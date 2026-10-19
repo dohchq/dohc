@@ -4,14 +4,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { freemem, tmpdir, uptime, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, launchAgentDefinition, launchAgentLabel, launchPath, listRequests, movedNote, nextRequest, nightlyAgentDefinition, nightlyAgentLabel, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, queueRoot, readJson, readPause, registerLaunchAgents, reloadLaunchAgent, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startCommand, startsInMs, submit, submitNightly, taskDefinition, terminalStates, unregisterLaunchAgents, verifyThroughQueue, writeJson } from "./queue.mjs";
-import { freeMemoryGb, holdAwake, laneTemp, runService, stopStrays, sweepContainers } from "./queue-service.mjs";
+import { cleanCheckout, freeMemoryGb, holdAwake, laneTemp, runService, stopStrays, sweepContainers } from "./queue-service.mjs";
 import { buildEnvHelper, envHelper, heldPath, holdSocket, instanceVariable, markedPids, members, processTable, requestMarker, requestVariable, stopProcesses, stopRecorded, supervise, treePath } from "./queue-supervisor.mjs";
 import { threadDirectory } from "./queue-monitor.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
@@ -638,6 +638,26 @@ test("a request's cleanup removes only its containers and their volumes, and the
 test("each lane has its own temp folder under the queue root", () => {
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane")), join("C:", "w", "_verification", "tmp", "lane"));
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
+});
+
+test("a lane's clean removes read-only build output that git clean alone cannot", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-lane-clean-"));
+  try {
+    const git = async args => (await run("git", args, { cwd: root, quietStdout: true })).stdout.trim();
+    await git(["init", "-q"]);
+    writeFileSync(join(root, ".gitignore"), "resources/\n");
+    // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
+    const generation = join(root, "resources", "engine-reader", "generation");
+    mkdirSync(generation, { recursive: true });
+    writeFileSync(join(generation, "reader.cjs"), "");
+    chmodSync(join(generation, "reader.cjs"), 0o444);
+    chmodSync(generation, 0o555);
+    await cleanCheckout(git, root);
+    assert.equal(existsSync(join(root, "resources")), false);
+  } finally {
+    try { chmodSync(join(root, "resources", "engine-reader", "generation"), 0o755); } catch { /* Removed. */ }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("another run waits while free memory is low, but a lone run still starts", async t => {

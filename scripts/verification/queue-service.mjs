@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -60,6 +60,28 @@ export async function sweepContainers({ request, command = run } = {}) {
  */
 export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
 
+/**
+ * Remove everything Git does not track except the named caches. A build can leave read-only output that Git
+ * cannot remove, such as the Markdown reader's folder from a commit before #2243. All of it is a build's own
+ * output, so after a failed clean, what remains becomes writable and the clean runs again.
+ */
+export async function cleanCheckout(laneGit, root) {
+  const clean = ["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"];
+  try { return await laneGit(clean); } catch { /* Cleaned again below. */ }
+  for (const line of (await laneGit([...clean, "--dry-run"])).split(/\r?\n/u)) {
+    const path = /^Would remove (.+)$/u.exec(line)?.[1];
+    if (path) await makeWritable(join(root, path));
+  }
+  return laneGit(clean);
+}
+
+async function makeWritable(path) {
+  const info = await lstat(path).catch(() => null);
+  if (!info || info.isSymbolicLink()) return;
+  await chmod(path, (info.mode & 0o7777) | 0o200);
+  if (info.isDirectory()) for (const name of await readdir(path)) await makeWritable(join(path, name));
+}
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
   // The temp folder keeps only the coming run's files.
@@ -77,7 +99,7 @@ export async function prepareLane({ lane, repo, head, signal }) {
   // No worker runs while the lane is prepared, so any Git lock or operation state is stale.
   for (const name of ["index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) rmSync(join(gitDir, name), { force: true });
   await laneGit(["checkout", "--force", "--detach", head]);
-  await laneGit(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"]);
+  await cleanCheckout(laneGit, lane);
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
