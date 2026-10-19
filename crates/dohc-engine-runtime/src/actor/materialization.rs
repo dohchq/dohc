@@ -1,7 +1,5 @@
 use super::ActorHandle;
-use super::versions::{
-    projection_paths_share_entry, projection_target_contains, switch_projection_job_id,
-};
+use super::versions::{projection_target_alias, switch_projection_job_id};
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -18,7 +16,6 @@ use dohc_engine_storage::{
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
 };
 use rusqlite::{OptionalExtension, params};
-use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -686,6 +683,16 @@ pub(super) fn replay_pending_materializations(
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
+    // Replay changes disk and the job ledger, never active tips.
+    let active_paths = if jobs
+        .iter()
+        .any(|job| job.operation == MaterializationOperation::Delete)
+    {
+        active_projection_paths(store, scope.workspace_id)?
+    } else {
+        Vec::new()
+    };
+    let active_targets: HashSet<&str> = active_paths.iter().map(String::as_str).collect();
     let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
@@ -694,28 +701,22 @@ pub(super) fn replay_pending_materializations(
             selected_seen: 0,
         };
         let mut secret_key: Option<SecretDataKey> = None;
-        let active_paths = OnceCell::new();
-        let active_targets = OnceCell::new();
         let mut case_paths = None;
-        // Replay changes disk and the job ledger, never active tips.
         let mut retire_delete = |store: &EngineStore, job: &MaterializationJob| {
-            if job.operation != MaterializationOperation::Delete {
+            if job.operation != MaterializationOperation::Delete
+                || active_targets.contains(job.target_path.as_str())
+            {
                 return Ok::<_, RuntimeError>(false);
             }
-            if active_paths.get().is_none() {
-                let _ = active_paths.set(active_projection_paths(store, scope.workspace_id)?);
-            }
-            let targets = active_targets.get_or_init(|| {
-                active_paths
-                    .get()
-                    .expect("active paths loaded")
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>()
-            });
-            if targets.contains(job.target_path.as_str())
-                || !projection_target_contains(root_dir, &job.target_path, targets, &mut case_paths)
-            {
+            let Some(alias) = projection_target_alias(
+                root_dir,
+                &job.target_path,
+                &active_targets,
+                &mut case_paths,
+            ) else {
+                return Ok(false);
+            };
+            if store.read_with(|conn| projection_write_pending(conn, scope.workspace_id, alias))? {
                 return Ok(false);
             }
             store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -1126,6 +1127,22 @@ fn active_projection_paths(
     })
 }
 
+// A pending create still needs the old entry removed before it can place
+// its bytes. Only retire an alias delete after that write has settled.
+fn projection_write_pending(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialization_jobs
+         WHERE workspace_id=?1 AND target_path=?2 AND status='pending' AND operation='write')",
+        params![workspace_id, path],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt_public)
+}
+
 fn retire_live_projection_delete(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -1137,6 +1154,9 @@ fn retire_live_projection_delete(
     if job.operation != MaterializationOperation::Delete {
         return Ok(false);
     }
+    let Ok(previous) = std::fs::canonicalize(root_dir.join(&job.target_path)) else {
+        return Ok(false);
+    };
     let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
     let has_alias = store.read_with(|conn| -> Result<bool, RuntimeError> {
         let version = match dohc_engine_domain::store::get_active_version_in(conn, workspace_id) {
@@ -1144,26 +1164,37 @@ fn retire_live_projection_delete(
             Err(DomainError::WorkspaceNotFound) => return Ok(false),
             Err(error) => return Err(error.into()),
         };
+        // NOCASE covers ASCII. Byte lengths and suffix checks retain Unicode
+        // and trailing-dot/space paths for the full collision-key check.
         let mut statement = conn
-            .prepare_cached(ACTIVE_PROJECTION_PATHS)
+            .prepare_cached(
+                "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2
+               AND (path=?3 COLLATE NOCASE OR length(path)!=length(CAST(path AS BLOB))
+                    OR instr(path,'./') OR instr(path,' /') OR rtrim(path,'. ')!=path)
+             UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2
+               AND (path=?3 COLLATE NOCASE OR length(path)!=length(CAST(path AS BLOB))
+                    OR instr(path,'./') OR instr(path,' /') OR rtrim(path,'. ')!=path)",
+            )
             .map_err(StorageError::corrupt_public)?;
         let mut rows = statement
-            .query(params![workspace_id, version.version_id])
+            .query(params![workspace_id, version.version_id, key])
             .map_err(StorageError::corrupt_public)?;
         let mut has_alias = false;
+        let mut pending_write = false;
         while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
             let path: String = row.get(0).map_err(StorageError::corrupt_public)?;
             if path == job.target_path {
                 return Ok(false);
             }
-            if !has_alias
-                && dohc_engine_files::floor::path_collision_key(&path) == key
-                && projection_paths_share_entry(root_dir, &job.target_path, &path)
+            if dohc_engine_files::floor::path_collision_key(&path) == key
+                && std::fs::canonicalize(root_dir.join(&path))
+                    .is_ok_and(|target| target == previous)
             {
                 has_alias = true;
+                pending_write |= projection_write_pending(conn, workspace_id, &path)?;
             }
         }
-        Ok(has_alias)
+        Ok(has_alias && !pending_write)
     })?;
     if !has_alias {
         return Ok(false);
@@ -1459,5 +1490,169 @@ mod rollback_identity_tests {
             None,
             "a non-rollback job takes the ordinary replay path."
         );
+    }
+}
+
+#[cfg(test)]
+mod delete_benchmarks {
+    use super::*;
+    use dohc_engine_storage::{MaterializationJobSpec, Preimage, enqueue_delete_job};
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use std::time::Instant;
+
+    fn fixture(active_paths: usize, deletes: usize) -> (ScratchDir, EngineStore) {
+        let root = ScratchDir::new().unwrap();
+        let db = engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("delete-benchmark", "main", 1, &NoFaults)
+            .unwrap();
+        let sha = hex_sha256(b"old");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,3,'old')", [&sha])
+                .map_err(StorageError::persist_public)?;
+            for n in 0..active_paths {
+                let object = format!("live-{n}");
+                let path = format!("live-{n}.md");
+                tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('delete-benchmark',?1,1)", [&object])
+                    .map_err(StorageError::persist_public)?;
+                tx.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) VALUES ('delete-benchmark','main',?1,?2)", params![path,object])
+                    .map_err(StorageError::persist_public)?;
+                tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('delete-benchmark','main',?1,?2,?3,1,'fixture','api')", params![object,path,sha])
+                    .map_err(StorageError::persist_public)?;
+            }
+            for n in 0..deletes {
+                enqueue_delete_job(tx, &MaterializationJobSpec {
+                    job_id: format!("benchmark-delete-{n:04}"),
+                    workspace_id: "delete-benchmark".into(),
+                    target_path: format!("deleted-{n}.md"),
+                    content_sha256: sha.clone(),
+                    preimage: Preimage::Present(sha.clone()),
+                    target_generation: 1,
+                    now_ms: 2,
+                })?;
+            }
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        for n in 0..deletes {
+            std::fs::write(root.join(format!("deleted-{n}.md")), "old").unwrap();
+        }
+        (root, store)
+    }
+
+    // Run explicitly with --ignored --nocapture; fixture creation is outside the timer.
+    #[test]
+    #[ignore = "direct delete timing at 0 and 20,000 live paths"]
+    fn alias_free_direct_delete_scaling() {
+        for active_paths in [0, 20_000] {
+            let (root, store) = fixture(active_paths, 7);
+            for (sample, job) in store
+                .list_pending_materialization_jobs()
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                let start = Instant::now();
+                let (completed, outcome) = materialize_pending_job(
+                    &store,
+                    &root,
+                    "delete-benchmark",
+                    &job,
+                    &(),
+                    3,
+                    &NoFaults,
+                    None,
+                );
+                let elapsed = start.elapsed();
+                assert!(completed);
+                assert_eq!(outcome, PostCommitMaterializeOutcome::Applied);
+                assert!(!root.join(&job.target_path).exists());
+                println!(
+                    "direct_delete_benchmark active_paths={active_paths} sample={sample} elapsed_ms={:.3}",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_alias_materialization_delete_waits_for_pending_write() {
+        let (root, mut store) = fixture(1, 0);
+        std::fs::write(root.join("LIVE-0.md"), "old").unwrap();
+        if !root.join("live-0.md").exists() {
+            eprintln!("skipping direct alias delete: this disk keeps case apart");
+            return;
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = dohc_engine_storage::put_binary_blob(tx, b"new")?;
+                enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "delete-first".into(),
+                        workspace_id: "delete-benchmark".into(),
+                        target_path: "LIVE-0.md".into(),
+                        content_sha256: hex_sha256(b"old"),
+                        preimage: Preimage::Present(hex_sha256(b"old")),
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )?;
+                dohc_engine_storage::enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "write-second".into(),
+                        workspace_id: "delete-benchmark".into(),
+                        target_path: "live-0.md".into(),
+                        content_sha256: sha,
+                        preimage: Preimage::Absent,
+                        target_generation: 2,
+                        now_ms: 3,
+                    },
+                )
+            })
+            .unwrap();
+        for job in store.list_pending_materialization_jobs().unwrap() {
+            let (complete, outcome) = materialize_pending_job(
+                &store,
+                &root,
+                "delete-benchmark",
+                &job,
+                &(),
+                4,
+                &NoFaults,
+                None,
+            );
+            assert!(complete);
+            assert_eq!(outcome, PostCommitMaterializeOutcome::Applied);
+        }
+        assert_eq!(std::fs::read(root.join("live-0.md")).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    #[ignore = "replay scaling benchmark: 1,000 real deletes at 0 and 20,000 live paths"]
+    async fn alias_free_delete_replay_scaling() {
+        for active_paths in [0, 20_000] {
+            for sample in 0..3 {
+                let (root, store) = fixture(active_paths, 1_000);
+                let db = engine_db_path(&root).unwrap();
+                drop(store);
+                let supervisor = crate::WorkspaceSupervisor::new();
+                let actor = supervisor.open(&db, 3).unwrap().actor;
+                let start = Instant::now();
+                let completed = actor
+                    .materialize_replay_pending(root.path().into(), "delete-benchmark".into(), 3)
+                    .await
+                    .unwrap();
+                let elapsed = start.elapsed();
+                assert_eq!(completed, 1_000);
+                supervisor.close(&db).unwrap();
+                assert!(!root.join("deleted-0.md").exists());
+                println!(
+                    "replay_benchmark active_paths={active_paths} deletes=1000 sample={sample} elapsed_ms={:.3}",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            }
+        }
     }
 }

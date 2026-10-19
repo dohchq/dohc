@@ -8,7 +8,7 @@ use dohc_engine_storage::{
     EngineStore, JobStatus, MaterializationJobSpec, Preimage, enqueue_delete_job, hex_sha256,
     put_binary_blob,
 };
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ fn secret_write(version: &str, path: &str, moment: &str, now_ms: i64) -> SecretW
     }
 }
 
-async fn secret_merge_replay(write_completed: bool) {
+async fn secret_merge_replay(write_completed: bool, delete_first: bool) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -67,8 +67,10 @@ async fn secret_merge_replay(write_completed: bool) {
         VersionedTextStore::new(&mut store)
             .ensure_main_version(WS, "main", 1, &NoFaults)
             .unwrap();
+        let mut base = secret_write("main", "foo.env", "base", 1);
+        base.text = "TOKEN=base".into();
         SecretFileStore::new(&mut store, &key)
-            .write_secret_file(&secret_write("main", "foo.env", "base", 1), &NoFaults)
+            .write_secret_file(&base, &NoFaults)
             .unwrap();
         fork(&mut store);
         let mut secrets = SecretFileStore::new(&mut store, &key);
@@ -96,7 +98,12 @@ async fn secret_merge_replay(write_completed: bool) {
     }
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
-    for path in ["Foo.env", "foo.env"] {
+    let paths = if delete_first {
+        ["foo.env", "Foo.env"]
+    } else {
+        ["Foo.env", "foo.env"]
+    };
+    for (index, path) in paths.into_iter().enumerate() {
         assert!(
             actor
                 .apply_secret_file(
@@ -108,7 +115,7 @@ async fn secret_merge_replay(write_completed: bool) {
                     "api".into(),
                     None,
                     None,
-                    4,
+                    4 + index as i64,
                     key.clone(),
                     Arc::new(NoFaults),
                     CancellationToken::new(),
@@ -127,8 +134,8 @@ async fn secret_merge_replay(write_completed: bool) {
             .filter(|job| job.job_id.starts_with("secret-mat_merge-"))
             .collect();
         assert_eq!(merge_jobs.len(), 2);
-        assert_eq!(merge_jobs[0].target_path, "Foo.env");
-        assert_eq!(merge_jobs[1].target_path, "foo.env");
+        assert_eq!(merge_jobs[0].target_path, paths[0]);
+        assert_eq!(merge_jobs[1].target_path, paths[1]);
         if write_completed {
             store
                 .mark_materialization_complete("secret-mat_merge-Foo.env", 5)
@@ -137,8 +144,10 @@ async fn secret_merge_replay(write_completed: bool) {
     }
     // The desktop's merge places deletes before writes (#2240).
     std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
-    std::fs::remove_file(root.join("foo.env")).unwrap();
-    std::fs::write(root.join("Foo.env"), "TOKEN=target").unwrap();
+    if !delete_first {
+        std::fs::remove_file(root.join("foo.env")).unwrap();
+        std::fs::write(root.join("Foo.env"), "TOKEN=target").unwrap();
+    }
     let actor = supervisor.open(&db, 6).unwrap().actor;
     let replay = actor
         .materialize_replay_pending(root.path().into(), WS.into(), 6)
@@ -168,16 +177,20 @@ async fn secret_merge_replay(write_completed: bool) {
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_reopen_replay() {
-    secret_merge_replay(false).await;
+    secret_merge_replay(false, false).await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_replay_after_write_completed() {
-    secret_merge_replay(true).await;
+    secret_merge_replay(true, false).await;
 }
 
 #[tokio::test]
-async fn text_case_only_merge_keeps_old_disk_bytes_and_new_tip_on_reopen() {
+async fn secret_case_only_merge_delete_first_survives_reopen() {
+    secret_merge_replay(false, true).await;
+}
+
+async fn text_merge_replay(delete_first: bool) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -250,7 +263,12 @@ async fn text_case_only_merge_keeps_old_disk_bytes_and_new_tip_on_reopen() {
     std::fs::write(root.join("notes.md"), "old").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
-    for path in ["Notes.md", "notes.md"] {
+    let paths = if delete_first {
+        ["notes.md", "Notes.md"]
+    } else {
+        ["Notes.md", "notes.md"]
+    };
+    for (index, path) in paths.into_iter().enumerate() {
         actor
             .versioned_text_merge(
                 MergeTextFileFromVersion {
@@ -266,23 +284,47 @@ async fn text_case_only_merge_keeps_old_disk_bytes_and_new_tip_on_reopen() {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
-                    now_ms: 4,
+                    now_ms: 4 + index as i64,
                 },
                 root.path().into(),
                 Arc::new(()),
-                Arc::new(NoFaults),
+                if delete_first {
+                    ScriptedFaults::crash_at(
+                        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+                    )
+                } else {
+                    Arc::new(NoFaults)
+                },
                 CancellationToken::new(),
             )
             .await
             .unwrap();
     }
     supervisor.close(&db).unwrap();
+    if delete_first {
+        let store = EngineStore::open(&db, 5).unwrap();
+        let jobs = store.list_pending_materialization_jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].target_path, "notes.md");
+        assert_eq!(jobs[1].target_path, "Notes.md");
+    }
     let actor = supervisor.open(&db, 5).unwrap().actor;
     actor
         .materialize_replay_pending(root.path().into(), WS.into(), 5)
         .await
         .unwrap();
     supervisor.close(&db).unwrap();
+    if delete_first {
+        assert_eq!(std::fs::read(root.join("Notes.md")).unwrap(), b"new");
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".conflict")
+        }));
+        return;
+    }
     assert_eq!(
         std::fs::read(root.join("Notes.md")).expect("text survives merge and reopen"),
         b"old"
@@ -338,15 +380,23 @@ async fn text_case_only_merge_keeps_old_disk_bytes_and_new_tip_on_reopen() {
         panic!("capture scan did not complete")
     };
     let respell = plan.respelled_retires.get("Notes.md").unwrap();
+    // Issue #2297: capture respells the merged tip back to the old disk name.
     assert_eq!(respell.path, "notes.md");
     assert_eq!(respell.sha256, hex_sha256(b"old"));
 }
 
+#[tokio::test]
+async fn text_case_only_merge_known_bug_respells_to_old_disk_name() {
+    text_merge_replay(false).await;
+}
+
+#[tokio::test]
+async fn text_case_only_merge_delete_first_survives_reopen() {
+    text_merge_replay(true).await;
+}
+
 async fn ordinary_delete_replay(exact_tip: bool, fence: bool) {
     let root = ScratchDir::new().unwrap();
-    if !ignores_case(&root) {
-        return;
-    }
     let db = engine_db_path(&root).unwrap();
     {
         let mut store = EngineStore::open(&db, 1).unwrap();
@@ -410,7 +460,7 @@ async fn ordinary_delete_replay(exact_tip: bool, fence: bool) {
         );
     }
     supervisor.close(&db).unwrap();
-    // Even an exact live tip must leave ordinary preimage-checked deletes alone.
+    // The alias skip must not retire a delete whose exact path is live.
     assert!(!root.join("delete.md").exists());
     let store = EngineStore::open(&db, 4).unwrap();
     assert_eq!(
