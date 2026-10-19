@@ -1,5 +1,5 @@
 use super::ActorHandle;
-use super::versions::switch_projection_job_id;
+use super::versions::{projection_target_alias, switch_projection_job_id};
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -683,6 +683,16 @@ pub(super) fn replay_pending_materializations(
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
+    // Filter small replays in SQL; cache the full version only for larger batches.
+    let cache_all_paths = jobs
+        .iter()
+        .filter(|job| {
+            job.operation == MaterializationOperation::Delete
+                && job.job_id.starts_with("secret-mat_")
+        })
+        .take(9)
+        .count()
+        > 8;
     let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
@@ -691,6 +701,60 @@ pub(super) fn replay_pending_materializations(
             selected_seen: 0,
         };
         let mut secret_key: Option<SecretDataKey> = None;
+        // Replay changes disk and the job ledger, never active tips.
+        let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut paths_loaded = false;
+        let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
+            if std::fs::canonicalize(root_dir.join(&job.target_path)).is_err() {
+                return Ok::<_, RuntimeError>(false);
+            }
+            let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
+            if !paths_loaded && !active_paths.contains_key(&key) {
+                // Small replays fold only SQL candidates. Check the exact path
+                // before loading the shared cache for a larger batch.
+                let candidates = active_projection_paths(store, scope.workspace_id, Some(&key))?;
+                if candidates.iter().any(|path| path == &job.target_path) {
+                    return Ok(false);
+                }
+                if cache_all_paths {
+                    for path in active_projection_paths(store, scope.workspace_id, None)? {
+                        active_paths
+                            .entry(dohc_engine_files::floor::path_collision_key(&path))
+                            .or_default()
+                            .push(path);
+                    }
+                    paths_loaded = true;
+                } else {
+                    active_paths.insert(
+                        key.clone(),
+                        candidates
+                            .into_iter()
+                            .filter(|path| {
+                                dohc_engine_files::floor::path_collision_key(path) == key
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let Some(candidates) = active_paths.get(&key) else {
+                return Ok(false);
+            };
+            // The replay cache already narrowed this to one collision group.
+            let active_targets: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+            if active_targets.contains(job.target_path.as_str()) {
+                return Ok(false);
+            }
+            let Some(alias) =
+                projection_target_alias(root_dir, &job.target_path, &active_targets, &mut None)
+            else {
+                return Ok(false);
+            };
+            if store.read_with(|conn| projection_write_pending(conn, scope.workspace_id, alias))? {
+                return Ok(false);
+            }
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            Ok(true)
+        };
         for job in jobs {
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
@@ -740,6 +804,10 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
+                    if ordinary_secret && retire_delete(store, &job)? {
+                        summary.completed += 1;
+                        continue;
+                    }
                     match materialize_secret_delete_one(
                         store,
                         root_dir,
@@ -1063,6 +1131,59 @@ pub(super) fn replay_pending_materializations(
     Ok(summary)
 }
 
+// ASCII collision keys lowercase each segment and strip trailing dots/spaces.
+// Keep Unicode and trailing aliases for the full Rust collision-key check.
+const ACTIVE_PROJECTION_PATHS: &str =
+    "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')
+     UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')";
+
+fn active_projection_paths(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    collision_key: Option<&str>,
+) -> Result<Vec<String>, RuntimeError> {
+    let version = match VersionedTextStore::new(store).get_active_version(workspace_id) {
+        Ok(version) => version,
+        Err(DomainError::WorkspaceNotFound) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare_cached(ACTIVE_PROJECTION_PATHS)
+            .map_err(StorageError::corrupt_public)?;
+        let paths = statement
+            .query_map(
+                params![workspace_id, version.version_id, collision_key],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)?;
+        Ok(paths)
+    })
+}
+
+// A pending create still needs the old entry removed before it can place
+// its bytes. Only retire an alias delete after that write has settled.
+fn projection_write_pending(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialization_jobs
+         WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?2
+           AND status='pending' AND operation='write')",
+        params![workspace_id, path],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt_public)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_pending_job(
     store: &EngineStore,
@@ -1308,5 +1429,60 @@ mod rollback_identity_tests {
             None,
             "a non-rollback job takes the ordinary replay path."
         );
+    }
+}
+
+#[cfg(test)]
+mod projection_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn materialization_candidates_keep_unicode_and_trailing_aliases() {
+        let paths = [
+            "Notes.md",
+            "notes.md",
+            "K.md",
+            "k.md",
+            "k.md.",
+            "k. /child.md",
+            "unrelated.md",
+        ];
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("projection-candidates", "main", 1, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = hex_sha256(b"old");
+                tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,3,'old')", [&sha])
+                    .map_err(StorageError::persist_public)?;
+                for (n, path) in paths.iter().enumerate() {
+                    let object = format!("live-{n}");
+                    tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('projection-candidates',?1,1)", [&object])
+                        .map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('projection-candidates','main',?1,?2,?3,1,'fixture','api')", params![object,path,sha])
+                        .map_err(StorageError::persist_public)?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        for key in ["notes.md", "k.md", "k/child.md"] {
+            let mut actual =
+                active_projection_paths(&mut store, "projection-candidates", Some(key))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                    .collect::<Vec<_>>();
+            let mut expected = paths
+                .iter()
+                .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
     }
 }

@@ -503,8 +503,17 @@ fn projection_target_contains<'a>(
     targets: &HashSet<&'a str>,
     case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
 ) -> bool {
-    if targets.contains(path) {
-        return true;
+    projection_target_alias(root, path, targets, case_paths).is_some()
+}
+
+pub(super) fn projection_target_alias<'a>(
+    root: &std::path::Path,
+    path: &str,
+    targets: &HashSet<&'a str>,
+    case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
+) -> Option<&'a str> {
+    if let Some(target) = targets.get(path) {
+        return Some(*target);
     }
     let aliases = case_paths.get_or_insert_with(|| {
         let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
@@ -516,15 +525,18 @@ fn projection_target_contains<'a>(
         }
         aliases
     });
-    let Some(candidates) = aliases.get(&path_collision_key(path)) else {
-        return false;
-    };
+    let candidates = aliases.get(&path_collision_key(path))?;
+    candidates
+        .iter()
+        .copied()
+        .find(|target| projection_paths_share_entry(root, path, target))
+}
+
+fn projection_paths_share_entry(root: &std::path::Path, path: &str, target: &str) -> bool {
     let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
         return false;
     };
-    candidates.iter().any(|target| {
-        std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
-    })
+    std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
 }
 
 fn case_alias_targets<'a>(
