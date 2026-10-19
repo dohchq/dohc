@@ -486,3 +486,11 @@ describe("share copy profile admission", () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+it("keeps an absent incoming subject as JSON null", async () => {
+  const { client } = await connectedToolNames({ root: "/tmp/links", home: "/tmp/home", request: async () => null });
+  const result = await client.callTool({ name: "dohc_links_in", arguments: { subject: { path: "missing.md" } } });
+  expect(result.content).toEqual([{ type: "text", text: "null" }]);
+  expect(result.structuredContent).toBeUndefined();
+  expect(result.isError).not.toBe(true);
+});

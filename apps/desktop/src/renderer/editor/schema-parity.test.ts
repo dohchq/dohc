@@ -541,6 +541,22 @@ describe("desktop editor schema parity", () => {
       await waitFor(() => expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody));
       const editor = mountedEditor();
       expect(() => editor.state.doc.check()).not.toThrow();
+      if ('stableTree' in item && item.stableTree) {
+        const original = canonical.nodeFromJSON(parseRichdocMarkdown(sourceBody, projected ? "projection" : "source")).toJSON();
+        expect(editor.getJSON()).toEqual(original);
+        expect(canonical.nodeFromJSON(parseRichdocMarkdown(canonicalBody, "projection")).toJSON()).toEqual(original);
+      }
+      if ('markedStart' in item && item.markedStart) {
+        const root = editor.getJSON();
+        let paragraph: JSONContent = root;
+        while (paragraph.type !== "paragraph") paragraph = paragraph.content![0];
+        paragraph.content = [{ type: "text", text: item.markedText!, marks: [item.markedStart] }];
+        act(() => { editor.commands.setContent(root); });
+        expect(ref.current!.getMarkdown()).toBe(canonicalBody);
+        expect(canonical.nodeFromJSON(parseRichdocMarkdown(ref.current!.getMarkdown(), "projection")).toJSON()).toEqual(
+          canonical.nodeFromJSON(parseRichdocMarkdown(canonicalBody, "projection")).toJSON(),
+        );
+      }
       act(() => editor.commands.insertContentAt(editor.state.doc.content.size, {
         type: "paragraph", content: [{ type: "text", text: "!" }],
       }));

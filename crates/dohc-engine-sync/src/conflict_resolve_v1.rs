@@ -16,6 +16,7 @@ use dohc_engine_files::{
     canonical_workspace_path_meets_shared_bounds, classify_engine_file_path_normalized,
     search_policy::SearchPolicySnapshot,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{MAX_IDENTIFIER_BYTES, Preimage, StorageError, put_binary_blob};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Map, Value, json};
@@ -1905,12 +1906,7 @@ fn require_imported_roots(
     validated: &ValidatedConflictResolveV1,
 ) -> Result<(), SyncError> {
     for sha in &validated.text_blob_sha256s {
-        let text: Option<String> = tx
-            .query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(SyncError::corrupt)?;
+        let text: Option<String> = text::read(tx, sha).optional().map_err(SyncError::corrupt)?;
         let Some(text) = text else {
             return Err(SyncError::BlobInvalid);
         };
@@ -2337,13 +2333,7 @@ fn scene_successor_result(
     if successor.content_kind != ContentKind::Scene {
         return Ok(None);
     }
-    let text: String = tx
-        .query_row(
-            "SELECT text FROM blobs WHERE sha256=?1",
-            [&successor.result_sha256],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
+    let text: String = text::read(tx, &successor.result_sha256).map_err(SyncError::corrupt)?;
     if dohc_engine_storage::hex_sha256(text.as_bytes()) != successor.result_sha256 {
         return Err(SyncError::BlobInvalid);
     }
@@ -2667,13 +2657,7 @@ fn reconcile_unbound_result_head(
             )
         }
         HeadContentKindV1::Text => {
-            let text: String = tx
-                .query_row(
-                    "SELECT text FROM blobs WHERE sha256=?1",
-                    [&result.blob_sha256],
-                    |row| row.get(0),
-                )
-                .map_err(SyncError::corrupt)?;
+            let text: String = text::read(tx, &result.blob_sha256).map_err(SyncError::corrupt)?;
             crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
                 tx,
                 key,
@@ -2735,13 +2719,7 @@ fn conflict_state_from_head(
     };
     match head.content_kind {
         HeadContentKindV1::Text => {
-            let text: String = tx
-                .query_row(
-                    "SELECT text FROM blobs WHERE sha256=?1",
-                    [&head.blob_sha256],
-                    |row| row.get(0),
-                )
-                .map_err(SyncError::corrupt)?;
+            let text: String = text::read(tx, &head.blob_sha256).map_err(SyncError::corrupt)?;
             Ok(ConflictFileState::text(
                 path.clone(),
                 Some(TextSnapshot {

@@ -10,6 +10,7 @@
     "./workspace-ref": "./src/workspaceRef.ts",
     "./actor-identity": "./src/actorIdentity.ts",
     "./access": "./src/access.ts",
+    "./links": "./src/links.ts",
     "./share-copy": "./src/share-copy.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",

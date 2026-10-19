@@ -44,7 +44,7 @@ const server=createServer(async(incoming,outgoing)=>{try {
 await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
 const address=server.address();if(!address||typeof address==="string")throw Error("port");
 const baseUrl=`http://127.0.0.1:${address.port}`;
-const start=createReplicaEngineStarter({engineExecutable:binary,allowUnisolatedDevelopment:true});
+const start=createReplicaEngineStarter({engineExecutable:binary,allowDevelopment:true});
 const supervisor=createReplicaSupervisor({storage,onError:(_workspace,error)=>failures.push(String(error)),storeRoot:join(root,"replicas"),startChild:async input=>{
   passiveDir=input.storeDir;const child=await start(input);enginePid=child.pid;if(enabled)return {...child,currentView:async(...args)=>{
     collections++;const start=performance.now(),page=await child.currentView(...args);

@@ -1,3 +1,4 @@
+import { TriangleAlert } from "lucide-react";
 import { CopyButton } from "./ui/CopyButton";
 import { DangerButton, SecondaryButton } from "./ui/controls";
 import { useContext, useEffect, useRef, useState } from "react";
@@ -46,25 +47,27 @@ export function DismissDraftControls(props: { onDismiss: () => void | Promise<vo
       if (mounted.current) setDismissing(false);
     });
   };
+  // Every control is a 24px row button, so the confirm takes the row's
+  // height and nothing below it moves.
   if (!confirming) {
     return (
-      <button
-        type="button"
-        data-testid="recovery-dismiss"
-        onClick={() => setConfirming(true)}
-        className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-      >
+      <SecondaryButton size="row" data-testid="recovery-dismiss" onClick={() => setConfirming(true)}>
         Dismiss
-      </button>
+      </SecondaryButton>
     );
   }
+  return <DismissConfirm dismissing={dismissing} onDismiss={dismiss} onKeep={() => setConfirming(false)} />;
+}
+
+// What Dismiss turns into. The states page draws it too.
+export function DismissConfirm(props: { dismissing: boolean; onDismiss: () => void; onKeep: () => void }) {
   return (
     <span className="flex items-center gap-2">
       <span className="text-[11px] text-danger">Deletes the only copy.</span>
-      <DangerButton size="compact" data-testid="recovery-dismiss-confirm" disabled={dismissing} onClick={dismiss}>
+      <DangerButton size="row" data-testid="recovery-dismiss-confirm" disabled={props.dismissing} onClick={props.onDismiss}>
         Dismiss edit
       </DangerButton>
-      <SecondaryButton size="compact" data-testid="recovery-dismiss-cancel" onClick={() => setConfirming(false)}>
+      <SecondaryButton size="row" data-testid="recovery-dismiss-cancel" onClick={props.onKeep}>
         Keep
       </SecondaryButton>
     </span>
@@ -86,6 +89,24 @@ export function RecoveryList(props: {
         >
           <span className="min-w-0 flex-1 truncate">
             <span className="font-mono text-muted">{row.path}</span>
+            {/* Most rows survive a quit, and one kind does not: a
+                secret-classified path never enters plaintext storage,
+                and a refused write leaves the text in memory. The lifetime
+                belongs to the ROW, so the row carries it — a list that mixes
+                the two (the notice center) would otherwise show a lost edit
+                and a durable one as the same thing. No caller opts out: the
+                close dialog lists only these, and repeating the fact there
+                costs less than a flag a caller can set wrong. It comes before
+                the workspace's name, which gives way first in a narrow row. */}
+            {row.persisted ? null : (
+              <span
+                data-testid="recovery-list-window-only"
+                className="ml-2 text-[11px] text-warning"
+              >
+                <TriangleAlert size={12} aria-hidden className="mr-1 inline-block align-[-2px]" />
+                Only in this window
+              </span>
+            )}
             {/* The GLOBAL list (the close dialog) can hold two workspaces'
                 identical paths — name the workspace or the rows are
                 indistinguishable. The label is the name
@@ -99,22 +120,6 @@ export function RecoveryList(props: {
                 {row.workspaceLabel}
               </span>
             ) : null}
-            {/* Most rows survive a quit, and one kind does not: a
-                secret-classified path never enters plaintext storage,
-                and a refused write leaves the text in memory. The lifetime
-                belongs to the ROW, so the row carries it — a list that mixes
-                the two (the notice center) would otherwise show a lost edit
-                and a durable one as the same thing. No caller opts out: the
-                close dialog lists only these, and repeating the fact there
-                costs less than a flag a caller can set wrong. */}
-            {row.persisted ? null : (
-              <span
-                data-testid="recovery-list-window-only"
-                className="ml-2 text-[10px] text-warning"
-              >
-                Only in this window
-              </span>
-            )}
           </span>
           <div className="flex shrink-0 items-center gap-2">
             <CopyButton testId="recovery-list-copy" getText={() => restoreRecoveryDraftText(row.draft.text)} />

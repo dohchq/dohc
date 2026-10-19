@@ -1,3 +1,4 @@
+import { installedReaderConfig } from "./installedReaderConfig";
 import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
@@ -13,10 +14,13 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
+import {
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+} from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
+import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
@@ -40,6 +44,16 @@ export interface ServerOwnerDelivery {
     retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   } | null>;
 }
+/**
+ * Whether this workspace has no ordinary sync configured: Stop sync saved a
+ * pause, or the folder was attached again as local work. Sign-out, a lost
+ * connection and a detach keep its remote.
+ */
+export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
+  return entry !== null && !entry.remote && entry.joinBootstrapPending !== true &&
+    !shareViewIsPresent(entry.shareView);
+}
+
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
 type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
 
@@ -56,6 +70,7 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  resourcesBasePath(): string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
@@ -326,6 +341,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // settles; boot-time paths that need engine sessions await this first instead
   // of throwing the broken-invariant error at it.
   let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
+  // A workspace that opens proves the engine's workspace work, so the startup
+  // smoke runs only when none has opened by the time the launch settles.
+  const startupSmoke = Promise.withResolvers<"run" | "skip">();
   const relayTransportRoutes = new RelayTransportRouteGuard();
 
   // Narrowing for the engine-access gates. The invariant is real:
@@ -438,7 +456,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
+        readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
+        startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -503,10 +523,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
       });
       await rustEngineDaemon.start();
-      // Collection projection completion is a separate derived-state wake.
-      // Workspace activity owns capture and file observation delivery.
+      // Collection projection completion is a separate derived-state wake, and
+      // so is the end of a new workspace's first read: reads refused during it
+      // can be answered now. Workspace activity owns capture and file
+      // observation delivery.
       bridgeCaptureEventsToRenderer({ onEvent: listener => rustEngineDaemon!.onEvent(event => {
-        if (event.name === "collections.projected") listener(event);
+        if (event.name === COLLECTIONS_PROJECTED_EVENT || event.name === CAPTURE_INITIAL_SETTLED_EVENT) listener(event);
       }) }, scope => notifyRenderer(scope ? { ...scope, pathSetChanged: false } : undefined));
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
@@ -528,6 +550,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const relaySource = new RelayConfiguredDaemonClientSource(
         rustEngineDaemon,
         relayTransportRoutes,
+        workspaceId => hasNoOrdinarySync(dependencies.findWorkspace(workspaceId)),
       );
       rustEngineSessionSource = relaySource;
       // A fresh debug-engine adoption measured 18.7 s for 5,000 files and
@@ -535,7 +558,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
+        onOpened: workspace => {
+          startupSmoke.resolve("skip");
+          dependencies.onWorkspaceOpened?.(workspace.workspaceId);
+        },
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
@@ -549,9 +575,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       startOwnerHost();
       startOwnerDelivery();
-      console.info(
-        "[desktop] Rust engine daemon handshake complete; startup smoke running.",
-      );
+      console.info("[desktop] Rust engine daemon handshake complete.");
       // Marked here, where the handshake actually completes — the bootstrap
       // gate's await also covers the cached-settings read, which would inflate
       // this mark.
@@ -621,6 +645,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     start() {
       engineDaemonStartup = startRustEngineDaemon();
       return engineDaemonStartup;
+    },
+    launchSettled() {
+      startupSmoke.resolve("run");
     },
   };
 }

@@ -30,7 +30,7 @@ vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
   ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
 }));
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => {vi.mocked(rm).mockReset(); for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset();});
+afterEach(async () => {vi.unstubAllEnvs(); vi.mocked(rm).mockReset(); for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset();});
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
@@ -64,6 +64,7 @@ function clientFrom(options: { env: Record<string, string> }) {
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise,resolve};}
 
 it("wakes served document and desktop listeners when service startup completes and the host closes", async () => {
+  vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "operator-reader");
   const f = await fixture(), entered = deferred<void>(), release = deferred<void>();
   const changes = createNamedFrameChanges(8), documentWake = vi.fn(), desktopWake = vi.fn(), unrelated = vi.fn();
   changes.subscribe(documentWake, {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)});
@@ -79,6 +80,7 @@ it("wakes served document and desktop listeners when service startup completes a
     await new Promise<void>(queueMicrotask);
     expect(documentWake).toHaveBeenCalledOnce(); expect(desktopWake).toHaveBeenCalledOnce(); expect(unrelated).not.toHaveBeenCalled();
     await host.close();
+    expect(spawn.mock.calls[0]![0].env.DOHC_ENGINE_READER_CONFIG).toBe("operator-reader");
     expect(documentWake).toHaveBeenCalledTimes(2); expect(desktopWake).toHaveBeenCalledTimes(2); expect(unrelated).not.toHaveBeenCalled();
   } finally {await host.close();}
 });

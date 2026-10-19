@@ -94,7 +94,7 @@ const server = createServer(async (incoming, outgoing) => {
 server.listen(0, "127.0.0.1"); await once(server, "listening");
 const address = server.address(); assert(address && typeof address !== "string");
 const baseUrl = `http://127.0.0.1:${address.port}`;
-const startReplica = createReplicaEngineStarter({engineExecutable: executable, allowUnisolatedDevelopment: true});
+const startReplica = createReplicaEngineStarter({engineExecutable: executable, allowDevelopment: true});
 const supervisor = createReplicaSupervisor({storage, storeRoot: join(root, "replicas"), idleMs: 600_000,
   onError: (_, error) => errors.push(String(error)), startChild: async input => {
     starts++; replicaDir = input.storeDir; replica = await startReplica({...input, relayHandler: async request => {
@@ -401,10 +401,11 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       const doc = document("doc-0"), current = storage.resolveCurrentLiveDocumentBinding({document: doc, actor});
       assert.equal(current.kind, "current"); if (current.kind !== "current") throw Error("authority");
       const lookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
+      const restoreAtMs = Date.now();
       beginStopRestore(storage as StorageContext, {...lookup, document: doc, deliveryKind: "bootstrap", shareId: "share", grantId: "grant",
         expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: current.binding.restoreFenceGeneration,
-        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, Date.now());
-      advanceStopRestoreFence(storage as StorageContext, lookup, Date.now());
+        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, restoreAtMs);
+      advanceStopRestoreFence(storage as StorageContext, lookup, restoreAtMs);
       const prepared = await consumer.prepareRestore(lookup); assert.equal(prepared.kind, "prepared"); if (prepared.kind !== "prepared") throw Error("restore");
       const restored = await consumer.completeRestore(lookup, prepared.proposalDigest);
       const cut = storage.readLiveUpdateJournalCut({document: doc}); assert.equal(cut.kind, "cut"); if (cut.kind !== "cut") throw Error("cut");

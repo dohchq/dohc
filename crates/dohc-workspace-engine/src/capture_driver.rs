@@ -27,10 +27,7 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
     StoreCaptureSinkParams,
 };
-use crate::{
-    CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents,
-};
+use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -1381,7 +1378,7 @@ fn is_safe_fresh_import_plan(run: &ReconcileRun) -> bool {
         && !plan.degraded
         && plan.degraded_paths.is_empty()
         && plan.unconfirmed_removed.is_empty()
-        && plan.retained_over_cap.is_empty()
+        && plan.retained_unread.is_empty()
         && plan.ops.iter().all(|op| {
             matches!(
                 op,
@@ -2341,10 +2338,7 @@ impl DriverEnv for RealEnv {
                 () = &mut initial_deadline, if early_import => {
                     initial_cancel.cancel();
                     self.status.mark_initial_apply_timed_out();
-                    self.events.emit(
-                        CAPTURE_INITIAL_SETTLED_EVENT,
-                        serde_json::json!({ "workspaceId": self.workspace_id }),
-                    );
+                    self.events.emit_initial_settled(&self.workspace_id);
                     // `workspace.open` already received this edge for an early
                     // import. Re-sending is harmless and makes the timeout's
                     // observable transition explicit if that contract changes.
@@ -2384,10 +2378,7 @@ impl DriverEnv for RealEnv {
         }
         self.initial_links_hold.take();
         if initial_start && !initial_settle_timed_out {
-            self.events.emit(
-                CAPTURE_INITIAL_SETTLED_EVENT,
-                serde_json::json!({ "workspaceId": self.workspace_id }),
-            );
+            self.events.emit_initial_settled(&self.workspace_id);
         }
         #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {
@@ -2588,11 +2579,7 @@ pub(crate) async fn reconcile_full_for_switch(
             Err(SwitchReconcileError::Degraded(degraded_paths))
         }
         Ok(run) => {
-            let manifest_changed = matches!(
-                &run,
-                ReconcileRun::Completed(plan)
-                    if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
-            );
+            let has_ops = matches!(&run, ReconcileRun::Completed(plan) if !plan.ops.is_empty());
             let context = ApplyRunContext {
                 root,
                 actor,
@@ -2611,8 +2598,12 @@ pub(crate) async fn reconcile_full_for_switch(
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await
-            .clean;
+            .await;
+            // An unread path changes the manifest only when the policy pass
+            // retires it. A pass the policy held fails the apply, and every
+            // failure refreshes the manifest.
+            let manifest_changed = has_ops || applied.retired_unread;
+            let applied = applied.clean;
             // A new file an editor still holds is not recorded yet, so the
             // switch would leave it behind.
             let deferred = match handle.stats().await {
@@ -2753,16 +2744,20 @@ fn moment_recorded_payload(
 struct ApplyOutcome {
     clean: bool,
     collection_busy_exhausted: bool,
+    /// The policy pass retired a path the scan retained unread.
+    retired_unread: bool,
 }
 
 impl ApplyOutcome {
     const CLEAN: Self = Self {
         clean: true,
         collection_busy_exhausted: false,
+        retired_unread: false,
     };
     const FAILED: Self = Self {
         clean: false,
         collection_busy_exhausted: false,
+        retired_unread: false,
     };
 }
 
@@ -2777,6 +2772,7 @@ impl CollectionReconcileFailure {
         ApplyOutcome {
             clean: false,
             collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
+            retired_unread: false,
         }
     }
 }
@@ -2976,7 +2972,7 @@ async fn apply_bound_run_with_handle(
     let apply_cancel = cancel.clone();
     let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
-    // The retained-over-cap loop below retires through its own sink; it must
+    // The retained-unread loop below retires through its own sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
     // history group with NULL correlation ids.
     let retire_provenance = provenance.clone();
@@ -3119,7 +3115,8 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
-    // OVER-CAP + narrowed: a path in the scanner's retained-over-cap set
+    // UNREAD + narrowed: a path in the scanner's retained-unread set, over
+    // the size cap or evicted by a cloud provider,
     // never appears in the diff (CAL-3 keeps it last-known-good, never
     // Retire), so a policy narrow could never reach it through an op. Retire
     // those directly — policy exclusion is an OWNERSHIP decision, distinct
@@ -3128,12 +3125,13 @@ async fn apply_bound_run_with_handle(
     // One policy read for the whole loop — a per-path re-read was N disk
     // round-trips for one answer, and could even give different paths a
     // different policy if an edit raced the loop.
-    let capture_policy = if plan.retained_over_cap.is_empty() {
+    let capture_policy = if plan.retained_unread.is_empty() {
         PolicyState::Known(None)
     } else {
         read_capture_policy(root)
     };
-    for path in &plan.retained_over_cap {
+    let mut retired_unread = false;
+    for path in &plan.retained_unread {
         let excluded = match &capture_policy {
             PolicyState::Known(policy) => policy_excludes(policy, path),
             // Unknown policy: hold LOUDLY. This loop is the only mechanism
@@ -3207,6 +3205,7 @@ async fn apply_bound_run_with_handle(
                 Some(Ok(paths)) => {
                     result.not_owned_paths.push(path.clone());
                     pending_placement_paths.extend(paths);
+                    retired_unread = true;
                 }
                 // A failed over-cap retire must fail the receipt too: this
                 // loop is the only thing that can retire such a head, so it
@@ -3289,11 +3288,13 @@ async fn apply_bound_run_with_handle(
         return ApplyOutcome {
             clean: false,
             collection_busy_exhausted,
+            retired_unread,
         };
     }
     ApplyOutcome {
         clean,
         collection_busy_exhausted,
+        retired_unread,
     }
 }
 

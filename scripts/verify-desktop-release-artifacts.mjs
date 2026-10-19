@@ -4,13 +4,75 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { parseUpdateManifest } from "./merge-update-manifests.mjs";
 
+// Each platform's artifacts, and whether its updater installs from one. electron-builder names an x64
+// AppImage x86_64 and an x64 .deb amd64. Each Linux updater installs its own kind, so the manifest lists both.
 const platforms = {
-  mac: { suffix: "-mac", extensions: ["dmg", "zip"], updateExtension: "zip", arches: ["x64", "arm64"] },
-  win: { suffix: "", extensions: ["exe"], updateExtension: "exe", arches: ["x64"] },
-  linux: { suffix: "-linux", extensions: ["AppImage"], updateExtension: "AppImage", arches: ["x64"], artifactArch: "x86_64" },
+  mac: { suffix: "-mac", arches: ["arm64"], artifacts: [{ extension: "dmg" }, { extension: "zip", update: true }] },
+  win: { suffix: "", arches: ["x64"], artifacts: [{ extension: "exe", update: true }] },
+  linux: { suffix: "-linux", arches: ["x64"], artifacts: [{ extension: "AppImage", arch: "x86_64", update: true }, { extension: "deb", arch: "amd64", update: true }] },
 };
+
+function parseScalar(value) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  return trimmed;
+}
+
+export function parseUpdateManifest(raw, sourcePath = "manifest") {
+  const manifest = { files: [] };
+  let currentFile = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.trim().length === 0 || line.trimStart().startsWith("#")) {
+      currentFile = null;
+      continue;
+    }
+    const fileStart = /^\s*-\s+([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (fileStart) {
+      currentFile = { [fileStart[1]]: parseScalar(fileStart[2]) };
+      manifest.files.push(currentFile);
+      continue;
+    }
+    const fileProperty = /^\s{4,}([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (fileProperty && currentFile) {
+      currentFile[fileProperty[1]] = parseScalar(fileProperty[2]);
+      continue;
+    }
+    const property = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (property) {
+      currentFile = null;
+      const [, key, value] = property;
+      if (key === "files") continue;
+      manifest[key] = parseScalar(value);
+      continue;
+    }
+    throw new Error(`Could not parse ${sourcePath}: ${line}`);
+  }
+  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+    throw new Error(`${sourcePath} is missing version.`);
+  }
+  if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
+    throw new Error(`${sourcePath} is missing files.`);
+  }
+  for (const file of manifest.files) {
+    if (typeof file.url !== "string" || file.url.length === 0) {
+      throw new Error(`${sourcePath} has a file entry without url.`);
+    }
+    if (typeof file.sha512 !== "string" || file.sha512.length === 0) {
+      throw new Error(`${sourcePath} has a file entry without sha512.`);
+    }
+    if (typeof file.size !== "number" || !Number.isFinite(file.size)) {
+      throw new Error(`${sourcePath} has a file entry without numeric size.`);
+    }
+  }
+  return manifest;
+}
 
 async function inspectFile(root, name) {
   if (typeof name !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
@@ -56,10 +118,10 @@ export async function verifyDesktopReleaseArtifacts({ directory, platform, arch,
   if (!legacy || legacy.sha512 !== manifest.sha512) {
     throw new Error("Manifest path and SHA-512 must match a listed artifact.");
   }
-  for (const extension of target.extensions) {
-    const name = `dohc-${version}-${platform}-${target.artifactArch ?? arch}.${extension}`;
+  for (const artifact of target.artifacts) {
+    const name = `dohc-${version}-${platform}-${artifact.arch ?? arch}.${artifact.extension}`;
     await inspect(name);
-    if (extension === target.updateExtension && !seen.has(name)) {
+    if (artifact.update && !seen.has(name)) {
       throw new Error(`Update manifest does not list the ${arch} update artifact: ${name}`);
     }
   }

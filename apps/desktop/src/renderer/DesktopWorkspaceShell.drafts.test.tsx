@@ -1,19 +1,20 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
+import { Profiler } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { webcrypto } from "node:crypto";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { captureOrphanedDraft } from "./orphanedDrafts";
 import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collectionWriteFailures, collectionWritesPaused, discardCollectionFieldWrite, enqueueCollectionFieldWrite, hasPendingCollectionFieldWrites } from "./collections/recordFieldWrites";
-import { deferred } from "../testing/deferred";
-import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { deferred, type Deferred } from "../testing/deferred";
+import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 async function openDirtyMarkdown(
   bridge: ReturnType<typeof makeBridge>,
@@ -83,11 +84,257 @@ describe("workspace switch admission", () => {
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     await act(async () => {});
 
-    expect(rejectedReads).toEqual([`ui-state:${OTHER_WORKSPACE.workspaceId}`]);
-    expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
+    expect(rejectedReads).toEqual([]);
+    expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce();
     expect(bridge.openWorkspace).toHaveBeenCalledOnce();
   });
+
+  it("reads after the first open and lifts the preparing surface with the saved layout", async () => {
+    const open = deferred<typeof SYNC_STATUS>();
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    bridge.openWorkspace = vi.fn(() => open.promise);
+    // What each commit put on screen, read after React applied it.
+    const commits: Array<{ preparing: boolean; tab: boolean; sidebarWidth: string | undefined; about: boolean }> = [];
+    const recordCommit = () => commits.push({
+      preparing: screen.queryByTestId("workspace-preparing") !== null,
+      tab: screen.queryByTestId("tab-b.md") !== null,
+      sidebarWidth: screen.queryByTestId("side-panel")?.style.width,
+      about: screen.queryByTestId("about-rail") !== null,
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <Profiler id="shell" onRender={recordCommit}>
+        <DesktopWorkspaceShell
+          workspace={WORKSPACE}
+          workspaces={[WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      </Profiler>,
+    );
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    await act(async () => {});
+
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expectNoUiStateTraffic(bridge);
+
+    await act(async () => open.resolve(SYNC_STATUS));
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
+    window.dispatchEvent(new Event("beforeunload"));
+    expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
+    // The first commit without the surface already shows the saved tab,
+    // sidebar width and About rail; no commit showed the defaults.
+    expect(commits.find((commit) => !commit.preparing)).toEqual({
+      preparing: false,
+      tab: true,
+      sidebarWidth: "320px",
+      about: true,
+    });
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+  });
+
+  it("keeps a title bar change made while the saved layout loads", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("titlebar-primary-sidebar"));
+    window.dispatchEvent(new Event("beforeunload"));
+    expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    await waitFor(() => expect(bridge.setWorkspaceUiState).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      state: expect.objectContaining({ sidebarVisible: false }),
+    }));
+  });
+
+  it.each(["null", "failed"] as const)("opens on the defaults after a %s read and saves them from then on", async (outcome) => {
+    const read = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(read.promise);
+    const view = renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    await act(async () => {});
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+
+    await act(async () => {
+      if (outcome === "null") read.resolve(null);
+      else read.reject(new Error("unreadable"));
+      await read.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    view.unmount();
+    const [payload] = bridge.setWorkspaceUiState.mock.lastCall!;
+    expect(payload.workspaceId).toBe(WORKSPACE.workspaceId);
+    expect(storedTabs(payload.state)).toEqual([]);
+  });
+
+  it("reads nothing and saves no defaults until a failed open succeeds", async () => {
+    const user = userEvent.setup();
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    bridge.openWorkspace.mockRejectedValueOnce(new Error("engine refused"));
+    renderShell(bridge);
+    const failed = await screen.findByTestId("workspace-open-failed");
+    await act(async () => {});
+    expectNoUiStateTraffic(bridge);
+
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  describe("after the selection moves on", () => {
+    // One mounted shell changes workspace, so only the admission gate can stop
+    // an obsolete read. Each open waits for the test; GET answers with a tab
+    // named for its workspace.
+    function heldOpens() {
+      const opens: Array<{ workspaceId: string; status: Deferred<typeof SYNC_STATUS> }> = [];
+      const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+        openWorkspace: vi.fn((payload: { workspaceId: string }) => {
+          const status = deferred<typeof SYNC_STATUS>();
+          opens.push({ workspaceId: payload.workspaceId, status });
+          return status.promise;
+        }),
+        getWorkspaceUiState: vi.fn(async (payload: { workspaceId: string }) =>
+          storedStateWithTabs([payload.workspaceId === WORKSPACE.workspaceId ? "a.md" : "b.md"]),
+        ),
+      });
+      const shell = (workspace: Workspace) => (
+        <DesktopWorkspaceShell
+          workspace={workspace}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      );
+      const release = async (index: number) => {
+        await act(async () => opens[index]!.status.resolve(SYNC_STATUS));
+      };
+      vi.stubGlobal("dohcDesktop", bridge);
+      return { bridge, opens, shell, release };
+    }
+
+    it("reads only for the selection whose open answers", async () => {
+      const { bridge, opens, shell, release } = heldOpens();
+      const view = render(shell(WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(1));
+      view.rerender(shell(OTHER_WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(2));
+
+      await release(0);
+      expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+      expectNoUiStateTraffic(bridge);
+
+      await release(1);
+      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
+    });
+
+    it("keeps B preparing when A's read answers late", async () => {
+      const { bridge, opens, shell, release } = heldOpens();
+      const reads: Array<Deferred<WorkspaceUiState>> = [];
+      bridge.getWorkspaceUiState.mockImplementation(() => {
+        const read = deferred<WorkspaceUiState>();
+        reads.push(read);
+        return read.promise;
+      });
+      const view = render(shell(WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(1));
+      await release(0);
+      await waitFor(() => expect(reads).toHaveLength(1));
+      view.rerender(shell(OTHER_WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(2));
+      await release(1);
+      await waitFor(() => expect(reads).toHaveLength(2));
+      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(1, { workspaceId: WORKSPACE.workspaceId });
+      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(2, { workspaceId: OTHER_WORKSPACE.workspaceId });
+      await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+
+      const [late, current] = reads as [Deferred<WorkspaceUiState>, Deferred<WorkspaceUiState>];
+      await act(async () => {
+        late.resolve(storedStateWithTabs(["a.md"]));
+        await late.promise;
+      });
+      expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+      expect(screen.queryByTestId("tab-a.md")).toBeNull();
+
+      await act(async () => {
+        current.resolve(storedStateWithTabs(["b.md"]));
+        await current.promise;
+      });
+      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+    });
+
+    it("never reads after unmount", async () => {
+      const { bridge, opens, shell, release } = heldOpens();
+      const view = render(shell(WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(1));
+      view.unmount();
+
+      await release(0);
+      expectNoUiStateTraffic(bridge);
+    });
+
+    it("does not reuse A's first open after A -> B -> A", async () => {
+      const { bridge, opens, shell, release } = heldOpens();
+      const view = render(shell(WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(1));
+      view.rerender(shell(OTHER_WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(2));
+      view.rerender(shell(WORKSPACE));
+      await waitFor(() => expect(opens).toHaveLength(3));
+      expect(opens.map((open) => open.workspaceId)).toEqual([WORKSPACE.workspaceId, OTHER_WORKSPACE.workspaceId, WORKSPACE.workspaceId]);
+
+      await release(0);
+      await release(1);
+      expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+      expectNoUiStateTraffic(bridge);
+
+      await release(2);
+      expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
+    });
+  });
 });
+
+// Neither a UI-state read nor a save of the default layout has happened, even
+// when the window unloads now.
+function expectNoUiStateTraffic(bridge: ReturnType<typeof makeBridge>) {
+  window.dispatchEvent(new Event("beforeunload"));
+  expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
+  expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
+}
 
 describe("collection input during a version switch", () => {
   it.each(["success", "failure"] as const)(
@@ -297,10 +544,13 @@ describe("workspace admission over collection writes", () => {
       expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
     );
     harness.bridge.openWorkspace.mockClear();
+    harness.bridge.getWorkspaceUiState.mockClear();
 
     view.rerender(harness.shell(OTHER_WORKSPACE));
     await act(async () => {});
     expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+    harness.bridge.setWorkspaceUiState.mockClear();
+    expectNoUiStateTraffic(harness.bridge);
 
     // A's write lands: the session opens under A's still-current authority,
     // the update stages, and the engine reports the save settled.
@@ -324,6 +574,7 @@ describe("workspace admission over collection writes", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    await waitFor(() => expect(harness.bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
     expect(collectionWriteFailures()).toEqual([]);
   });
 
@@ -339,10 +590,13 @@ describe("workspace admission over collection writes", () => {
     });
     await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
     harness.bridge.openWorkspace.mockClear();
+    harness.bridge.getWorkspaceUiState.mockClear();
 
     view.rerender(harness.shell(OTHER_WORKSPACE));
     await screen.findByTestId("workspace-open-failed");
     expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+    harness.bridge.setWorkspaceUiState.mockClear();
+    expectNoUiStateTraffic(harness.bridge);
 
     // Resolving the failure re-runs admission without another click.
     act(() => {
@@ -356,6 +610,7 @@ describe("workspace admission over collection writes", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    await waitFor(() => expect(harness.bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
   });
 
   it("blocks admission when A's write fails during the wait", async () => {

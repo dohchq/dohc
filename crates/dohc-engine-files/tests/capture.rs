@@ -726,7 +726,7 @@ fn plan_of(
         from_generation: dohc_engine_files::ScanGeneration(0),
         to_generation: dohc_engine_files::ScanGeneration(1),
         ops,
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: unconfirmed_removed
             .iter()
             .map(|path| (*path).to_owned())
@@ -834,8 +834,8 @@ fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
     assert_eq!(result.failed_applies, ["notes.md", "Notes.md"]);
 }
 
-/// Where the disk cannot show the stored spelling, as on Windows, the old
-/// spelling's removal stays unconfirmed every pass. The new spelling is
+/// Where the disk cannot prove the stored spelling, the old spelling's
+/// removal stays unconfirmed every pass. The new spelling is
 /// captured as it is without the respell fix, never held back for good.
 #[test]
 fn an_unproven_respell_never_holds_back_an_ingest() {

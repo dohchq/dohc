@@ -75,6 +75,31 @@ impl From<Envelope> for OutputItem {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--replica-sandbox-check"] {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)?;
+        let store = std::env::temp_dir().join(format!(
+            "dohc-sandbox-check-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&store)?;
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .arg("--replica-sandbox-check-store")
+            .arg(&store)
+            .status();
+        std::fs::remove_dir(&store)?;
+        if !result?.success() {
+            return Err(io::Error::other("replica sandbox check failed").into());
+        }
+        return Ok(());
+    }
+    if args.len() == 2 && args[0] == "--replica-sandbox-check-store" {
+        println!(
+            "Landlock policy ABI {}",
+            dohc_workspace_engine::replica_sandbox::apply(std::path::Path::new(&args[1]))?
+        );
+        return Ok(());
+    }
     if args == ["--projection-only"] {
         if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
@@ -88,6 +113,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let replica = args == ["--replica"];
+    if replica {
+        dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?;
+    }
     let passive = replica || args == ["--store-role", "passive"];
     if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
@@ -98,7 +126,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive, replica))
+    let runtime = if replica {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Runtime::new()?
+    };
+    runtime.block_on(run_stdio(auth_token, passive, replica))
 }
 
 fn passive_ingress(
@@ -161,6 +198,13 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
             }
         },
     };
+    if let Some(config) = reader_config(
+        replica,
+        std::env::var_os("DOHC_ENGINE_READER_CONFIG"),
+        |message| eprintln!("{message}"),
+    ) {
+        service.configure_reader(config);
+    }
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
         service.clone(),
@@ -170,7 +214,7 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
-        service.events().subscribe_with_files(),
+        service.events().subscribe_with_wakes(),
         || WorkspaceSupervisor::global().close_all(),
         live,
     )
@@ -181,6 +225,24 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
     service.shutdown_all_capture().await;
     transport?;
     Ok(())
+}
+
+fn reader_config(
+    replica: bool,
+    value: Option<std::ffi::OsString>,
+    warn: impl FnOnce(&str),
+) -> Option<dohc_engine_reader::Config> {
+    if replica {
+        return None;
+    }
+    let value = value?;
+    let config = value
+        .to_str()
+        .and_then(|value| serde_json::from_str(value).ok());
+    if config.is_none() {
+        warn("Invalid DOHC_ENGINE_READER_CONFIG; Markdown reader unavailable.");
+    }
+    config
 }
 
 #[cfg(test)]
@@ -1378,6 +1440,66 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
 /// `dohc_workspace_engine::tests` (the `open_lock` seam lives in `lib.rs`).
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replica_startup_ignores_reader_environment() {
+        for value in [
+            "invalid",
+            r#"{"node":"/runtime/node","bundle":"/reader/reader.cjs","manifest":"/reader/manifest.json"}"#,
+        ] {
+            assert!(
+                super::reader_config(true, Some(value.into()), |_| {
+                    panic!("replica must not parse reader configuration")
+                })
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn reader_environment_is_optional_and_invalid_values_warn_once() {
+        let mut warnings = Vec::new();
+        assert!(
+            super::reader_config(false, None, |message| warnings.push(message.to_owned()))
+                .is_none()
+        );
+        assert!(warnings.is_empty());
+        let valid = r#"{"node":"/runtime/node","bundle":"/reader/reader.cjs","manifest":"/reader/manifest.json"}"#;
+        let config =
+            super::reader_config(false, Some(valid.into()), |_| panic!("valid config warned"))
+                .unwrap();
+        assert_eq!(config.bundle, std::path::Path::new("/reader/reader.cjs"));
+        for value in [
+            "",
+            "secret invalid JSON",
+            "{}",
+            r#"{"node":"a","bundle":"b","manifest":"c","extra":true}"#,
+        ] {
+            warnings.clear();
+            assert!(
+                super::reader_config(false, Some(value.into()), |message| warnings
+                    .push(message.to_owned()))
+                .is_none()
+            );
+            assert_eq!(
+                warnings,
+                ["Invalid DOHC_ENGINE_READER_CONFIG; Markdown reader unavailable."]
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            warnings.clear();
+            assert!(
+                super::reader_config(
+                    false,
+                    Some(std::ffi::OsString::from_vec(vec![255])),
+                    |message| { warnings.push(message.to_owned()) }
+                )
+                .is_none()
+            );
+            assert_eq!(warnings.len(), 1);
+        }
+    }
     use super::*;
     use dohc_engine_protocol::transport::{RequestContext, ServiceResponse};
     use dohc_engine_protocol::wire::{BlobStart, Request as WireRequest, Response as WireResponse};

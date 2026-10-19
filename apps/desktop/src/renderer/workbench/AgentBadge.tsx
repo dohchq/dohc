@@ -1,7 +1,9 @@
 import { createContext, useCallback, useContext, useId, useMemo, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
+import type { ActorPresentation } from "../../ipc/bridgeContract";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { useAgentInk } from "./ChatAvatar";
 
 export const AgentSettingsContext = createContext<DesktopUserSettings | null>(null);
 
@@ -69,8 +71,11 @@ export function AgentBadge(props: {
   testIdPrefix: string;
   author: AgentAuthor;
   viewerAuthorId?: string;
+  // The agent's token where its avatar shows, so the sparkle takes the avatar's hue.
+  presentation?: ActorPresentation;
 }) {
   const settings = useContext(AgentSettingsContext);
+  const ink = useAgentInk(props.presentation);
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
@@ -78,7 +83,7 @@ export function AgentBadge(props: {
   const command = ownAgent && settings ? configuredRunnerCommand(settings.runner) : undefined;
   return (
     <span
-      className="relative inline-flex text-agent"
+      className={`relative inline-flex ${ink}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);

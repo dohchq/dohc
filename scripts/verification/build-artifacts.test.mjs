@@ -42,7 +42,7 @@ test("a Windows x64 desktop artifact rejects a changed, deleted or missing probe
   assert.throws(fingerprint, { code: "ENOENT" });
 });
 
-for (const [platform, arch] of [["darwin", "arm64"], ["darwin", "x64"], ["linux", "arm64"], ["linux", "x64"]]) {
+for (const [platform, arch] of [["darwin", "arm64"], ["linux", "arm64"], ["linux", "x64"]]) {
   test(`a ${platform} ${arch} desktop artifact reads the compiler tree but not the probe`, t => {
     const { root, write } = artifacts(t);
     rmSync(join(root, probe), { recursive: true });
@@ -61,6 +61,7 @@ test("other targets do not read the probe or compiler trees", t => {
   rmSync(join(root, dirname(node)), { recursive: true });
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "linux", "arm"));
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "win32", "arm64"));
+  assert.doesNotThrow(() => artifactFingerprint("desktop", root, "darwin", "x64"));
 });
 
 test("desktop production inputs cover the probe sources and ignore staged probe output", t => {

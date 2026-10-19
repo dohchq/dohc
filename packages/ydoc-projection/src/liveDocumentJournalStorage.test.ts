@@ -15,6 +15,8 @@ import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../.
 import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
 import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
+import {appendValidatedLiveJournal, liveJournalCoverageWithin} from '../../../services/sync-relay/src/storage/liveUpdateJournal.js'
+import {startLiveJournalCheck} from '../../../services/sync-relay/src/storage/liveJournalCheck.js'
 
 function openJournalStorage(...args: Parameters<typeof openSyncRelayStorage>) {
   const storage = openSyncRelayStorage(...args)
@@ -348,7 +350,9 @@ it('reuses an unchanged issued cut without rereading the suffix or full provenan
     const spy = vi.spyOn(db, 'prepare').mockImplementation(sql => { queries.push(sql); return prepare(sql) })
     try {
       expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
-      expect(queries.some(sql => sql.includes('LIMIT 4095') || sql.includes('LEFT JOIN sync_relay_live_update_journal'))).toBe(false)
+      expect(queries.some(sql => sql.includes('LIMIT 4095'))).toBe(false)
+      expect(queries.filter(sql => sql.includes('LEFT JOIN sync_relay_live_update_journal'))
+        .every(sql => /client_id=\?[\s\S]*start_clock<=\?[\s\S]*start_clock>=/.test(sql))).toBe(true)
     } finally { spy.mockRestore() }
   } finally { f.close() }
 })
@@ -592,6 +596,150 @@ function gcCandidate(clientId: number, startClock: number, length: number): Uint
   encoder.writeDsLen(length)
   return encoder.toUint8Array()
 }
+
+it('bounds coverage reads by candidate ranges at 200 and 2000 clients', () => {
+  const counts = [200, 2000].map(k => {
+    const f = registered()
+    try {
+      // Spy before the first commit: coverage statements are prepared once per database and reused.
+      const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db)
+      let rows = 0
+      vi.spyOn(context.db, 'prepare').mockImplementation(sql => {
+        const statement = prepare(sql)
+        if (!/^\s*SELECT/i.test(sql) || !sql.includes('sync_relay_live_update_struct_provenance') ||
+          /WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql)) return statement
+        return new Proxy(statement, {get(target, key) {
+          if (key === 'all') return (...args: Parameters<typeof statement.all>) => {
+            const result = target.all(...args); rows += result.length; return result
+          }
+          const value = Reflect.get(target, key, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        }})
+      })
+      const merged = Y.mergeUpdates(Array.from({length: k}, (_, i) => gcCandidate(i + 1, 0, 1)))
+      expect(f.storage.commitLiveUpdateJournal(f.capture(merged, 'history')).result.kind).toBe('accepted')
+      rows = 0
+      const input = f.capture(gcCandidate(k + 1, 0, 1), 'candidate')
+      expect(input.validation.kind).toBe('accepted')
+      const result = f.storage.commitLiveUpdateJournal(input).result
+      if (result.kind !== 'accepted') throw Error(result.kind)
+      expect(f.storage.readCommittedLiveUpdate({host, document: f.input.evidence.document,
+        journalCursor: result.receipt.journalCursor}).kind).toBe('committed')
+      vi.restoreAllMocks()
+      return rows
+    } finally {vi.restoreAllMocks(); f.close()}
+  })
+  expect.soft(counts[0]).toBeGreaterThan(0)
+  expect.soft(counts[0]).toBeLessThanOrEqual(3)
+  expect.soft(counts[1]).toBeLessThanOrEqual(3)
+  expect.soft(counts[1]).toBe(counts[0])
+})
+
+it('seeks coverage windows through indexes without scans or sorts', () => {
+  const f = registered()
+  try {
+    const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db)
+    const plans: string[] = []
+    vi.spyOn(context.db, 'prepare').mockImplementation(sql => {
+      if (/start_clock>=COALESCE/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(13).fill(0)).map(row => row.detail).join('; '))
+      return prepare(sql)
+    })
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 10), 'history')).result.kind).toBe('accepted')
+    expect(plans).toHaveLength(2)
+    for (const plan of plans) expect(plan).not.toMatch(/SCAN |TEMP B-TREE/)
+    expect(plans[0]).toContain('idx_sync_relay_live_update_struct_provenance_coverage')
+    expect(plans[1]).toContain('idx_sync_relay_live_document_baseline_coverage')
+  } finally {vi.restoreAllMocks(); f.close()}
+})
+
+it.each(['provenance', 'baseline'] as const)('refuses an append overlapping %s before writing', kind => {
+  const f = registered()
+  try {
+    const prior = f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 10), 'history')).admitted!
+    const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.input.evidence.document, actor: f.actor})
+    if (current.kind !== 'current') throw Error(current.kind)
+    const range = kind === 'provenance' ? {clientId: 91, startClock: 5, endClock: 8} : f.input.evidence.checkpoint.ranges[0]!
+    const before = f.journalRows()
+    let wrote = false
+    expect(() => (f.storage as StorageContext).tx(() => appendValidatedLiveJournal(f.storage as StorageContext, {
+      document: f.input.evidence.document, namespace: 'journal-test', host, current,
+      metadata: {deliveryId: 'restore', updateDigest: hash(f.input.baselineBytes)}, updateBytes: f.input.baselineBytes,
+      receivedAtMs: 40, firstSeen: [range], checkpointBytes: f.input.baselineBytes,
+      checkpointDigest: hash(f.input.baselineBytes),
+      priorMetadata: prior.metadata, onFirstWrite() {wrote = true},
+    }))).toThrow(/damaged/)
+    expect(wrote).toBe(false)
+    expect(f.journalRows()).toEqual(before)
+  } finally {f.close()}
+})
+
+it('refuses first-seen starting inside a stored row and accepts another cursor touching it', () => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 10), 'history')).result.kind).toBe('accepted')
+    const input = f.capture(gcCandidate(91, 5, 3), 'overlap')
+    if (input.validation.kind !== 'accepted') throw Error(input.validation.kind)
+    const overlapping = {...input, validation: {...input.validation, evidence: {...input.validation.evidence,
+      candidate: {...input.validation.evidence.candidate, firstSeen: [{clientId: 91, startClock: 5, endClock: 8}]}}}}
+    expect(f.storage.commitLiveUpdateJournal(overlapping).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 10, 1), 'touching')).result.kind).toBe('accepted')
+  } finally {f.close()}
+})
+
+it.each(['overlap', 'same-cursor adjacency'] as const)('rejects %s before the checkpoint inside the candidate window', kind => {
+  const f = registered(), context = f.storage as StorageContext
+  try {
+    const bytes = gcCandidate(91, 0, 10)
+    let prior = f.storage.commitLiveUpdateJournal(f.capture(bytes, 'history')).admitted!.metadata
+    Y.applyUpdate(f.doc, bytes)
+    const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.input.evidence.document, actor: f.actor})
+    if (current.kind !== 'current') throw Error(current.kind)
+    const noop = Y.encodeStateAsUpdate(f.doc, Y.encodeStateVector(f.doc)), state = Y.encodeStateAsUpdate(f.doc)
+    context.tx(() => {
+      for (let i = 1; i < 4095; i++) prior = appendValidatedLiveJournal(context, {
+        document: f.input.evidence.document, namespace: 'journal-test', host, current,
+        metadata: {deliveryId: `checkpoint-${i}`, updateDigest: hash(noop)}, updateBytes: noop,
+        receivedAtMs: 40, firstSeen: [], checkpointBytes: i === 4094 ? state : null,
+        checkpointDigest: i === 4094 ? hash(state) : null, priorMetadata: prior,
+      }).metadata
+    })
+    const next = f.capture(gcCandidate(91, 0, 11), 'candidate')
+    expect(next.cutToken.suffixCount).toBe(0)
+    if (kind === 'same-cursor adjacency') f.raw.exec('UPDATE sync_relay_live_update_struct_provenance SET end_clock=5')
+    f.raw.exec(`INSERT INTO sync_relay_live_update_struct_provenance
+      SELECT workspace_id,main_version_id,object_id,lineage_claim_id,client_id,${kind === 'overlap' ? '1,3' : '5,10'},journal_cursor
+      FROM sync_relay_live_update_struct_provenance LIMIT 1`)
+    const before = f.journalRows()
+    expect(() => f.storage.commitLiveUpdateJournal(next)).toThrow(/damaged/)
+    expect(f.journalRows()).toEqual(before)
+  } finally {f.close()}
+}, 30_000)
+
+it('cold check reports a hidden overlapping database row once per relay run', async () => {
+  const f = registered(), report = vi.fn()
+  vi.useFakeTimers()
+  let check: ReturnType<typeof startLiveJournalCheck> | undefined
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 100), 'outer')).result.kind).toBe('accepted')
+    const context = f.storage as StorageContext
+    f.raw.exec(`INSERT INTO sync_relay_live_update_struct_provenance
+      SELECT workspace_id,main_version_id,object_id,lineage_claim_id,client_id,1,2,journal_cursor
+      FROM sync_relay_live_update_struct_provenance WHERE client_id=91`)
+    // The inner row hides the outer row from the edit's left-neighbour lookup.
+    expect(liveJournalCoverageWithin(context, f.input.evidence.document,
+      [{clientId: 91, startClock: 50, endClock: 51}])).toEqual([{clientId: 91, startClock: 1, endClock: 2}])
+    check = startLiveJournalCheck((f.storage as StorageContext).db, report)
+    expect(report).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(report).toHaveBeenCalledExactlyOnceWith('[sync-relay] live journal damaged', {
+      document: f.input.evidence.document,
+      firstBadRow: {source: 'provenance', clientId: 91, startClock: 1, endClock: 2, journalCursor: 1},
+      previousRow: {source: 'provenance', clientId: 91, startClock: 0, endClock: 100, journalCursor: 1},
+    })
+    await vi.advanceTimersByTimeAsync(86_400_100)
+    expect(report).toHaveBeenCalledTimes(1)
+  } finally {check?.close(); vi.useRealTimers(); f.close()}
+}, 30_000)
 
 it('subtracts prior GC coverage, retaining adjacent first authors and separate clients', () => {
   const f = registered()

@@ -608,6 +608,18 @@ describe("registered workspace settings and UI state", () => {
     await expect(uiStateStore.readUiStateFile(h.otherRoot)).resolves.toBeNull();
   });
 
+  it("denies a UI-state read from a renderer until its open admits it", async () => {
+    const h = await harness();
+    const fresh = sender(3);
+    dispose.unshift(() => h.sessions.retireAfterCrash(fresh));
+    await uiStateStore.writeUiStateFile(h.root, state);
+    const uiReads = vi.spyOn(uiStateStore, "readUiStateFile");
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).rejects.toThrow("UI state read stopped because this window changed workspaces.");
+    expect(uiReads).not.toHaveBeenCalled();
+    await h.open(fresh, "workspace-a");
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).resolves.toEqual(state);
+  });
+
   it.each(["null", "[]", "7", "\"text\"", "{broken"])("returns null for unavailable or non-object UI state: %s", async raw => {
     const h = await harness();
     await mkdir(join(h.root, ".dohc"));

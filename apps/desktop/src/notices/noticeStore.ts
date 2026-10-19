@@ -107,6 +107,10 @@ export interface NoticeStore {
   // when its caller is no longer current. Never rejects.
   sync(isCurrent?: () => boolean): Promise<void>;
   refreshRefusals(openedWorkspaceId?: string): Promise<void>;
+  // Stops refusal work for good, as quit does before workspaces close: work
+  // not started yet never reads or dismisses a refusal, and the promise
+  // settles once the work already queued is done.
+  stopWorkspaceRefusals(): Promise<void>;
   // The failure notice the signed-in person sent themselves about one run,
   // dismissed or not, with the computer that posted it, or null. Only read,
   // never shown.
@@ -301,6 +305,12 @@ export function createNoticeStore(deps: {
     const run = queue.then(work);
     queue = run.catch(() => undefined);
     return run;
+  }
+  let refusalsStopped = false;
+  let refusalsDrained: Promise<void> | null = null;
+  function stopWorkspaceRefusals(): Promise<void> {
+    refusalsStopped = true;
+    return refusalsDrained ??= queue.then(() => undefined);
   }
 
   const accountFileName = (account: NoticeAccount) =>
@@ -685,9 +695,10 @@ export function createNoticeStore(deps: {
   }
 
   async function refreshRefusals(openedWorkspaceId?: string): Promise<void> {
-    if (!deps.refusalNotices) return;
+    if (!deps.refusalNotices || refusalsStopped) return;
     const readRefusals = deps.refusalNotices;
     const changed = await locked(async () => {
+      if (refusalsStopped) return false;
       const workspaces = await readRefusals(openedWorkspaceId);
       const prior = await loadLocal();
       const previousRows = new Map(prior.rows.map(row => [row.noticeId, row]));
@@ -933,6 +944,11 @@ export function createNoticeStore(deps: {
       let localChanged = false;
       if (localRefs.size > 0) {
         const file = await loadLocal();
+        // Once refusal work stops, a batch with a refusal dismissal fails before it changes any row.
+        if (refusalsStopped && mark === "dismissed" && file.rows.some(row => localRefs.has(row.noticeId) &&
+          row.dismissedAtMs === null && row.kind === "sync-refusal" && row.workspaceId)) {
+          throw new DOMException("dohc is closing. Dismiss this Notice after dohc opens again.", "AbortError");
+        }
         for (const row of file.rows) {
           const ref = localRefs.get(row.noticeId);
           if (!ref) continue;
@@ -1111,7 +1127,7 @@ export function createNoticeStore(deps: {
     });
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals, sentFailure, pendingAutomationWakes };
+  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals, stopWorkspaceRefusals, sentFailure, pendingAutomationWakes };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

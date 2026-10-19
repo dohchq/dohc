@@ -26,6 +26,7 @@ import {
 } from "./storage";
 import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
+import {sharedMomentAuthors} from "./sharedMomentAuthors";
 
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
@@ -477,25 +478,6 @@ export function scanFilteredLog<T>(
       return { items, nextCursor, hasMore: page.hasMore };
     }
   }
-}
-
-/** Only relay-minted snapshots can name people or bind an agent to them. */
-function sharedMomentAuthors(snapshot: SyncRelayLogRow["admittedAuthorSnapshot"]): Array<Record<string, unknown>> {
-  if (!snapshot?.length) return [{kind: "unattributed"}];
-  const principals = new Set(snapshot.flatMap(author => author.kind === "human" ? [author.humanId]
-    : author.kind === "link" ? [author.publicPrincipalId] : []));
-  let unattributed = false;
-  return snapshot.flatMap(author => {
-    if (author.kind === "agent" && (!author.onBehalfOf || !principals.has(author.onBehalfOf))) {
-      if (unattributed) return [];
-      unattributed = true;
-      return [{kind: "unattributed"}];
-    }
-    if (author.kind === "automation") return {kind: "automation", automationId: author.automationId,
-      depth: author.attribution.depth,
-      ...(author.attribution.onBehalfOf === undefined ? {} : {onBehalfOf: author.attribution.onBehalfOf})};
-    return {...author};
-  });
 }
 
 // The objects whose after-content in an admitted row is `sha256`: the moment's

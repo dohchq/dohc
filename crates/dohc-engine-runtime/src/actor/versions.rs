@@ -14,7 +14,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::{
-    PlacementHolds, ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState,
     remove_empty_directory_target,
 };
 use dohc_engine_storage::{
@@ -527,6 +527,49 @@ fn projection_target_contains<'a>(
     })
 }
 
+fn case_alias_targets<'a>(
+    previous: impl Iterator<Item = &'a str>,
+    target: &HashSet<&str>,
+) -> HashSet<String> {
+    if !cfg!(windows) {
+        return HashSet::new();
+    }
+    let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
+    for path in previous {
+        aliases
+            .entry(path_collision_key(path))
+            .or_default()
+            .push(path);
+    }
+    target
+        .iter()
+        .filter(|path| {
+            aliases
+                .get(&path_collision_key(path))
+                .is_some_and(|previous| previous.iter().any(|previous| previous != *path))
+        })
+        .map(|path| (*path).to_owned())
+        .collect()
+}
+
+fn spelling_differs(
+    probe: Option<&ProjectionProbe>,
+    aliases: &HashSet<String>,
+    path: &str,
+) -> bool {
+    aliases.contains(path) && probe.is_some_and(|probe| probe.stored_under_other_spelling(path))
+}
+
+fn probe_target(
+    probe: Option<&ProjectionProbe>,
+    path: &str,
+    kind: ProjectionTargetKind,
+) -> ProjectionTargetState {
+    probe.map_or(ProjectionTargetState::UntrackedContent, |probe| {
+        probe.probe(path, kind)
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "projection coordinates and rollback-only pre-state paths are independent"
@@ -538,6 +581,7 @@ fn plan_plaintext_switch(
     previous_version_id: &str,
     additional_previous_paths: &[(&str, i64)],
     root_dir: &std::path::Path,
+    probe: Option<&ProjectionProbe>,
     now_ms: i64,
     token: &CancellationToken,
     holds: &PlacementHolds,
@@ -561,6 +605,30 @@ fn plan_plaintext_switch(
         }
         .into());
     }
+    let previous = VersionedTextStore::new(store)
+        .list_snapshots(workspace_id, previous_version_id)
+        .map_err(RuntimeError::from)?;
+    let mut previous_paths: Vec<(String, i64)> = previous
+        .into_iter()
+        .map(|snapshot| (snapshot.path, snapshot.updated_at_ms))
+        .collect();
+    for (path, target_generation) in additional_previous_paths {
+        if !previous_paths
+            .iter()
+            .any(|(previous_path, _)| previous_path == path)
+        {
+            previous_paths.push(((*path).to_owned(), *target_generation));
+        }
+    }
+    for (path, _) in holds.entries() {
+        if !previous_paths.iter().any(|(previous, _)| previous == path) {
+            previous_paths.push((path.to_owned(), now_ms));
+        }
+    }
+    let spelling_aliases = case_alias_targets(
+        previous_paths.iter().map(|(path, _)| path.as_str()),
+        &target_paths,
+    );
     let mut projections = Vec::new();
     if !policy.is_degraded() {
         for snapshot in &target {
@@ -583,7 +651,7 @@ fn plan_plaintext_switch(
             let state = if held.is_some() {
                 ProjectionTargetState::UntrackedContent
             } else {
-                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext)
+                probe_target(probe, &snapshot.path, ProjectionTargetKind::Plaintext)
             };
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
@@ -597,7 +665,9 @@ fn plan_plaintext_switch(
                 }
                 SnapshotContent::Binary { sha256 } => (sha256.clone(), None),
             };
-            if projection_matches(&state, &desired_sha256) {
+            if projection_matches(&state, &desired_sha256)
+                && !spelling_differs(probe, &spelling_aliases, &snapshot.path)
+            {
                 continue;
             }
             projections.push(planned_projection(
@@ -612,26 +682,6 @@ fn plan_plaintext_switch(
                 false,
                 inline_content,
             ));
-        }
-    }
-    let previous = VersionedTextStore::new(store)
-        .list_snapshots(workspace_id, previous_version_id)
-        .map_err(RuntimeError::from)?;
-    let mut previous_paths: Vec<(String, i64)> = previous
-        .into_iter()
-        .map(|snapshot| (snapshot.path, snapshot.updated_at_ms))
-        .collect();
-    for (path, target_generation) in additional_previous_paths {
-        if !previous_paths
-            .iter()
-            .any(|(previous_path, _)| previous_path == path)
-        {
-            previous_paths.push(((*path).to_owned(), *target_generation));
-        }
-    }
-    for (path, _) in holds.entries() {
-        if !previous_paths.iter().any(|(previous, _)| previous == path) {
-            previous_paths.push((path.to_owned(), now_ms));
         }
     }
     if !policy.is_degraded() {
@@ -665,7 +715,7 @@ fn plan_plaintext_switch(
             let state = if held.is_some() {
                 ProjectionTargetState::UntrackedContent
             } else {
-                probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext)
+                probe_target(probe, &path, ProjectionTargetKind::Plaintext)
             };
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
@@ -737,6 +787,7 @@ fn plan_secret_switch(
     target_version_id: &str,
     previous_version_id: &str,
     root_dir: &std::path::Path,
+    probe: Option<&ProjectionProbe>,
     now_ms: i64,
     token: &CancellationToken,
     secret_key: &mut Option<SecretDataKey>,
@@ -749,6 +800,11 @@ fn plan_secret_switch(
         .iter()
         .filter_map(|path| holds.get(path).map(|(path, _)| path))
         .collect();
+    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
+    let spelling_aliases = case_alias_targets(
+        previous.iter().map(|stat| stat.path.as_str()),
+        &target_paths,
+    );
     let mut projections = Vec::new();
     for stat in &target {
         if token.is_cancelled() {
@@ -761,7 +817,7 @@ fn plan_secret_switch(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+            probe_target(probe, &stat.path, ProjectionTargetKind::Secret)
         };
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
@@ -784,7 +840,7 @@ fn plan_secret_switch(
             ProjectionTargetState::Text { sha256 } if sha256 == &desired_plaintext_sha
         );
         drop(plaintext);
-        if already_equal {
+        if already_equal && !spelling_differs(probe, &spelling_aliases, &stat.path) {
             continue;
         }
         let ciphertext_sha =
@@ -802,7 +858,6 @@ fn plan_secret_switch(
             None,
         ));
     }
-    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
     let empty_sha = hex_sha256(&[]);
     for stat in previous {
         if token.is_cancelled() {
@@ -827,7 +882,7 @@ fn plan_secret_switch(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+            probe_target(probe, &stat.path, ProjectionTargetKind::Secret)
         };
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
@@ -871,6 +926,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     token: &CancellationToken,
 ) -> Result<(), RuntimeError> {
     let holds = PlacementHolds::load(store, workspace_id)?;
+    let probe = ProjectionProbe::new(root_dir).ok();
     let mut projections = plan_plaintext_switch(
         store,
         workspace_id,
@@ -878,6 +934,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         inactive_version_id,
         rollback_paths,
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &holds,
@@ -969,6 +1026,7 @@ pub(super) fn switch_active_version_on_store(
     }
     let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;
+    let probe = ProjectionProbe::new(root_dir).ok();
     let mut projections = plan_plaintext_switch(
         store,
         workspace_id,
@@ -976,6 +1034,7 @@ pub(super) fn switch_active_version_on_store(
         &previous.version_id,
         &[],
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &holds,
@@ -986,6 +1045,7 @@ pub(super) fn switch_active_version_on_store(
         version_id,
         &previous.version_id,
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &mut secret_key,
@@ -1203,6 +1263,16 @@ pub(super) fn materialize_relay_page_on_store(
         let has_head = relay_has_head(store, workspace_id, &active, &change)?;
         page.push((path_key(&change.path), change, has_head));
     }
+    let probe = ProjectionProbe::new(root_dir).ok();
+    let target_paths: HashSet<&str> = page
+        .iter()
+        .filter(|(_, _, head)| *head)
+        .map(|(_, change, _)| change.path.as_str())
+        .collect();
+    let spelling_aliases = case_alias_targets(
+        page.iter().map(|(_, change, _)| change.path.as_str()),
+        &target_paths,
+    );
     let writes: Vec<Vec<String>> = page
         .iter()
         .filter(|(_, _, has_head)| *has_head)
@@ -1268,8 +1338,8 @@ pub(super) fn materialize_relay_page_on_store(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(
-                root_dir,
+            probe_target(
+                probe.as_ref(),
                 &change.path,
                 if secret {
                     ProjectionTargetKind::Secret
@@ -1297,7 +1367,12 @@ pub(super) fn materialize_relay_page_on_store(
                 reason: "ordinary materialization target is unsafe or unreadable",
             })?;
         let (operation, sha, inline) = match head {
-            Some(head) if head.current(&state, secret) => continue,
+            Some(head)
+                if head.current(&state, secret)
+                    && !spelling_differs(probe.as_ref(), &spelling_aliases, &change.path) =>
+            {
+                continue;
+            }
             Some(head) => (MaterializationOperation::Write, head.sha, head.inline),
             None if matches!(state, ProjectionTargetState::Absent) => {
                 deleted.push(change.path);
@@ -1554,6 +1629,70 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(HEADS_HELD.with(Cell::get), (0, 1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_case_alias_page_publishes_the_new_spelling_even_with_equal_bytes() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        for path in ["held.md", "HELD.MD"] {
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: path.into(),
+                        path: path.into(),
+                        text: "same\n".into(),
+                        moment_id: path.into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        std::fs::write(scratch.join("held.md"), "same\n").unwrap();
+        if !scratch.join("HELD.MD").exists() {
+            return;
+        }
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    operation: "write",
+                    content_kind: "text",
+                },
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "HELD.MD".into(),
+                    operation: "write",
+                    content_kind: "text",
+                },
+            ],
+            &(),
+            3,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_dir(&scratch)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "HELD.MD")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("HELD.MD")).unwrap(),
+            "same\n"
+        );
     }
 
     /// An older build's page can carry a change for Finder's `.DS_Store`. The

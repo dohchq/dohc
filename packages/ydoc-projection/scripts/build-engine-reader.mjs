@@ -63,7 +63,7 @@ export function checkReaderBundle(code) {
 /** Fixed entry point; destination belongs to preparation/tests, never to a document. */
 export async function buildEngineReader(destination = join(packageRoot, 'dist/engine-reader')) {
   const result = await build({
-    absWorkingDir: repoRoot, entryPoints: [join(packageRoot, 'src/engine-markdown-reader.ts')],
+    absWorkingDir: repoRoot, entryPoints: [join(packageRoot, 'src/engine-markdown-host-entry.ts')],
     outfile: 'reader.cjs', bundle: true, platform: 'node', target: 'node24', format: 'cjs',
     write: false, metafile: true, logLevel: 'silent',
     plugins: [{name: 'fixed-reader-imports', setup(build) {

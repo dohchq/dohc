@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -89,6 +89,24 @@ Changes the workspace, so a shared view does not offer it.
 No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
+
+### `dohc_links_in`
+
+Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.
+
+- `subject`: `{ path: string } | { objectId: string }`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor } | null`.
+
+### `dohc_links_resolve`
+
+Resolve wikilink or Markdown literals from one source document using the engine's link rules.
+
+- `source`: `string`. Required.
+- `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
+
+Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
 ### `dohc_read_operation`
 
@@ -526,6 +544,34 @@ Two environment variables also change what the CLI does:
 
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
+
+### `dohc links`
+
+Read and resolve document links.
+
+`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields.
+
+#### `dohc links in`
+
+```sh
+dohc links in <subject-json> [options]
+```
+
+Read documents that link to a file.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }` or `null`.
+
+#### `dohc links resolve`
+
+```sh
+dohc links resolve <source> <literals-json> [options]
+```
+
+Resolve links from one document.
+
+With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
 ### `dohc sync`
 

@@ -6,26 +6,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
-import { build } from "esbuild";
 
-export const NODE_VERSION = "24.16.0";
-// https://nodejs.org/dist/v24.16.0/SHASUMS256.txt names each download. A
-// macOS archive is checked against it, then the node binary inside against
-// its own pin.
-const release = `https://nodejs.org/dist/v${NODE_VERSION}`;
-const darwinNode = (arch, archiveSha256, sha256) => ({
-  url: `${release}/node-v${NODE_VERSION}-darwin-${arch}.tar.gz`, archiveSha256,
-  member: `node-v${NODE_VERSION}-darwin-${arch}/bin/node`, file: "node", sha256,
-});
-export const PINNED_NODE = {
-  "win32-x64": { url: `${release}/win-x64/node.exe`, file: "node.exe", sha256: "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3" },
-  "darwin-arm64": darwinNode("arm64", "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6", "1ee75375e33b94fc34b3b19aede049e11dae90efb63b374dc96d6bdace70c4b8"),
-  "darwin-x64": darwinNode("x64", "298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185", "47483a524a057d93e246bb0e63867e2b4d189810aef53a6978d9e708a3d0f453"),
-};
+import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const ownerTargets = { arm64: "aarch64-apple-darwin", x64: "x86_64-apple-darwin" };
+const ownerTarget = "aarch64-apple-darwin";
 const ownerCrate = "crates/dohc-compiler-owner";
 
 function compilerFiles(platform, arch) {
@@ -38,11 +24,16 @@ function compilerFiles(platform, arch) {
   ];
 }
 
-// Windows x64 and macOS build apps; Linux ships only the esbuild binary that
-// Collection actions compile with.
+// dohc ships no Intel Mac build, so staging or packaging one fails.
+function refuseIntelMac(platform, arch) {
+  if (platform === "darwin" && arch !== "arm64") throw new Error("The packaged app compiler requires macOS arm64. dohc has no Intel Mac build.");
+}
+
+// Windows x64 and Apple silicon Macs build apps; Linux ships only the esbuild
+// binary that Collection actions compile with.
 function stagedFiles(platform, arch) {
   if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "windowsCompilerJob.ps1"] : undefined;
-  if (platform === "darwin") return ["arm64", "x64"].includes(arch) ? [...compilerFiles(platform, arch), "compiler-owner"] : undefined;
+  if (platform === "darwin") return [...compilerFiles(platform, arch), "compiler-owner"];
   if (platform !== "linux" || !["arm64", "x64"].includes(arch)) return undefined;
   const native = `node_modules/@esbuild/${platform}-${arch}`;
   return ["node_modules/esbuild/LICENSE.md", `${native}/package.json`, `${native}/bin/esbuild`];
@@ -58,10 +49,11 @@ async function packageRoot(resolve, name) {
 
 export async function requireAppCompiler(root = join(desktopRoot, "resources/app-compiler"), platform = process.platform, arch = process.arch) {
   if (platform === "win32" && arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
+  refuseIntelMac(platform, arch);
   const files = stagedFiles(platform, arch);
   if (!files) return;
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  const node = PINNED_NODE[`${platform}-${arch}`];
+  const node = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
   if (node && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== node.sha256) ||
       manifest.platform !== platform || manifest.arch !== arch ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
@@ -111,7 +103,7 @@ export function archiveMember(archive, name) {
 /** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
 export async function readPinnedCompilerNode(options = {}) {
   const target = `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
-  const node = PINNED_NODE[target];
+  const node = target.startsWith("linux-") ? undefined : PINNED_NODE[target];
   if (!node) throw new Error(`App compiler has no pinned Node for ${target}.`);
   if (options.nodeExecutable) {
     const bytes = await readFile(options.nodeExecutable);
@@ -129,33 +121,36 @@ export async function readPinnedCompilerNode(options = {}) {
   return bytes;
 }
 
-/** Builds crates/dohc-compiler-owner for the package's architecture. */
-async function buildCompilerOwner(sourceRoot, arch) {
+/** Builds crates/dohc-compiler-owner for Apple silicon. */
+async function buildCompilerOwner(sourceRoot) {
   const repoRoot = resolve(sourceRoot, "../..");
   const targetDir = join(repoRoot, "target");
   try {
-    await promisify(execFile)("cargo", ["build", "--locked", "--release", "--manifest-path", join(repoRoot, ownerCrate, "Cargo.toml"), "--target", ownerTargets[arch], "--target-dir", targetDir],
+    await promisify(execFile)("cargo", ["build", "--locked", "--release", "--manifest-path", join(repoRoot, ownerCrate, "Cargo.toml"), "--target", ownerTarget, "--target-dir", targetDir],
       { cwd: repoRoot, env: process.env, maxBuffer: 16 * 1024 * 1024 });
   } catch (error) {
-    throw new Error(`Cannot build the app compiler owner for ${ownerTargets[arch]}: ${(error.stderr || error.message).trim().split("\n").slice(-5).join("\n")}`);
+    throw new Error(`Cannot build the app compiler owner for ${ownerTarget}: ${(error.stderr || error.message).trim().split("\n").slice(-5).join("\n")}`);
   }
-  return join(targetDir, ownerTargets[arch], "release", "dohc-compiler-owner");
+  return join(targetDir, ownerTarget, "release", "dohc-compiler-owner");
 }
 
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
+  refuseIntelMac(platform, arch);
   const files = stagedFiles(platform, arch);
   if (!files) return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const pinned = PINNED_NODE[`${platform}-${arch}`];
+  const pinned = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
   // A temporary destination reuses the copy that development staging keeps.
   const stagedNodePaths = pinned ? [join(destination, pinned.file), join(sourceRoot, "resources/app-compiler", pinned.file)] : [];
   const node = pinned ? await readPinnedCompilerNode({ platform, arch, nodeExecutable: options.nodeExecutable, stagedNodePaths }) : null;
   const require = createRequire(join(sourceRoot, "package.json"));
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
+  // Loaded here so the Rust gate can read the pinned Node without installed packages.
+  const { build } = await import("esbuild");
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
   const nativePackage = `@esbuild/${platform}-${arch}`;
   let platformRoot;
@@ -166,7 +161,7 @@ export async function stageAppCompiler(options = {}) {
     throw new Error(`App compiler requires ${nativePackage}. Install it with pnpm install --cpu=current --cpu=${arch}.`);
   }
   if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error(`App compiler requires ${nativePackage} 0.28.1.`);
-  const owner = platform === "darwin" ? await buildCompilerOwner(sourceRoot, arch) : null;
+  const owner = platform === "darwin" ? await buildCompilerOwner(sourceRoot) : null;
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
   try {
@@ -224,9 +219,9 @@ export async function stageAppCompiler(options = {}) {
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const options = {};
   for (const argument of process.argv.slice(2)) {
-    const match = /^--(node|platform|arch)=(.+)$/.exec(argument);
+    const match = /^--node=(.+)$/.exec(argument);
     if (!match) throw new Error(`Unknown compiler staging argument: ${argument}`);
-    options[match[1] === "node" ? "nodeExecutable" : match[1]] = match[2];
+    options.nodeExecutable = match[1];
   }
   console.log(JSON.stringify(await stageAppCompiler(options)));
 }

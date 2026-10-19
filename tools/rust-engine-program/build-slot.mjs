@@ -39,22 +39,27 @@ import { execFileSync, spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { availableParallelism, platform } from "node:os";
+import { availableParallelism, homedir, platform } from "node:os";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+
+/** The slot root of a shared Mac. Its presence marks the Mac as shared; `pnpm verify:queue install` creates it. */
+export const macSlotRoot = (home = homedir()) => join(home, "dev", "worktrees", ".locks");
 
 /**
  * The budget this host imposes, or null on a single-tenant host (CI runners
  * have no slot root and run uncapped). The root comes from
- * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows outside CI —
- * the shared dev machine the budget exists for. Tests point the root at a private
+ * `DOHC_BUILD_SLOT_ROOT`, defaulting outside CI to `C:\w\_locks` on Windows and
+ * to `macSlotRoot()` on a Mac where that folder exists — the shared dev machines
+ * the budget exists for. Tests point the root at a private
  * directory so a suite run never holds a real lane's slot.
  */
 export function resolveBuildBudget(env = process.env, host = {}) {
   const os = host.platform ?? platform();
   const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
+  const mac = os === "darwin" && !ci ? macSlotRoot(host.home) : null;
   const root =
-    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : null);
+    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : mac && existsSync(mac) ? mac : null);
   if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();
@@ -783,12 +788,25 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   function onSigterm() {
     interrupt(143);
   }
+  // Leave the slot as a holder that died leaves it: no heartbeat and no release at exit, so the reclaimer frees
+  // it only once this process is gone and its grace has passed. For work this process started but could not stop.
+  const abandon = () => {
+    if (released) return;
+    released = true;
+    clearInterval(beat);
+    clearTimeout(identify);
+    process.off("exit", release);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    removeTicket();
+    historyEvent(root, { event: "abandon", kind, name, pid: process.pid, elapsedMs: Date.now() - startedAt, ...metadataFields(metadata) });
+  };
   process.once("exit", release);
   // Standalone gates release before exiting. Cooperative callers retain the
   // slot until their child cleanup finishes and finally releases it.
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-  return { name, dir, release, update };
+  return { name, dir, release, update, abandon };
 }
 
 /**
@@ -797,6 +815,14 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
 export function acquireBuildSlot(options) {
   // A dead holder's compilers can outlive it, so a cargo lane keeps the long grace.
   return acquireSlot({ goneMs: 30 * 60_000, ...options, kind: "build-slot", lanes: "cargo lanes" });
+}
+
+/**
+ * Take the host's one Linux verification run. Runs share one Linux checkout, so they take turns.
+ * The run also takes a cargo lane for its build.
+ */
+export function acquireLinuxSlot({ root, metadata, signal, waitMs = 2 * 60 * 60_000 }) {
+  return acquireSlot({ root, slots: 1, kind: "linux-slot", lanes: "Linux runs", metadata, signal, waitMs, cooperativeCancellation: true });
 }
 
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
@@ -1021,9 +1047,14 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
-        // A hold that began during this pass gets the slot back before anything runs in it.
-        if (created && hold?.()) { rmSync(dir, { recursive: true, force: true }); continue; }
-        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
+        if (created) {
+          // A hold that began during this pass gets the slot back before anything runs in it, and so does a hold that throws.
+          let held;
+          try { held = hold?.(); }
+          catch (error) { rmSync(dir, { recursive: true, force: true }); throw error; }
+          if (held) { rmSync(dir, { recursive: true, force: true }); continue; }
+          return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
+        }
       }
     } catch (error) {
       if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
@@ -1087,6 +1118,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(verificationRoot ? [
       buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
     ] : []),
+    ...(cargoRoot && existsSync(join(cargoRoot, "verification-linux")) ? [buildQueueStatus({root: cargoRoot, kind: "linux-slot", slots: 1})] : []),
   ];
   console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
     verificationSlots: verificationConfigurationError ? null : verificationSlots, verificationConfigurationError, lanes}, null, 2));

@@ -1,11 +1,13 @@
-import { chmod, lstat, mkdir, rmdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rmdir, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { dirname } from "node:path";
+import { constants } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { RelayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 import { OPERATOR_MAX_REQUEST_BYTES, OPERATOR_TIMEOUT_MS, parseDisableRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
-export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication">, path: string) {
+export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication">, path: string, secretPath: string) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   const unix = uid !== undefined, directory = dirname(path);
   if (unix) {
@@ -24,6 +26,16 @@ export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "
       await unlink(path);
     }
   }
+  await mkdir(dirname(secretPath), {recursive: true, mode: 0o700});
+  const file = await open(secretPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+  let secret: string;
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || (unix && (info.uid !== uid || (info.mode & 0o777) !== 0o600))) throw new Error("Operator secret must belong to the relay user with mode 0600.");
+    secret = await file.readFile("utf8");
+    if (!secret) {secret = randomBytes(32).toString("hex"); await file.writeFile(secret);}
+    if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error("Invalid operator secret file.");
+  } finally {await file.close();}
   const connections = new Set<Socket>();
   const server = createServer({allowHalfOpen: true}, socket => {
     connections.add(socket);
@@ -43,7 +55,14 @@ export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "
       received = true;
       if (boundary !== bytes.length - 1) {reply({code: 2, message: "Send exactly one takedown request."}); return;}
       let request;
-      try {request = parseDisableRequest(JSON.parse(bytes.toString("utf8")));}
+      try {
+        const {secret: credential, ...value} = JSON.parse(bytes.toString("utf8"));
+        const offered = Buffer.from(typeof credential === "string" ? credential : "");
+        if (offered.length !== secret.length || !timingSafeEqual(offered, Buffer.from(secret))) {
+          reply({code: 1, message: "Operator authentication failed. Run takedown with access to the relay continuity volume."}); return;
+        }
+        request = parseDisableRequest(value);
+      }
       catch {reply({code: 2, message: "Invalid takedown request. Supply a publication ID and a reason of 1 to 1024 characters."}); return;}
       try {
         const result = storage.disableAppPublication({...request, nowMs: Date.now()});

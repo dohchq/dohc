@@ -2,8 +2,6 @@ import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
-  GetBacklinksPayload,
-  GetBacklinksResult,
   ListWorkspaceHeadingsPayload,
   ListWorkspaceHeadingsResult,
   ReadWorkspaceGraphPayload,
@@ -31,7 +29,7 @@ export function registerWorkspaceGraphIpcHandlers<
   Operation extends {
     workspace: Workspace;
     state: {
-      workspaceGraph: Pick<WorkspaceGraphIndex, "readGraph" | "readBacklinks">;
+      workspaceGraph: Pick<WorkspaceGraphIndex, "readGraph">;
     };
   },
 >(dependencies: {
@@ -271,24 +269,6 @@ export function registerWorkspaceGraphIpcHandlers<
           })),
         });
       },
-    );
-  });
-
-  registerHandler(CHANNELS.getBacklinks, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetBacklinksPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Backlink read stopped because this window changed workspaces.",
-      async (operation) =>
-        GetBacklinksResult.parse({
-          sources: await operation.state.workspaceGraph.readBacklinks(
-            operation.workspace.rootPath,
-            input.path,
-            ownedWorkspaceGraphSource(operation.workspace),
-          ),
-        }),
     );
   });
 

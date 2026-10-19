@@ -1,17 +1,19 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
+import {historyObjectKey, sameHistoryState, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, realpath, rm, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaReadPrincipal";
 
-/** PR 2's catch-up and store budgets belong at the startChild boundary. */
-export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024 });
+export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024,
+  maxStoreBytes: 512*1024*1024, minFreeBytes: 1024*1024*1024, lifetimeMs: 15*60_000, diskCheckMs: 1000 });
+export class ReplicaBudgetError extends Error {}
 export interface ReplicaChild {
   readonly pid?: number;
-  readonly exited?: Promise<void>;
+  readonly exited?: Promise<void | Error>;
   pull(): Promise<void>;
   currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position?: ReplicaCurrentViewPosition, cursor?: ReplicaCurrentViewCursor): Promise<ReplicaCurrentViewPage>;
   close(): Promise<void>;
@@ -28,6 +30,10 @@ export interface ReplicaSupervisorOptions {
   readonly maxRunning?: number;
   readonly idleMs?: number;
   readonly maxViewTextBytes?: number;
+  readonly maxStoreBytes?: number;
+  readonly minFreeBytes?: number;
+  readonly lifetimeMs?: number;
+  readonly diskCheckMs?: number;
   readonly onError?: (workspaceId: string, error: unknown) => void;
 }
 interface Entry {
@@ -46,6 +52,12 @@ interface Entry {
   reportedOmissions?: Set<string>;
   quiet?: ReturnType<typeof setTimeout>;
   ceiling?: ReturnType<typeof setTimeout>;
+  history?: ReturnType<typeof setTimeout>;
+  historyObservations?: Map<string,ReplicaHistoryObservation>;
+  lifetime?: ReturnType<typeof setTimeout>;
+  disk?: ReturnType<typeof setTimeout>;
+  diskCheck?: Promise<void>;
+  closing?: Promise<void>;
 }
 
 /** Explicit construction only. Production startup must wait for PR 6's readers. */
@@ -53,7 +65,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const limits = { ...REPLICA_SUPERVISOR_LIMITS, ...options };
   if (!isAbsolute(options.storeRoot)) throw new TypeError("Replica store root must be absolute.");
   if (dirname(resolve(options.storeRoot)) === resolve(options.storeRoot)) throw new TypeError("Replica store root must be a private directory.");
-  for (const value of [limits.maxRunning, limits.idleMs, limits.maxViewTextBytes]) {
+  for (const value of [limits.maxRunning, limits.idleMs, limits.maxViewTextBytes, limits.maxStoreBytes,
+    limits.minFreeBytes, limits.lifetimeMs, limits.diskCheckMs]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid replica budget.");
   }
   const principal = createReplicaReadPrincipal(options.storage);
@@ -68,7 +81,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       if (!root.isDirectory() || root.uid !== process.getuid!()) throw new Error("Replica store root must be a directory owned by the process user.");
       if (root.mode & 0o022) throw new Error("Replica store root must not be writable by group or others.");
       const limit = process.platform === "darwin" ? 104 : 108;
-      const bytes = Buffer.byteLength(join(resolve(options.storeRoot), "replica-XXXXXX", "relay.sock"));
+      const bytes = Buffer.byteLength(join(await realpath(options.storeRoot), "replica-XXXXXX", "relay.sock"));
       if (bytes >= limit) throw new Error(`Replica socket path requires ${bytes + 1} bytes; this host permits ${limit}. Use a shorter store root.`);
     })
     .then(() => readdir(options.storeRoot, { withFileTypes: true }))
@@ -81,8 +94,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   let notificationDone = Promise.resolve();
   let finishNotification = () => {};
   const report = (entry: Entry, error: unknown) => options.onError?.(entry.lease.workspaceId, error);
-  const standingCurrent = (lease: ReplicaReadLease) => {
-    const standing = options.storage.readReplicaStanding(lease.workspaceId, lease.shareGrantBindings);
+  const standingCurrent = (lease: ReplicaReadLease, withGrants = true) => {
+    const standing = options.storage.readReplicaStanding(lease.workspaceId, withGrants ? lease.shareGrantBindings : undefined);
     return standing && standing.ownerUserId === lease.ownerUserId &&
       standing.replicationEpoch === lease.replicationEpoch && standing.streamIdentity === lease.streamIdentity ? standing : null;
   };
@@ -93,54 +106,107 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     finishNotification();
   }
 
-  function persist(entry: Entry, view = entry.newest) {
+  function armHistory(entry: Entry) {
+    clearTimeout(entry.history); entry.history=undefined;
+    const due = options.storage.nextReplicaHistoryPinAt(entry.lease.workspaceId);
+    if (due !== null && !entry.stopping) {
+      entry.history=setTimeout(()=>{void flush(entry,true);
+      },Math.max(1,due-Date.now())); entry.history.unref();
+    }
+  }
+  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView): boolean {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.quiet = entry.ceiling = undefined;
-    if (!entry.pendingView || !view) return;
+    if (!entry.pendingView || !view) return false;
     try {
-      entry.newest = options.storage.storeReplicaCurrentView(entry.lease, view);
+      const observations=[...(entry.historyObservations?.values() ?? [])].map(o=>beforeStructuralChange ? {...o,beforeStructuralChange:true} : o);
+      entry.newest = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
+        : options.storage.storeReplicaCurrentView(entry.lease, view,observations);
       entry.pendingView = false;
+      entry.historyObservations?.clear();
+      armHistory(entry);
+      return true;
     } catch (error) {
+      entry.newest = undefined; entry.pendingView = false;
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
-      entry.newest = undefined; entry.pendingView = false;
+      return false;
     }
+  }
+  async function flush(entry: Entry, sampleHistory = false) {
+    clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
+    entry.quiet = entry.ceiling = undefined;
+    try {
+      const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const pending = entry.newest;
+      // Restore can fence a pending view while the next journal page is in flight.
+      if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
+        await schedule(entry).catch(() => {});
+      }
+      if (!entry.stopping) {
+        const persisted=persist(entry);
+        if (sampleHistory) {
+          if (!persisted) options.storage.sampleReplicaHistory(entry.lease);
+          armHistory(entry);
+        }
+      }
+    } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
   }
   function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
     if (!principal.current(entry.lease)) return;
+    const previous = entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
+    const next = new Map(view.files.map(f=>[historyObjectKey(f),f]));
+    const omitted = new Set(view.omitted.map(historyObjectKey));
+    if (entry.pendingView && previous?.files.some(f=>!omitted.has(historyObjectKey(f)) && historyStructuralReason(f,next.get(historyObjectKey(f))))) {
+      const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
+      persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
+        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},true);
+    }
+    entry.historyObservations ??= new Map();
+    const prior = new Map(previous?.files.map(f=>[historyObjectKey(f),f]) ?? []), now=Date.now();
+    let changed=!previous;
+    let structural=!previous;
+    for (const key of new Set([...prior.keys(),...next.keys()])) {
+      if (omitted.has(key)) continue;
+      const old=prior.get(key), file=next.get(key);
+      if (old && file && sameHistoryState(old,file)) continue;
+      changed=true;
+      if (!old || !file || historyStructuralReason(old,file) || old.contentKind !== file.contentKind) structural=true;
+      const identity=file ?? old!;
+      entry.historyObservations.set(key,{versionId:identity.versionId,objectId:identity.objectId,
+        firstChangedAtMs:entry.historyObservations.get(key)?.firstChangedAtMs ?? now,changedAtMs:now});
+    }
+    const priorOmitted=new Map(previous?.omitted.map(f=>[historyObjectKey(f),f]) ?? []);
+    if (view.omitted.length !== priorOmitted.size) changed=structural=true;
+    for (const file of view.omitted) {
+      const old=priorOmitted.get(historyObjectKey(file));
+      if (!old || old.path !== file.path || old.reason !== file.reason) changed=structural=true;
+      else if (old.sha256 !== file.sha256) changed=true;
+    }
+    if (previous && JSON.stringify(previous.omitted)!==JSON.stringify(view.omitted)) changed=true;
+    const fresh = !entry.newest;
     if (spilled) {
       entry.pendingView = true;
       persist(entry, view);
       return;
     }
-    const previous = entry.newest;
     const held = new Map(previous?.texts.map(t => [t.sha256, t.text]) ?? []);
     for (const text of view.texts) held.set(text.sha256, text.text);
     const needed = new Set(view.files.filter(f => f.contentKind === "text").map(f => f.sha256));
     view.texts = [...held].filter(([sha]) => needed.has(sha)).map(([sha256, text]) => ({sha256, text}));
-    const structure = (v: ReplicaCurrentView) => JSON.stringify([
-      v.files.map(f => [f.versionId, f.objectId, f.path, f.contentKind, f.lineageClaimId, f.restoreGeneration]),
-      v.omitted.map(f => [f.versionId, f.objectId, f.path, f.reason])]);
     entry.newest = view;
-    if (previous && JSON.stringify([previous.files, previous.omitted]) === JSON.stringify([view.files, view.omitted])) return;
+    if (!changed && !entry.pendingView && previous && (previous.revision !== view.revision || previous.logCursor !== view.logCursor || previous.journalCursor !== view.journalCursor)) {
+      entry.pendingView=true;persist(entry,view,false,previous);return;
+    }
+    if (!changed) {if (fresh) armHistory(entry); return;}
     entry.pendingView = true;
-    if (!previous || structure(previous) !== structure(view)) {
+    if (fresh || structural) {
       persist(entry);
       return;
     }
-    const flush = async () => {
-      try {
-        const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
-        const pending = entry.newest;
-        // Restore can fence a pending view while the next journal page is in flight.
-        if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
-          await schedule(entry);
-        }
-        if (!entry.stopping) persist(entry);
-      } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
-    };
-    clearTimeout(entry.quiet); entry.quiet = setTimeout(flush, 2000); entry.quiet.unref();
-    entry.ceiling ??= setTimeout(flush, 30_000); entry.ceiling.unref();
+    clearTimeout(entry.quiet); entry.quiet = setTimeout(()=>{void flush(entry);}, 2000); entry.quiet.unref();
+    entry.ceiling ??= setTimeout(()=>{void flush(entry);}, 30_000); entry.ceiling.unref();
   }
 
   async function retire(entry: Entry): Promise<void> {
@@ -148,15 +214,18 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     entry.stopping = true;
     principal.revoke(entry.lease);
     clearTimeout(entry.idle);
+    clearTimeout(entry.lifetime); clearTimeout(entry.disk);
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
+    clearTimeout(entry.history);
     entry.retirement = (async () => {
       // Startup may still own the directory and child. Wait before disposing either.
       try {
         await entry.run?.catch(() => {});
-        try { persist(entry); } catch (error) { report(entry,error); }
+        await entry.diskCheck?.catch(() => {});
+        try { if (standingCurrent(entry.lease,false) && !persist(entry)) options.storage.sampleReplicaHistory(entry.lease); } catch (error) { report(entry,error); }
         options.storage.discardReplicaCurrentView(entry.lease);
         options.storage.releaseReplicaCurrentView(entry.lease);
-        try { await entry.child?.close(); } catch (error) { report(entry, error); }
+        try { await (entry.closing ?? entry.child?.close()); } catch (error) { report(entry, error); }
         finally {
           try { if (entry.storeDir) await rm(entry.storeDir, { recursive: true, force: true }); }
           catch (error) { report(entry, error); }
@@ -169,6 +238,37 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     return entry.retirement;
   }
 
+  function exhaust(entry: Entry, error: unknown) {
+    if (entry.stopping) return;
+    if (error !== undefined) report(entry, error);
+    // Close before waiting for an in-flight pull, which can otherwise wait on the child forever.
+    entry.closing ??= entry.child?.close();
+    void entry.closing?.catch(failure => report(entry, failure));
+    void retire(entry).catch(failure => report(entry, failure));
+  }
+  async function checkDisk(entry: Entry) {
+    const free = await statfs(options.storeRoot);
+    if (free.bavail * free.bsize < limits.minFreeBytes) throw new ReplicaBudgetError("Replica storage is low on free space. Free space on the replicas volume before retrying.");
+    let bytes = 0;
+    const visit = async (path: string): Promise<void> => {
+      const info = await lstat(path).catch(error => {if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error;});
+      if (!info) return;
+      bytes += Math.max(info.size, (info.blocks ?? 0) * 512);
+      if (bytes > limits.maxStoreBytes) throw new ReplicaBudgetError("Replica store exceeded its disk budget.");
+      if (info.isDirectory() && !info.isSymbolicLink()) {
+        for (const item of await readdir(path).catch(error => {if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error;})) await visit(join(path, item));
+      }
+    };
+    await visit(entry.storeDir!);
+  }
+  function monitorDisk(entry: Entry) {
+    entry.disk = setTimeout(() => {
+      if (entry.stopping) return;
+      entry.diskCheck = checkDisk(entry).then(() => {if (!entry.stopping) monitorDisk(entry);}, error => exhaust(entry, error));
+    }, limits.diskCheckMs);
+    entry.disk.unref();
+  }
+
   function schedule(entry: Entry): Promise<void> {
     clearTimeout(entry.idle);
     entry.dirty = true;
@@ -177,17 +277,23 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const fresh = !entry.child;
       if (fresh) {
         await mkdir(options.storeRoot, { recursive: true, mode: 0o700 });
+        const free = await statfs(options.storeRoot);
+        if (free.bavail * free.bsize < limits.minFreeBytes) throw new ReplicaBudgetError("Replica storage is low on free space. Free space on the replicas volume before retrying.");
         entry.storeDir = await mkdtemp(join(options.storeRoot, "replica-"));
+        entry.lifetime = setTimeout(() => exhaust(entry, undefined), limits.lifetimeMs);
+        entry.lifetime.unref();
+        monitorDisk(entry);
       }
       for (let attempt = 0; ; attempt++) {
         try {
           if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
             entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease, relayHandler: principal.handle });
+            if (entry.stopping) {await (entry.closing ??= entry.child.close()); return;}
             const child = entry.child;
-            void child.exited?.then(() => {
+            void child.exited?.then(error => {
               // A first-pull crash belongs to the one-time fresh-store rebuild below.
               if (entry.child === child && !entry.stopping && entry.frontier >= 0) {
-                report(entry, new Error("Replica child exited."));
+                report(entry, error ?? new Error("Replica child exited."));
                 void retire(entry).catch(error => report(entry, error));
               }
             });
@@ -199,6 +305,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
             await entry.child!.pull();
             entry.frontier = standing.logSeq;
             entry.journalFrontier = standing.journalCursor;
+            await checkDisk(entry);
             if (principal.current(entry.lease)) {
               const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
               for (;;) {
@@ -264,15 +371,18 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
           }
           return;
         } catch (error) {
-          if (!fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
+          if (error instanceof ReplicaBudgetError || !fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
           // A crash before the passive role is recorded can leave an owner-role store.
           options.storage.releaseReplicaCurrentView(entry.lease);
           principal.revoke(entry.lease);
           await entry.child?.close();
+          clearTimeout(entry.disk);
+          await entry.diskCheck;
           entry.child = undefined;
           await rm(entry.storeDir!, { recursive: true, force: true });
           if (entry.stopping) throw error;
           await mkdir(entry.storeDir!, { mode: 0o700 });
+          monitorDisk(entry);
           if (entry.stopping || !standingCurrent(entry.lease)) throw error;
           entry.lease = principal.issue(entry.lease.workspaceId, randomUUID());
           options.storage.bindReplicaCurrentView(entry.lease);
@@ -290,7 +400,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         entry.idle.unref();
       }
     }, error => {
-      report(entry, error);
+      if (!entry.stopping) report(entry, error);
       void retire(entry).catch(failure => report(entry, failure));
     });
     return running;

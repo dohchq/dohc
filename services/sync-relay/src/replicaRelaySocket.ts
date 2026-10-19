@@ -29,6 +29,7 @@ export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLeas
     }
   });
   server.maxConnections = 4;
+  server.setTimeout(10_000, socket => socket.destroy());
   const close = () => new Promise<void>((resolve, reject) => {
     server.close(error => error ? reject(error) : resolve()); server.closeAllConnections();
   });

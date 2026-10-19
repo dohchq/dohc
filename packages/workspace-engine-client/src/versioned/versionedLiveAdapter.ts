@@ -1,3 +1,4 @@
+import { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
@@ -913,6 +914,17 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
+  async incomingLinks(input: LinksInInput): Promise<LinksInResult> {
+    return LinksInResult.parse(await this.requester.request("links.in", LinksInInput.parse(input), { workspace: this.workspace }));
+  }
+  async resolveLinks(input: LinksResolveInput): Promise<LinksResolveResult> {
+    const params = LinksResolveInput.parse(input);
+    if (Buffer.byteLength(JSON.stringify(params)) > 48 * 1024) throw new Error("links.resolve exceeds 48 KiB.");
+    const result = LinksResolveResult.parse(await this.requester.request("links.resolve", params, { workspace: this.workspace }));
+    if (result.results.length !== params.literals.length) throw new DaemonProtocolError("links.resolve returned a different literal count.");
+    return result;
+  }
+
   /** Resolve only the requested file identities without listing or reading bodies. */
   async resolveFiles(input: {
     workspaceId: string;
@@ -1424,6 +1436,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       {},
     );
     return result.applied;
+  }
+
+  /**
+   * Collection updates wait for an ordinary pull that has not committed its
+   * last page. The engine answers from the pull's durable token.
+   */
+  async collectionsWaiting(): Promise<boolean> {
+    const result = await this.workspaceRequest(
+      WORKSPACE_METHOD.syncCollectionsWaiting,
+      {},
+    );
+    return result.waiting;
   }
 
   async writeSecretFile(input: {

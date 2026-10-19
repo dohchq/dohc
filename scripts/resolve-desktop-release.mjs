@@ -20,24 +20,6 @@ export function desktopReleaseTargets(platforms = "windows") {
       require_signing: "1",
     },
     {
-      label: "macOS x64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "x64",
-      target: "x86_64-apple-darwin",
-      require_signing: "1",
-    },
-    {
-      label: "macOS arm64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "arm64",
-      target: "aarch64-apple-darwin",
-      require_signing: "1",
-    },
-    {
       label: "Linux x64",
       os: "Linux",
       artifact_platform: "linux",
@@ -49,9 +31,8 @@ export function desktopReleaseTargets(platforms = "windows") {
   ];
   if (platforms === "windows") return targets.filter((target) => target.os === "Windows");
   if (platforms === "linux") return targets.filter((target) => target.os === "Linux");
-  if (platforms === "windows-linux") return targets.filter((target) => target.os !== "macOS");
-  if (platforms === "all") return targets;
-  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, windows-linux, or all.`);
+  if (platforms === "windows-linux") return targets;
+  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, or windows-linux.`);
 }
 
 export function repoRootFromScript() {

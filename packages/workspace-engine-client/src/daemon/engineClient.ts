@@ -2488,6 +2488,7 @@ export async function createEngineClient(
       ...process.env,
       ...options.env,
       DOHC_ENGINE_LIVE_HOST_CONFIG: options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG,
+      DOHC_ENGINE_READER_CONFIG: options.env?.DOHC_ENGINE_READER_CONFIG,
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,
     },
     stdio: ["pipe", "pipe", "pipe"],

@@ -7,6 +7,8 @@ import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } 
 import { buildMenuTemplate } from "../window/applicationMenu";
 import type { MenuItemConstructorOptions } from "electron";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { EDITOR_MENU_COMMANDS } from "../ipc/channels";
+import { onEditorMenuCommand } from "./editor/editorMenuCommands";
 
 async function ready(platform: NodeJS.Platform = "win32") {
   const bridge = makeBridge(Promise.resolve(STORED_STATE), platform);
@@ -312,5 +314,31 @@ describe("macOS text editing inside a modal", () => {
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+  });
+});
+
+describe("macOS Edit > Find", () => {
+  it("hands each item to the editor that has focus, and to nothing without one", async () => {
+    const bridge = await ready("darwin");
+    const editor = document.createElement("div");
+    const field = editor.appendChild(document.createElement("input"));
+    screen.getByTestId("workspace-shell").append(editor);
+    const received = vi.fn();
+    const stop = onEditorMenuCommand(editor, received);
+    try {
+      field.focus();
+      for (const command of EDITOR_MENU_COMMANDS) act(() => bridge.emitMenuCommand(command));
+      expect(received.mock.calls).toEqual(EDITOR_MENU_COMMANDS.map((command) => [command]));
+
+      field.blur();
+      for (const command of EDITOR_MENU_COMMANDS) act(() => bridge.emitMenuCommand(command));
+      expect(received).toHaveBeenCalledTimes(EDITOR_MENU_COMMANDS.length);
+      expect(screen.getByTestId("side-panel")).toBeTruthy();
+      expect(screen.queryByTestId("command-palette")).toBeNull();
+      expect(screen.queryByTestId("quick-open")).toBeNull();
+    } finally {
+      stop();
+      editor.remove();
+    }
   });
 });

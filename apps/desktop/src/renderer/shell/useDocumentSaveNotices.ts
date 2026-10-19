@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { EngineYDocSaveStateEvent, SaveFailureReason } from "../../ipc/bridgeContract";
-import { isPrivacyDenied, isShareReadOnlyRefusal, PRIVACY_DENIED_WORDS } from "../../ipc/errorWords";
+import {
+  isPrivacyDenied,
+  isShareReadOnlyRefusal,
+  isVolumeSharesNewFiles,
+  PRIVACY_DENIED_WORDS,
+  VOLUME_SHARES_NEW_FILES_WORDS,
+} from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import type { ErrorDetailField } from "./copyDetails";
 import type { ShellErrorKind } from "./useShellError";
@@ -24,16 +30,27 @@ const REPLACES_FAILURE = new Set<EngineYDocSaveStateEvent["state"]["kind"]>([
 ]);
 
 // The reason that tells a person the most, when writers give different ones.
-const REASON_ORDER: readonly SaveFailureReason[] = ["privacy-denied", "read-only"];
+const REASON_ORDER: readonly SaveFailureReason[] = ["privacy-denied", "volume-shares-new-files", "read-only"];
+
+// What a person reads for each reason, and the cause Copy details carries.
+function reasonWords(reason: SaveFailureReason): { message: string; cause: string | null } {
+  switch (reason) {
+    case "privacy-denied":
+      return { message: PRIVACY_DENIED_WORDS, cause: "macOS blocked dohc from this folder." };
+    case "volume-shares-new-files":
+      return { message: VOLUME_SHARES_NEW_FILES_WORDS, cause: "The disk adds sharing permissions to new files." };
+    case "read-only":
+      return { message: "The file is read-only. Make it writable, then try again.", cause: "The file is read-only." };
+    case null:
+      return { message: "dohc couldn't write the file.", cause: null };
+  }
+}
 
 export function saveFailureNotice(path: string, reason: SaveFailureReason): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
-  const cause = reason === "privacy-denied" ? "macOS blocked dohc from this folder."
-    : reason === "read-only" ? "The file is read-only." : null;
+  const { message, cause } = reasonWords(reason);
   return {
     title: `Couldn't save ${path}`,
-    message: reason === "privacy-denied" ? PRIVACY_DENIED_WORDS
-      : reason === "read-only" ? "The file is read-only. Make it writable, then try again."
-      : "dohc couldn't write the file.",
+    message,
     details: [["File", path, path.length], ...(cause ? [["Cause", cause] as const] : [])],
   };
 }
@@ -219,7 +236,9 @@ export function useDocumentSaveNotices(input: {
         forget(save.path, "text");
         return;
       }
-      fail(save.path, "text", isPrivacyDenied(failed.cause) ? "privacy-denied" : null, (failure) => {
+      const reason = isPrivacyDenied(failed.cause) ? "privacy-denied"
+        : isVolumeSharesNewFiles(failed.cause) ? "volume-shares-new-files" : null;
+      fail(save.path, "text", reason, (failure) => {
         if (!failed.retry()) reopen(save.path, "text", failure);
       }, failed.cause);
     };

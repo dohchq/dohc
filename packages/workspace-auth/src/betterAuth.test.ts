@@ -202,10 +202,16 @@ describeWithPostgres("closed sign-up", () => {
     expect(await accountExists(email)).toBe(true);
     expect(linkIn(lastEmailTo(email)).searchParams.get("next")).toBe("/device?user_code=ABCD-EFGH");
 
+    const emailsBeforeSignIn = emailsTo(email).length;
     await expect(closed.api.signInEmail({ body: { email, password: PASSWORD } })).rejects.toMatchObject({
       statusCode: 403,
       body: { code: "EMAIL_NOT_VERIFIED" },
     });
+    await expect(closed.api.signInEmail({ body: { email, password: "wrong-password-1" } })).rejects.toMatchObject({
+      statusCode: 401,
+      body: { code: "INVALID_EMAIL_OR_PASSWORD" },
+    });
+    expect(emailsTo(email)).toHaveLength(emailsBeforeSignIn);
 
     // Choosing the password proves the mailbox; then the desktop's device
     // sign-in completes as on an open server.

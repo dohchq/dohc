@@ -404,6 +404,7 @@ describe("CLI socket server", () => {
           return { results: [], saturated: true };
         },
         listUnreadFileThreads,
+        collectionsWaiting: async () => false,
       },
       async fileObjectIdForPath(path) {
         return path === "tracked.md" ? "object_tracked" : null;
@@ -2097,6 +2098,21 @@ describe("CLI socket server", () => {
       ok: false,
       reason: "kept copies are not available in this workspace",
     });
+  });
+
+  it("answers whether Collection updates wait with the engine's own answer", async () => {
+    const answers = [true, false];
+    context.daemonReads.collectionsWaiting = async () => {
+      const answer = answers.shift();
+      if (answer === undefined) throw new Error("engine stopped");
+      return answer;
+    };
+    for (const waiting of [true, false]) {
+      await expect(invoke("collectionsWaiting", { cwd: workspaceRoot, actor: "agent" }))
+        .resolves.toEqual({ ok: true, waiting });
+    }
+    await expect(invoke("collectionsWaiting", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toMatchObject({ ok: false });
   });
 
   it("reads and edits documents with provenance the door derives", async () => {
@@ -4757,6 +4773,7 @@ describe("CLI socket server", () => {
     let daemonCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         daemonCalls += 1;
         const row = {
@@ -4851,6 +4868,7 @@ describe("CLI socket server", () => {
     let daemonCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         daemonCalls += 1;
         return { results: [], saturated: false };
@@ -4896,6 +4914,7 @@ describe("CLI socket server", () => {
     let unreadCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         return { results: [], saturated: false };
       },

@@ -20,6 +20,7 @@ import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
 import {createAccountDeletionRoute, fencePendingAccountDeletions} from "./accountDeletionRoute";
 import type {StorageContext} from "./storage/context";
+import {startLiveJournalCheck} from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -39,7 +40,7 @@ import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { startPublicationOperator } from "./appPublicationOperator";
-import { operatorSocketPath } from "./appPublicationOperatorProtocol";
+import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
@@ -687,7 +688,7 @@ if (namedLiveConfig) {
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
-const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
+const publicationOperator = await startPublicationOperator(storage, operatorSocketPath(), operatorSecretPath());
 
 // A server that does not run automations keeps no copies of workspaces.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
@@ -708,7 +709,12 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
 
+let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
+const stopJournalCheck = () => journalCheck?.close();
+process.once("SIGINT", stopJournalCheck); process.once("SIGTERM", stopJournalCheck);
+server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   void (async () => {
     for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
@@ -722,6 +728,7 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    stopJournalCheck();
     await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();

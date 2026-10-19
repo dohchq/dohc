@@ -75,6 +75,9 @@
     "keptCopies": [
       "file.kept.list"
     ],
+    "collectionsWaiting": [
+      "workspace.status"
+    ],
     "saveKeptCopy": [
       "file.kept.save"
     ],
@@ -178,6 +181,12 @@
     ],
     "historyUndo": [
       "history.operation.undo"
+    ],
+    "linksIn": [
+      "links.in"
+    ],
+    "linksResolve": [
+      "links.resolve"
     ]
   },
   "public": {
@@ -258,6 +267,8 @@
     "account deletePreview": "account.delete.preview",
     "account delete": "account.delete",
     "history operation": "history.operation.read",
-    "history undo": "history.operation.undo"
+    "history undo": "history.operation.undo",
+    "links in": "links.in",
+    "links resolve": "links.resolve"
   }
 }

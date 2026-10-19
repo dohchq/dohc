@@ -42,17 +42,18 @@ export async function confirmRestartDialog(
   dialog: MessageDialog,
   failure: UpdateFailure,
   version: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<boolean> {
   const quits = failure === "startup" || failure === "unfinished-launch";
-  // A downloaded update also installs on quit (autoInstallOnAppQuit).
-  const onQuit = "If you quit, the update installs as dohc closes.";
+  // A downloaded update also installs on quit (autoInstallOnAppQuit), except on Linux.
+  const onQuit = platform === "linux" ? "" : " If you quit, the update installs as dohc closes.";
   const { response } = await dialog.showMessageBox({
     type: "info",
     message: failure === "startup" ? `Update ${version} is downloaded.` : FAILURE_MESSAGES[failure],
     detail: failure === "startup"
-      ? `Restart now to open dohc on the new version. ${onQuit}`
+      ? `Restart now to open dohc on the new version.${onQuit}`
       : quits
-        ? `Update ${version} is downloaded. Restart now to open dohc on the new version. ${onQuit}`
+        ? `Update ${version} is downloaded. Restart now to open dohc on the new version.${onQuit}`
         : `Update ${version} is downloaded. dohc closes and opens again on the new version.`,
     buttons: ["Restart now", quits ? "Quit" : "Not now"],
     defaultId: 0,

@@ -1620,3 +1620,6 @@ fn passive_links_never_queue_seed_or_drain_even_with_leftover_work() {
 
 #[path = "incoming_tests.rs"]
 mod incoming_tests;
+
+#[path = "query_tests.rs"]
+mod query_tests;

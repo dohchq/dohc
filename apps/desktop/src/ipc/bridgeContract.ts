@@ -1,3 +1,4 @@
+import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -1183,37 +1184,6 @@ export const WorkspaceGraphResult = z.object({
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
-// Backlinks ("Linked mentions"): the open document's inbound links, derived
-// read-only in main from the same source graph. `path` is the open file; the
-// result lists every other file that links to it with a highlighted snippet per
-// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
-// here so this shared contract never imports the main-only fs module).
-export const GetBacklinksPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
-});
-export type GetBacklinksPayload = z.infer<typeof GetBacklinksPayload>;
-
-const BacklinkSnippet = z.object({
-  // A single source line, trimmed/windowed to ~160 chars (+ ellipses).
-  text: z.string().max(400),
-  line: z.number().int().positive(),
-  // [start, end) of the link within `text`; the UI marks this range.
-  highlightStart: z.number().int().nonnegative(),
-  highlightEnd: z.number().int().nonnegative(),
-});
-
-const BacklinkSource = z.object({
-  sourcePath: PATH_STRING,
-  sourceTitle: z.string().max(120),
-  snippets: z.array(BacklinkSnippet).max(20),
-});
-
-export const GetBacklinksResult = z.object({
-  sources: z.array(BacklinkSource).max(500),
-});
-export type GetBacklinksResult = z.infer<typeof GetBacklinksResult>;
-
 export const ListWorkspaceHeadingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
@@ -1391,6 +1361,12 @@ const SYNC_STATUS_BASE_FIELDS = {
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  // Collection updates wait for a pull that has not finished, as the engine
+  // answers. "sync" while ordinary sync is on, signed in or not, so a pass
+  // that finishes the pull ends it. "reopen" after sync paused but the
+  // workspace did not reopen, which is what ends the wait. Local writes are
+  // saved either way.
+  collectionsWaitingForSync: z.enum(["sync", "reopen"]).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -6891,7 +6867,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
@@ -7015,6 +6991,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof sharedChannelOperations>,
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof linksOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -7094,7 +7071,6 @@ export interface DohcDesktopBridge
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
-  getBacklinks(payload: GetBacklinksPayload): Promise<GetBacklinksResult>;
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;

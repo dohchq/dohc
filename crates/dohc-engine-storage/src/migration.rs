@@ -3320,18 +3320,39 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 61,
+        id: "v2-ordinary-pull-progress",
+        sql: V2_ORDINARY_PULL_PROGRESS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 62,
         id: "v2-history-undo-plans",
         sql: "CREATE INDEX idx_engine_requests_kind ON engine_requests(kind,request_id); \
               CREATE TABLE history_undo_plans (request_id TEXT PRIMARY KEY REFERENCES engine_requests(request_id), workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, operation_id TEXT NOT NULL, author_json TEXT, plan_json TEXT NOT NULL CHECK(json_valid(plan_json)), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, errors_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(errors_json)), UNIQUE(workspace_id,operation_id)) STRICT;",
         sets_user_version: None,
     },
     Migration {
-        ordinal: 62,
+        ordinal: 63,
         id: "v2-file-search-key",
         sql: include_str!("file_search_key.sql"),
         sets_user_version: None,
     },
 ];
+
+/// The ordinary pull pass whose applied pages await their terminal commit.
+/// A replication identity change abandons it.
+const V2_ORDINARY_PULL_PROGRESS_DDL: &str = "\
+ALTER TABLE sync_identity ADD COLUMN ordinary_pull_token TEXT
+    CHECK (ordinary_pull_token IS NULL OR length(ordinary_pull_token) > 0);
+CREATE TRIGGER sync_identity_change_abandons_ordinary_pull
+AFTER UPDATE OF origin_id,replication_epoch,stream_identity ON sync_identity
+WHEN NEW.ordinary_pull_token IS NOT NULL
+  AND (OLD.origin_id IS NOT NEW.origin_id OR OLD.replication_epoch IS NOT NEW.replication_epoch
+    OR OLD.stream_identity IS NOT NEW.stream_identity)
+BEGIN
+    UPDATE sync_identity SET ordinary_pull_token=NULL WHERE workspace_id=NEW.workspace_id;
+END;
+";
 
 /// A hosted document that left the scope parks instead of losing its state.
 /// Its heads and path aliases move to the parked tables, whose blob keys keep
@@ -4347,6 +4368,10 @@ mod tests {
                 "56e87a5adcc33c2af1f301c3c25c91fe7c6b1c738f34e35ccd629080d89bcc50",
             ),
             (
+                "v2-ordinary-pull-progress",
+                "d97e08cea4e222c34c253d21da14e714bf118ac330e0b0ea3891f2d499e8097e",
+            ),
+            (
                 "v2-history-undo-plans",
                 "804873129399ca333652a5efdfc20b18e2219671d068e70ee2a78dc3a2c92783",
             ),
@@ -4372,6 +4397,8 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-file-search-key");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 62);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 63);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO engine_search_files_fts(workspace_id,version_id,object_id,path,text) VALUES ('ws','main','a','a.md','alpha'),('ws','other','a','a.md','other'),('ws','main','b','b.md','beta');").unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
@@ -4412,10 +4439,9 @@ mod tests {
 
         let mut conn = open_bare(&path);
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied {
-                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - before).unwrap(),
-            }
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
+                .expect("upgrade"),
+            MigrationOutcome::Applied { newly_applied: 1 }
         );
         let runs = conn
             .prepare("SELECT run_id, failure_handled FROM agent_run_records ORDER BY started_at_ms")
@@ -4457,9 +4483,91 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("reopen"),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
+                .expect("reopen"),
             MigrationOutcome::Applied { newly_applied: 0 }
         );
+    }
+
+    fn ordinary_pull_token(conn: &Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ordinary_pull_progress_upgrade_starts_with_no_unfinished_pull() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-ordinary-pull-progress");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 60);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 61);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES ('ws','origin','epoch','stream',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(ordinary_pull_token(&conn), None);
+        assert!(
+            conn.execute(
+                "UPDATE sync_identity SET ordinary_pull_token='' WHERE workspace_id='ws'",
+                []
+            )
+            .is_err(),
+            "an empty token owns nothing"
+        );
+    }
+
+    #[test]
+    fn each_identity_change_abandons_the_unfinished_ordinary_pull() {
+        for column in ["origin_id", "replication_epoch", "stream_identity"] {
+            let dir = tempdir();
+            let mut conn = open_bare(&dir.join("engine.db"));
+            run_migrations(
+                &mut conn,
+                BASELINE_MIGRATIONS,
+                &MigrationContext::current(1),
+                &NoFaults,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+                 VALUES ('ws','origin','epoch','stream',1,'token')",
+                [],
+            )
+            .unwrap();
+            // Other columns, and rewriting a value unchanged, leave the pull.
+            conn.execute(
+                &format!(
+                    "UPDATE sync_identity SET claim_state='pending',{column}={column} WHERE workspace_id='ws'"
+                ),
+                [],
+            )
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn).as_deref(), Some("token"));
+            // A rolled-back change keeps the identity and its pull together.
+            conn.execute_batch(&format!(
+                "BEGIN; UPDATE sync_identity SET {column}='changed' WHERE workspace_id='ws'; ROLLBACK;"
+            ))
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn).as_deref(), Some("token"));
+            conn.execute(
+                &format!("UPDATE sync_identity SET {column}='changed' WHERE workspace_id='ws'"),
+                [],
+            )
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn), None, "{column} changed");
+        }
     }
 
     #[test]

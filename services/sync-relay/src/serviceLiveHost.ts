@@ -331,7 +331,7 @@ export async function startServiceLiveHost(options: {
     signal.throwIfAborted();
     const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
-      env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
+      env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG }, signal,
       onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
     })),value => Effect.promise(() => value.waitForExit()));
     yield* Effect.acquireRelease(Effect.sync(() => {

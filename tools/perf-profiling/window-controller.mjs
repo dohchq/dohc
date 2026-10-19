@@ -21,8 +21,9 @@ export async function waitForVisibleWindow(inspect, { signal, timeoutMs = 10000 
 }
 
 export async function startWindowController({
-  command = 'pwsh.exe',
-  args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', fileURLToPath(new URL('./packaged-window-state.ps1', import.meta.url))],
+  command = process.platform === 'darwin' ? 'osascript' : 'pwsh.exe',
+  args = process.platform === 'darwin' ? ['-l', 'JavaScript', fileURLToPath(new URL('./packaged-window-state.js', import.meta.url))]
+    : ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', fileURLToPath(new URL('./packaged-window-state.ps1', import.meta.url))],
   startupTimeoutMs = 30000, requestTimeoutMs = 10000, closeTimeoutMs = 2000,
   onSpawn = () => {}, signal,
 } = {}) {

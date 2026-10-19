@@ -314,7 +314,8 @@ function slotRoot(t) {
 
 async function monitor(t, root, options = {}) {
   const slots = "slotRoot" in options ? options.slotRoot : slotRoot(t);
-  const server = startMonitor({ root, port: 0, ...options, slotRoot: slots });
+  // A Mac refuses the lane switch; these tests choose, so they read the same on every host.
+  const server = startMonitor({ root, port: 0, oneLane: false, ...options, slotRoot: slots });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");
   const { port } = server.address();
@@ -427,6 +428,17 @@ test("the page switches the host between 2 and 3 lanes with a JSON POST from its
   assert.equal((await write("/api/lanes", { lanes: 3 })).status, 200);
   assert.equal(setting(), "3\n");
   assert.match(logged.at(-1), /set the verification lanes to 3, from a setting that could not be read$/u);
+});
+
+test("a Mac refuses the lane switch and keeps one lane, because Electron runs cannot share its display", async t => {
+  const root = await queueRoot(t);
+  const { write, state, slots } = await monitor(t, root, { oneLane: true });
+  const answer = await write("/api/lanes", { lanes: 2 });
+  assert.deepEqual([answer.status, answer.body], [409, "This Mac runs one lane: Electron runs cannot share its display."]);
+  assert.deepEqual(readdirSync(slots), [], "the refusal writes no lane setting");
+  assert.equal((await state()).laneSetting.lanes, 1);
+  // Pause and resume still work there.
+  assert.equal((await write("/api/pause", { reason: "a Mac pause" })).status, 200);
 });
 
 test("a lane switch is refused with a status, and changes nothing, unless it is a small JSON POST from the page's own origin that names 2 or 3 lanes", async t => {

@@ -2190,3 +2190,18 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   expect(requests[2]).toMatchObject({method:"history.undo",idempotencyKey:"retry",params:{operationId:"dohc-operation:minted"}});
   expect(requests[2]?.params).not.toHaveProperty("requestId");
 });
+
+it("forwards link batches through the workspace handle and rejects malformed replies", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = { versionId: "main", results: [{ path: "target.md", fragment: null }], mountsCovered: true };
+  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) { requests.push(request); return { id: request.id, result }; } }, WORKSPACE, { workspaceId: WORKSPACE });
+  const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target" }] };
+  expect(await adapter.resolveLinks(input)).toEqual(result);
+  expect(requests[0]).toMatchObject({ method: "links.resolve", workspace: WORKSPACE, params: input });
+  result = { versionId: "main", results: [], mountsCovered: true };
+  await expect(adapter.resolveLinks(input)).rejects.toThrow("different literal count");
+  result = null;
+  expect(await adapter.incomingLinks({ subject: { objectId: "absent" } })).toBeNull();
+  result = { entries: [] };
+  await expect(adapter.incomingLinks({ subject: { path: "target.md" } })).rejects.toThrow();
+});

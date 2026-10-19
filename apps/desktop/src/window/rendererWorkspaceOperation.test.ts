@@ -61,6 +61,51 @@ describe("renderer workspace operation runner", () => {
     },
   );
 
+  it("rejects finished renderer work after its physical attachment retires", async () => {
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => ({
+        workspaceId: "workspace",
+        rootPath: "C:/workspace",
+      }),
+      canonicalizeRoot: (rootPath: string) => rootPath,
+      createState: () => ({}),
+    });
+    const session: TestSession = {
+      workspaceId: "workspace",
+      attachmentId: owner.currentBinding("workspace").attachmentId,
+      generation: 1,
+      isCurrent: () => true,
+    };
+    const run = createRendererWorkspaceOperationRunner<
+      object,
+      TestWorkspace,
+      Record<string, never>,
+      TestSession
+    >({
+      currentSession: () => session,
+      withPhysicalOperation: (workspaceId, work) =>
+        owner.withOperation(workspaceId, work),
+    });
+    const entered = deferred();
+    const resume = deferred();
+    const pending = run({}, "workspace", "inactive", async () => {
+      entered.resolve();
+      await resume.promise;
+      return "finished";
+    });
+
+    await entered.promise;
+    const retiring = owner.invalidate("workspace");
+    try {
+      resume.resolve();
+      await expect(pending).rejects.toThrow("This workspace was closed. Open it again.");
+      await retiring;
+    } finally {
+      resume.resolve();
+      await owner.close();
+    }
+  });
+
   it("admits only the active renderer attachment and keeps its canonical root", async () => {
     const attachmentA = Symbol("A");
     const attachmentB = Symbol("B");
@@ -84,7 +129,7 @@ describe("renderer workspace operation runner", () => {
       currentSession: () => session,
       withPhysicalOperation: async (workspaceId: string, work) => {
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error(`Unknown workspace: ${workspaceId}`);
+          throw new Error("This workspace is not open. Open it again.");
         }
         return await work({
           workspace,

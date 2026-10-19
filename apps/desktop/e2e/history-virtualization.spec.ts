@@ -97,7 +97,8 @@ test.describe("history virtualization", () => {
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
 
       await firstGroup.locator('[data-moment-id="moment-1"]').focus();
-      await list.evaluate((element) => { element.scrollTop = 20_000; });
+      // Rows are 30px: moment-399 starts near 9,750px, under three day headings.
+      await list.evaluate((element) => { element.scrollTop = 9_400; });
       await expect(page.locator('[data-moment-id="moment-399"]')).toBeVisible();
       await expect(firstGroup.locator('[data-moment-id="moment-1"]')).toBeFocused();
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");

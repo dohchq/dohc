@@ -1290,6 +1290,7 @@ mod tests {
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
             settlement_report_id: None,
+            ordinary_pull: None,
         };
 
         assert!(matches!(
@@ -2063,6 +2064,7 @@ mod tests {
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
             settlement_report_id: None,
+            ordinary_pull: None,
         };
         crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &leases, 1_001)
             .expect("cursor commit");
@@ -2246,6 +2248,7 @@ mod tests {
                 stream_identity: "stream".into(),
                 bootstrap_complete: true,
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &leases,
@@ -2603,6 +2606,7 @@ mod tests {
                 replication_epoch: "epoch".to_owned(),
                 stream_identity: "stream".to_owned(),
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &crate::NoLiveLeases,
@@ -2821,6 +2825,7 @@ mod tests {
                 stream_identity: "stream".into(),
                 bootstrap_complete: true,
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &crate::NoLiveLeases,
@@ -3441,6 +3446,7 @@ mod tests {
                 replication_epoch: "epoch".to_owned(),
                 stream_identity: "stream".to_owned(),
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4750,6 +4756,7 @@ mod tests {
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
             settlement_report_id: None,
+            ordinary_pull: None,
         };
         let declines = match crate::commit_relay_cursor(
             &mut store,

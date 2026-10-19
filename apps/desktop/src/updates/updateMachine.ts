@@ -104,7 +104,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
     case "defer":
       return state.status === "ready" ? ready(state.version, true) : state;
     case "offline":
-      // A downloaded update survives going offline: install-on-quit is local.
+      // A downloaded update survives going offline: installing it is local.
       return state.status === "ready"
         ? state
         : {
@@ -114,8 +114,8 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
             message: "You're offline. dohc will check for updates the next time it starts.",
           };
     case "error":
-      // A downloaded update still installs on quit (autoInstallOnAppQuit), so
-      // "ready" survives errors exactly like it survives going offline.
+      // A downloaded update still installs on restart or quit, so "ready"
+      // survives errors exactly like it survives going offline.
       return state.status === "ready"
         ? state
         : {
