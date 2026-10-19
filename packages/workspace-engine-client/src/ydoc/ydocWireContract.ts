@@ -247,8 +247,9 @@ const SettleResultSchema = mutableStruct({
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
-// `materialized` answers whether the close's own settle wrote the file. It is
-// absent when the close did not settle.
+// `materialized` answers whether the file holds the settled bytes after the
+// close's own settle, written now or already there. It is absent when the
+// close did not settle.
 const CloseResultSchema = mutableStruct({
   closed: Schema.Literal(true),
   materialized: Schema.optionalKey(Schema.Boolean),

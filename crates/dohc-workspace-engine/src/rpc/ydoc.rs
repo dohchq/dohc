@@ -397,7 +397,8 @@ struct YdocCloseParams {
 #[serde(rename_all = "camelCase")]
 struct YdocCloseResult {
     closed: bool,
-    /// Whether this close's settle wrote the file. Absent when it did not settle.
+    /// Whether the file holds the settled bytes after this close's settle,
+    /// written now or already there. Absent when it did not settle.
     #[serde(skip_serializing_if = "Option::is_none")]
     materialized: Option<bool>,
 }

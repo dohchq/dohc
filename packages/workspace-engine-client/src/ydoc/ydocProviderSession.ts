@@ -103,7 +103,7 @@ export interface EngineYdocProviderSessionOptions {
   onSettleError?: (error: unknown, token: number) => void;
   // Return false when artifact verification failed, so close retries settlement.
   onSettled?: (result: YdocSettleResult, token: number) => boolean | void | Promise<boolean | void>;
-  // A close wrote the file while settling on its way out, through a settle
+  // A close left the file holding its settled bytes on its way out, through a settle
   // that has no `onSettled`: the reused settle of a replicated lineage, or
   // the settling close a refused release escalates to.
   onCloseMaterialized?: () => void;

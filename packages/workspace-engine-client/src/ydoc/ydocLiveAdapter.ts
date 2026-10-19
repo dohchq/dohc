@@ -1384,7 +1384,7 @@ export class YdocAdapterSession {
     };
   }
 
-  // Answers whether this close's own settle wrote the file.
+  // Answers whether the file holds the settled bytes after this close's own settle.
   async close(
     options?: { settle?: boolean; summary?: string },
   ): Promise<{ materialized: boolean }> {
