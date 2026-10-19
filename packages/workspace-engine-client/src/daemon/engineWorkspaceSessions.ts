@@ -4,6 +4,7 @@ import {
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
   isWorkspaceUpdatingRefusal,
+  isYdocFileNotReadRefusal,
   isYdocOpenOperationCrashedRefusal,
   isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
@@ -263,6 +264,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
     isWorkspaceUpdatingRefusal(error) ||
+    isYdocFileNotReadRefusal(error) ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
     isYdocArtifactAssetsInvalidRefusal(error) ||

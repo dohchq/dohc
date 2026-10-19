@@ -647,6 +647,28 @@ describe("EngineWorkspaceSessions", () => {
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
   });
 
+  it("keeps a file a degraded capture has not read read-only without waiting for a wake", async () => {
+    const refusal = new DaemonRefusalError({
+      code: "OVERLOADED",
+      message: "dohc has not read this file yet. Open it again once dohc has read it.",
+      retry: "no",
+    }, undefined);
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+    const workspace = await tempWorkspace(), client = new MockClient("file-not-read");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    let attempts = 0;
+    try {
+      await expect(sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
+        attempts += 1;
+        throw refusal;
+      }, { retryInitialCapture: true }))).rejects.toBe(refusal);
+      expect(attempts).toBe(1);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      await sessions.closeAll();
+    }
+  });
+
   it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
     const refusal = new DaemonRefusalError(
       {

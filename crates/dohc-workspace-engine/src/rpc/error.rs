@@ -611,12 +611,14 @@ pub(super) fn initial_capture_updating() -> WireError {
     )
 }
 
-/// The initial capture ended without recording the file, so retrying after
-/// a capture wake does not help. The person can still try again.
+/// The initial capture ended without reading the file. No capture wake will
+/// follow, so the refusal is not retryable, but a later capture pass can still
+/// read the file, and the caller can open it then.
 pub(super) fn initial_capture_degraded() -> WireError {
     WireError {
+        code: ErrorCode::Overloaded,
+        message: "dohc has not read this file yet. Open it again once dohc has read it.".to_owned(),
         retry: Retryability::No,
-        ..initial_capture_updating()
     }
 }
 

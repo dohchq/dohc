@@ -1828,9 +1828,12 @@ async fn wait_for_wake(events: &mut EngineEventReceiver, name: &str) {
 /// The restored document of a new folder opens once its own file is
 /// captured, not once the whole import is. Its refused open moves the file
 /// ahead of the lexically earlier remainder, and the import's progress wake
-/// tells the caller to open again.
+/// tells the caller to open again. An edit saved while the import still runs
+/// survives the rest of the import.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_document_is_captured_next_and_opens_while_the_import_runs() {
+    use base64::Engine as _;
+
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
@@ -1902,24 +1905,87 @@ async fn a_refused_document_is_captured_next_and_opens_while_the_import_runs() {
         .expect("watcher.status");
     assert_eq!(status.result["phase"], json!("importing"));
 
+    // Edit and save the document while the rest of the import still waits.
+    let session = opened.result["sessionId"].clone();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    let record = |update: Vec<u8>, seed: bool| {
+        json!({
+            "expectedLineageClaimId": opened.result["lineageClaimId"],
+            "sessionId": session,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            "seed": seed,
+        })
+    };
+    let seed = doc.plaintext_insert(0, "restored text");
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.recordUpdate",
+        record(seed, true),
+    )
+    .await;
+    let edit = doc.plaintext_insert(13, " edited early");
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        record(edit, false),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.settle",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+    assert_eq!(settled["content"], json!("restored text edited early"));
+    let on_disk = || std::fs::read_to_string(scratch.path().join("zz-restored.md")).unwrap();
+    assert_eq!(on_disk(), "restored text edited early");
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(9, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("importing"));
+
     probe.release_import_commit();
     wait_for_wake(&mut events, CAPTURE_INITIAL_SETTLED_EVENT).await;
     assert_eq!(
-        read_text(&transport, &handle, 6, "zz-restored.md")
-            .await
-            .as_deref(),
-        Some("restored text")
-    );
-    assert_eq!(
-        read_text(&transport, &handle, 7, &last_seed)
+        read_text(&transport, &handle, 10, &last_seed)
             .await
             .as_deref(),
         Some("seed")
     );
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.close",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    // The rest of the import, and the watcher pass over the saved file, keep
+    // the saved text in the head and on disk.
+    let flush = call(&transport, &handle, 12, "capture.flush", json!({})).await;
+    assert_eq!(flush["settled"], json!(true));
+    assert_eq!(
+        read_text(&transport, &handle, 13, "zz-restored.md")
+            .await
+            .as_deref(),
+        Some("restored text edited early")
+    );
+    assert_eq!(on_disk(), "restored text edited early");
     transport
         .call(
             RequestContext::unbounded(),
-            request(8, "workspace.close", Some(handle), json!({})),
+            request(14, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("close");
@@ -2008,6 +2074,10 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
         uncaptured.retry,
         Retryability::No,
         "no capture wake follows a degraded import, so waiting must not be offered"
+    );
+    assert_eq!(
+        uncaptured.message,
+        "dohc has not read this file yet. Open it again once dohc has read it."
     );
 
     probe.release_apply_worker();
