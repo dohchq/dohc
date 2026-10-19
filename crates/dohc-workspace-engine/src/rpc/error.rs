@@ -335,13 +335,32 @@ fn internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) 
     let mut source = error.source();
     while let Some(cause) = source {
         let text = cause.to_string();
-        if !line.ends_with(&text) {
+        if !line
+            .strip_suffix(text.as_str())
+            .is_some_and(|head| head.ends_with(": "))
+        {
             line.push_str(": ");
             line.push_str(&text);
         }
         source = cause.source();
     }
-    Some(line)
+    let mut escaped = String::with_capacity(line.len());
+    for ch in line.chars() {
+        if ch.is_control() {
+            escaped.extend(ch.escape_default());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    if escaped.len() > 4096 {
+        let mut end = 4096 - '…'.len_utf8();
+        while !escaped.is_char_boundary(end) {
+            end -= 1;
+        }
+        escaped.truncate(end);
+        escaped.push('…');
+    }
+    Some(escaped)
 }
 
 /// The error followed by each of its sources, for migration wire messages.
@@ -611,6 +630,24 @@ mod tests {
                 "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)",
             ),
             (
+                RuntimeError::Relay(RelayError::Local("object apollo\nforged\r\t\u{0}\u{1b}\u{85}".into())),
+                "workspace operation failed",
+                "engine: internal refusal: relay error: local sync state failed: object apollo\\nforged\\r\\t\\u{0}\\u{1b}\\u{85}",
+            ),
+            (
+                RuntimeError::Relay(RelayError::UnknownServerCode("unknown\nforged".into())),
+                "workspace operation failed",
+                "engine: internal refusal: relay error: relay returned unknown error code unknown\\nforged",
+            ),
+            (
+                RuntimeError::Identity {
+                    reason: "missing identity",
+                    source: Some(std::io::Error::other("identity")),
+                },
+                "workspace operation failed",
+                "engine: internal refusal: could not resolve engine.db identity: missing identity: identity",
+            ),
+            (
                 RuntimeError::Sync(SyncError::RetryableState {
                     reason: "ydoc-resulting-head-pending",
                 }),
@@ -661,6 +698,30 @@ mod tests {
                 (wire.code, wire.message.as_str(), logged.as_deref()),
                 (ErrorCode::Internal, message, Some(line)),
             );
+        }
+    }
+
+    #[test]
+    fn internal_refusal_caps_the_escaped_chain_on_a_char_boundary() {
+        use dohc_engine_storage::StorageError;
+
+        for detail in ["é".repeat(3000), "\n".repeat(3000)] {
+            let (wire, logged) = map_runtime_logged(RuntimeError::Storage(
+                StorageError::corrupt_public(std::io::Error::other(detail)),
+            ));
+            assert_eq!(
+                (wire.code, wire.message.as_str()),
+                (ErrorCode::Internal, "workspace operation failed"),
+            );
+            let line = logged.expect("Internal refusal logs its cause");
+            assert!((4093..=4096).contains(&line.len()), "{} bytes", line.len());
+            assert!(line.ends_with('…'));
+            assert!(
+                line.starts_with(
+                    "engine: internal refusal: storage error: engine store is corrupt: "
+                )
+            );
+            assert!(!line.chars().any(char::is_control));
         }
     }
 
