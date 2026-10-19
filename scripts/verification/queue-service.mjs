@@ -63,13 +63,14 @@ export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
 /**
  * Remove everything Git does not track except the named caches. A build can leave read-only output that Git
  * cannot remove, such as the Markdown reader's folder from a commit before #2243. All of it is a build's own
- * output, so after a failed clean, what remains becomes writable and the clean runs again.
+ * output, so after a clean that Git ran and failed, what remains becomes writable and the clean runs again.
+ * A stop, a timeout, or a Git that never ran fails the lane at once.
  */
 export async function cleanCheckout(gitOutput, root) {
   const caches = ["node_modules", "target"];
   const excludes = caches.map(name => `--exclude=${name}`);
   const clean = ["clean", "-ffdx", ...excludes];
-  try { return await gitOutput(clean); } catch { /* Cleaned again below. */ }
+  try { return await gitOutput(clean); } catch (error) { if (!error?.commandExitFailure) throw error; }
   // What the clean left, as raw paths: -z neither quotes nor translates them.
   for (const path of (await gitOutput(["ls-files", "-z", "--others", "--directory", ...excludes])).split("\0")) {
     if (path) await makeWritable(join(root, path), caches);

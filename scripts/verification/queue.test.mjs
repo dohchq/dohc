@@ -668,6 +668,21 @@ test("a lane's clean removes read-only build output that git clean alone cannot,
   }
 });
 
+test("a lane's clean retries only after Git ran and failed, and fails when the retry does", async () => {
+  const calls = [];
+  const exited = Object.assign(new Error("git failed (1)."), { commandExitFailure: true });
+  await assert.rejects(cleanCheckout(async args => {
+    calls.push(args[0]);
+    if (args[0] === "clean") throw exited;
+    return "";
+  }, tmpdir()), /git failed \(1\)/);
+  assert.deepEqual(calls, ["clean", "ls-files", "clean"]);
+  calls.length = 0;
+  const timedOut = Object.assign(new Error("git failed (timed out after 900000ms)."), { timedOut: true });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw timedOut; }, tmpdir()), /timed out/);
+  assert.deepEqual(calls, ["clean"], "a timeout or a stop fails the lane without touching it again");
+});
+
 test("another run waits while free memory is low, but a lone run still starts", async t => {
   let memory = 5;
   const { root, request, calls } = harness(t, { lanes: () => 2, freeMemory: () => memory });
