@@ -758,6 +758,32 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
             .len(),
         1
     );
+    // The page resolves identities against main, even when its subject is workspace-wide.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versions.ensureMain",
+        json!({ "workspaceId": "rpc-b2-attachments" }),
+    )
+    .await;
+    // Reusing the hint must not make object-1 resolve to this different object.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "object-2",
+            "path": "notes/file.md",
+            "text": "A different file now owns this path.",
+            "momentId": "reuse-file-hint",
+            "origin": "api",
+            "nowMs": 31
+        }),
+    )
+    .await;
     let mentions = call(
         &transport,
         &handle,
@@ -767,8 +793,18 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
     )
     .await;
     assert_eq!(
-        mentions["entries"],
-        json!([]),
+        mentions,
+        json!({
+            "versionId": "main",
+            "subject": null,
+            "entries": [],
+            "unchecked": [],
+            "complete": true,
+            "indexBuilding": false,
+            "mountsCovered": true,
+            "sharedChannelRowsUncovered": 0,
+            "nextCursor": null
+        }),
         "A missing object never falls back to its old path hint."
     );
     call(
