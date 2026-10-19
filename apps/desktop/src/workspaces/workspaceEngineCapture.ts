@@ -1558,6 +1558,14 @@ type MaterializeOperation =
   | { kind: "write-binary"; path: string; bytes: Uint8Array }
   | { kind: "delete"; path: string; protected?: boolean };
 
+// Delete first so a case or Unicode normalization alias cannot remove a new write.
+function deletesBeforeWrites(operations: readonly MaterializeOperation[]): MaterializeOperation[] {
+  return [
+    ...operations.filter((operation) => operation.kind === "delete"),
+    ...operations.filter((operation) => operation.kind !== "delete"),
+  ];
+}
+
 function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): boolean {
   return resolveEffectivePolicy({
     path,
@@ -6396,7 +6404,7 @@ export function createWorkspaceEngineCapture(
         // The folder shows the active version; only a merge into the active
         // version changes what is on disk.
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
-          await materialize(materializations, policy);
+          await materialize(deletesBeforeWrites(materializations), policy);
         }
         return { mergedFileCount, unchangedFileCount, conflictCount };
       });
