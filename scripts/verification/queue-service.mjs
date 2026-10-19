@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -60,6 +60,36 @@ export async function sweepContainers({ request, command = run } = {}) {
  */
 export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
 
+/**
+ * Remove everything Git does not track except the named caches. A build can leave read-only output that Git
+ * cannot remove, such as the Markdown reader's folder from a commit before #2243. All of it is a build's own
+ * output, so after a clean that Git ran and failed, what remains becomes writable and the clean runs again.
+ * A stop, a timeout, or a Git that never ran fails the lane at once.
+ */
+export async function cleanCheckout(gitOutput, root) {
+  const caches = ["node_modules", "target"];
+  const excludes = caches.map(name => `--exclude=${name}`);
+  const clean = ["clean", "-ffdx", ...excludes];
+  try { return await gitOutput(clean); } catch (error) {
+    // windows-job.ps1 and windows-command.mjs exit with 0xD0C5 when Git never started.
+    if (!error?.commandExitFailure || error.exitCode === 0xD0C5) throw error;
+  }
+  // What the clean left, as raw paths: -z neither quotes nor translates them.
+  for (const path of (await gitOutput(["ls-files", "-z", "--others", "--directory", ...excludes])).split("\0")) {
+    if (path) await makeWritable(join(root, path), caches);
+  }
+  return gitOutput(clean);
+}
+
+/** Adds the owner's write permission throughout `path`, leaving symbolic links and the caches the clean keeps. */
+async function makeWritable(path, caches) {
+  const info = await lstat(path).catch(() => null);
+  if (!info || info.isSymbolicLink()) return;
+  await chmod(path, (info.mode & 0o7777) | 0o200);
+  if (!info.isDirectory()) return;
+  for (const name of await readdir(path)) if (!caches.includes(name)) await makeWritable(join(path, name), caches);
+}
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
   // The temp folder keeps only the coming run's files.
@@ -67,7 +97,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
-  const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
+  const gitOutput = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout;
+  const laneGit = async (args, cwd = lane) => (await gitOutput(args, cwd)).trim();
   if (!existsSync(join(lane, ".git"))) {
     await laneGit(["worktree", "add", "--detach", "--force", lane, head], repo);
     // Workspace cleanup keeps locked worktrees, so the lane keeps its warm caches.
@@ -77,7 +108,7 @@ export async function prepareLane({ lane, repo, head, signal }) {
   // No worker runs while the lane is prepared, so any Git lock or operation state is stale.
   for (const name of ["index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) rmSync(join(gitDir, name), { force: true });
   await laneGit(["checkout", "--force", "--detach", head]);
-  await laneGit(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"]);
+  await cleanCheckout(gitOutput, lane);
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.

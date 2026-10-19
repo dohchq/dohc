@@ -4,14 +4,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { freemem, tmpdir, uptime, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, launchAgentDefinition, launchAgentLabel, launchPath, listRequests, movedNote, nextRequest, nightlyAgentDefinition, nightlyAgentLabel, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, queueRoot, readJson, readPause, registerLaunchAgents, reloadLaunchAgent, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startCommand, startsInMs, submit, submitNightly, taskDefinition, terminalStates, unregisterLaunchAgents, verifyThroughQueue, writeJson } from "./queue.mjs";
-import { freeMemoryGb, holdAwake, laneTemp, runService, stopStrays, sweepContainers } from "./queue-service.mjs";
+import { cleanCheckout, freeMemoryGb, holdAwake, laneTemp, runService, stopStrays, sweepContainers } from "./queue-service.mjs";
 import { buildEnvHelper, envHelper, heldPath, holdSocket, instanceVariable, markedPids, members, processTable, requestMarker, requestVariable, stopProcesses, stopRecorded, supervise, treePath } from "./queue-supervisor.mjs";
 import { threadDirectory } from "./queue-monitor.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
@@ -638,6 +638,54 @@ test("a request's cleanup removes only its containers and their volumes, and the
 test("each lane has its own temp folder under the queue root", () => {
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane")), join("C:", "w", "_verification", "tmp", "lane"));
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
+});
+
+test("a lane's clean removes read-only build output that git clean alone cannot, and keeps the caches", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-lane-clean-"));
+  // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
+  // The other two have names Git would quote, and a name that trimmed output would lose.
+  const generations = [join(root, "resources", "engine-reader", "generation"), join(root, "généré"), join(root, " generated")];
+  const cached = join(root, "scratch", "node_modules", "package", "index.js");
+  try {
+    const git = async args => (await run("git", args, { cwd: root, quietStdout: true })).stdout;
+    await git(["init", "-q"]);
+    writeFileSync(join(root, ".gitignore"), "resources/\n");
+    for (const generation of generations) {
+      mkdirSync(generation, { recursive: true });
+      writeFileSync(join(generation, "reader.cjs"), "");
+      chmodSync(join(generation, "reader.cjs"), 0o444);
+      chmodSync(generation, 0o555);
+    }
+    mkdirSync(join(cached, ".."), { recursive: true });
+    writeFileSync(cached, "");
+    chmodSync(cached, 0o444);
+    await cleanCheckout(git, root);
+    for (const generation of generations) assert.equal(existsSync(generation), false, generation);
+    assert.equal(statSync(cached).mode & 0o200, 0, "the clean keeps a cache below an untracked folder as it was");
+  } finally {
+    for (const path of [...generations, cached]) try { chmodSync(path, 0o755); } catch { /* Removed. */ }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lane's clean retries only after Git ran and failed, and fails when the retry does", async () => {
+  const calls = [];
+  const exited = Object.assign(new Error("git failed (1)."), { commandExitFailure: true });
+  await assert.rejects(cleanCheckout(async args => {
+    calls.push(args[0]);
+    if (args[0] === "clean") throw exited;
+    return "";
+  }, tmpdir()), /git failed \(1\)/);
+  assert.deepEqual(calls, ["clean", "ls-files", "clean"]);
+  calls.length = 0;
+  const timedOut = Object.assign(new Error("git failed (timed out after 900000ms)."), { timedOut: true });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw timedOut; }, tmpdir()), /timed out/);
+  assert.deepEqual(calls, ["clean"], "a timeout or a stop fails the lane without touching it again");
+  calls.length = 0;
+  // Windows' job relay exits with 0xD0C5 when Git never started.
+  const neverStarted = Object.assign(new Error("git failed (53445)."), { commandExitFailure: true, exitCode: 0xD0C5 });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw neverStarted; }, tmpdir()), /53445/);
+  assert.deepEqual(calls, ["clean"]);
 });
 
 test("another run waits while free memory is low, but a lone run still starts", async t => {
