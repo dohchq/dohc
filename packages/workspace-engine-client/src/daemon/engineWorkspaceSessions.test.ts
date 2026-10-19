@@ -460,7 +460,7 @@ describe("EngineWorkspaceSessions", () => {
     }
   });
 
-  it("wakes an initial-capture retry on the scoped settled event", async () => {
+  it.each(["capture.initialSettled", "capture.importProgress"])("wakes an initial-capture retry on the scoped %s event", async (name) => {
     const workspace = await tempWorkspace("workspace-initial-settled-wake");
     const client = new MockClient("initial-settled-wake");
     let attempts = 0;
@@ -490,7 +490,7 @@ describe("EngineWorkspaceSessions", () => {
                 client.emit({
                   seq: 1,
                   sessionGeneration: 1,
-                  name: "capture.initialSettled",
+                  name,
                   payload: { workspaceId: workspace.workspaceId },
                 }),
               );

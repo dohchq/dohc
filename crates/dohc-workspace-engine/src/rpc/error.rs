@@ -5,6 +5,7 @@ use dohc_engine_collab::OwnerOutboxError;
 use dohc_engine_collab::live_update_application::ApplicationError;
 use dohc_engine_domain::DomainError;
 use dohc_engine_protocol::error::ErrorCode;
+use dohc_engine_protocol::error::Retryability;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_runtime::RuntimeError;
 use dohc_engine_runtime::SearchError;
@@ -608,6 +609,15 @@ pub(super) fn initial_capture_updating() -> WireError {
         ErrorCode::Overloaded,
         "Workspace is still updating. Try again.",
     )
+}
+
+/// The initial capture ended without recording the file, so retrying after
+/// a capture wake does not help. The person can still try again.
+pub(super) fn initial_capture_degraded() -> WireError {
+    WireError {
+        retry: Retryability::No,
+        ..initial_capture_updating()
+    }
 }
 
 pub(super) fn workspace_unavailable() -> WireError {

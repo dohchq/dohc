@@ -4,6 +4,8 @@ use crate::events::emit_automation_claimed;
 use crate::events::emit_record_events;
 use crate::lock;
 use crate::rpc::collections::collection_in_band_cap;
+use crate::rpc::dispatch::initial_capture_phase_requires_fence;
+use crate::rpc::error::initial_capture_degraded;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::error::map_owner_outbox;
 use crate::rpc::error::map_runtime;
@@ -1008,6 +1010,15 @@ impl EngineService {
                 // its head yet. Refuse before lease acquisition; otherwise a new
                 // absent-lineage session can block capture and turn disk bytes
                 // into a misleading uncaptured-artifact failure.
+                if !initial_capture_phase_requires_fence(capture_phase) {
+                    // Degraded: nothing will wake a caller that waits.
+                    return Err(initial_capture_degraded());
+                }
+                // A running import captures the path next, and its progress
+                // wake tells the caller to open again.
+                if let Some(driver) = lock(&open.capture).as_ref() {
+                    driver.request_import_priority(&params.path);
+                }
                 return Err(initial_capture_updating());
             }
         }

@@ -23,7 +23,10 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("liveApplication.")
         || method.starts_with("ydoc.ownerDelivery.")
         || method.starts_with("ydoc.ownerStop.")
-        || (method.starts_with("versions.") && method != "versions.ensureMain")
+        // The main bootstrap is idempotent, and the active version is metadata
+        // no version operation can change while the import fences them.
+        || (method.starts_with("versions.")
+            && !matches!(method, "versions.ensureMain" | "versions.active"))
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
@@ -1345,10 +1348,10 @@ mod tests {
     }
 
     #[test]
-    fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
-        assert!(!method_requires_initial_capture_ready(
-            "versions.ensureMain"
-        ));
+    fn only_version_bootstrap_and_the_active_version_bypass_the_initial_capture_fence() {
+        for method in ["versions.ensureMain", "versions.active"] {
+            assert!(!method_requires_initial_capture_ready(method), "{method}");
+        }
         for method in [
             "links.edges",
             "links.in",
@@ -1358,7 +1361,6 @@ mod tests {
             "ydoc.ownerStop.release",
             "ydoc.ownerStop.clear",
             "ydoc.ownerStop.retired",
-            "versions.active",
             "versions.list",
             "versions.createNamed",
             "versions.setActive",
