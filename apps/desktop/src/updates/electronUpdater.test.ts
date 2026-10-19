@@ -52,11 +52,12 @@ function fakeUpdater() {
   return updater;
 }
 
-async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
+async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean }, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
   quitForStagedRestart?: () => void;
+  platform?: NodeJS.Platform;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
@@ -66,6 +67,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
     pollIntervalMs: 60 * 60_000,
     quitForStagedRestart: options.quitForStagedRestart,
     importUpdater: async () => ({ autoUpdater: updater }),
+    platform: options.platform ?? "win32",
   });
 }
 
@@ -117,6 +119,31 @@ describe("electron updater configuration", () => {
       provider: "generic",
       url: "https://updates.test",
     });
+  });
+
+  it("installs on Linux only when the person asks, never at quit", async () => {
+    for (const platform of ["win32", "darwin"] as const) {
+      const updater = fakeUpdater();
+      await startWith(updater, { platform });
+      expect(updater.autoInstallOnAppQuit).toBe(true);
+    }
+    const updater = fakeUpdater();
+    const controller = await startWith(updater, { platform: "linux" });
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+    expect(updater.autoDownload).toBe(true);
+    updater.emit("checking-for-update");
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect((await controller!.installUpdate()).accepted).toBe(true);
+    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+  });
+
+  it("starts no updater where it cannot install, so no check waits forever", async () => {
+    const inactive = Object.assign(fakeUpdater(), { isUpdaterActive: () => false });
+    await expect(startWith(inactive, { platform: "linux" })).resolves.toBeNull();
+    expect(inactive.on).not.toHaveBeenCalled();
+    expect(inactive.checkForUpdates).not.toHaveBeenCalled();
+    const active = Object.assign(fakeUpdater(), { isUpdaterActive: () => true });
+    await expect(startWith(active, { platform: "linux" })).resolves.not.toBeNull();
   });
 
   it("sets nightly channel flags explicitly", async () => {

@@ -433,7 +433,7 @@ jobs:
                 ;;
             esac
             case "$name" in
-              latest*.yml|nightly*.yml|*.dmg|*.zip|*.exe|*.AppImage|*.blockmap)
+              latest*.yml|nightly*.yml|*.dmg|*.zip|*.exe|*.AppImage|*.deb|*.blockmap)
                 return 0
                 ;;
               *)

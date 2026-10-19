@@ -137,7 +137,10 @@ win:
 linux:
   # Without its own icon, the Linux target falls back to mac.icon.
   icon: build/icon.png
-  target: [AppImage]
+  # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
+  # user namespaces are blocked, as on Ubuntu 24.04, it refuses to start. The
+  # .deb installs an AppArmor profile that allows them.
+  target: [AppImage, deb]
   category: Office
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
@@ -146,6 +149,9 @@ appImage:
   # electron-builder's default AppImage desktop entry passes --no-sandbox.
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
   executableArgs: []
+deb:
+  # A package names who answers for it. The homepage is package.json's.
+  maintainer: dohc <sup@dohc.computer>
 
 # macOS ranks: dohc edits Markdown as its own documents, so it may be their
 # default app, but it never claims to own the type. For text, CSV and JSON it

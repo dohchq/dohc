@@ -58,6 +58,9 @@ type AutoUpdaterLike = {
   forceDevUpdateConfig?: boolean;
   setFeedURL(options: { provider: "generic"; url: string }): void;
   checkForUpdates(): Promise<unknown>;
+  // False where this updater cannot install, such as a Linux build that is
+  // neither an AppImage nor a package. Its checks then resolve without events.
+  isUpdaterActive?(): boolean;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
   on(eventName: "checking-for-update", listener: () => void): void;
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
@@ -156,8 +159,10 @@ export async function startAutoUpdates(options: {
   // main makes it.
   quitForStagedRestart?: () => void;
   importUpdater?: () => Promise<UpdaterModuleLike>;
+  platform?: NodeJS.Platform;
 }): Promise<AutoUpdateController | null> {
   const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
   if (!updatesEnabled(env, options.isPackaged)) return null;
 
   const imported =
@@ -195,9 +200,13 @@ export async function startAutoUpdates(options: {
   };
 
   autoUpdater.autoDownload = true;
-  // The machine's ready-state contract: a downloaded update installs on quit
-  // even if no UI surface ever asks for a restart.
-  autoUpdater.autoInstallOnAppQuit = true;
+  // The machine's ready-state contract on Windows and macOS: a downloaded
+  // update installs on quit even if no UI surface ever asks for a restart.
+  // On Linux an update installs only when the person asks: a .deb installs
+  // with dpkg behind a password prompt, which must never appear while someone
+  // closes the app. There the click installs at once, so a staged restart has
+  // nothing left to install.
+  autoUpdater.autoInstallOnAppQuit = platform !== "linux";
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = false;
@@ -206,6 +215,7 @@ export async function startAutoUpdates(options: {
     if (!options.isPackaged) autoUpdater.forceDevUpdateConfig = true;
     autoUpdater.setFeedURL({ provider: "generic", url: feedOverride });
   }
+  if (autoUpdater.isUpdaterActive?.() === false) return null;
 
   autoUpdater.on("checking-for-update", () => {
     installErrorMessage = null;
