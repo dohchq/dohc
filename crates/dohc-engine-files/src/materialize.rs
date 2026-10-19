@@ -615,6 +615,9 @@ impl ProjectionProbe {
     pub fn probe(&self, rel: &str, kind: ProjectionTargetKind) -> ProjectionTargetState {
         probe_projection_target_in(&self.root, rel, kind)
     }
+    pub fn stored_under_other_spelling(&self, rel: &str) -> bool {
+        crate::reconcile::stored_spelling_in(&self.root, rel).is_some()
+    }
 }
 
 pub fn projection_target_stamp(root: &Path, rel: &str) -> ProjectionTargetStamp {
@@ -1295,6 +1298,7 @@ fn materialize_secret_one_with_remover(
     let current = read_current_no_follow(&target)?;
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == desired_sha
+        && !target_has_other_leaf_spelling(&target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1488,6 +1492,7 @@ fn materialize_secret_write(
     }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
+        && !target_has_other_leaf_spelling(target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1630,6 +1635,7 @@ fn materialize_ordinary_write(
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
         && sha == job.content_sha256
+        && !target_has_other_leaf_spelling(target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -2346,10 +2352,17 @@ fn stage_target(
     options: &MaterializeOptions<'_>,
 ) -> Result<Stage, MaterializeError> {
     let write = job.operation == MaterializationOperation::Write;
+    let mut original_path = PathBuf::from(&job.target_path);
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
+        original_path.set_file_name(leaf);
+    }
     let spec = DisplacementSpec {
         job_id: job.job_id.clone(),
         workspace_id: job.workspace_id.clone(),
-        target_path: job.target_path.clone(),
+        target_path: original_path.to_string_lossy().replace('\\', "/"),
         displaced_name: unused_staged_name(&staging.dir, &job.job_id, &staging.taken)?,
         expected_sha256: expected.to_owned(),
         content_sha256: write.then(|| job.content_sha256.clone()),
@@ -2536,7 +2549,16 @@ fn place_after_stage(
     });
     if placed.is_err()
         && !matches!(
-            return_displaced(store, target, &staging.join(&spec.displaced_name), options),
+            return_displaced(
+                store,
+                &target.with_file_name(
+                    Path::new(&spec.target_path)
+                        .file_name()
+                        .ok_or(MaterializeError::UnsafeTargetPath)?
+                ),
+                &staging.join(&spec.displaced_name),
+                options,
+            ),
             Ok(true)
         )
     {
@@ -2675,7 +2697,12 @@ fn swap_back(
         store.resolve_displacement(aside.displacement_id, back, None, options.now_ms)?;
         return Ok(true);
     }
-    let returned = return_displaced(store, target, &moved.path, options)?;
+    let original = target.with_file_name(
+        Path::new(&moved.target_path)
+            .file_name()
+            .ok_or(MaterializeError::UnsafeTargetPath)?,
+    );
+    let returned = return_displaced(store, &original, &moved.path, options)?;
     if returned {
         store.resolve_displacement(
             moved.displacement_id,
@@ -2732,10 +2759,17 @@ fn move_aside(
         .into_iter()
         .map(|row| row.displaced_name)
         .collect();
+    let mut original_path = PathBuf::from(&moved.target_path);
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
+        original_path.set_file_name(leaf);
+    }
     let spec = DisplacementSpec {
         job_id: moved.job_id.clone(),
         workspace_id: moved.workspace_id.clone(),
-        target_path: moved.target_path.clone(),
+        target_path: original_path.to_string_lossy().replace('\\', "/"),
         displaced_name: unused_staged_name(staging, &moved.job_id, &taken)?,
         expected_sha256: content.to_owned(),
         content_sha256: Some(content.to_owned()),
@@ -4329,6 +4363,26 @@ fn placement_is_held(
     Ok(false)
 }
 
+fn target_has_other_leaf_spelling(target: &Path) -> bool {
+    other_leaf_spelling(target).is_some()
+}
+
+fn other_leaf_spelling(target: &Path) -> Option<std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        let requested = target.file_name()?.to_str()?;
+        let stored = dohc_windows_files::stored_leaf_name(target).ok()?;
+        if stored != requested
+            && crate::floor::fold_segment(stored.to_str()?) == crate::floor::fold_segment(requested)
+        {
+            return Some(stored);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = target;
+    None
+}
+
 /// The existing disk-placement segment rule, including tracked peer names.
 fn materialize_segment_is_safe(segment: &str) -> bool {
     !segment.is_empty()
@@ -4410,6 +4464,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     #[cfg(windows)]
     {
+        let requested_leaf = out.file_name().unwrap().to_os_string();
         // Check links before resolving aliases. Resolve the deepest existing
         // path once, including an existing leaf so file aliases cannot bypass
         // the sidecar and conflict-artifact floor.
@@ -4443,6 +4498,17 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
         let relative = relative.to_string_lossy().replace('\\', "/");
         if is_excluded_file(&relative) || crate::policy::is_shared_with_me_path(&relative) {
             return Err(MaterializeError::UnsafeTargetPath);
+        }
+        // Validate the resolved alias first, including the short-name floor.
+        // Publication must still use the requested case of an ordinary leaf.
+        if requested_leaf
+            .to_str()
+            .zip(out.file_name().and_then(OsStr::to_str))
+            .is_some_and(|(requested, resolved)| {
+                crate::floor::fold_segment(requested) == crate::floor::fold_segment(resolved)
+            })
+        {
+            out.set_file_name(requested_leaf);
         }
     }
     Ok(out)
@@ -7066,6 +7132,135 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .expect("enqueue materialization job");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conflicting_case_alias_publication_returns_the_outside_spelling() {
+        struct EditOnDisplace(AtomicUsize);
+        impl AtomicReplacer for EditOnDisplace {
+            fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    std::fs::write(target, b"outside edit")?;
+                }
+                std::fs::rename(target, displaced)
+            }
+        }
+        for crash in [false, true] {
+            let scratch = Scratch::new("conflict-leaf-case");
+            let root = scratch.root.path();
+            std::fs::write(root.join("held.md"), b"before").unwrap();
+            if !root.join("HELD.MD").exists() {
+                continue;
+            }
+            let (_db, mut store) = flush_store();
+            let before = store.put_binary_blob(b"before").unwrap();
+            let content = store.put_binary_blob(b"intended").unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "alias-conflict".into(),
+                            workspace_id: "ws".into(),
+                            target_path: "HELD.MD".into(),
+                            content_sha256: content,
+                            preimage: Preimage::Present(before),
+                            target_generation: 1,
+                            now_ms: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("alias-conflict")
+                .unwrap()
+                .unwrap();
+            struct CrashAfterJournal;
+            impl FaultInjector for CrashAfterJournal {
+                fn poll(&self, point: FaultPoint) -> FaultAction {
+                    if point == FaultPoint::MaterializeAfterDisplacementJournal {
+                        FaultAction::Crash
+                    } else {
+                        FaultAction::Continue
+                    }
+                }
+            }
+            let faults = CrashAfterJournal;
+            let replacer = EditOnDisplace(AtomicUsize::new(0));
+            let mut options = options_with(&replacer);
+            if crash {
+                options.faults = &faults;
+            }
+            let outcome = materialize_one(&store, root, &job, &options).unwrap();
+            if crash {
+                assert_eq!(
+                    outcome,
+                    JobOutcome::Crashed(FaultPoint::MaterializeAfterDisplacementJournal)
+                );
+                recover_displacements(&store, root, None, &options_with(&StdReplacer)).unwrap();
+            } else {
+                assert_eq!(outcome, JobOutcome::Conflict);
+            }
+            assert_eq!(
+                dohc_windows_files::stored_leaf_name(&root.join("held.md")).unwrap(),
+                "held.md"
+            );
+            assert_eq!(
+                std::fs::read(root.join("held.md")).unwrap(),
+                b"outside edit"
+            );
+            assert_eq!(
+                std::fs::read(conflict_sibling(&root.join("HELD.MD"), "alias-conflict")).unwrap(),
+                b"intended"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_publication_keeps_the_requested_leaf_case_even_with_equal_bytes() {
+        for desired in [b"Before.\n".as_slice(), b"After.\n".as_slice()] {
+            let scratch = Scratch::new("publication-leaf-case");
+            let root = scratch.root.path();
+            std::fs::write(root.join("held.md"), b"Before.\n").unwrap();
+            if !root.join("HELD.MD").exists() {
+                continue;
+            }
+            let (_db, mut store) = flush_store();
+            let before = store.put_binary_blob(b"Before.\n").unwrap();
+            let content = store.put_binary_blob(desired).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "leaf-case".into(),
+                            workspace_id: "ws".into(),
+                            target_path: "HELD.MD".into(),
+                            content_sha256: content,
+                            preimage: Preimage::Present(before),
+                            target_generation: 1,
+                            now_ms: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("leaf-case")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                materialize_one(&store, root, &job, &options_with(&StdReplacer)).unwrap(),
+                JobOutcome::Completed
+            );
+            assert_eq!(
+                dohc_windows_files::stored_leaf_name(&root.join("HELD.MD")).unwrap(),
+                "HELD.MD"
+            );
+            assert_eq!(std::fs::read(root.join("HELD.MD")).unwrap(), desired);
+            assert!(!crate::stored_under_other_spelling(root, "HELD.MD"));
+        }
     }
 
     fn capture_file_hold_fixture(store: &mut EngineStore, outside: &[u8]) {

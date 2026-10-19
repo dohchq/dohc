@@ -569,3 +569,73 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
         .await
         .expect("workspace close");
 }
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_byte_secret_switch_publishes_each_versions_spelling() {
+    let (scratch, transport, handle, workspace_id) = fixture("secret-case-alias").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId":workspace_id, "versionId":"main", "path":".env", "text":"KEY=same\n",
+            "origin":"api", "momentId":"main-secret-case"
+        }),
+    )
+    .await;
+    if !scratch.path().join(".ENV").exists() {
+        call(&transport, &handle, 4, "workspace.close", json!({})).await;
+        return;
+    }
+    let feature = create_feature(&transport, &handle, 4, &workspace_id).await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId":workspace_id, "versionId":feature, "path":".env",
+            "origin":"api", "momentId":"feature-secret-old-case"
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "secrets.write",
+        json!({
+            "workspaceId":workspace_id, "versionId":feature, "path":".ENV", "text":"KEY=same\n",
+            "origin":"api", "momentId":"feature-secret-new-case"
+        }),
+    )
+    .await;
+    for (index, version, leaf) in [(7, feature.as_str(), ".ENV"), (9, "main", ".env")] {
+        switch_to(&transport, &handle, index, &workspace_id, version).await;
+        assert!(
+            std::fs::read_dir(scratch.path())
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == leaf)
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(leaf)).unwrap(),
+            "KEY=same\n"
+        );
+        call(&transport, &handle, index + 1, "capture.flush", json!({})).await;
+        let conn =
+            rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM secret_files WHERE workspace_id=?1 AND version_id=?2 AND path=?3", rusqlite::params![workspace_id, version, leaf], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+}
