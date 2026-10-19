@@ -2477,6 +2477,27 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* A workspace CSV past the preview's cap: the count, then Import to
+          SQLite, which runs the tab row's import and is busy as it is. */}
+      <Section part="csv-bound" title="CSV offer">
+        <Specimen label="at rest">
+          <CsvPreviewBound rowCount={1240} onImport={noop} />
+        </Specimen>
+        <Specimen label="hovered">
+          <div data-force-state="hover" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus">
+          <div data-force-state="focus-visible" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="busy: the import running">
+          <CsvPreviewBound rowCount={1240} onImport={noop} importing />
+        </Specimen>
+      </Section>
+
       {/* The body's H1 is the editor's, so the folded specimens show the
           row above it alone. */}
       <Section part="page-identity" title="Page identity">

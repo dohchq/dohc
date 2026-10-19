@@ -96,7 +96,8 @@ export function registerDesktopDatabaseIpcHandlers<
 
   // This registration lives for the main process run, across renderer reloads.
   const imports = new Map<string, DatabaseImportRecord>();
-  const inactiveMessage = "Database import undo stopped because this window changed workspaces. Open the original workspace, then try again.";
+  // The Undo is a row in this workspace's Notices, and a switch clears them, so no retry is offered.
+  const inactiveMessage = "Cannot undo this import. This window changed workspaces. Delete the database yourself if you don't want it.";
   registerOperations({
     handle: registerHandler, assertTrustedSender,
     withActiveWorkspace: (event: Event, workspaceId, message, work) =>

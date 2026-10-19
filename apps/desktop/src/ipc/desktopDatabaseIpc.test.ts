@@ -342,6 +342,15 @@ describe("database import Undo", () => {
     await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
   });
 
+  // A switch clears the Notices row that held Undo, so the refusal offers no retry.
+  it("refuses Undo from a window that changed workspaces, keeps the file, and offers no retry", async () => {
+    const h = await harness(), result = await seed(h);
+    await expect(h.invoke(undoChannel, { workspaceId: "workspace-a", operationId: result.operationId }, new Sender(8)))
+      .rejects.toThrow("Cannot undo this import. This window changed workspaces. Delete the database yourself if you don't want it.");
+    expect(h.remove).not.toHaveBeenCalled();
+    expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(true);
+  });
+
   it("refuses an unknown id without deleting anything", async () => {
     const h = await harness();
     await seed(h);
@@ -363,7 +372,7 @@ describe("database import Undo", () => {
     const h = await harness(), result = await seed(h);
     const sidecar = join(h.workspace.rootPath, result.path + suffix);
     await writeFile(sidecar, "");
-    await expect(undo(h, result.operationId)).rejects.toThrow(`Cannot undo this import while data.sqlite${suffix} exists. Close programs using the database, then try again.`);
+    await expect(undo(h, result.operationId)).rejects.toThrow(`Cannot undo this import. data.sqlite${suffix} exists. Close programs using the database, then try again.`);
     expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(true);
     await rm(sidecar);
     await expect(undo(h, result.operationId)).resolves.toBeDefined();

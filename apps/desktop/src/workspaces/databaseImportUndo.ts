@@ -38,6 +38,6 @@ export async function assertDatabaseImportUnchanged(root: string, record: Databa
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (sidecar) throw new Error(`Cannot undo this import while ${record.path}${suffix} exists. Close programs using the database, then try again.`);
+    if (sidecar) throw new Error(`Cannot undo this import. ${record.path}${suffix} exists. Close programs using the database, then try again.`);
   }
 }
