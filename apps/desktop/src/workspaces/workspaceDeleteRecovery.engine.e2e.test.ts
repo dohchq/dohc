@@ -50,7 +50,7 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites closed links and un
     for (const name of ["old.md", "one.md", "two.md", "open.md"]) await waitForPathMoments(capture, name, 1);
     const history = await sessions.run(workspace, async binding => new VersionedLiveAdapter(binding.client, binding.workspace, {workspaceId: workspace.workspaceId}));
     const session = await sessions.run(workspace, binding => binding.client.sendRequest({id: 700, method: "ydoc.open", workspace: binding.workspace,
-      params: {versionId: "main", path: "open.md", contentKind: "richdoc", seedFromArtifact: true}}));
+      params: {versionId: "main", path: "open.md", contentKind: "richdoc"}}));
     expect(session).not.toHaveProperty("error");
     const owner = createWorkspaceFileMutationOwner({historyFor: () => history, assertTrustedSender: () => undefined,
       withRendererWorkspaceOperation: async (_event, _id, work) => work({workspace: operation.workspace, signal: operation.signal, authorityId: workspace.attachmentId,
