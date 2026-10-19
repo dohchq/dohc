@@ -1,5 +1,6 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
@@ -84,6 +85,7 @@ function fixture() {
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
   const dependencies: Dependencies = {
+    resourcesBasePath: () => "resources",
     findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root") },
     dialog: { showErrorBox: vi.fn() },
@@ -135,6 +137,20 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("derives reader paths from main's resources base when getAppPath points at dist/main", async () => {
+    const f = fixture(), resources = await createTestScratch("reader-resources-");
+    const generation = "a".repeat(64);
+    mkdirSync(resolve(resources, "engine-reader"));
+    writeFileSync(resolve(resources, "engine-reader/selection.json"), JSON.stringify({ generation }));
+    f.dependencies.resourcesBasePath = () => resources;
+    vi.mocked(f.dependencies.app.getAppPath).mockReturnValue(resolve("unrelated/dist/main"));
+    try {
+      await f.engine.start();
+      const config = JSON.parse(f.options().readerConfig!);
+      expect(config.bundle).toBe(resolve(resources, "engine-reader", generation, "reader.cjs"));
+      expect(config.manifest).toBe(resolve(resources, "engine-reader", generation, "manifest.json"));
+    } finally { await f.close(); }
+  });
   it("notifies after a workspace binding opens, including reopening", async () => {
     const f = fixture();
     const opened = vi.fn();

@@ -1,8 +1,8 @@
-import { SecondaryButton, PrimaryButton } from "../ui/controls";
+import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
-import { Bot, ChevronDown, ChevronsUpDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
+import { Bot, ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -355,6 +355,7 @@ export function VersionMenu(props: {
       ? {
           id: "new",
           label: "New version…",
+          icon: <Plus size={14} aria-hidden />,
           testId: "version-new",
           onSelect: () => {
             setInlineError(null);
@@ -375,7 +376,7 @@ export function VersionMenu(props: {
             placeholder: "Version name",
             maxLength: 80,
             busy: busy === "create",
-            hint: busy === "create" ? "Creating…" : "Press Enter to create and start working in it.",
+            hint: busy === "create" ? "Creating…" : undefined,
             testId: "version-new-input",
           },
         },
@@ -385,6 +386,7 @@ export function VersionMenu(props: {
       {
         id: "compare",
         label: "Compare with Main",
+        icon: <Diff size={14} aria-hidden />,
         testId: "version-compare",
         onSelect: () => {
           setMenu(false);
@@ -394,6 +396,7 @@ export function VersionMenu(props: {
       {
         id: "merge",
         label: "Merge into Main…",
+        icon: <Merge size={14} aria-hidden />,
         testId: "version-merge",
         disabled: !active.canMergeIntoMain,
         title: active.canMergeIntoMain
@@ -443,6 +446,7 @@ export function VersionMenu(props: {
           </button>
         )}
       >
+        {/* The text-files limit is stated once, in the merge confirm. */}
         {inlineError ? (
           <p
             data-testid="version-menu-error"
@@ -451,11 +455,7 @@ export function VersionMenu(props: {
           >
             {inlineError}
           </p>
-        ) : (
-          <p className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-subtle">
-            Versions cover text files during the alpha.
-          </p>
-        )}
+        ) : null}
       </Menu>
 
       {pendingSwitch !== null ? (
@@ -1677,31 +1677,30 @@ export function VersionComparePage(props: {
       data-testid="version-compare-page"
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
-      <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <SectionLabel>Compare</SectionLabel>
-          <h2 className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink">
-            {state.status === "ready"
-              ? `${state.versionName} compared with Main`
-              : "Comparing with Main"}
-          </h2>
+      {/* The tab says Compare with Main, so the header names the version
+          and counts the files that differ; the empty state says when none do. */}
+      <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-2">
+        <Layers size={14} aria-hidden className="shrink-0 text-subtle" />
+        <h2 className="m-0 min-w-0 truncate text-[14px] font-semibold text-ink">
           {state.status === "ready" ? (
-            <p className="mb-0 mt-1 text-[11px] text-muted">
-              {state.files.length === 0
-                ? "The two versions have the same text files."
-                : // One numeral style with the conflict copy next door
-                  // (the dohc-interface skill): a lone file is a sentence and
-                  // spells "one"; scanned counts above one use numerals.
-                  state.nextAfterPath !== null
-                  ? state.files.length === 1
-                    ? `More than one file differs between ${state.versionName} and Main.`
-                    : `More than ${state.files.length} files differ between ${state.versionName} and Main.`
-                  : state.files.length === 1
-                    ? `One file differs between ${state.versionName} and Main.`
-                    : `${state.files.length} files differ between ${state.versionName} and Main.`}
-            </p>
-          ) : null}
-        </div>
+            <>
+              {state.versionName}{" "}
+              <span className="sr-only">compared with Main</span>
+            </>
+          ) : (
+            "Comparing with Main"
+          )}
+        </h2>
+        {state.status === "ready" && state.files.length > 0 ? (
+          <span data-testid="version-compare-count" className="shrink-0">
+            <Pill>
+              {state.nextAfterPath !== null
+                ? `${state.files.length}+ files`
+                : state.files.length === 1 ? "1 file" : `${state.files.length} files`}
+            </Pill>
+          </span>
+        ) : null}
+        <span className="min-w-0 flex-1" />
         <button
           type="button"
           data-testid="version-compare-refresh"
