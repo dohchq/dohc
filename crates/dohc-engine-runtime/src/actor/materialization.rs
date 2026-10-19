@@ -705,11 +705,8 @@ pub(super) fn replay_pending_materializations(
         let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut paths_loaded = false;
         let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
-            if job.operation != MaterializationOperation::Delete {
-                return Ok::<_, RuntimeError>(false);
-            }
             if std::fs::canonicalize(root_dir.join(&job.target_path)).is_err() {
-                return Ok(false);
+                return Ok::<_, RuntimeError>(false);
             }
             let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
             if !paths_loaded && !active_paths.contains_key(&key) {

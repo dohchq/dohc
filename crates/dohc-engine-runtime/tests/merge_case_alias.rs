@@ -219,7 +219,8 @@ async fn secret_case_only_merge_delete_first_waits_for_legacy_write() {
 }
 
 #[tokio::test]
-async fn secret_exact_live_tip_keeps_existing_disk_entry() {
+async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
+    // Main's tip-present check completes this delete before alias retirement runs.
     let root = ScratchDir::new().unwrap();
     let db = engine_db_path(&root).unwrap();
     let key = create_key_file(&root).unwrap();
