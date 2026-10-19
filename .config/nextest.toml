@@ -34,5 +34,5 @@ retries = 1
 
 # Keep the latency fixture isolated from other tests in this runner.
 [[profile.default.overrides]]
-filter = 'test(two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fifty_ms)'
+filter = 'test(two_thousand_members_bound_store_work_and_ydoc_wait)'
 threads-required = "num-test-threads"
