@@ -47,14 +47,12 @@ function singleFlight(job) {
 
 // One request to the dashboard server. It gives up after 15 seconds, so a request left hanging by an
 // outage never holds up the next refresh. A failure says what went wrong in words, never a browser's error.
-// A phone that wakes or a connection that dropped fails one read, so a read that gets no answer tries once more.
-async function call(url, options = {}, again = !options.method) {
+async function call(url, options = {}) {
   let response, text;
   try {
     response = await fetch(url, { cache: "no-store", ...options, signal: AbortSignal.timeout(15_000) });
     text = await response.text();
   } catch (error) {
-    if (again && error.name !== "TimeoutError") return new Promise(done => setTimeout(done, 1000)).then(() => call(url, options, false));
     throw Object.assign(new Error(error.name === "TimeoutError" ? "the dashboard server did not answer in 15 seconds" : "can't reach the dashboard server"), { offline: true });
   }
   if (!response.ok) throw new Error(text.trim() || `the dashboard server answered ${response.status}`);
@@ -465,8 +463,8 @@ async function refreshTerminalsOnce() {
     const file = consoleFile(view);
     const pre = $(".term-body", el);
     if (!file) { writeTerminal(pre, waitingWords(view), `${view.source}:none`, true); renderConsoleStatus(el, view); return; }
-    const url = view.inline ? `api/log?slot=${view.n}&file=${encodeURIComponent(file)}`
-      : `api/log?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
+    const url = view.inline ? `api/output?slot=${view.n}&file=${encodeURIComponent(file)}`
+      : `api/output?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
     const key = `${view.source}:${file}`;
     try {
       const log = await getJson(url);
@@ -819,7 +817,7 @@ async function loadDrawerLog() {
   const pre = $("#drawer-log");
   if (!pre) return;
   try {
-    const log = await getJson(`api/log?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
+    const log = await getJson(`api/output?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
     if (ui.drawer === drawer && drawer.file === file) writeTerminal(pre, log?.text || "This log is empty.", `${drawer.id}/${drawer.attempt}:${file}`);
   } catch { /* The next refresh tries again. */ }
 }

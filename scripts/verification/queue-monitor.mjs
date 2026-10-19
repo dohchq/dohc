@@ -577,7 +577,8 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
       if (asset) return send(200, asset[1], readFileSync(assetPath(asset[0])));
       if (url.pathname === "/api/state") return send(200, "application/json", snapshot().body);
       if (url.pathname === "/api/run") return json(runDetails(root, query("id"), query("attempt")));
-      if (url.pathname === "/api/log") return json(query("slot") ? slotLog(slots(maxVerificationLanes), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
+      // Not /api/log: uBlock Origin's default EasyPrivacy list blocks any URL containing /log?id=.
+      if (url.pathname === "/api/output") return json(query("slot") ? slotLog(slots(maxVerificationLanes), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
       if (url.pathname === "/api/load") return json({ samples: load.read(query("days") === "7" ? 7 : 1, 288, listRequests(root, finished)) });
       return send(404, "text/plain", "Not found.");
     } catch (error) { failed(error); }

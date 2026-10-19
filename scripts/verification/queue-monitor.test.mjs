@@ -196,8 +196,9 @@ test("the server answers reads only on this host's names and the tailnet", async
   const script = await get(port, "/app.js");
   assert.equal(script.status, 200);
   assert.match(script.type, /javascript/u);
-  assert.equal((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=..%2F..%2Fstatus.json")).status, 404);
-  assert.equal(JSON.parse((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=rust.log")).body).text, "rust.log\n");
+  assert.doesNotMatch(script.body, /\/log\?/u, "uBlock Origin's default lists block URLs like /log?id=, so the page must not request one");
+  assert.equal((await get(port, "/api/output?id=000000003-cccccc&attempt=1&file=..%2F..%2Fstatus.json")).status, 404);
+  assert.equal(JSON.parse((await get(port, "/api/output?id=000000003-cccccc&attempt=1&file=rust.log")).body).text, "rust.log\n");
   assert.equal(JSON.parse((await get(port, "/api/load?days=7")).body).samples.length, 288);
 });
 
