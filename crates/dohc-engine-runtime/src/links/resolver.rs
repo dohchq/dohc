@@ -120,7 +120,7 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
             prefix.push('/');
         }
         prefix.push_str(part);
-        if !dohc_engine_files::materialize::materialize_segment_is_safe(part)
+        if !dohc_engine_files::materialize::creation_segment_is_safe(part)
             || dohc_engine_files::policy::classify_engine_file_path(&prefix)
                 != dohc_engine_files::policy::PathClassification::Tracked
         {
@@ -136,7 +136,7 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
     }
     if !path
         .split('/')
-        .all(dohc_engine_files::materialize::materialize_segment_is_safe)
+        .all(dohc_engine_files::materialize::creation_segment_is_safe)
         || dohc_engine_files::policy::classify_engine_file_path(&path)
             != dohc_engine_files::policy::PathClassification::Tracked
     {
@@ -359,11 +359,33 @@ mod tests {
             "NUL .txt",
             "COM¹.md",
             "report~1.pdf",
+            "ab~1.x~y",
+            "ab~x~1.md",
+            "😀😀😀😀~1.md",
             "notes/LPT9/new.md",
         ] {
             assert_eq!(
                 creation_path("source.md", literal, "markdown"),
                 None,
+                "{literal}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creation_allows_names_outside_the_desktop_short_name_pattern() {
+        for literal in [
+            "abcdefghi~1.md",
+            "ab~1.long",
+            "ab~1.x.y",
+            "ab~x.md",
+            "😀😀😀😀a~1.md",
+            "ab~1.x\u{feff}y",
+        ] {
+            assert_eq!(
+                creation_path("source.md", literal, "markdown"),
+                Some(literal.into()),
                 "{literal}"
             );
         }
