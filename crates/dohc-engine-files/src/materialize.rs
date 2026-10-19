@@ -4373,9 +4373,9 @@ fn other_leaf_spelling(target: &Path) -> Option<std::ffi::OsString> {
         let requested = target.file_name()?.to_str()?;
         let stored = dohc_windows_files::stored_leaf_name(target).ok()?;
         if stored != requested
-            && crate::floor::fold_segment(&stored) == crate::floor::fold_segment(requested)
+            && crate::floor::fold_segment(stored.to_str()?) == crate::floor::fold_segment(requested)
         {
-            return Some(stored.into());
+            return Some(stored);
         }
     }
     #[cfg(not(windows))]
