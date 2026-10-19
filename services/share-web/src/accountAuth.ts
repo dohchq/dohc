@@ -131,6 +131,16 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         return response;
       }
       if (upstream.status !== 200 || upstream.headers.has("location") || upstream.redirected) {
+        if (operation === "sign-in" && upstream.status === 403 && !upstream.headers.has("location") && !upstream.redirected &&
+            upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === "application/json") {
+          let refusal: unknown;
+          try { refusal = await readBoundedJson(upstream, options.maxResponseBytes, controller.signal); }
+          catch { controller.signal.throwIfAborted(); return refuse(401); }
+          // Better Auth checks the password before EMAIL_NOT_VERIFIED. Expose only that fixed refusal.
+          if (record(refusal) && refusal.code === "EMAIL_NOT_VERIFIED") {
+            return Response.json({ ok: false, code: "EMAIL_NOT_VERIFIED" }, { status: 403 });
+          }
+        }
         await upstream.body?.cancel().catch(() => undefined);
         return refuse(upstream.status >= 400 && upstream.status < 500 ? 401 : 503);
       }
