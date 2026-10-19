@@ -256,6 +256,7 @@ describe("SettingsDialog", () => {
     expect(order).toEqual([
       "settings-nav-general",
       "settings-nav-appearance",
+      "settings-nav-keyboard",
       "settings-nav-agents",
       "settings-row-current-workspace",
       "settings-nav-files",
@@ -588,7 +589,7 @@ describe("SettingsDialog", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("drops the History rail and Current workspace rows, and the Keyboard section", async () => {
+  it("drops the History rail and Current workspace rows", async () => {
     const view = render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
     );
@@ -599,7 +600,45 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     const general = await screen.findByTestId(settingsSectionPin("general"));
     expect(general.textContent).not.toContain("Current workspace");
-    expect(screen.queryByTestId("settings-nav-keyboard")).toBeNull();
+  });
+
+  it("finds the Keyboard page by a shortcut's name", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    await user.type(search, "bold");
+    const nav = screen.getByTestId("settings-sidebar").querySelector("nav")!;
+    expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid)).toEqual(["settings-nav-keyboard"]);
+    // The page shows the shortcut the search named, under its heading.
+    const page = () => screen.getByTestId(settingsSectionPin("keyboard"));
+    expect(within(page()).getAllByRole("heading").map((heading) => heading.textContent)).toEqual(["Document"]);
+    expect(page().textContent).toBe("DocumentBoldCtrlB");
+
+    // A name another section also answers to lists both.
+    await user.clear(search);
+    await user.type(search, "sidebar");
+    expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid))
+      .toEqual(["settings-nav-appearance", "settings-nav-keyboard", "settings-nav-workbench"]);
+
+    // A search that found the page by its own words shows every shortcut.
+    await user.clear(search);
+    await user.type(search, "keys");
+    expect(within(page()).getAllByRole("heading").map((heading) => heading.textContent))
+      .toEqual(["Workbench", "Document", "Find field", "Command palette and Go to"]);
+  });
+
+  it("finds no Keyboard page for a shortcut this computer does not list", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    // The test renderer loaded with no macOS platform and no dev tools.
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    for (const query of ["paragraph", "dev tools"]) {
+      await user.clear(search);
+      await user.type(search, query);
+      expect(screen.getByTestId(desktopPins.settingsEmptySearch).textContent).toBe(`No settings match "${query}".`);
+    }
   });
 
   it("shows the window zoom as a percentage and steps it through settings", async () => {

@@ -38,6 +38,7 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
+import { KeyboardSettings } from "../settings/KeyboardSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -2285,6 +2286,20 @@ function Pane(props: { theme: "light" | "dark" }) {
             <SettingRow title="Zoom" modified onReset={noop}>
               <ZoomSpecimen percent={110} />
             </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The page at Settings' content width, whatever this host's keys. */}
+      <Section part="settings-keyboard" title="Settings: Keyboard">
+        <Specimen label="Windows keys">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="win32" devTools={false} />
+          </div>
+        </Specimen>
+        <Specimen label="macOS keys, with dev tools">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="darwin" devTools />
           </div>
         </Specimen>
       </Section>

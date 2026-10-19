@@ -16,6 +16,8 @@ export function SettingRow(props: {
   aside?: ReactNode;
   // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
+  // A row of a long list that only shows a value, such as a shortcut's keys.
+  compact?: boolean;
 }) {
   const text = (
     <div className="min-w-0">
@@ -40,9 +42,9 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex min-h-14 items-center justify-between gap-6 border-b border-line py-2.5 last:border-b-0 max-[720px]:flex-col max-[720px]:items-start max-[720px]:gap-2 ${
-        props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""
-      }`}
+      className={`flex items-center justify-between gap-6 border-b border-line last:border-b-0 max-[720px]:flex-col max-[720px]:items-start max-[720px]:gap-2 ${
+        props.compact ? "min-h-9 py-1.5" : "min-h-14 py-2.5"
+      } ${props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""}`}
     >
       {props.lead ? (
         <div className="flex min-w-0 items-center gap-3">
