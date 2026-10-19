@@ -1,5 +1,14 @@
 import {expect,it} from "vitest";
 import {ReplicaMap} from "./replicaMap";
+it("keeps bulk-loaded entries and prior views through later delta rotations",()=>{
+  const entries=Array.from({length:513},(_,i)=>[String(512-i),i] as const),expected=new Map<string,number>(entries);
+  const map=new ReplicaMap<number>([...entries,["9",999]]);expected.set("9",999);
+  const prior=map.fork();
+  for(let i=0;i<800;i++) {const key=String(i);if(i%3){map.set(key,i);expected.set(key,i);}else{map.delete(key);expected.delete(key);}}
+  expect([...map]).toEqual([...expected].sort(([a],[b])=>a<b?-1:a>b?1:0));
+  expect(map.size).toBe(expected.size);expect(prior.size).toBe(513);expect(prior.get("9")).toBe(999);
+  expect([...prior]).toEqual([...new Map([...entries,["9",999] as const])].sort(([a],[b])=>a<b?-1:a>b?1:0));
+});
 it("retains prior roots through insertion, replacement, and deletion rotations",()=>{
   const map=new ReplicaMap<number>(),expected=new Map<string,number>();let seed=17;
   const snapshots:Array<{map:ReplicaMap<number>;expected:Map<string,number>}>=[];

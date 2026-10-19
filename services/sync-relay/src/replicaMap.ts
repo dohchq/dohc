@@ -34,7 +34,16 @@ function put<V>(n:Node<V>|undefined,key:string,value:V|undefined):Node<V>|undefi
 export class ReplicaMap<V> {
   private root?:Node<V>;
   size=0;
-  constructor(entries?:Iterable<readonly [string,V]>) {if(entries) for(const [k,v] of entries)this.set(k,v);}
+  constructor(entries?:Iterable<readonly [string,V]>) {
+    if(!entries)return;
+    const sorted=[...(entries instanceof Map ? entries : new Map(entries))].sort(([a],[b])=>a<b?-1:a>b?1:0);
+    const build=(start:number,end:number):Node<V>|undefined=>{
+      if(start===end)return undefined;
+      const mid=(start+end)>>>1, [key,value]=sorted[mid]!;
+      return node(key,value,build(start,mid),build(mid+1,end));
+    };
+    this.root=build(0,sorted.length);this.size=sorted.length;
+  }
   fork() {const copy=new ReplicaMap<V>();copy.root=this.root;copy.size=this.size;return copy;}
   get(key:string):V|undefined {let n=this.root;while(n){if(key===n.key)return n.value;n=key<n.key?n.left:n.right;}return undefined;}
   has(key:string) {return this.get(key)!==undefined;}

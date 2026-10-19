@@ -7,6 +7,36 @@ import type {StorageContext} from "./storage/context";
 import {ReplicaManifest} from "./replicaManifest";
 
 afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
+it("keeps restart indexing lazy, then updates the index after its first read",async()=>{
+  const f=await fixture(3);
+  try {
+    await f.supervisor.evict("w");forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");await f.supervisor.activate("w");
+    const view=f.supervisor.currentReadView("w")!.view,files=view.files;
+    let enumerations=0;
+    Object.defineProperty(view,"files",{get(){enumerations++;return files;},configurable:true});
+    expect(f.storage.readReplicaCurrentViewFile({...f.input,path:f.files[0]!.path},f.supervisor)).toMatchObject({status:"ready",text:""});
+    expect(enumerations).toBeGreaterThan(0);
+    const warmEnumerations=enumerations;
+    const renamed={...f.files[0]!,path:"docs/renamed.md"};f.update({files:[renamed]});await f.supervisor.activate("w");
+    const next=f.supervisor.currentReadView("w")!.view;
+    const descriptor=Object.getOwnPropertyDescriptor(next,"files")!;
+    Object.defineProperty(next,"files",{get(){throw Error("enumerated renamed restart view");},configurable:true});
+    try {
+      expect(f.storage.readReplicaCurrentViewFile({...f.input,path:renamed.path},f.supervisor)).toMatchObject({status:"ready",text:""});
+      expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor)).toMatchObject({status:"ready",files:expect.arrayContaining([expect.objectContaining({path:renamed.path})])});
+      expect(enumerations).toBe(warmEnumerations);
+    } finally {Object.defineProperty(next,"files",descriptor);}
+  } finally {await f.supervisor.close();}
+});
+it("validates changed rows before publishing a deferred cold view",()=>{
+  const file={versionId:"main",objectId:"o",path:"docs/a.md",contentKind:"text" as const,sha256:sha256(""),byteLength:0,lineageClaimId:null,restoreGeneration:null};
+  const stored={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files:[file],texts:[],omitted:[]};
+  const manifest=ReplicaManifest.fromStored(stored);
+  const invalid={...stored,revision:2,files:[{...file,path:"../secret.md"}]};
+  expect(()=>manifest.apply(invalid,false,[])).toThrow("Invalid replica read index");
+  const next=manifest.apply({...stored,revision:2},false,[]).next;
+  expect(()=>next.apply(invalid,true,[])).toThrow("Invalid replica read index");
+});
 it("fix1: removing an omission does not observe an old unavailable History row",()=>{
   const omitted={versionId:"main",objectId:"large",path:"docs/large.md",sha256:sha256("large"),reason:"text-frame-limit" as const};
   const page={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files:[],texts:[],omitted:[omitted]};

@@ -233,7 +233,7 @@ pub fn collect_current_view_cached(
         if !view.removed.is_empty() {last=Some(CurrentViewCursor{path:String::new(),object_id:String::new(),version_id:String::new(),removed:Some(cache.removed.len())});}
         let from=if cache.delta {"replica_cut_collecting t CROSS JOIN snapshots s ON s.workspace_id=t.workspace AND s.version_id=t.version AND s.object_id=t.object CROSS JOIN path_aliases a ON a.workspace_id=s.workspace_id AND a.version_id=s.version_id AND a.object_id=s.object_id AND a.path=s.path"} else {"path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path"};
         let filter=if cache.delta {" AND t.workspace=?1"} else {""};
-        let mut stmt = tx.prepare(&format!("SELECT a.version_id,a.object_id,a.path,s.content_kind,COALESCE(s.blob_sha256,s.binary_sha256),COALESCE(b.byte_length,bb.byte_length) FROM {from} LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND (a.version_id,a.path) > (?2,?3){filter} ORDER BY a.version_id,a.path")).map_err(SyncError::corrupt)?;
+        let mut stmt = tx.prepare(&format!("SELECT a.version_id,a.object_id,a.path,s.content_kind,COALESCE(s.blob_sha256,s.binary_sha256),COALESCE(b.byte_length,bb.byte_length),d.object_id IS NOT NULL,CASE WHEN d.object_id IS NULL THEN 0 ELSE d.settled_update_seq END FROM {from} LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 LEFT JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id WHERE a.workspace_id=?1 AND (a.version_id,a.path) > (?2,?3){filter} ORDER BY a.version_id,a.path")).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query(params![workspace, request.cursor.as_ref().map_or("", |c| c.version_id.as_str()),request.cursor.as_ref().map_or("", |c| c.path.as_str())]).map_err(SyncError::corrupt)?;
         while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
             let version: String = row.get(0).map_err(SyncError::corrupt)?;
@@ -242,7 +242,7 @@ pub fn collect_current_view_cached(
             let object: String = row.get(1).map_err(SyncError::corrupt)?;
 
             let key = DocKey::new(workspace, &version, &object).map_err(map_collab_hard_error)?;
-            let marker = durable::read_marker_in(&tx, &key).map_err(map_collab_hard_error)?;
+            let marker = if row.get::<_,bool>(6).map_err(SyncError::corrupt)? {durable::read_marker_in(&tx, &key).map_err(map_collab_hard_error)?} else {None};
             let scene_key=(version.clone(),object.clone());
             if marker.as_ref().is_some_and(|m|m.content_kind==dohc_engine_collab::ContentKind::Scene) {cache.scenes.insert(scene_key);} else {cache.scenes.remove(&scene_key);}
             let lineage = marker.as_ref().and_then(|m| m.lineage_claim_id.clone());
@@ -253,7 +253,7 @@ pub fn collect_current_view_cached(
             let mut sha: String = row.get(4).map_err(SyncError::corrupt)?;
             let mut len = usize::try_from(row.get::<_,i64>(5).map_err(SyncError::corrupt)?).map_err(SyncError::corrupt)?;
             let mut text: Option<String> = None;
-            let settled: i64 = tx.query_row("SELECT settled_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,version,object],|r|r.get(0)).optional().map_err(SyncError::corrupt)?.unwrap_or(0);
+            let settled: i64 = row.get(7).map_err(SyncError::corrupt)?;
             if let Some(marker) = marker && kind == "text" && marker.head_update_seq > settled {
                 let cache_key=(workspace.to_string(),version.clone(),object.clone());
                 // Scene projections also depend on versioned assets, so their key includes the complete applied revision.

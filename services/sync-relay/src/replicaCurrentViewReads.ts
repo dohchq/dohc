@@ -67,8 +67,8 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
   indexes.set(view,null);
   const paths = new Set<string>(), objects = new Set<string>();
   const byteLengths = new Map<string,number>();
-  const lineages: ViewIndex["lineages"] = new ReplicaMap(), omittedPaths = new ReplicaMap<string>();
-  const files: ViewIndex["files"] = new ReplicaMap(), texts = new ReplicaMap<string>(), omitted: ViewIndex["omitted"] = new ReplicaMap();
+  const lineages = new Map<string,IndexedFile>(), omittedPaths = new Map<string,string>();
+  const files = new Map<string,Map<string,IndexedFile>>(), texts = new Map<string,string>(), omitted = new Map<string,{row:ReplicaCurrentView["omitted"][number];path:IndexedFile["path"]}>();
   for (const file of [...view.files, ...view.omitted]) {
     const key = JSON.stringify([file.versionId,file.path]), object = JSON.stringify([file.versionId,file.objectId]);
     const prior = "contentKind" in file ? previous?.get(file.versionId)?.get(file.path) : undefined;
@@ -85,7 +85,7 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
       if (byteLengths.has(file.sha256) && byteLengths.get(file.sha256) !== file.byteLength) return null;
       byteLengths.set(file.sha256,file.byteLength);
       let version = files.get(file.versionId);
-      if (!version) files.set(file.versionId,version = new ReplicaMap());
+      if (!version) files.set(file.versionId,version = new Map());
       const indexed: IndexedFile = same ? prior : {row:file,path,lineage:lineageKey(file.versionId,file.objectId,file.lineageClaimId),projected:new Map()};
       projectedFile(indexed,file.path);
       version.set(file.path,indexed); lineages.set(indexed.lineage,indexed);
@@ -101,16 +101,17 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
   }
   // Metadata and verified text only. No grant or selector decision is cached.
   Object.freeze(view.files); Object.freeze(view.omitted); Object.freeze(view.texts); Object.freeze(view);
-  const index: ViewIndex = {files,texts,textChecks:new Map<string,boolean>(),lineages,omittedPaths,inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted}; indexes.set(view,index);
+  const index: ViewIndex = {files:new ReplicaMap([...files].map(([version,rows])=>[version,new ReplicaMap(rows)])),texts:new ReplicaMap(texts),textChecks:new Map<string,boolean>(),lineages:new ReplicaMap(lineages),omittedPaths:new ReplicaMap(omittedPaths),inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted:new ReplicaMap(omitted)}; indexes.set(view,index);
   return index;
 }
 
 /** Validate the changed rows and publish a separate index for this complete live view. */
 export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous:ReplicaCurrentView|undefined,
-  changes:ReplicaCurrentView, before:Array<ViewFile|ReplicaCurrentView["omitted"][number]>, texts:ReplicaMap<string>) {
-  const delta=indexView(changes), prior=previous && indexes.get(previous);
-  if (!delta || previous && !prior) throw new Error("Invalid replica read index.");
-  if (!prior) {delta.texts=texts;indexes.set(view,delta);return;}
+  changes:ReplicaCurrentView, before:Array<ViewFile|ReplicaCurrentView["omitted"][number]>, texts:ReplicaMap<string>, replacement?:ReplicaCurrentView,cold=false) {
+  const prior=previous && indexes.get(previous), delta=indexView(replacement && (!cold || prior) ? replacement : changes,prior?.files);
+  if (!delta || previous && !prior && !cold) throw new Error("Invalid replica read index.");
+  if(previous && !prior && cold)return;
+  if (!prior || replacement) {delta.texts=texts;indexes.set(view,delta);return;}
   const files=prior.files.fork(), lineages=prior.lineages.fork(), omittedPaths=prior.omittedPaths.fork(), omitted=prior.omitted.fork();
   const versions=new Set([...before,...changes.files,...changes.omitted].map(f=>f.versionId));
   for(const version of versions) files.set(version,files.get(version)?.fork() ?? new ReplicaMap());
@@ -127,6 +128,7 @@ export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous
 export function publishPersistedReplicaIndex(saved:ReplicaCurrentView, source:ReplicaCurrentView, unchanged=false) {
   if(saved===source)return;
   const index=indexes.get(source);
+  if(!index)return;
   if (index && (unchanged || saved.files.every(f=>{
     const row=index.files.get(f.versionId)?.get(f.path)?.row;
     return row && row.objectId===f.objectId && row.sha256===f.sha256 && row.byteLength===f.byteLength && row.contentKind===f.contentKind && row.lineageClaimId===f.lineageClaimId && row.restoreGeneration===f.restoreGeneration;

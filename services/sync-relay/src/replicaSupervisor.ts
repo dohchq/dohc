@@ -318,7 +318,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                 const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
                 const selectorDigest=createHash("sha256").update(JSON.stringify(selectors)).digest("hex");
                 const stored=entry.resync || !entry.manifest ? options.storage.readReplicaCurrentView(entry.lease.workspaceId) : undefined;
-                const manifest=entry.resync || !entry.manifest ? (stored ? new ReplicaManifest().apply(stored,false,[]).next : new ReplicaManifest()) : entry.manifest;
+                const manifest=entry.resync || !entry.manifest ? (stored ? (entry.manifest ? new ReplicaManifest().apply(stored,false,[]).next : ReplicaManifest.fromStored(stored)) : new ReplicaManifest()) : entry.manifest;
                 if(!entry.manifest && !entry.resync && stored)entry.storedView=stored;
                 if(entry.resync && entry.manifest) {manifest.texts=entry.manifest.texts.fork();manifest.textBytes=entry.manifest.textBytes;}
                 const since=!entry.resync && entry.selectorDigest===selectorDigest && manifest.view ? {revision:manifest.view.revision,logCursor:manifest.view.logCursor,journalCursor:manifest.view.journalCursor} : undefined;
