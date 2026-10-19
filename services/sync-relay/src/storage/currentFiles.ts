@@ -114,6 +114,12 @@ export function objectPathFromMomentPayload(
 // a base — which fails closed, because an unresolvable base opens a conflict.
 export function objectMomentFromMomentPayload(
   payloadJson: string,
+): ReturnType<typeof objectMomentFromMomentValue> {
+  try { return objectMomentFromMomentValue(JSON.parse(payloadJson)); } catch { return null; }
+}
+
+export function objectMomentFromMomentValue(
+  parsed: unknown,
 ): {
   objectId: string;
   momentId: string;
@@ -124,12 +130,6 @@ export function objectMomentFromMomentPayload(
   byteLength: number | null;
   recordedAtMs: number;
 } | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
   const record = asRecord(parsed);
   if (!record) return null;
   const objectId = record.objectId;

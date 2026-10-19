@@ -789,8 +789,10 @@ export interface SyncRelayStorage {
   replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
   stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("./replicaCurrentViews").StagedCurrentView;
   flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  advanceReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   nextReplicaHistoryPinAt(workspaceId: string): number | null;
+  sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   listReplicaHistoryPins(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryList;
   readReplicaHistoryPin(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {pinId: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryRead;
   readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
