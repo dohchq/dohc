@@ -73,7 +73,8 @@ fn delete_file_index_row(
 ) -> Result<(), SearchError> {
     conn.prepare_cached(
         "DELETE FROM engine_search_files_fts \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+         WHERE rowid IN (SELECT id FROM engine_search_files_fts_content \
+             WHERE c0 = ?1 AND c1 = ?2 AND c2 = ?3)",
     )?
     .execute(params![workspace_id, version_id, object_id])?;
     Ok(())
@@ -96,7 +97,7 @@ fn insert_file_index_row(
     Ok(())
 }
 
-/// Replace a group's search rows with one table scan, using the policy read before mutation.
+/// Delete a group's rows through the content-key index, using the policy read before mutation.
 pub(crate) fn begin_file_search_index_batch(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
@@ -113,8 +114,8 @@ pub(crate) fn begin_file_search_index_batch(
     } else {
         conn.execute(
             "DELETE FROM engine_search_files_fts
-             WHERE workspace_id=?1 AND version_id=?2
-                 AND object_id IN (SELECT value FROM json_each(?3))",
+             WHERE rowid IN (SELECT id FROM engine_search_files_fts_content
+                 WHERE c0=?1 AND c1=?2 AND c2 IN (SELECT value FROM json_each(?3)))",
             params![workspace_id, version_id, objects_json],
         )?;
     }

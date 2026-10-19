@@ -3325,6 +3325,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               CREATE TABLE history_undo_plans (request_id TEXT PRIMARY KEY REFERENCES engine_requests(request_id), workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, operation_id TEXT NOT NULL, author_json TEXT, plan_json TEXT NOT NULL CHECK(json_valid(plan_json)), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, errors_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(errors_json)), UNIQUE(workspace_id,operation_id)) STRICT;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 62,
+        id: "v2-file-search-key",
+        sql: include_str!("file_search_key.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -4344,6 +4350,10 @@ mod tests {
                 "v2-history-undo-plans",
                 "804873129399ca333652a5efdfc20b18e2219671d068e70ee2a78dc3a2c92783",
             ),
+            (
+                "v2-file-search-key",
+                "60447cc5e4274b65f3f9e71a830288acfc896ac0899d471e8bcebaf754519695",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4354,6 +4364,29 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn file_search_key_upgrade_preserves_rows_and_indexes_exact_deletion() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-file-search-key");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO engine_search_files_fts(workspace_id,version_id,object_id,path,text) VALUES ('ws','main','a','a.md','alpha'),('ws','other','a','a.md','other'),('ws','main','b','b.md','beta');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan: String = conn.query_row("EXPLAIN QUERY PLAN SELECT id FROM engine_search_files_fts_content WHERE c0='ws' AND c1='main' AND c2='a'", [], |row| row.get(3)).unwrap();
+        assert!(
+            plan.contains("COVERING INDEX idx_engine_search_files_key"),
+            "{plan}"
+        );
+        assert_eq!(conn.execute("DELETE FROM engine_search_files_fts WHERE rowid IN (SELECT id FROM engine_search_files_fts_content WHERE c0='ws' AND c1='main' AND c2='a')", []).unwrap(), 1);
+        let rows: Vec<(String,String)> = conn.prepare("SELECT version_id,object_id FROM engine_search_files_fts ORDER BY version_id,object_id").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(
+            rows,
+            vec![("main".into(), "b".into()), ("other".into(), "a".into())]
+        );
+        conn.execute_batch("INSERT INTO engine_search_files_fts(engine_search_files_fts) VALUES('integrity-check');").unwrap();
     }
 
     #[test]
