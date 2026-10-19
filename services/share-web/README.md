@@ -212,7 +212,7 @@ For a manual deployment, configure both services:
 - On share-web, set `DOHC_SHARE_WEB_AUTH_URL` and `DOHC_SHARE_WEB_PUBLIC_ORIGIN` with the matching public Host and relay exchange key.
   Set `DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS`, and `DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS`.
 
-Serve the account service's `/account/*` pages on share-web's public origin so the sign-in form's "Forgot your password?" link works.
+Serve the account service's `/account/*` and `/api/auth/*` paths on share-web's public origin so the sign-in form's "Forgot your password?" link works.
 
 Without the self-host profile, the named session, live transport, and editor settings require explicit budgets.
 Share-web refuses editor requests when its named editor is unconfigured.
