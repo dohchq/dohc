@@ -22,14 +22,14 @@ export function replicaHistoryAuthors(storage: StorageContext, workspace: string
       else if (!prior) authors.set(key,author);
     }
   };
-  const logs = statement(storage,`SELECT op_kind,relay_admission,settlement_admission_json,admitted_author_snapshot_json
+  const logs = statement(storage,`SELECT admitted_author_snapshot_json
     FROM sync_relay_log WHERE workspace_id=? AND json_extract(payload_json,'$.versionId')=?
-      AND json_extract(payload_json,'$.objectId')=? AND relay_seq>? AND relay_seq<=? ORDER BY relay_seq LIMIT ?`)
+      AND json_extract(payload_json,'$.objectId')=? AND relay_seq>? AND relay_seq<=?
+      AND op_kind IN ('ydoc.update','moment.append') AND relay_admission IS NULL
+      AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json,'$.status')<>'refused')
+      ORDER BY relay_seq LIMIT ?`)
     .all(workspace,version,object,fromLog,toLog,SCAN_LIMIT+1);
   for (const row of logs.slice(0,SCAN_LIMIT)) {
-    if (row.relay_admission != null ||
-        !["ydoc.update","moment.append"].includes(String(row.op_kind)) ||
-        row.settlement_admission_json != null && JSON.parse(String(row.settlement_admission_json)).status === "refused") continue;
     add(row.admitted_author_snapshot_json);
   }
   const remaining = SCAN_LIMIT-Math.min(logs.length,SCAN_LIMIT);

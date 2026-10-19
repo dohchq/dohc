@@ -166,6 +166,7 @@ node tools/rust-engine-program/build-slot.mjs --status
 ```
 
 Use `--root <directory>` to inspect another queue root. The command emits JSON and does not create directories or acquire slots.
+On a host that [checks Rust on Linux](#rust-on-linux), it also reports the Linux slot.
 Each lane reports owners and waiters with their purpose, checkout, commit, phase, and elapsed time when recorded.
 Older records without that metadata have an unknown purpose.
 Wait estimates use the median duration of up to twenty completed runs in the same lane.
@@ -203,6 +204,38 @@ Record other host builds and gates during the comparison; a separate outer queue
 Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
 Do not change the live queue root or remove another run's tickets to conduct a trial.
 Remove the two verification trial environment variables from the shell before returning to ordinary verification.
+
+### Rust on Linux
+
+On the shared Windows host, a run that selects Rust also checks Rust in WSL. A change that breaks only the Linux build then fails before merge.
+A PR run runs the gate's clippy command there, which builds every target, tests included, without running them.
+A full run, such as the nightly, runs the whole Rust job there, tests included.
+A full Rust job on every PR would take as long as the Windows one, and the host runs one Linux job at a time for every lane.
+
+The host names its WSL distro in `verification-linux` in the build slot root:
+
+```powershell
+Set-Content C:\w\_locks\verification-linux Ubuntu
+```
+
+Without that file, nothing runs on Linux. Other hosts and CI do not have it.
+
+- The verifier sends the commit and its base to the distro as a Git bundle. The distro checks out the commit in `~/.dohc-verification/linux`. A full run installs dependencies and runs `verify.mjs pr --job rust` there, with the same pinned tools as Windows.
+- The host runs one Linux job at a time. The job waits for the Linux slot, then takes a cargo lane, like a build in another lane, and builds with the same number of jobs.
+- The job runs in a systemd user scope with a memory limit of 11 GB, because all WSL distros share one VM with Docker. When the Windows side stops, the scope stops everything the job started.
+  The job frees its slots only after WSL confirms that the scope stopped. Otherwise the run is a machine failure, and the job leaves its slots as a holder that died leaves them. Each slot frees once the verifier has exited and its grace has passed since its last heartbeat, which stops when the job gives the slot up: 30 minutes for the cargo lane, about 2 minutes for the Linux slot, so that the next Linux job can stop the scope.
+  If WSL's connection broke during a run, its Linux build can keep running beside other builds until the scope's two-hour limit.
+  The next job stops a scope that a killed run left behind, and does not start while one still runs.
+  The scope's peak memory and out-of-memory kills are in the job's `scope.json`. A failure after a kill at the limit is a machine failure.
+- Before it builds, the job waits until Windows has room for it. The VM's page cache already counts against Windows memory, so the job needs only the part of its limit that exceeds that cache, with 3 GB still free.
+- The job waits at most 30 minutes in all for the Linux slot, a cargo lane, and memory. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
+- The step is `rust-linux`. Its evidence is in the attempt's `rust-linux` folder: a `result.json`, the logs, and the scripts that ran in WSL. In a full run, that `result.json` and the logs are the Linux verifier's own.
+- A clippy error or warning, or a failed Linux test, fails the change. A failed test appears under `failed` and `flaky` with the step `rust-linux`. A failure of WSL, of the transfer, or of the Linux host is a machine failure, and the queue retries it.
+- `pnpm verify:plan` shows the distro under `linux`. A run that reuses Rust evidence with `--reuse-rust` runs nothing on Linux, because a reuse covers renderer changes only.
+
+To run a failed Linux check again, use your own clone in the distro, not the queue's checkout.
+The distro needs systemd, and the Node, pnpm, Rust, and cargo tool versions that `pr-checks.yml` pins on the `PATH` of a login shell.
+The first job sends the whole history, about 60 MB, and builds from cold.
 
 ### Restart the computer without losing a run
 

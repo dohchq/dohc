@@ -651,6 +651,46 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
+test("a hold that throws after its slot was created gives the slot back", async () => {
+  const root = slotRoot();
+  try {
+    // The first look admits; the look after the claim throws, as a deadline that passes in between does.
+    let looks = 0;
+    const hold = () => { looks += 1; if (looks > 1) throw new Error("the deadline passed"); return null; };
+    await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 5000, pollMs: 1, hold }), /the deadline passed/);
+    assert.equal(looks, 2);
+    assert.deepEqual(readdirSync(root).filter(name => /^build-slot-\d$/u.test(name)), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an abandoned slot stays held, as a dead holder's does, without a release at exit", async () => {
+  const root = slotRoot();
+  try {
+    const exits = process.listenerCount("exit");
+    const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 5000, pollMs: 1 });
+    assert.equal(process.listenerCount("exit"), exits + 1);
+    slot.abandon();
+    assert.equal(process.listenerCount("exit"), exits);
+    assert.equal(existsSync(join(root, "build-slot-1", "owner.json")), true);
+    slot.release();
+    assert.equal(existsSync(join(root, "build-slot-1")), true, "an abandoned slot is no longer this process's to release");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status CLI reports the Linux slot only on a host that runs Linux jobs", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const status = () => {
+    const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status", "--root", root], {encoding: "utf8", timeout: 5000});
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).lanes.map(lane => lane.kind);
+  };
+  assert.deepEqual(status(), ["build-slot", "verification-slot"]);
+  writeFileSync(join(root, "verification-linux"), "Ubuntu");
+  assert.deepEqual(status(), ["build-slot", "verification-slot", "linux-slot"]);
+  assert.deepEqual(readdirSync(root), ["verification-linux"]);
+});
+
 test("status CLI reports invalid configuration and shows a lane held above the setting", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));

@@ -2325,7 +2325,8 @@ fn select_snapshot_by_object(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<Snapshot>, SyncError> {
-    tx.query_row(
+    let snapshot = text::ReadSnapshot::new(tx).map_err(SyncError::corrupt)?;
+    let row = tx.query_row(
         "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
                 s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                 s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
@@ -2335,11 +2336,15 @@ fn select_snapshot_by_object(
          LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
          WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
         params![workspace_id, version_id, object_id],
-        |row| snapshot_from_row(tx, row),
+        snapshot_from_row,
     )
     .optional()
     .map_err(SyncError::corrupt)?
-    .transpose()
+    .transpose()?;
+    snapshot.finish(
+        hydrate_snapshots(tx, row.into_iter().collect()).map(|rows| rows.into_iter().next()),
+        SyncError::corrupt,
+    )
 }
 
 fn select_snapshot_by_path(
@@ -2360,7 +2365,7 @@ fn select_snapshot_by_path(
              LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
              WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
             params![workspace_id, version_id, path],
-            |row| snapshot_from_row(tx, row),
+            snapshot_from_row,
         )
         .optional()
         .map_err(SyncError::corrupt)?
@@ -2369,7 +2374,7 @@ fn select_snapshot_by_path(
         if snapshot.path != path {
             return Err(SyncError::CoordinateDiverged);
         }
-        return Ok(Some(snapshot));
+        return hydrate_snapshots(tx, vec![snapshot]).map(|rows| rows.into_iter().next());
     }
     let mut statement = tx
         .prepare(
@@ -2384,22 +2389,38 @@ fn select_snapshot_by_path(
         )
         .map_err(SyncError::corrupt)?;
     let rows = statement
-        .query_map(params![workspace_id, version_id, path], |row| {
-            snapshot_from_row(tx, row)
-        })
+        .query_map(params![workspace_id, version_id, path], snapshot_from_row)
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
     if rows.len() > 1 {
         return Err(SyncError::CoordinateDiverged);
     }
-    rows.into_iter().next().transpose()
+    let rows = rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+    hydrate_snapshots(tx, rows).map(|rows| rows.into_iter().next())
 }
 
-fn snapshot_from_row(
+fn hydrate_snapshots(
     conn: &rusqlite::Connection,
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Result<Snapshot, SyncError>> {
+    mut rows: Vec<Snapshot>,
+) -> Result<Vec<Snapshot>, SyncError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter()
+            .filter(|row| row.kind == ContentKind::Text)
+            .map(|row| row.digest.as_str()),
+        None,
+    )
+    .map_err(SyncError::corrupt)?;
+    for row in &mut rows {
+        if row.kind == ContentKind::Text {
+            row.text = text::take(&mut bodies, &row.digest);
+        }
+    }
+    Ok(rows)
+}
+
+fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapshot, SyncError>> {
     let kind: String = row.get(3)?;
     let kind = match kind.as_str() {
         "text" => ContentKind::Text,
@@ -2408,7 +2429,7 @@ fn snapshot_from_row(
             return Ok(Err(SyncError::CoordinateDiverged));
         }
     };
-    let text: Option<String> = text::optional_from_row(conn, row, 6)?;
+    let text: Option<String> = row.get(6)?;
     let digest = match kind {
         ContentKind::Text => row.get::<_, Option<String>>(4)?,
         ContentKind::Binary => row.get::<_, Option<String>>(5)?,
@@ -2417,7 +2438,7 @@ fn snapshot_from_row(
         return Ok(Err(SyncError::CoordinateDiverged));
     };
     let text = match (kind, text) {
-        (ContentKind::Text, Some(text)) => text,
+        (ContentKind::Text, Some(_)) => String::new(),
         (ContentKind::Binary, _) => String::new(),
         _ => return Ok(Err(SyncError::CoordinateDiverged)),
     };
