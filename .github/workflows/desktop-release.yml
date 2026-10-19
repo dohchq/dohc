@@ -20,9 +20,9 @@ on:
         required: false
         type: string
       platforms:
-        description: Platforms to build
+        description: Platforms to build. A published nightly needs windows-linux.
         required: true
-        default: windows
+        default: windows-linux
         type: choice
         options:
           - windows
@@ -154,7 +154,9 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Keep published update platforms
+      # Publish checks these rules again, because a run can publish after
+      # midnight UTC or be re-run.
+      - name: Check publication rules
         if: needs.preflight.outputs.dry_run != 'true'
         shell: bash
         env:
@@ -164,8 +166,8 @@ jobs:
         run: |
           set -euo pipefail
           gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq '.[] | {draft, assets: [.assets[] | {name}]}' > release-history.jsonl
-          node scripts/check-desktop-release-platforms.mjs \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
             --channel "$RELEASE_CHANNEL" \
             --platforms "$RELEASE_PLATFORMS" \
             --releases release-history.jsonl
@@ -374,6 +376,28 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      # This job holds the channel's concurrency lock, so no other release on
+      # the channel can publish between this check and the publish step.
+      - name: Check publication rules
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
+            --channel "$RELEASE_CHANNEL" \
+            --platforms "$RELEASE_PLATFORMS" \
+            --releases release-history.jsonl
 
       - name: Download packaged artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
