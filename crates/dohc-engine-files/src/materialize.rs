@@ -4335,7 +4335,9 @@ pub fn creation_segment_is_safe(segment: &str) -> bool {
         let numbered_device = ["com", "lpt"].into_iter().any(|prefix| {
             base.strip_prefix(prefix).is_some_and(|number| {
                 number.chars().count() == 1
-                    && number.chars().any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
+                    && number
+                        .chars()
+                        .any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
             })
         });
         if named_device || numbered_device {
@@ -4355,9 +4357,8 @@ pub fn creation_segment_is_safe(segment: &str) -> bool {
                 && plain(stem)
                 && !digits.is_empty()
                 && digits.bytes().all(|byte| byte.is_ascii_digit())
-                && extension.is_none_or(|ext| {
-                    (1..=3).contains(&ext.encode_utf16().count()) && plain(ext)
-                })
+                && extension
+                    .is_none_or(|ext| (1..=3).contains(&ext.encode_utf16().count()) && plain(ext))
             {
                 return false;
             }
