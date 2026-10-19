@@ -336,7 +336,7 @@ fn the_windows_name_lookup_rejects_a_symlink_leaf() {
         return;
     }
     assert_eq!(
-        dohc_windows_files::stored_leaf_name(&ws.path().join("notes.md"))
+        dohc_windows_files::stored_leaf_name(&ws.path().join("Notes.md"))
             .expect_err("a symlink leaf has no spelling proof")
             .kind(),
         ErrorKind::InvalidInput
