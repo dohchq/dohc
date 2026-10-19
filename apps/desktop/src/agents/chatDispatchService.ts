@@ -1209,10 +1209,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspaceId: string,
     expectedAttachmentId?: symbol,
   ): Promise<void> {
+    // After stop, a scan neither queues nor looks up its workspace: quit may
+    // already be closing workspace authority.
+    if (stopped) return Promise.resolve();
     let scannedWorkspace: ChatDispatchWorkspace | null = null;
     const scan = enqueue(workspaceId, async () => {
+      if (stopped) return;
       const workspace = options.workspaceFor(workspaceId);
-      if (!workspace || stopped) return;
+      if (!workspace) return;
       if (
         expectedAttachmentId !== undefined &&
         workspace.attachmentId !== expectedAttachmentId

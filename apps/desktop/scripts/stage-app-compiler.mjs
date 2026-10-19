@@ -6,7 +6,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
-import { build } from "esbuild";
 
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
@@ -150,6 +149,8 @@ export async function stageAppCompiler(options = {}) {
   const require = createRequire(join(sourceRoot, "package.json"));
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
+  // Loaded here so the Rust gate can read the pinned Node without installed packages.
+  const { build } = await import("esbuild");
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
   const nativePackage = `@esbuild/${platform}-${arch}`;
   let platformRoot;

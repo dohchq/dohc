@@ -27,8 +27,10 @@ const scopeMemory = `-p MemoryHigh=${scopeMaxGb - 2}G -p MemoryMax=${scopeMaxGb}
 // The queue distrusts a check that failed after Windows free memory fell below this.
 const hostFloorGb = 3;
 // The queue fails an attempt that passes its two-hour limit, so the job stops waiting for its slots
-// and memory well before that, as a machine failure the queue retries.
-const admissionMs = 30 * 60_000;
+// and memory in time to finish inside it, as a machine failure the queue retries. Until the attempt's
+// own Windows jobs end, about 45 minutes in, or 60 in a full run, they hold a cargo lane and memory, so the
+// wait outlasts them. A full run's Linux job then takes about 45 minutes; clippy takes a few.
+const admissionMs = full => (full ? 55 : 75) * 60_000;
 
 /** The WSL distro this host verifies Linux in, or null. */
 export function linuxDistro(env = process.env, platform = process.platform) {
@@ -149,7 +151,7 @@ exit 1
  * or a machine failure, which carries `environment` so the queue retries it instead of failing the change.
  */
 export async function linuxRustJob({ distro, head, base, output, full = false, signal, request = "inline", attempt = null, command = run, gitRead = git,
-  budget = resolveBuildBudget(), freeMemoryGb = () => freemem() / 1024 ** 3, waitMs = admissionMs }) {
+  budget = resolveBuildBudget(), freeMemoryGb = () => freemem() / 1024 ** 3, waitMs = admissionMs(full) }) {
   const environment = cause => error => {
     if (signal?.aborted) throw signal.reason ?? error;
     if (error?.interrupted) throw error;

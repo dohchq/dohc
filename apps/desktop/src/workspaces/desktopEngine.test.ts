@@ -24,6 +24,11 @@ vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock
 const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
+// Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
+vi.mock("./installedReaderConfig", async importOriginal => {
+  const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
+  return { installedReaderConfig: (resources: string | undefined) => installedReaderConfig(resources, "linux", "x64") };
+});
 
 type State = {
   collectionAutomations: { notifyClaimed: Mock<() => void>; failuresChanged: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };

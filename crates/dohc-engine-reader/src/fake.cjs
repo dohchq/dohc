@@ -56,8 +56,10 @@ process.stdin.on('data', chunk => {
     if (r.method === 'hello') {
       const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=256'];
       const env = Object.keys(process.env);
+      // Windows receives SystemRoot. On macOS, CoreFoundation sets this variable inside Node itself.
+      const allowed = {win32: ['SystemRoot'], darwin: ['__CF_USER_TEXT_ENCODING']}[process.platform] ?? [];
       if (JSON.stringify(process.execArgv) !== JSON.stringify(expected)
-        || JSON.stringify(env.sort()) !== JSON.stringify(process.platform === 'win32' ? ['SystemRoot'] : [])
+        || JSON.stringify(env.sort()) !== JSON.stringify(allowed)
         || !process.permission || process.permission.has('fs.write') || process.permission.has('child')
         || process.cwd() === manifest.parentCwd) process.exit(19);
       if (mode === 'startup-hang') continue;

@@ -4,13 +4,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { freemem, tmpdir, uptime, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, verifyThroughQueue, writeJson } from "./queue.mjs";
-import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
+import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, launchAgentDefinition, launchAgentLabel, launchPath, listRequests, movedNote, nextRequest, nightlyAgentDefinition, nightlyAgentLabel, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, queueRoot, readJson, readPause, registerLaunchAgents, reloadLaunchAgent, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startCommand, startsInMs, submit, submitNightly, taskDefinition, terminalStates, unregisterLaunchAgents, verifyThroughQueue, writeJson } from "./queue.mjs";
+import { cleanCheckout, freeMemoryGb, holdAwake, laneTemp, runService, stopStrays, sweepContainers } from "./queue-service.mjs";
+import { buildEnvHelper, envHelper, heldPath, holdSocket, instanceVariable, markedPids, members, processTable, requestMarker, requestVariable, stopProcesses, stopRecorded, supervise, treePath } from "./queue-supervisor.mjs";
 import { threadDirectory } from "./queue-monitor.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -407,7 +409,7 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32, heartbeatMs, bootedAt, threadOf = () => null } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32, heartbeatMs, bootedAt, threadOf = () => null, strays = async () => undefined, strayRetryMs } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
@@ -436,7 +438,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
   };
   const serve = (overrides = {}) => runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs, heartbeatMs, bootedAt,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, threadOf, stop: stop.signal, log: () => {}, ...overrides });
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, threadOf, stop: stop.signal, log: () => {}, keepAwake: () => () => {}, strays, strayRetryMs, ...overrides });
   let service = serve();
   // Stop the service and start another on the same root, as the supervisor does. Resolves once the new one beats.
   const restart = async overrides => {
@@ -462,6 +464,8 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
   const finishHeld = () => held.splice(0).forEach(done => done());
   return { root, fixture, calls, request, settled, service, restart, finishHeld };
 }
+
+const uptimeMs = () => uptime() * 1000;
 
 async function waitFor(read, message, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
@@ -636,6 +640,54 @@ test("each lane has its own temp folder under the queue root", () => {
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
 });
 
+test("a lane's clean removes read-only build output that git clean alone cannot, and keeps the caches", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-lane-clean-"));
+  // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
+  // The other two have names Git would quote, and a name that trimmed output would lose.
+  const generations = [join(root, "resources", "engine-reader", "generation"), join(root, "généré"), join(root, " generated")];
+  const cached = join(root, "scratch", "node_modules", "package", "index.js");
+  try {
+    const git = async args => (await run("git", args, { cwd: root, quietStdout: true })).stdout;
+    await git(["init", "-q"]);
+    writeFileSync(join(root, ".gitignore"), "resources/\n");
+    for (const generation of generations) {
+      mkdirSync(generation, { recursive: true });
+      writeFileSync(join(generation, "reader.cjs"), "");
+      chmodSync(join(generation, "reader.cjs"), 0o444);
+      chmodSync(generation, 0o555);
+    }
+    mkdirSync(join(cached, ".."), { recursive: true });
+    writeFileSync(cached, "");
+    chmodSync(cached, 0o444);
+    await cleanCheckout(git, root);
+    for (const generation of generations) assert.equal(existsSync(generation), false, generation);
+    assert.equal(statSync(cached).mode & 0o200, 0, "the clean keeps a cache below an untracked folder as it was");
+  } finally {
+    for (const path of [...generations, cached]) try { chmodSync(path, 0o755); } catch { /* Removed. */ }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lane's clean retries only after Git ran and failed, and fails when the retry does", async () => {
+  const calls = [];
+  const exited = Object.assign(new Error("git failed (1)."), { commandExitFailure: true });
+  await assert.rejects(cleanCheckout(async args => {
+    calls.push(args[0]);
+    if (args[0] === "clean") throw exited;
+    return "";
+  }, tmpdir()), /git failed \(1\)/);
+  assert.deepEqual(calls, ["clean", "ls-files", "clean"]);
+  calls.length = 0;
+  const timedOut = Object.assign(new Error("git failed (timed out after 900000ms)."), { timedOut: true });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw timedOut; }, tmpdir()), /timed out/);
+  assert.deepEqual(calls, ["clean"], "a timeout or a stop fails the lane without touching it again");
+  calls.length = 0;
+  // Windows' job relay exits with 0xD0C5 when Git never started.
+  const neverStarted = Object.assign(new Error("git failed (53445)."), { commandExitFailure: true, exitCode: 0xD0C5 });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw neverStarted; }, tmpdir()), /53445/);
+  assert.deepEqual(calls, ["clean"]);
+});
+
 test("another run waits while free memory is low, but a lone run still starts", async t => {
   let memory = 5;
   const { root, request, calls } = harness(t, { lanes: () => 2, freeMemory: () => memory });
@@ -649,6 +701,9 @@ test("another run waits while free memory is low, but a lone run still starts", 
   await waitFor(() => /waiting for memory/u.test(readJson(queuePaths(root).service)?.health?.reason ?? "") || null, "status says why", 20_000);
   memory = 20;
   await waitFor(() => calls.find(call => call.id === second.id), "the second run starts once memory is back");
+  // With every lane busy, no run waits for memory, so status does not say so.
+  memory = 5;
+  await waitFor(() => readJson(queuePaths(root).service)?.health?.reason === null || null, "a full host waits for a lane, not for memory", 20_000);
   await cancel(root, first.id);
   await cancel(root, second.id);
 });
@@ -728,7 +783,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   mkdirSync(held);
   const calls = [];
   const stop = new AbortController();
-  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100, keepAwake: () => () => {}, strays: async () => undefined,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
     worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
     threadOf: () => null, stop: stop.signal, log: () => {} });
@@ -762,7 +817,7 @@ test("a newer commit submitted while the service was down replaces the request i
   const key = await submit(root, { head: newer, ...fields });
   const calls = [];
   const stop = new AbortController();
-  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100, keepAwake: () => () => {}, strays: async () => undefined,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
     worker: async ({ grant, output }) => { calls.push(grant.head); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
     threadOf: () => null, stop: stop.signal, log: () => {} });
@@ -841,6 +896,397 @@ test("the supervisor stops everything a dead service started, restarts it, and i
   // Stop only the supervisor, as a crash or Task Scheduler would; its job takes the rest.
   spawnSync("taskkill.exe", ["/PID", String(supervisor.pid), "/F"], { windowsHide: true });
   await waitFor(() => second.every(pid => !alive(pid)), "the service and everything it started must stop with the supervisor", 15_000);
+});
+
+test("a Mac finds its queue only once the service is installed there, and never for a run with its own slot root", t => {
+  const home = mkdtempSync(join(tmpdir(), "dohc-queue-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const mac = { platform: "darwin", home };
+  const root = join(home, "dev", "worktrees", "_verification");
+  assert.equal(queueRoot({}, mac), null, "an ordinary Mac verifies inline");
+  mkdirSync(join(home, "dev", "worktrees", ".locks"), { recursive: true });
+  mkdirSync(root);
+  assert.equal(queueRoot({}, mac), null, "a shared Mac without the service verifies inline");
+  writeFileSync(join(root, "current"), "0123456789ab");
+  assert.equal(queueRoot({}, mac), root, "the queue sits beside the slot root, as on Windows");
+  assert.equal(queueRoot({ DOHC_BUILD_SLOT_ROOT: join(home, "trial") }, mac), null, "a trial or a test verifies inline");
+  assert.equal(queueRoot({ CI: "true" }, mac), null);
+  assert.equal(queueRoot({ DOHC_VERIFICATION_QUEUE_ROOT: join(home, "elsewhere") }, mac), join(home, "elsewhere"));
+  assert.equal(queueRoot({}, { platform: "linux", home }), null);
+  // Uninstall removes the marker, and the Mac verifies inline again.
+  rmSync(join(root, "current"));
+  assert.equal(queueRoot({}, mac), null);
+});
+
+test("the Mac's LaunchAgents run the supervisor in the login session and submit the nightly run at 03:07", t => {
+  // A name only, never created: Windows forbids < and > in a file name.
+  const root = join("/Users", "a & b <c>", "_verification");
+  const xml = text => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const service = launchAgentDefinition(root, "/opt/homebrew/bin:/usr/bin");
+  assert.match(service, /<key>Label<\/key><string>app\.dohc\.verification-queue<\/string>/u);
+  assert.match(service, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/u, "Electron needs the login session's display");
+  assert.match(service, /<key>RunAtLoad<\/key><true\/>\s*<key>KeepAlive<\/key><true\/>/u, "launchd starts it at login and whenever it exits");
+  assert.match(service, /<key>ProcessType<\/key><string>Interactive<\/string>/u, "a gate runs without launchd's limits for other jobs");
+  assert.ok(service.includes(`<array><string>/usr/bin/env</string><string>node</string><string>${xml(join(root, "supervisor.mjs"))}</string><string>--root</string><string>${xml(root)}</string></array>`));
+  assert.match(service, /<key>PATH<\/key><string>\/opt\/homebrew\/bin:\/usr\/bin<\/string>/u, "the service finds the installer's tools");
+  assert.doesNotMatch(service, /DOHC_VERIFICATION_QUEUE_ROOT/u, "a lane's tests inherit the service's environment, and their nested verifiers must not find the live queue");
+  const nightly = nightlyAgentDefinition(root, "/usr/bin");
+  assert.match(nightly, /<key>Label<\/key><string>app\.dohc\.verification-nightly<\/string>/u);
+  assert.ok(nightly.includes(`<key>DOHC_VERIFICATION_QUEUE_ROOT</key><string>${xml(root)}</string>`), "the nightly submission names its queue, as nightly.ps1 does");
+  assert.match(nightly, /<key>StartCalendarInterval<\/key><dict><key>Hour<\/key><integer>3<\/integer><key>Minute<\/key><integer>7<\/integer><\/dict>/u);
+  assert.doesNotMatch(nightly, /KeepAlive|RunAtLoad/u);
+  assert.match(nightly, /sleep 600/u, "a failed submission tries again every 10 minutes");
+  // Only a Mac has plutil, and only a POSIX shell runs the nightly script.
+  if (process.platform !== "darwin") return;
+  const dir = mkdtempSync(join(tmpdir(), "dohc queue & agents "));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const [name, text] of [["service.plist", launchAgentDefinition(dir, process.env.PATH)], ["nightly.plist", nightlyAgentDefinition(dir, process.env.PATH)]]) {
+    writeFileSync(join(dir, name), text);
+    const lint = spawnSync("plutil", ["-lint", join(dir, name)], { encoding: "utf8" });
+    assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+  }
+  // The nightly script runs the installed service's queue.mjs, whatever the root's name; a pass ends it at once.
+  const script = nightlyAgentDefinition(dir, process.env.PATH).match(/<string>\/bin\/sh<\/string><string>-c<\/string><string>(.*?)<\/string>/su)[1]
+    .replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+  const queue = join(dir, "service", "0123456789ab", "scripts", "verification");
+  mkdirSync(queue, { recursive: true });
+  writeFileSync(join(dir, "current"), "0123456789ab\n");
+  writeFileSync(join(queue, "queue.mjs"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(join(dir, "ran"))}, process.argv.slice(2).join(" ") + " " + process.env.DOHC_VERIFICATION_QUEUE_ROOT);`);
+  // A failed first attempt would wait ten minutes for the next one.
+  const ran = spawnSync("/bin/sh", ["-c", script, dir], { encoding: "utf8", timeout: 30_000, env: { PATH: process.env.PATH, DOHC_VERIFICATION_QUEUE_ROOT: dir } });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(readFileSync(join(dir, "ran"), "utf8"), `nightly ${dir}`);
+});
+
+test("the LaunchAgents keep the installer's PATH without the folders pnpm adds for its script", () => {
+  const checkout = "/Users/ice/dev/worktrees/mac-queue";
+  const path = [`${checkout}/node_modules/.bin`, "/Users/ice/.bun/install/global/node_modules/pnpm/dist/node-gyp-bin", `${checkout}/node_modules/.bin`,
+    "/opt/homebrew/bin", "", "/usr/bin", "/opt/homebrew/bin", "/Users/ice/.cargo/bin", `${checkout}/apps/desktop/node_modules/.bin/`, "node_modules/.bin", ".", "bin", "~/bin"].join(":");
+  assert.equal(launchPath(path), "/opt/homebrew/bin:/usr/bin:/Users/ice/.cargo/bin", "a later checkout at that path would supply tools to every run, and a relative entry names a folder in the lane");
+  assert.doesNotMatch(launchAgentDefinition("/q", launchPath(path)) + nightlyAgentDefinition("/q", launchPath(path)), /node_modules|node-gyp-bin/u);
+});
+
+test("install loads both LaunchAgents into the login session, a loaded supervisor keeps its definition until restart, and uninstall unloads and removes them", { skip: process.platform === "win32" && "launchd is macOS-only" }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-queue-agents-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = join(dir, "_verification");
+  const domain = `gui/${process.getuid()}`;
+  const file = label => join(dir, `${label}.plist`);
+  const loaded = new Set();
+  // bootout returns while the job still stops: launchd still lists it for two more looks.
+  const stopping = new Map();
+  const calls = [];
+  const command = args => {
+    if (args[0] !== "print") calls.push(args);
+    const label = args[0] === "bootstrap" ? basename(args[2], ".plist") : args[1].split("/").at(-1);
+    if (args[0] === "print") {
+      if (stopping.get(label) > 0) { stopping.set(label, stopping.get(label) - 1); return { status: 0 }; }
+      return { status: loaded.has(label) ? 0 : 113, stderr: "Could not find service" };
+    }
+    // A bootstrap while launchd still lists the job fails, as launchd's does.
+    if (args[0] === "bootstrap") { if (loaded.has(label) || stopping.get(label) > 0) return { status: 5, stderr: "Bootstrap failed: 5: Input/output error" }; loaded.add(label); return { status: 0 }; }
+    if (loaded.delete(label)) stopping.set(label, 2);
+    return { status: 0 };
+  };
+  const take = () => calls.splice(0);
+  assert.equal(await registerLaunchAgents(root, { dir, command, path: "/usr/bin" }), false);
+  assert.deepEqual(take(), [["bootstrap", domain, file(launchAgentLabel)], ["bootstrap", domain, file(nightlyAgentLabel)]]);
+  assert.equal(readFileSync(file(launchAgentLabel), "utf8"), launchAgentDefinition(root, "/usr/bin"));
+  // An upgrade that changes the supervisor's definition never stops a run: restart applies it. The nightly agent
+  // loads again at once, once launchd has let the old one go.
+  assert.equal(await registerLaunchAgents(root, { dir, command, path: "/opt/homebrew/bin:/usr/bin" }), true);
+  assert.deepEqual(take(), [["bootout", `${domain}/${nightlyAgentLabel}`], ["bootstrap", domain, file(nightlyAgentLabel)]]);
+  assert.equal(await registerLaunchAgents(root, { dir, command, path: "/opt/homebrew/bin:/usr/bin" }), false, "the same definition changes nothing");
+  take();
+  const stopped = [];
+  const stop = async path => { stopped.push(path); return []; };
+  await reloadLaunchAgent(root, { dir, command, stop });
+  assert.deepEqual(take(), [["bootout", `${domain}/${launchAgentLabel}`], ["bootstrap", domain, file(launchAgentLabel)]]);
+  assert.deepEqual(stopped, [root], "a restart stops what a supervisor launchd killed left behind before another starts");
+  // A service that is not running is started through launchd, never by hand.
+  assert.deepEqual(startCommand("darwin"), ["launchctl", ["kickstart", `${domain}/${launchAgentLabel}`]]);
+  assert.deepEqual(startCommand("win32"), ["schtasks.exe", ["/run", "/tn", "dohc-verification-queue"]]);
+  await unregisterLaunchAgents(root, { dir, command, stop });
+  assert.deepEqual(take(), [["bootout", `${domain}/${launchAgentLabel}`], ["bootout", `${domain}/${nightlyAgentLabel}`]]);
+  assert.deepEqual([loaded.size, readdirSync(dir)], [0, []]);
+  assert.deepEqual(stopped, [root, root]);
+  // A LaunchAgent launchd keeps loaded is an error, and its definition stays.
+  await registerLaunchAgents(root, { dir, command, path: "/usr/bin" });
+  await assert.rejects(unregisterLaunchAgents(root, { dir, command: args => args[0] === "bootout" ? { status: 5 } : command(args), stop, waitMs: 500 }), /launchd did not unload app\.dohc\.verification-queue/u);
+  assert.ok(existsSync(file(launchAgentLabel)));
+});
+
+test("a Mac counts the memory it can reclaim at once as free, as Windows counts its standby memory", () => {
+  const near = (a, b) => Math.abs(a - b) < 0.5;
+  assert.ok(near(freeMemoryGb("darwin"), process.availableMemory() / 1024 ** 3));
+  assert.ok(near(freeMemoryGb("win32"), freemem() / 1024 ** 3), "Windows keeps os.freemem()");
+});
+
+test("a run on a Mac holds off idle sleep until it ends", { skip: process.platform !== "darwin" && "caffeinate is macOS-only" }, async t => {
+  assert.equal(holdAwake("win32")(), undefined, "elsewhere nothing is held");
+  const holder = () => spawnSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" }).stdout.split("\n")
+    .find(line => line.trim().endsWith(`caffeinate -i -w ${process.pid}`))?.trim().split(/\s+/u)[0] ?? null;
+  const letSleep = holdAwake("darwin");
+  t.after(letSleep);
+  const pid = await waitFor(holder, "caffeinate must hold the assertion");
+  await waitFor(() => spawnSync("pmset", ["-g", "assertions"], { encoding: "utf8" }).stdout.includes(`pid ${pid}(caffeinate)`), "macOS must list the assertion");
+  letSleep();
+  await waitFor(() => !holder(), "the assertion must end with the run");
+});
+
+test("the supervisor takes a service instance's processes by its marker, its record, and descent, and never a stranger's", () => {
+  const start = second => `Mon Oct 19 10:00:${String(second).padStart(2, "0")} 2026`;
+  const table = processTable([
+    [1, 0, "Ss", 0], [200, 1, "Ss", 3], [201, 200, "S", 4], [300, 1, "S", 5], [400, 1, "Ss", 6], [500, 1, "Ss", 8], [600, 1, "Z", 9],
+  ].map(([pid, ppid, stat, second]) => `${String(pid).padStart(5)} ${String(ppid).padStart(5)} ${stat.padEnd(4)} ${start(second)}`).join("\n"));
+  assert.deepEqual(table.find(row => row.pid === 200), { pid: 200, ppid: 1, zombie: false, start: start(3) });
+  // 200 carries the marker and its parent died; 201 is its child, an Apple program; 300 is recorded; 500 is a recorded pid that is now another process.
+  assert.deepEqual([...members(table, new Set([200, 1]), new Map([[300, start(5)], [500, start(59)]])).keys()].sort((a, b) => a - b), [200, 201, 300]);
+  assert.deepEqual([...members(table, new Set([200])).keys()].sort((a, b) => a - b), [200, 201], "the marker alone finds what the record missed");
+  // lstart pads a one-digit day with a space; a start time reads the same either way.
+  assert.equal(processTable("    9     1 S    Thu Oct  1 10:00:00 2026")[0].start, "Thu Oct 1 10:00:00 2026");
+});
+
+/** A fake process table of `[pid, ppid, second]` rows, as ps prints it. */
+const fakeTable = rows => processTable(rows.map(([pid, ppid, second]) => `${String(pid).padStart(5)} ${String(ppid).padStart(5)} S    Mon Oct 19 10:00:${String(second).padStart(2, "0")} 2026`).join("\n"));
+
+test("the supervisor kills a process once it is stopped and still the same process, even one that dropped its marker, and lets a reused pid go on", async () => {
+  const signals = [];
+  const killed = new Set();
+  let stopping = false;
+  // Pid 200 is marked when first read, and another process by the time it is stopped. Pid 300 ran another program
+  // without the marker, which keeps its pid and start. Pid 400 and its child stay themselves. Pid 600 exits first.
+  const table = () => fakeTable([[200, 1, stopping ? 9 : 3], [300, 1, 4], [400, 1, 5], [401, 400, 6], [600, 1, 7]].filter(([pid]) => !killed.has(pid) && !(pid === 600 && stopping)));
+  const marked = () => new Set(stopping ? [400] : [200, 300, 400, 600]);
+  const signal = (pid, name) => {
+    if (pid === 600) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    signals.push(`${name} ${pid}`);
+    if (name === "SIGSTOP") stopping = true;
+    if (name === "SIGKILL") killed.add(pid);
+  };
+  assert.deepEqual((await stopProcesses({ table, marked, signal })).sort(), [300, 400, 401]);
+  assert.deepEqual(signals, ["SIGSTOP 200", "SIGSTOP 300", "SIGSTOP 400", "SIGSTOP 401", "SIGCONT 200", "SIGKILL 300", "SIGKILL 400", "SIGKILL 401"]);
+});
+
+test("a stop that fails midway kills the processes it confirmed and lets the others go on, so none stays stopped", async () => {
+  const signals = [];
+  let reads = 0;
+  // Round one finds and confirms 400; round two finds its new child 401, then the read that would confirm it fails.
+  const table = () => {
+    reads += 1;
+    if (reads === 4) throw new Error("ps timed out");
+    return fakeTable(reads >= 3 ? [[400, 1, 5], [401, 400, 6]] : [[400, 1, 5]]);
+  };
+  await assert.rejects(stopProcesses({ table, marked: () => new Set([400]), signal: (pid, name) => { signals.push(`${name} ${pid}`); } }), /ps timed out/u);
+  assert.deepEqual(signals, ["SIGSTOP 400", "SIGSTOP 401", "SIGCONT 401", "SIGKILL 400"]);
+});
+
+test("the helper finds an exact environment entry, never one in the arguments, inside another value, or in an Apple program's hidden environment", { skip: process.platform !== "darwin" && "the helper reads macOS process arguments" }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-queue-helper-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  buildEnvHelper(envHelper(dir));
+  const marker = requestMarker("test-helper-1");
+  const idle = (args, env = {}, command = process.execPath) => spawn(command, args, { stdio: "ignore", env: { ...process.env, ...env } });
+  const exact = idle(["-e", "setInterval(() => {}, 1000)"], { [requestVariable]: "test-helper-1" });
+  // Node zero-fills the rest of its arguments' area when it sets its title, as pnpm does on its native-build path.
+  const titled = idle(["-e", "process.title = 'x'; setInterval(() => {}, 1000)", "padding", "more padding"], { [requestVariable]: "test-helper-1" });
+  const decoys = [
+    idle(["-e", "setInterval(() => {}, 1000)", marker]),
+    idle(["-e", "setInterval(() => {}, 1000)"], { OTHER: `x ${marker} y` }),
+    idle(["-e", "setInterval(() => {}, 1000)"], { [requestVariable]: "test-helper-10" }),
+    idle(["600"], { [requestVariable]: "test-helper-1" }, "/bin/sleep"),
+    idle(["-c", `while :; do pgrep -f ${marker} > /dev/null; sleep 0.2; done`], {}, "/bin/zsh"),
+  ];
+  t.after(() => { for (const child of [exact, titled, ...decoys]) child.kill("SIGKILL"); });
+  await Promise.all([exact, titled, ...decoys].map(child => once(child, "spawn")));
+  await waitFor(() => spawnSync("ps", ["-o", "command=", "-p", String(titled.pid)], { encoding: "utf8" }).stdout.trim() === "x", "the titled process must set its title");
+  assert.deepEqual([...markedPids(marker, envHelper(dir))].sort((a, b) => a - b), [exact.pid, titled.pid].sort((a, b) => a - b));
+  assert.throws(() => buildEnvHelper(join(dir, "broken"), join(dir, "missing.c")), /cc could not build the procenv helper.*xcode-select --install/su);
+});
+
+test("an attempt's end stops what its verifier left running, and its attempt and the history say how many", async t => {
+  const swept = [];
+  const { root, request, settled } = harness(t, { strays: async (id, queue) => { swept.push([id, queue]); return swept.length === 1 ? 2 : 0; } });
+  const passed = await settled((await request("pass")).id);
+  const failed = await settled((await request("fail")).id);
+  assert.deepEqual(swept, [[passed.id, root], [failed.id, root]], "a pass and a failure are both swept");
+  assert.deepEqual([passed.status.attempts[0].strays, failed.status.attempts[0].strays], [2, 0]);
+  const history = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(event => event.event === "finished");
+  assert.deepEqual(history.map(event => [event.id, event.strays]), [[passed.id, 2], [failed.id, 0]]);
+});
+
+test("an attempt keeps its lane until what it left running has stopped, and status says the lane is held meanwhile", async t => {
+  const events = [];
+  let failures = 2;
+  const strays = async id => { events.push(`sweep ${id}`); if (failures-- > 0) throw new Error("processes 4242 did not stop after SIGKILL"); return 1; };
+  const holdLane = async ({ entry }) => { events.push(`lane ${entry.id}`); return { release() { events.push(`release ${entry.id}`); } }; };
+  const { root, request, settled } = harness(t, { strays, holdLane, strayRetryMs: 500, heartbeatMs: 20 });
+  const first = await request("pass");
+  const second = await request("pass", { branch: "refs/heads/second" });
+  await waitFor(() => /^held: could not stop what the run left running \(processes 4242 did not stop after SIGKILL\)/u.test(readJson(queuePaths(root).service)?.running?.[0]?.phase ?? "") || null, "status must say the lane is held");
+  assert.ok(!events.includes(`lane ${second.id}`), "the next request waits while the lane is held");
+  await settled(second.id);
+  assert.deepEqual(events, [`lane ${first.id}`, `sweep ${first.id}`, `sweep ${first.id}`, `sweep ${first.id}`, `release ${first.id}`, `lane ${second.id}`, `sweep ${second.id}`, `release ${second.id}`]);
+  assert.equal((await settled(first.id)).status.attempts[0].strays, 1);
+});
+
+test("a request's sweep stops a daemon its verifier left in a session of its own in /, and neither another request's process nor one that only names the marker", { skip: process.platform !== "darwin" && "the sweep runs on a Mac" }, async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-sweep-"));
+  buildEnvHelper(envHelper(root));
+  assert.equal(await stopStrays("any", root, "win32"), undefined, "Windows sweeps nothing: the service's job stops what it started");
+  const daemon = (id, args = []) => spawn(process.execPath, ["-e", "process.chdir('/'); setInterval(() => {}, 1000)", ...args], { detached: true, stdio: "ignore", cwd: "/", env: { ...process.env, ...(id ? { [requestVariable]: id } : {}) } });
+  const mine = daemon("test-request-1");
+  const others = [daemon("test-request-10"), daemon(null, [requestMarker("test-request-1")])];
+  t.after(() => { for (const child of [mine, ...others]) child.kill("SIGKILL"); rmSync(root, { recursive: true, force: true }); });
+  await Promise.all([mine, ...others].map(child => once(child, "spawn")));
+  const exited = once(mine, "exit");
+  assert.equal(await stopStrays("test-request-1", root), 1);
+  await exited;
+  assert.deepEqual(others.map(child => child.exitCode ?? child.signalCode), [null, null], "another request's process and one that names the marker in its arguments keep running");
+  assert.equal(await stopStrays("test-request-1", root), 0, "nothing of the request is left");
+});
+
+test("a socket that a killed holder left is taken over, and a live holder keeps it", { skip: process.platform === "win32" && "Windows names a pipe, which dies with its holder" }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-queue-sock-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "service.sock");
+  const holder = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(path)}, () => console.log("ready"))`], { stdio: ["ignore", "pipe", "inherit"] });
+  await once(holder.stdout, "data");
+  assert.equal(await holdSocket(path), null, "a live holder keeps the name");
+  holder.kill("SIGKILL");
+  await once(holder, "exit");
+  assert.ok(existsSync(path), "a killed holder leaves its socket file behind");
+  const server = await holdSocket(path);
+  assert.ok(server, "the name is taken over");
+  assert.equal(await holdSocket(path), null, "and held again");
+  server.close();
+});
+
+test("a record names its service's processes in the boot that wrote it, and stays until they are stopped", { skip: process.platform !== "darwin" && "the supervisor runs on a Mac" }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-record-")));
+  buildEnvHelper(envHelper(root));
+  // One process the record names by its start time, and one only its marker names.
+  const recorded = spawn("/bin/sleep", ["600"], { stdio: "ignore" });
+  const marked = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", env: { ...process.env, [instanceVariable]: "test-instance" } });
+  t.after(() => { recorded.kill("SIGKILL"); marked.kill("SIGKILL"); rmSync(root, { recursive: true, force: true }); });
+  await Promise.all([once(recorded, "spawn"), once(marked, "spawn")]);
+  const start = processTable().find(row => row.pid === recorded.pid).start;
+  const record = fields => writeFileSync(treePath(root), JSON.stringify({ at: Date.now(), bootedAt: Date.now() - uptimeMs(), instance: "test-instance", processes: [[recorded.pid, start]], ...fields }));
+  record({ bootedAt: 0 });
+  assert.deepEqual(await stopRecorded(root), [], "a record from before the computer restarted names nothing");
+  record({ instance: "another", processes: [[recorded.pid, "Thu Jan 1 00:00:00 2026"]] });
+  assert.deepEqual(await stopRecorded(root), [], "a pid under another start is another process, and another instance's marker is not this one");
+  assert.equal(recorded.exitCode ?? recorded.signalCode ?? marked.exitCode ?? marked.signalCode, null);
+  // A process that outlives SIGKILL fails the stop, and the record stays for the next try.
+  record({});
+  await assert.rejects(stopRecorded(root, { signal: (pid, name) => name === "SIGKILL" || process.kill(pid, name), timeoutMs: 300 }), /did not stop after SIGKILL/u);
+  assert.ok(existsSync(treePath(root)));
+  const exited = Promise.all([once(recorded, "exit"), once(marked, "exit")]);
+  assert.deepEqual((await stopRecorded(root)).sort((a, b) => a - b), [recorded.pid, marked.pid].sort((a, b) => a - b));
+  await exited;
+  assert.equal(existsSync(treePath(root)), false);
+});
+
+/** A stub service under `root`: it waits for go, runs `body`, records its pid, and heartbeats until the test process exits. */
+function stubService(root, body = "") {
+  const service = join(root, "service", "stub", "scripts", "verification");
+  mkdirSync(service, { recursive: true });
+  writeFileSync(join(root, "current"), "stub");
+  writeFileSync(join(service, "queue-service.mjs"), `
+    import { spawn } from "node:child_process";
+    import { appendFileSync, writeFileSync } from "node:fs";
+    for await (const chunk of process.stdin) if (String(chunk).includes("go")) break;
+    ${body}
+    // A test stopped midway must not leave this service running.
+    setInterval(() => { try { process.kill(${process.pid}, 0); } catch { process.exit(0); } }, 1000);
+    appendFileSync(${JSON.stringify(join(root, "services.log"))}, process.pid + "\\n");
+    setInterval(() => writeFileSync(${JSON.stringify(join(root, "service.json"))}, "{}"), 1000);
+  `);
+}
+
+const logged = (root, name) => existsSync(join(root, `${name}.log`)) ? readFileSync(join(root, `${name}.log`), "utf8").split("\n").filter(Boolean).map(Number) : [];
+// Zombies hold a pid but no longer run.
+const running = pid => { const stat = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim(); return stat !== "" && !stat.startsWith("Z"); };
+
+test("the supervisor starts no service while the last one's processes cannot be stopped, and status says so", { skip: process.platform !== "darwin" && "the supervisor runs on a Mac" }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-held-")));
+  buildEnvHelper(envHelper(root));
+  stubService(root);
+  const abort = new AbortController();
+  let failures = 2;
+  const stopLast = async path => { if (failures-- > 0) throw new Error("processes 4242 did not stop after SIGKILL"); return stopRecorded(path); };
+  const supervising = supervise(root, { stopLast, retryMs: 300, signal: abort.signal });
+  t.after(async () => { abort.abort(); await supervising; for (const pid of logged(root, "services")) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } rmSync(root, { recursive: true, force: true }); });
+  await waitFor(() => existsSync(heldPath(root)), "a failed stop must hold the service");
+  assert.deepEqual(logged(root, "services"), [], "no service starts while the last one's processes run");
+  const status = spawnSync(process.execPath, [fileURLToPath(new URL("./queue.mjs", import.meta.url)), "status"], { env: { ...process.env, DOHC_VERIFICATION_QUEUE_ROOT: root }, encoding: "utf8" });
+  assert.match(status.stdout, /^held since \S+: the supervisor could not stop the last service's processes \(processes 4242 did not stop after SIGKILL\)\. No service starts until they stop/mu);
+  assert.match(readFileSync(join(root, "supervisor.log"), "utf8"), /could not stop everything the last service left: processes 4242 did not stop after SIGKILL\. No service starts until they stop; trying again in 0 s/u);
+  const [service] = await waitFor(() => logged(root, "services").length ? logged(root, "services") : null, "the service starts once the stop succeeds");
+  assert.equal(existsSync(heldPath(root)), false, "status no longer says held");
+  assert.ok(running(service));
+  abort.abort();
+  await supervising;
+  assert.equal(running(service), false, "a stopped supervisor stops its service");
+});
+
+test("on a Mac, the supervisor stops everything a dead service started, whatever its session, parent, or folder, and a new supervisor stops what a killed one left", { skip: process.platform !== "darwin" && "launchd supervises the service on a Mac only" }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-supervisor-")));
+  buildEnvHelper(envHelper(root));
+  const log = name => join(root, `${name}.log`);
+  // Each helper records its pid in the log it is given, and runs until it is stopped.
+  writeFileSync(join(root, "idle.cjs"), `require("node:fs").appendFileSync(process.argv[2], process.pid + "\\n"); setInterval(() => {}, 1000);`);
+  // A command as the verifier starts one, in a session of its own, starts another session, as Playwright starts Electron.
+  writeFileSync(join(root, "command.cjs"), `require("node:child_process").spawn(process.execPath, [${JSON.stringify(join(root, "idle.cjs"))}, ${JSON.stringify(log("grandchildren"))}], { detached: true, stdio: "ignore" });
+    require("node:fs").appendFileSync(${JSON.stringify(log("commands"))}, process.pid + "\\n"); setInterval(() => {}, 1000);`);
+  // A daemon: a child that calls setsid, works in /, and outlives its parent, which exits before any poll can see it.
+  writeFileSync(join(root, "daemon.cjs"), `require("node:child_process").spawn(process.execPath, ["-e", "process.chdir('/'); require('node:fs').appendFileSync(" + ${JSON.stringify(JSON.stringify(log("daemons")))} + ", process.pid + '\\\\n'); setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore", cwd: "/" }).unref();`);
+  stubService(root, `
+    const { run } = await import(${JSON.stringify(new URL("./process.mjs", import.meta.url).href)});
+    spawn(process.execPath, [${JSON.stringify(join(root, "idle.cjs"))}, ${JSON.stringify(log("children"))}], { stdio: "ignore" });
+    run(process.execPath, [${JSON.stringify(join(root, "command.cjs"))}], { quietStdout: true }).catch(() => {});
+    spawn(process.execPath, [${JSON.stringify(join(root, "daemon.cjs"))}], { stdio: "ignore" });
+    // An Apple program hides its environment: only the record names it once its parent is gone.
+    appendFileSync(${JSON.stringify(log("sleeps"))}, spawn("/bin/sleep", ["600"], { stdio: "ignore" }).pid + "\\n");
+  `);
+  const names = ["services", "children", "commands", "grandchildren", "daemons", "sleeps"];
+  const all = () => names.flatMap(name => logged(root, name));
+  // launchd starts a job in a session of its own and kills that job's group, as the test does.
+  const supervisors = [];
+  const startSupervisor = () => { const child = spawn(process.execPath, [fileURLToPath(new URL("./queue-supervisor.mjs", import.meta.url)), "--root", root], { detached: true, stdio: "ignore" }); supervisors.push(child); return child; };
+  t.after(() => {
+    for (const child of supervisors) try { process.kill(-child.pid, "SIGKILL"); } catch { /* Gone. */ }
+    for (const pid of all()) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ }
+    rmSync(root, { recursive: true, force: true });
+  });
+  // A generation: the service and the five processes it started, once the supervisor has recorded the Apple program.
+  const generation = n => waitFor(() => {
+    const found = names.map(name => logged(root, name)[n]);
+    if (found.some(pid => !pid)) return null;
+    const recorded = new Set((readJson(treePath(root))?.processes ?? []).map(([pid]) => pid));
+    return recorded.has(found[0]) && recorded.has(found.at(-1)) ? found : null;
+  }, `the supervisor must start and record service generation ${n + 1}`, 60_000);
+  const first = startSupervisor();
+  const zero = await generation(0);
+  assert.ok(zero.every(running));
+  // A crash of the service alone: the supervisor stops everything it started, then starts another.
+  process.kill(zero[0], "SIGKILL");
+  await waitFor(() => zero.every(pid => !running(pid)), "everything the dead service started must stop", 15_000);
+  const one = await generation(1);
+  // launchd kills the supervisor's group, which leaves the service and everything it started running.
+  process.kill(-first.pid, "SIGKILL");
+  await once(first, "exit");
+  assert.ok(one.every(running), "killing the supervisor alone stops nothing below it");
+  // The next supervisor stops them from the record before it starts a service.
+  const second = startSupervisor();
+  await waitFor(() => one.every(pid => !running(pid)), "a new supervisor must stop what the killed one left", 15_000);
+  const two = await generation(2);
+  // launchctl bootout sends SIGTERM: the supervisor stops everything, then exits.
+  const exited = once(second, "exit");
+  process.kill(second.pid, "SIGTERM");
+  await exited;
+  assert.deepEqual(two.filter(running), [], "the supervisor stops the service and everything it started before it exits");
+  assert.match(readFileSync(join(root, "supervisor.log"), "utf8"), /stopped 6 process\(es\) that service stub started/u);
 });
 
 test("a check that fails while Docker stops answering is retried, and fails on a healthy host", async t => {
@@ -965,7 +1411,7 @@ test("a stop decided before a restart is honored after it", async t => {
   await writeJson(join(paths.request(id), "status.json"), { state: "running", stopping: "time limit", attempts: [{ n: 1, startedAt: new Date().toISOString() }] });
   const calls = [];
   const stop = new AbortController();
-  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100, keepAwake: () => () => {}, strays: async () => undefined,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }),
     worker: async ({ grant }) => { calls.push(grant); }, threadOf: () => null, stop: stop.signal, log: () => {} });
   const ended = await waitFor(() => terminalStates.has(listRequests(root)[0]?.status.state) && listRequests(root)[0], "the request must end");

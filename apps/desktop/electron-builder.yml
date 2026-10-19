@@ -2,15 +2,17 @@
 # (electron-vite build), then run electron-builder from apps/desktop.
 #
 # SIGNING SAFETY — this config never fabricates a signature.
-# electron-builder signs only when real credentials are in the environment:
-#   macOS:   CSC_LINK (base64 .p12) + CSC_KEY_PASSWORD, plus notarization via
-#            APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID.
+# electron-builder signs only when real credentials are present:
+#   macOS:   CSC_KEYCHAIN and CSC_NAME name a release keychain and its
+#            Developer ID identity, and APPLE_KEYCHAIN with
+#            APPLE_KEYCHAIN_PROFILE name its notarytool profile
+#            (scripts/release-desktop-macos.mjs sets all four).
 #   Windows: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD.
 # Without them the artifact is UNSIGNED (scripts/package-smoke.mjs labels it
 # "SIGNING: unsigned (dev)"). forceCodeSigning stays unset here so local/dev
-# and unsigned nightly dogfood packaging work. Stable release pipelines export
-# DOHC_REQUIRE_SIGNING=1 and pass `-c.forceCodeSigning=true` so a missing cert
-# fails the build instead of shipping an unsigned stable binary.
+# and unsigned nightly dogfood packaging work. Release builds that require
+# signing export DOHC_REQUIRE_SIGNING=1 and pass `-c.forceCodeSigning=true` so
+# a missing certificate fails the build instead of shipping an unsigned binary.
 
 appId: app.dohc.desktop
 productName: dohc
@@ -137,7 +139,10 @@ win:
 linux:
   # Without its own icon, the Linux target falls back to mac.icon.
   icon: build/icon.png
-  target: [AppImage]
+  # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
+  # user namespaces are blocked, as on Ubuntu 24.04, it refuses to start. The
+  # .deb installs an AppArmor profile that allows them.
+  target: [AppImage, deb]
   category: Office
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
@@ -146,6 +151,9 @@ appImage:
   # electron-builder's default AppImage desktop entry passes --no-sandbox.
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
   executableArgs: []
+deb:
+  # A package names who answers for it. The homepage is package.json's.
+  maintainer: dohc <sup@dohc.computer>
 
 # macOS ranks: dohc edits Markdown as its own documents, so it may be their
 # default app, but it never claims to own the type. For text, CSV and JSON it
