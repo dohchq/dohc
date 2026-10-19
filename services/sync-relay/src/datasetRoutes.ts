@@ -3,6 +3,7 @@ import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
 import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
@@ -51,6 +52,7 @@ async function response(run: () => unknown): Promise<Response> {
     if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error)) return Response.json({code: error.code, message: error.message},
       {status: 503, headers: {...headers, ...(error.retryAfterMs ? {"retry-after": String(Math.ceil(error.retryAfterMs / 1000))} : {})}});
     if (error instanceof JournalError) throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
+    if (error instanceof DatasetBindingPendingAttemptError) throw relayError("conflict", error.message);
     if (error instanceof DatasetHostError) throw relayError(error.code === "not_authorized" ? "not_found" : error.code === "invalid" ? "bad_request" : "conflict");
     throw error;
   }

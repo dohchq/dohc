@@ -13,6 +13,7 @@ import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
@@ -121,6 +122,33 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
+it("returns the pending-response sentence when another app cannot bind", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId = f.publish();
+  expect((await f.http(`${f.path}/binding`, {publicationId, enabled: true})).status).toBe(200);
+  const route = `link/app-publications/${publicationId}/backend`;
+  expect((await f.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "save",
+    input: {name: "Pending guest"}, idempotencyKey: "pending"}, f.publicHeaders)).status).toBe(200);
+  const anotherPublication = f.publish("b".repeat(64));
+  for (const [path, body] of [
+    [`${f.path}/binding`, {publicationId: anotherPublication, enabled: true}],
+    [`w/app-publications/${anotherPublication}/backend/activate`, {authorityRevision: 1}],
+  ] as const) {
+    const refused = await f.http(path, body);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ok: false, code: "conflict", error: "A response is pending in another app. Confirm it there before publishing this app."});
+  }
+});
+
+it("keeps other host conflict details private", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId = f.publish();
+  vi.spyOn(f.host, "bindPublication").mockImplementation(() => {throw new DatasetHostError("conflict", "Private conflict detail");});
+  const refused = await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ok: false, code: "conflict", error: "conflict"});
 });
 
 it("creates and manages one dataset through authenticated routes and the public app broker", async () => {
@@ -619,8 +647,7 @@ it("transfers a lost-response attempt and replays it under the same publication 
     expect(await (await target.http(`${route}/invoke`, {authorityRevision: 1, operation: "submit", input: pending.attempt.input, idempotencyKey: pending.attempt.idempotencyKey}, target.publicHeaders)).json()).toMatchObject({replayed: true});
     expect(await (await target.invoke()).json()).toMatchObject({result: [{name: "Lost response", receipt: uploaded.file.fileId}]});
     const anotherPublication = target.publish("b".repeat(64));
-    const refused = await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true});
-    expect(refused.status).toBe(409);
+    expect((await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true})).status).toBe(200);
     const before = Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
     expect((await target.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "clear", token: pending.attempt.token}, target.publicHeaders)).status).toBe(200);
     expect(Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes)).toBeLessThan(before);
