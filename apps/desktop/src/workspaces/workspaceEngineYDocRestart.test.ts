@@ -5148,7 +5148,52 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
   await capture.stop();
 });
 
-// dohc#2301. A close debt's retry opens a fresh session, which knows nothing
+// A document open with a close debt left by a store-busy close. A draft is
+// one a crash kept: its lineage holds edits, and no file was ever written.
+// `firstPaymentCloseWrites` makes the first payment's close write the file,
+// as a release the daemon refuses does when it escalates to a settling close.
+async function closeWithDebt(
+  prefix: string,
+  draft: boolean,
+  firstPaymentCloseWrites = false,
+) {
+  let rootPath = "";
+  let opens = 0;
+  const locked = await lockedRebindCapture(prefix, {
+    wrapProvider: (base) => async (options) => {
+      const provider = await base(options);
+      opens += 1;
+      const writesOnClose = firstPaymentCloseWrites && opens === 2;
+      return {
+        ...provider,
+        ...(draft ? { head: "absent" as const } : {}),
+        ...(writesOnClose
+          ? {
+              async close(closeOptions) {
+                await writeFile(join(rootPath, options.path), "written on close");
+                await provider.close(closeOptions);
+              },
+            }
+          : {}),
+      };
+    },
+  });
+  rootPath = locked.rootPath;
+  if (draft) {
+    const kept = new Y.Doc();
+    kept.getText("plainText").insert(0, "kept ");
+    locked.state.journal.push(Y.encodeStateAsUpdate(kept));
+  }
+  const { session } = await openWithOneEdit(locked.capture, "busy edit");
+  locked.state.replicated = true;
+  locked.state.closeSettleFailure = busyRefusal();
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  return locked;
+}
+
+// dohc#2301. A close debt's payment opens a fresh session, which knows nothing
 // of the file the closed one had. It carries the closed session's answer: yes
 // for a document that had its file, so the engine keeps a deleted file
 // deleted, and nothing for a draft that never had one, which it may create.
@@ -5156,29 +5201,64 @@ it.each([
   { name: "a document that had its file", draft: false, said: true },
   { name: "a draft that never had a file", draft: true, said: undefined },
 ] as const)("a close debt's retry passes on whether the file existed: $name", async ({ draft, said }) => {
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-debt-file-existed-",
-    draft
-      ? { wrapProvider: (base) => async (options) => ({ ...(await base(options)), head: "absent" as const }) }
-      : undefined,
-  );
-  if (draft) {
-    // A crash kept this draft's edits in its lineage. No file was written.
-    const kept = new Y.Doc();
-    kept.getText("plainText").insert(0, "kept ");
-    state.journal.push(Y.encodeStateAsUpdate(kept));
-  }
-  const { session } = await openWithOneEdit(capture, "busy edit");
-
-  state.replicated = true;
-  state.closeSettleFailure = busyRefusal();
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-file-existed-", draft);
   state.closeSettleFailure = null;
   await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
 
   expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, said]);
+  await capture.stop();
+});
+
+// dohc#2301. Once a payment writes a draft's file, the file has existed. A
+// peer update that outruns that settle keeps the debt armed, and the next
+// payment must say so: a delete outside dohc and a daemon restart before
+// either is observed would otherwise let it write the deleted file back.
+it("a close debt's next payment says the file existed once an earlier payment wrote it", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-paid-file-", true);
+  state.emitUpdateAfterSettle = true;
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(2);
+
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, undefined, true]);
+  await capture.stop();
+});
+
+// dohc#2301. A close answers only that it closed, so the file on disk is what
+// tells the debt that a payment's close wrote it.
+it("a close debt's next payment says the file existed once a payment's close wrote it", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-close-file-", true, true);
+  // The first payment's settle is refused, so only its close writes the file.
+  state.locked = true;
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.closeCalls.includes(2), { timeout: 15_000 }).toBe(true);
+  state.locked = false;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
+
+  const said = state.generationOptions.map((options) => options.fileExisted);
+  expect(said.slice(0, 2)).toEqual([undefined, undefined]);
+  expect(said.length).toBeGreaterThan(2);
+  expect(said.slice(2).every((value) => value === true)).toBe(true);
+  await capture.stop();
+});
+
+// dohc#2301. A document reopened while its close debt is still owed is the
+// same document. Every open after the first, the reopen included, says the
+// file existed, because they all continue the one file fact.
+it("a reopen while a close debt is owed says the file existed", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-reopen-file-", false);
+  // Payments keep failing, so the debt is still owed when the reopen lands.
+  state.locked = true;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+
+  const later = state.generationOptions.slice(1).map((options) => options.fileExisted);
+  expect(later.length).toBeGreaterThan(0);
+  expect(later.every((said) => said === true)).toBe(true);
+  state.locked = false;
+  state.closeSettleFailure = null;
+  await reopened.close();
   await capture.stop();
 });
 
