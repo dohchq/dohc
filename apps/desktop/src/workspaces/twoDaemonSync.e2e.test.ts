@@ -2063,7 +2063,7 @@ it.skipIf(engine.missing)("keeps a journaled sharing-declined lineage private an
       onRemoteUpdate: () => {}, scheduleSettle: () => () => {},
     }));
     Y.applyUpdate(doc, withheld.initialUpdate);
-    let appendIndex = 0;
+    let appendIndex = 0, claim = withheld.lineageClaimId ?? null;
     const append = async (text: string) => {
       const vector = Y.encodeStateVector(doc), body = doc.getText("plainText");
       body.insert(body.length, text);
@@ -2073,8 +2073,10 @@ it.skipIf(engine.missing)("keeps a journaled sharing-declined lineage private an
         new WorkspaceDaemonRequester(source.nativeClient()).request("ydoc.recordUpdate", {
           sessionId: withheld!.nativeOwner!.sessionId,
           updateBase64: Buffer.from(Y.encodeStateAsUpdate(doc, vector)).toString("base64"),
-        }, {workspace, idempotencyKey: `withheld-${appendIndex++}`}));
+          expectedLineageClaimId: claim,
+        }, {workspace, idempotencyKey: `withheld-${appendIndex++}`})) as {seq: number; lineageClaimId: string | null};
       expect(result).toHaveProperty("seq");
+      claim = result.lineageClaimId;
     };
     // Three legal deltas make a base larger than MAX_YDOC_UPDATE_BYTES (20 MiB).
     // They are durable in the local Y.Doc journal before this workspace enrolls.
