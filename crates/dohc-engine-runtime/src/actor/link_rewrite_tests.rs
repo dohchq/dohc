@@ -883,6 +883,16 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     ));
     f.restart().await;
     drop(initial_hold);
+    assert_eq!(
+        f.actor
+            .history_operation(f.ws.clone(), OP.into())
+            .await
+            .unwrap()
+            .moments
+            .len(),
+        1001,
+        "rename plus exactly 1,000 source commits survived the crash"
+    );
     f.actor
         .run(|store, _| {
             undo_probe::enable_work_probe(store);
@@ -960,6 +970,11 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     let result = f.pass("performance", Arc::new(NoFaults)).await.unwrap();
     let pass_ns = start.elapsed().as_nanos();
     assert_eq!(result["documents"], 2000);
+    assert_eq!(result["links"], 4000);
+    assert_eq!(
+        f.pass("performance", Arc::new(NoFaults)).await.unwrap(),
+        result
+    );
     let (waits, positions, gaps) = updates.await.unwrap();
     assert!(
         gaps.iter().all(|g| *g <= 2),
@@ -1012,7 +1027,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
                     claim,
                     i == 0,
                     None,
-                    Some(format!("typing-{i}")),
+                    Some(format!("undo-typing-{i}")),
                     5,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
