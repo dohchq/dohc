@@ -251,7 +251,7 @@ type DemoDesktopBridge = Pick<
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
   | "deleteWorkspacePath"
-  | "showExplorerMenu"
+  | "readExplorerMenu"
   | "exportWorkspaceZip"
   | "getDroppedFilePaths"
   | "pickImageFiles"
@@ -566,8 +566,9 @@ const demoBridge = {
     rewriteAssetUrls(payload.relativePath, null);
     return { trashed: true };
   },
-  async showExplorerMenu() {
-    return null;
+  // The demo offers no Explorer menu.
+  async readExplorerMenu() {
+    return [];
   },
   async exportWorkspaceZip() {
     return { path: "demo-workspace.zip" };

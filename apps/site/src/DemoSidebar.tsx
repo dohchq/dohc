@@ -224,6 +224,8 @@ export function DemoSidebar(props: {
           onShare={() => undefined}
           onRefresh={() => undefined}
           onError={props.onError}
+          // The demo records no History operations, so it has nothing to undo.
+          onNotice={() => undefined}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">
