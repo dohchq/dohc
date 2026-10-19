@@ -19,18 +19,40 @@ export function degrees(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
   }
   return [...byPath.values()];
 }
-export function appendPage(graph: GraphData, page: LinksEdgesResult): GraphData {
-  const nodes = new Map(graph.nodes.map(node => [node.path, node]));
-  for (const file of page.files) nodes.set(file.path, { ...file, kind: "file", filePath: file.path, incoming: 0, outgoing: 0 });
-  for (const edge of page.entries) for (const path of [edge.source, edge.target]) {
-    if (!nodes.has(path)) nodes.set(path, { path, filePath: path, kind: "file", title: path.split("/").at(-1) ?? path, incoming: 0, outgoing: 0 });
-  }
-  const edges = new Map(graph.edges.map(edge => [JSON.stringify([edge.source, edge.target, edge.kind]), edge]));
-  for (const { source, target, kind } of page.entries) edges.set(JSON.stringify([source, target, kind]), { source, target, kind });
-  const visible = [...edges.values()];
-  return { nodes: degrees([...nodes.values()], visible), edges: visible, complete: graph.complete && page.complete,
-    indexBuilding: graph.indexBuilding || page.indexBuilding, mountsCovered: graph.mountsCovered && page.mountsCovered,
-    unchecked: [...new Set([...graph.unchecked, ...page.unchecked])] };
+// One accumulator per walk; published snapshots never share mutable nodes.
+export function graphWalk() {
+  const nodes = new Map<string, GraphNode>();
+  const edges = new Map<string, GraphEdge>();
+  const unchecked = new Set<string>();
+  let complete = true, indexBuilding = false, mountsCovered = true;
+  const ensure = (path: string) => {
+    let node = nodes.get(path);
+    if (!node) {
+      node = { path, filePath: path, kind: "file", title: path.split("/").at(-1) ?? path, incoming: 0, outgoing: 0 };
+      nodes.set(path, node);
+    }
+    return node;
+  };
+  return {
+    append(page: LinksEdgesResult) {
+      for (const file of page.files) Object.assign(ensure(file.path), file);
+      for (const { source, target, kind } of page.entries) {
+        const key = JSON.stringify([source, target, kind]);
+        if (edges.has(key)) continue;
+        edges.set(key, { source, target, kind });
+        ensure(source).outgoing++;
+        ensure(target).incoming++;
+      }
+      for (const path of page.unchecked) unchecked.add(path);
+      complete &&= page.complete;
+      indexBuilding ||= page.indexBuilding;
+      mountsCovered &&= page.mountsCovered;
+    },
+    snapshot(): GraphData {
+      return { nodes: [...nodes.values()].map(node => ({ ...node })), edges: [...edges.values()],
+        complete, indexBuilding, mountsCovered, unchecked: [...unchecked] };
+    },
+  };
 }
 export function withChatMentions(graph: GraphData, mentions: ChatFileMentionRecord[]): GraphData {
   const nodes = new Map(graph.nodes.map(node => [node.path, node]));
@@ -40,7 +62,7 @@ export function withChatMentions(graph: GraphData, mentions: ChatFileMentionReco
     const file = row.attachment.pathHint;
     if (!file || !nodes.has(file)) continue;
     const base = nodes.get(file);
-    if (base?.kind !== "file" || (row.attachment.objectId && base.objectId !== row.attachment.objectId)) continue;
+    if (base?.kind !== "file" || (row.attachment.objectId && base.objectId && base.objectId !== row.attachment.objectId)) continue;
     const thread = "chat-thread:" + encodeURIComponent(row.thread.id);
     nodes.set(thread,{ path:thread,kind:"chat-thread",threadId:row.thread.id,title:row.thread.title,
       channelId:row.channelId,channelWireId:row.channelWireId,channelName:row.channelName,channelSlug:row.channelSlug,channelKind:row.channelKind,incoming:0,outgoing:0 });

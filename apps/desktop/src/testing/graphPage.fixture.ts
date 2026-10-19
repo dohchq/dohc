@@ -36,8 +36,8 @@ export function installGraphFixture(
     versionId: "main", files, entries: graph.edges.map((edge, ordinal) => ({ ...edge, ordinal })),
     unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null,
   }));
-  bridge.listChatFileMentions = vi.fn(async ({ path }) => ({
-    mentions: graph.nodes.filter(node => node.kind === "chat-thread").flatMap(node => {
+  bridge.listChatFileMentions = vi.fn(async ({ path, paths }) => ({
+    mentions: (paths ?? [path!]).flatMap((path: string) => graph.nodes.filter(node => node.kind === "chat-thread").flatMap(node => {
       const headings: (SampleNode | undefined)[] = [
         undefined, ...graph.nodes.filter(row => row.kind === "heading" && row.filePath === path),
       ];
@@ -55,6 +55,6 @@ export function installGraphFixture(
         channelId: node.channelId, channelWireId: node.channelWireId, channelName: node.channelName,
         channelSlug: node.channelSlug, channelKind: node.channelKind,
       } satisfies ChatFileMentionRecord));
-    }),
+    })),
   }));
 }

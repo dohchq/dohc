@@ -692,6 +692,66 @@ describe("GraphView", () => {
     await waitFor(()=>expect(onError).toHaveBeenCalledOnce());
     expect(screen.getAllByText("a.md")).toBeTruthy();
   });
+  it("keeps the drawn graph through every page of a refresh", async () => {
+    const next = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockResolvedValueOnce(page("old.md"))
+      .mockResolvedValueOnce(page("replacement.md", "next")).mockReturnValueOnce(next.promise);
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
+    await screen.findAllByText("old.md");
+    fireEvent.click(screen.getByLabelText("Refresh graph"));
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(3));
+    expect(screen.getAllByText("old.md")).toBeTruthy();
+    expect(screen.queryByText("replacement.md")).toBeNull();
+    await act(async () => next.resolve(page("last.md")));
+    await screen.findAllByText("replacement.md");
+    expect(screen.queryByText("old.md")).toBeNull();
+    expect(screen.getAllByText("last.md")).toBeTruthy();
+  });
+
+  it.each([false, true])("restarts a changed-source cursor once; repeated rejection=%s", async repeated => {
+    const frames = stubAnimationFrames();
+    const changed = new Error("DaemonRefusalError [CONFLICT]: links-edges-source-changed");
+    const linksEdges = vi.fn().mockResolvedValueOnce(page("a.md", "cursor"))
+      .mockRejectedValueOnce(changed).mockResolvedValueOnce(page("fresh.md", "fresh-cursor"));
+    if (repeated) linksEdges.mockRejectedValueOnce(changed);
+    else linksEdges.mockResolvedValueOnce(page("last.md"));
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} />);
+    await screen.findAllByText("a.md");
+    await act(async () => { while (frames.pending) frames.runNext(); });
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(4));
+    expect(linksEdges.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "cursor", undefined, "fresh-cursor"]);
+    if (repeated) {
+      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      expect(screen.getAllByText("a.md")).toBeTruthy();
+    } else {
+      await screen.findAllByText("last.md");
+      expect(screen.queryByText("a.md")).toBeNull();
+      expect(onError).not.toHaveBeenCalled();
+    }
+  });
+
+  it("requests one chat batch for drawn files and joins non-Markdown targets once", async () => {
+    const mention = {
+      attachment: { objectId: "svg", pathHint: "picture.svg" },
+      thread: { id: "thread", title: "Picture discussion" },
+    } as ChatFileMentionRecord;
+    const linksEdges = vi.fn(async () => ({ ...page("a.md"), entries: [
+      { source: "a.md", target: "picture.svg", kind: "markdown" as const, ordinal: 0 },
+    ] }));
+    const listChatFileMentions = vi.fn(async () => ({ mentions: [mention] }));
+    vi.stubGlobal("dohcDesktop", { linksEdges, listChatFileMentions });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    await screen.findAllByText("a.md");
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await screen.findAllByText("Picture discussion");
+    expect(listChatFileMentions).toHaveBeenCalledOnce();
+    expect(listChatFileMentions).toHaveBeenCalledWith({ workspaceId: "ws", paths: ["a.md", "picture.svg"] });
+    expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+  });
+
 });
 
 function page(path: string, nextCursor: string | null = null): LinksEdgesResult {

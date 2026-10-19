@@ -9,7 +9,7 @@ import {
   type RefObject,
 } from "react";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
-import { appendPage, degrees, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
+import { graphWalk, degrees, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
@@ -776,6 +776,7 @@ export function GraphView(props: {
   const reportError = useRef(props.onError);
   reportError.current = props.onError;
   const [walking, setWalking] = useState(true);
+  const completedRequest = useRef<typeof requestIdentity | null>(null);
   const [chatRows, setChatRows] = useState<{ workspaceId: string; graph: GraphData; rows: ChatFileMentionRecord[] } | null>(null);
   useEffect(() => {
     let active = true;
@@ -792,21 +793,44 @@ export function GraphView(props: {
       resumePaint = resolve;
       frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
     });
+    let hasDrawnGraph = state.workspaceId === props.workspaceId && (state.graph?.nodes.length ?? 0) > 0;
+    let restarted = false;
     const walk = async () => {
-      let graph = emptyGraph();
+      let accumulator = graphWalk();
       let cursor: string | undefined;
       try {
-        do {
-          const page = await bridge().linksEdges({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+        for (;;) {
+          let page;
+          try {
+            page = await bridge().linksEdges({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+          } catch (error) {
+            if (!current()) return;
+            if (cursor && !restarted && String(error).includes("links-edges-source-changed")) {
+              restarted = true;
+              accumulator = graphWalk();
+              cursor = undefined;
+              continue;
+            }
+            throw error;
+          }
           if (!current()) return;
-          graph = appendPage(graph, page);
-          setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null });
+          accumulator.append(page);
           cursor = page.nextCursor ?? undefined;
-          if (cursor) { await paint(); if (!current()) return; }
-        } while (cursor);
-        if (graph.indexBuilding && retries < 5) {
+          // Paint initial data before continuing. Keep that snapshot stable while
+          // gathering; refreshes replace the drawn graph only at the end.
+          if (!hasDrawnGraph || !cursor) {
+            const graph = accumulator.snapshot();
+            setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null });
+            if (!hasDrawnGraph && graph.nodes.length) {
+              hasDrawnGraph = true;
+              if (cursor) { await paint(); if (!current()) return; }
+            }
+          }
+          if (!cursor) break;
+        }
+        if (accumulator.snapshot().indexBuilding && retries < 5) {
           timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
-        } else setWalking(false);
+        } else { completedRequest.current = requestIdentity; setWalking(false); }
       } catch (error) {
         if (!current()) return;
         setWalking(false);
@@ -821,26 +845,22 @@ export function GraphView(props: {
   useEffect(() => {
     let active = true;
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    if (!chatMentionsEnabled || walking || !graph) { setChatRows(null); return; }
+    if (!chatMentionsEnabled || walking || completedRequest.current !== requestIdentity || !graph) { setChatRows(null); return; }
     const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
     void (async () => {
-      const rows: ChatFileMentionRecord[] = [];
       try {
-        // Keep today's subject-specific chat permission gate until 8-S1b-ii.
-        for (const node of graph.nodes) {
-          if (node.kind !== "file") continue;
-          const result = await bridge().listChatFileMentions({ workspaceId: props.workspaceId, path: node.path });
-          if (!active || requestIdentityRef.current !== requestIdentity) return;
-          rows.push(...result.mentions);
-          setChatRows({ workspaceId: props.workspaceId, graph, rows: [...rows] });
-        }
+        const paths = visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path);
+        if (!paths.length) return;
+        const result = await bridge().listChatFileMentions({ workspaceId: props.workspaceId, paths });
+        if (!active || requestIdentityRef.current !== requestIdentity) return;
+        setChatRows({ workspaceId: props.workspaceId, graph, rows: result.mentions });
       } catch (error) {
         if (active && requestIdentityRef.current === requestIdentity)
           reportError.current?.("dohc could not load chat mentions.", error, retry);
       }
     })();
     return () => { active = false; };
-  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, requestIdentity, load]);
+  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, props.activePath, variant, requestIdentity, load]);
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&

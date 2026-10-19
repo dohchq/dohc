@@ -1879,7 +1879,10 @@ export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
 export const ListChatFileMentionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
+  path: PATH_STRING.optional(),
+  paths: z.array(PATH_STRING).min(1).max(500).optional(),
+}).refine(input => (input.path !== undefined) !== (input.paths !== undefined), {
+  message: "Choose a file or a batch of files.",
 });
 export type ListChatFileMentionsPayload = z.infer<
   typeof ListChatFileMentionsPayload

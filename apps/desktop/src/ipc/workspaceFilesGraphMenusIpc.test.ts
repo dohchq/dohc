@@ -446,7 +446,6 @@ describe("registered workspace file handlers", () => {
 describe("registered heading handler", () => {
   it("reads repeated headings through the file owner", async () => {
     const h = await harness();
-    // Go to and backlinks use files while the engine's deferred index is not ready.
     await writeFile(join(h.workspace.rootPath, "alpha.md"), "# Alpha\n[[beta]]\n");
     await writeFile(join(h.workspace.rootPath, "beta.md"), "# Same\n\n# Same\n");
 
@@ -456,10 +455,6 @@ describe("registered heading handler", () => {
     const headings = await h.invoke(CHANNELS.listWorkspaceHeadings, { workspaceId: "workspace", path: "beta.md" }) as { headings: { occurrence: number }[] };
     expect(headings.headings.map((heading) => heading.occurrence)).toEqual([0, 1]);
   });
-
-
-
-
 
   it("rejects a heading response after renderer retirement", async () => {
     const h = await harness();
