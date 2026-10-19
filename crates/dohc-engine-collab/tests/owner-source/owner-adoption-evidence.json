@@ -1,0 +1,53 @@
+{
+  "binding": {
+    "workspaceId": "workspace",
+    "mainVersionId": "main",
+    "objectId": "object",
+    "lineageClaimId": "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7",
+    "currentPath": "owner.md",
+    "selectorPaths": ["owner.md"],
+    "restoreFenceGeneration": 0
+  },
+  "cut": {
+    "relayDatabaseNamespace": "namespace",
+    "sourceMomentId": "original",
+    "sourceDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceByteLength": 5,
+    "baselineMomentRelaySequence": 1,
+    "baselineRegisteredAtMs": 3,
+    "expectedLocalSequence": 2,
+    "baselineBytes": [0, 0]
+  },
+  "cases": [
+    {
+      "name": "first adoption",
+      "retainedPrefix": null,
+      "evidenceDigest": "4a2f7f4172b33abcf23561048605aeee34ec34420e4ff25caa0cb2f36d0277a4"
+    },
+    {
+      "name": "successor at its chain's origin",
+      "retainedPrefix": {
+        "terminalReceipt": null,
+        "eventCount": 0,
+        "historyEvidenceDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "predecessorActivationId": "ordinary-activation-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "evidenceDigest": "ef46cae1adb9bd07bdf03d150367273a2e73e830a254f7f50d687904309fe410"
+    },
+    {
+      "name": "successor after an application",
+      "retainedPrefix": {
+        "terminalReceipt": {
+          "deliveryId": "delivery",
+          "updateDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "journalCursor": 3,
+          "acceptingHostEpoch": 1
+        },
+        "eventCount": 1,
+        "historyEvidenceDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "predecessorActivationId": "adoption"
+      },
+      "evidenceDigest": "d2d14c466a9a32699f1892b8a8a43f36c6f4a8828d81196a6e93c6cbd991ca94"
+    }
+  ]
+}

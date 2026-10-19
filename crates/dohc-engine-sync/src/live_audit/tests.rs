@@ -3373,7 +3373,8 @@ fn imported_activation_publication_admits_the_preserved_event_zero_source() {
 
 fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bool) {
     use dohc_engine_collab::live_update_application::{
-        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
+        NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
+        capture_imported_owner_activation,
     };
     let mut source =
         fixture_with_markdown(true, preserve_baseline.then_some("Original source.\n\n"));
@@ -3560,9 +3561,13 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         expected_local_sequence: activation.source.native_head_sequence,
         events: vec![],
         terminal_receipt: None,
+        retained_prefix: None,
         outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
             max_pending_bytes: 1_000_000,
             max_pending_age_ms: 100_000,
+        },
+        reconstruction: NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
         },
     };
     adopt_owner_committed(
@@ -4449,8 +4454,8 @@ fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
 #[test]
 fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     use dohc_engine_collab::live_update_application::{
-        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
-        resume_imported_owner_activation,
+        NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
+        capture_imported_owner_activation, resume_imported_owner_activation,
     };
     use dohc_engine_storage::TxnOutcome;
     use std::collections::BTreeMap;
@@ -4650,9 +4655,13 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             expected_local_sequence: activation.source.native_head_sequence,
             events: vec![],
             terminal_receipt: None,
+            retained_prefix: None,
             outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                 max_pending_bytes: 1_000_000,
                 max_pending_age_ms: 100_000,
+            },
+            reconstruction: NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
             },
         },
         1_000_000,

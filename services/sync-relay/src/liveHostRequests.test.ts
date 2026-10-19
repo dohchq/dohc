@@ -98,7 +98,8 @@ it("does not enqueue the internal RPC of an already queued client method", async
 
 const adoptionCut = (baselineBytes: Uint8Array) => ({
   relayDatabaseNamespace: "namespace", adoptionId: "adoption", sourceMomentId: "source", sourceDigest: "a".repeat(64), sourceByteLength: 0,
-  baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, baselineBytes, events: [],
+  baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, retainedPrefix: null,
+  baselineBytes, events: [],
 });
 it("bounds retained borrowed cuts and releases cancelled queued input without borrowing the native budget", async () => {
   const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();

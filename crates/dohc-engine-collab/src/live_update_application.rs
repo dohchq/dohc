@@ -53,8 +53,8 @@ mod restore_resume;
 mod retirement;
 pub use retirement::{
     begin_retirement, reconcile_activation, release_activation, CarriedDelivery, JournalEvidence,
-    Reconciliation, Release, ReleasePending, RetainedPrefix, RetirementKey, RetirementScope,
-    RetirementTarget,
+    Reconciliation, Release, ReleasePending, RetainedPrefix, RetainedPrefixBody, RetirementKey,
+    RetirementScope, RetirementTarget,
 };
 mod settlement;
 pub use bootstrap::{

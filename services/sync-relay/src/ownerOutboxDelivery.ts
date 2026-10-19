@@ -87,6 +87,9 @@ export async function drainOwnerOutbox(options: {
   // first, the seed can leave the queue before the host applies it, so neither
   // an empty queue nor a later head proves its application.
   const receiptFirst = receiptFirstSeed(options.seedDelivery, {storage, transport: client, activationId: adoption.adoptionId, binding, host});
+  // The engine holds a service activation's seed until its receipt is saved,
+  // so applying that seed first would wait forever.
+  const service = options.seedDelivery !== undefined || admission.activation !== undefined;
   if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (status.pendingBytes === 0) {if (!receiptFirst) adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
@@ -122,7 +125,9 @@ export async function drainOwnerOutbox(options: {
       const seed = entry.appendKey === seedKey(entry.updateDigest);
       if (!seed && entry.appendKey.startsWith("owner-adoption:")) throw new Error("Owner outbox holds another adoption's seed.");
       if (!seed && !receiptFirst) adoption.applied();
-      const acknowledgeFirst = seed && receiptFirst?.deliveryId === entry.deliveryId && receiptFirst.updateDigest === entry.updateDigest;
+      // The engine's entry names the seed's place in its outbox.
+      const acknowledgeFirst = seed && receiptFirst?.deliveryId(entry.sequence) === entry.deliveryId && receiptFirst.updateDigest === entry.updateDigest;
+      if (seed && service && !acknowledgeFirst) throw new Error("Service seed delivery is unavailable.");
       const shareId = admission.shares.get(binding.workspaceId);
       const share = shareId ? storage.getShare(shareId) : null;
       if (!share || share.workspaceId !== binding.workspaceId) throw new Error("Owner share is unavailable.");

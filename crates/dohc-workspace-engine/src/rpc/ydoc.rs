@@ -2532,6 +2532,11 @@ mod tests {
             expected_local_sequence: sequence,
             events: vec![],
             terminal_receipt: None,
+            retained_prefix: None,
+            reconstruction:
+                dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
         };
         for replay in [false, true] {
             let mut ctx = RequestContext::unbounded();

@@ -251,6 +251,25 @@ function ownerCutDigest(capture: OwnerCutCapture): string {
     events: events.map(event => ({ metadata: event.metadata,digest: digest(event.updateBytes) })) })));
 }
 
+/**
+ * The evidence native adoption hashes for `cut` (adoption.rs `validate_cut`).
+ * A successor's prefix is the tenth element, only when present, so a first
+ * adoption's evidence keeps its nine.
+ */
+export function ownerAdoptionCutEvidenceDigest(binding: LiveObjectBinding, cut: LiveOwnerAdoptionCut): string {
+  const evidence: unknown[] = [binding, cut.relayDatabaseNamespace, cut.sourceMomentId, cut.sourceDigest, cut.sourceByteLength,
+    cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
+    cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))];
+  const prefix = cut.retainedPrefix;
+  if (prefix) {
+    const terminal = prefix.terminalReceipt;
+    evidence.push({terminalReceipt: terminal && {deliveryId: terminal.deliveryId, updateDigest: terminal.updateDigest,
+      journalCursor: terminal.journalCursor, acceptingHostEpoch: terminal.acceptingHostEpoch},
+    eventCount: prefix.eventCount, historyEvidenceDigest: prefix.historyEvidenceDigest, predecessorActivationId: prefix.predecessorActivationId});
+  }
+  return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+}
+
 /** Internal storage consumer. Authentication and namespace provisioning belong to its caller. */
 export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
@@ -514,7 +533,7 @@ export class LiveCommittedDeliveryStore {
         sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
         sourceByteLength: source.sourceByteLength, baselineMomentRelaySequence: authority.baselineSequence,
         baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
-        terminalReceipt: terminal, baselineBytes: new Uint8Array(authority.baselineBytes), events };
+        terminalReceipt: terminal, retainedPrefix: null, baselineBytes: new Uint8Array(authority.baselineBytes), events };
       const { events: _events, baselineBytes: _baseline, ...header } = cut;
       if (bytes + Buffer.byteLength(JSON.stringify({ ...header, eventCount: events.length })) + 8 > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
       return { journal: result.cut, authority: structuredClone(authority), binding: structuredClone(binding), source: { ...source }, cut };
@@ -550,16 +569,15 @@ export class LiveCommittedDeliveryStore {
     const { host,document,activation } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
     integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
-    const { baselineBytes: _baseline,events: _events,...header } = cut;
-    const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
-      cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
-      cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))])).digest("hex");
+    // The evidence digest binds a successor's prefix, so the origin keeps only its count and history.
+    const { baselineBytes: _baseline,events: _events,retainedPrefix: prefix,...header } = cut;
+    const cutEvidenceDigest = ownerAdoptionCutEvidenceDigest(capture.binding, cut);
     // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
     const originEvidenceDigest = activation === null ? cutEvidenceDigest
       : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
-    const originEventCount = cut.events.length;
-    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata),
-      initialAcceptedHistoryDigest(this.#history.namespace, document));
+    const originEventCount = prefix ? prefix.eventCount : cut.events.length;
+    const originHistoryEvidenceDigest = prefix ? prefix.historyEvidenceDigest : cut.events.reduce((previous, event, index) =>
+      nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata), initialAcceptedHistoryDigest(this.#history.namespace, document));
     const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex"),
       originEvidenceDigest, originEventCount, originHistoryEvidenceDigest,originalBinding:structuredClone(capture.binding) });
     this.#storage.tx(() => {

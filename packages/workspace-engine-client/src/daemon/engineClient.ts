@@ -127,6 +127,18 @@ export interface LiveApplicationBootstrap {
   readonly baselineBytes: Uint8Array;
 }
 
+/** The accepted prefix a release kept: its endpoint in the lineage's accepted history. */
+export interface RetainedPrefixBody {
+  readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  readonly eventCount: number;
+  readonly historyEvidenceDigest: string;
+}
+
+/** The released prefix a successor adopts, after its predecessor, the released chain tail. */
+export interface RetainedPrefix extends RetainedPrefixBody {
+  readonly predecessorActivationId: string;
+}
+
 /** Trusted main-process evidence acquired from the authenticated relay journal. */
 export interface LiveOwnerAdoptionCut {
   readonly relayDatabaseNamespace: string;
@@ -138,6 +150,8 @@ export interface LiveOwnerAdoptionCut {
   readonly baselineRegisteredAtMs: number;
   readonly expectedLocalSequence: number;
   readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  /** A successor's prefix, with no events after it; null for a lineage's first adoption. */
+  readonly retainedPrefix: RetainedPrefix | null;
   readonly baselineBytes: Uint8Array;
   readonly events: readonly AdmittedLiveUpdate[];
 }

@@ -1,5 +1,7 @@
 use super::*;
-use dohc_engine_collab::live_update_application::{LiveUpdateReceipt, OwnerAdoptionCut};
+use dohc_engine_collab::live_update_application::{
+    LiveUpdateReceipt, NativeHistoryReconstruction, OwnerAdoptionCut, RetainedPrefix,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -13,6 +15,9 @@ struct CutHeader {
     baseline_registered_at_ms: i64,
     expected_local_sequence: i64,
     terminal_receipt: Option<LiveUpdateReceipt>,
+    // Required, though it may be null.
+    #[serde(deserialize_with = "Option::deserialize")]
+    retained_prefix: Option<RetainedPrefix>,
     event_count: usize,
 }
 
@@ -37,6 +42,7 @@ pub(super) fn decode(
     mut bytes: &[u8],
     max_events: usize,
     outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+    reconstruction: NativeHistoryReconstruction,
 ) -> Result<OwnerAdoptionCut, WireError> {
     let header = field(&mut bytes)?;
     if header.len() > MAX_HEADER_BYTES {
@@ -62,8 +68,10 @@ pub(super) fn decode(
         baseline_bytes: baseline.to_vec(),
         expected_local_sequence: header.expected_local_sequence,
         terminal_receipt: header.terminal_receipt,
+        retained_prefix: header.retained_prefix,
         events: Vec::new(),
         outbox_limits,
+        reconstruction,
     };
     for _ in 0..header.event_count {
         let metadata: serde_json::Value = serde_json::from_slice(field(&mut bytes)?)
@@ -102,35 +110,95 @@ mod tests {
         })
     }
 
-    fn cut(metadata: Value) -> Vec<u8> {
-        let update = b"update".to_vec();
-        let header = json!({
+    fn header() -> Value {
+        json!({
             "relayDatabaseNamespace": "relay", "adoptionId": "adoption", "sourceMomentId": "moment",
             "sourceDigest": "0".repeat(64), "sourceByteLength": 0, "baselineMomentRelaySequence": 0,
-            "baselineRegisteredAtMs": 0, "expectedLocalSequence": 0, "terminalReceipt": null, "eventCount": 1,
-        });
+            "baselineRegisteredAtMs": 0, "expectedLocalSequence": 0, "terminalReceipt": null,
+            "retainedPrefix": null, "eventCount": 1,
+        })
+    }
+
+    fn cut(metadata: Value) -> Vec<u8> {
+        cut_with(header(), Some(metadata))
+    }
+
+    fn cut_with(header: Value, metadata: Option<Value>) -> Vec<u8> {
+        let mut fields = vec![serde_json::to_vec(&header).unwrap(), vec![0, 0]];
+        if let Some(metadata) = metadata {
+            fields.push(serde_json::to_vec(&metadata).unwrap());
+            fields.push(b"update".to_vec());
+        }
         let mut bytes = Vec::new();
-        for field in [
-            serde_json::to_vec(&header).unwrap(),
-            vec![0, 0],
-            serde_json::to_vec(&metadata).unwrap(),
-            update,
-        ] {
+        for field in fields {
             bytes.extend_from_slice(&(field.len() as u32).to_le_bytes());
             bytes.extend_from_slice(&field);
         }
         bytes
     }
 
-    #[test]
-    fn events_must_arrive_canonical() {
-        let limits = dohc_engine_collab::OwnerOutboxLimits {
+    fn limits() -> dohc_engine_collab::OwnerOutboxLimits {
+        dohc_engine_collab::OwnerOutboxLimits {
             max_pending_bytes: 1_000_000,
             max_pending_age_ms: 60_000,
+        }
+    }
+
+    fn reconstruction() -> NativeHistoryReconstruction {
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 1,
+        }
+    }
+
+    /// The retained prefix is required, null for a first adoption, and
+    /// decodes exactly for a successor.
+    #[test]
+    fn the_retained_prefix_is_required() {
+        let decoded = decode(&cut(metadata(json!([]))), 1, limits(), reconstruction()).unwrap();
+        assert!(decoded.retained_prefix.is_none());
+        let mut missing = header();
+        missing.as_object_mut().unwrap().remove("retainedPrefix");
+        let Err(error) = decode(
+            &cut_with(missing, Some(metadata(json!([])))),
+            1,
+            limits(),
+            reconstruction(),
+        ) else {
+            panic!("a header without its retained prefix decoded");
         };
+        assert_eq!(error.message, "invalid-owner-adoption-header");
+        let prefix = json!({"terminalReceipt": null, "eventCount": 0, "historyEvidenceDigest": "e".repeat(64),
+            "predecessorActivationId": "predecessor"});
+        let mut successor = header();
+        successor["retainedPrefix"] = prefix.clone();
+        successor["eventCount"] = json!(0);
+        let decoded = decode(
+            &cut_with(successor.clone(), None),
+            1,
+            limits(),
+            reconstruction(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded.retained_prefix.unwrap()).unwrap(),
+            prefix
+        );
+        successor["retainedPrefix"]["extra"] = json!(1);
+        assert!(decode(&cut_with(successor, None), 1, limits(), reconstruction()).is_err());
+    }
+
+    #[test]
+    fn events_must_arrive_canonical() {
+        let limits = limits();
         let canonical = json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 5, "endClock": 10}]);
         let canonical_metadata = metadata(canonical.clone());
-        let decoded = decode(&cut(canonical_metadata.clone()), 1, limits.clone()).unwrap();
+        let decoded = decode(
+            &cut(canonical_metadata.clone()),
+            1,
+            limits.clone(),
+            reconstruction(),
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&decoded.events[0].metadata.first_seen).unwrap(),
             canonical
@@ -150,7 +218,7 @@ mod tests {
             "author": {"kind": "human", "humanId": "owner", "humanName": "Owner"},
             "structRanges": canonical, "deletionRanges": canonical,
         }]);
-        let decoded = decode(&cut(v2.clone()), 1, limits.clone()).unwrap();
+        let decoded = decode(&cut(v2.clone()), 1, limits.clone(), reconstruction()).unwrap();
         assert_eq!(
             serde_json::to_value(&decoded.events[0].metadata).unwrap(),
             v2
@@ -171,7 +239,7 @@ mod tests {
             ("adjacent checkpoint structRanges", struct_coverage),
             ("overlapping checkpoint deletionRanges", deletion_coverage),
         ] {
-            let Err(error) = decode(&cut(event), 1, limits.clone()) else {
+            let Err(error) = decode(&cut(event), 1, limits.clone(), reconstruction()) else {
                 panic!("{case} decoded");
             };
             assert_eq!(error.message, "invalid-owner-adoption-event", "{case}");

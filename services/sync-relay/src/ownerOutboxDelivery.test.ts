@@ -10,20 +10,24 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const seedKey = (adoptionId: string, sequence: number) => (updateDigest: string) =>
   `owner-adoption:${sha(Buffer.from(JSON.stringify([adoptionId, sequence, updateDigest])))}`;
 
-// The delivery native gives an outbox's first entry (owner_outbox.rs).
-const firstDelivery = (updateDigest: string) => `owner-delivery-${sha(Buffer.from(`outbox\0${1}\0${updateDigest}`))}`;
+// The delivery native gives an outbox's entry at `sequence` (owner_outbox.rs).
+const seedDelivery = (updateDigest: string, sequence = 1) => `owner-delivery-${sha(Buffer.from(`outbox\0${sequence}\0${updateDigest}`))}`;
 const serviceHost = {mode: "service", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"};
 
-/** `seedDigest` makes the first entry's delivery the one native gives a seed of that full state. */
+/**
+ * `seedDigest` makes the first entry's delivery the one native gives a seed
+ * of that full state at that entry's sequence.
+ */
 function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true,
-  seedDigest?: string) {
+  seedDigest?: string, sequences = [1, 3, 7]) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
-  const entries = [1,3,7].map(sequence => ({sequence,
-    appendKey: sequence === 1 && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
-    deliveryId: sequence === 1 && seedDigest ? firstDelivery(seedDigest) : `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+  const first = sequences[0];
+  const entries = sequences.map(sequence => ({sequence,
+    appendKey: sequence === first && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
+    deliveryId: sequence === first && seedDigest ? seedDelivery(seedDigest, sequence) : `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
     ...(personEdit ? {personEdit: true} : {}),
-    ...(sequence === 1 && agentDeclaration ? {agentDeclaration} : {})}));
+    ...(sequence === first && agentDeclaration ? {agentDeclaration} : {})}));
   const applied = vi.fn();
   const host = {...serviceHost};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [], order: string[] = [];
@@ -149,7 +153,7 @@ it("keeps a service seed's application for a later pass, which neither a later h
   const f = seedFixture(), transport = await f.service(), options = {client: transport.client, seedDelivery: transport.seedDelivery()};
   f.applyThrough.mockResolvedValueOnce(null);
   expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: true});
-  expect(f.receipts).toMatchObject([{deliveryId: firstDelivery(seedDigest)}]);
+  expect(f.receipts).toMatchObject([{deliveryId: seedDelivery(seedDigest)}]);
   expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: true});
   expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: false});
   expect(f.order.slice(2)).toEqual(["commit", "apply", "acknowledge", "commit", "apply", "acknowledge"]);
@@ -180,9 +184,29 @@ it("acknowledges a freshly adopted service seed first, though its adoption named
   expect(f.order).toEqual(["commit", "acknowledge", "apply"]);
 });
 
+// A successor's seed follows the entries its released predecessor left in the
+// outbox, at the sequence the engine reports, not the outbox's first.
+it("acknowledges a successor's service seed at the sequence the engine names", async () => {
+  const digest = sha(Buffer.from([4]));
+  const f = fixture(1, 10_000, undefined, seedKey("adoption", 7), false, digest, [4, 5, 6]);
+  const transport = await f.service({digest});
+  expect(await f.run({client: transport.client, seedDelivery: transport.seedDelivery()})).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.order).toEqual(["commit", "acknowledge", "apply"]);
+  expect(f.receipts).toMatchObject([{deliveryId: seedDelivery(digest, 4)}]);
+});
+
+it("applies a device host's seed before acknowledging it", async () => {
+  const f = seedFixture();
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.order).toEqual(["commit", "apply", "acknowledge"]);
+  expect(f.applied).toHaveBeenCalledTimes(1);
+});
+
+// Round 2 review: applied first, a service seed would wait forever for the
+// receipt the engine holds it behind, so the drain refuses before admitting it.
 type DrainOptions = Partial<Parameters<typeof drainOwnerOutbox>[0]>;
 it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOptions>]>([
-  ["no capability, as a device host", seedDigest, async () => ({})],
+  ["no capability", seedDigest, async f => ({client: (await f.service()).client, admission: {...f.admission, activation: {activationId: "adoption"}}})],
   ["copied public values", seedDigest, async f => ({client: (await f.service()).client, seedDelivery: {activationId: "adoption"}})],
   ["a serialized capability", seedDigest, async f => {
     const t = await f.service(); return {client: t.client, seedDelivery: JSON.parse(JSON.stringify(t.seedDelivery()))};
@@ -193,8 +217,6 @@ it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOpt
   ["a cloned capability", seedDigest, async f => {
     const t = await f.service(); return {client: t.client, seedDelivery: structuredClone(t.seedDelivery())};
   }],
-  ["pending activation access alone", seedDigest, async f => ({client: (await f.service()).client,
-    admission: {...f.admission, activation: {activationId: "adoption"}}})],
   ["another activation", seedDigest, async f => {
     const t = await f.service({activationId: "other"}); return {client: t.client, seedDelivery: t.seedDelivery()};
   }],
@@ -216,11 +238,12 @@ it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOpt
   ["another transport", seedDigest, async f => {
     const issuer = await f.service(), other = await f.service(); return {client: other.client, seedDelivery: issuer.seedDelivery()};
   }],
-])("applies the seed before acknowledging it with %s", async (_name, digest, options) => {
+])("refuses a service seed without its exact capability: %s", async (_name, digest, options) => {
   const f = seedFixture(digest);
-  expect(await f.run(await options(f))).toEqual({admittedEntries: 1, hasMore: true});
-  expect(f.order).toEqual(["commit", "apply", "acknowledge"]);
-  expect(f.applied).toHaveBeenCalledTimes(1);
+  await expect(f.run(await options(f))).rejects.toThrow("Service seed delivery is unavailable.");
+  expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  expect(f.applyThrough).not.toHaveBeenCalled();
+  expect(f.receipts).toEqual([]);
 });
 
 it.each([["another adoption", seedKey("other", 7)], ["another adopted head", seedKey("adoption", 6)]])(

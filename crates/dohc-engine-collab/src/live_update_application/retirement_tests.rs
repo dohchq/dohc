@@ -178,6 +178,7 @@ fn imported_source(f: &Fixture, full: &[u8]) -> ImportedOwnerSource {
         native_head_sequence: f.cut.expected_local_sequence,
         full_state_digest: hex_sha256(full),
         full_state_byte_length: full.len(),
+        predecessor_activation_id: None,
     }
 }
 
@@ -1255,7 +1256,7 @@ fn an_adopted_activation_releases_once_parked_and_reconciled() {
         })
         .unwrap();
     assert_eq!((stored.0, stored.1), (0, 10));
-    assert_eq!(serde_json::from_str::<RetainedPrefix>(&stored.2).unwrap(), boundary);
+    assert_eq!(serde_json::from_str::<RetainedPrefixBody>(&stored.2).unwrap(), boundary);
     assert_eq!(
         serde_json::from_str::<Vec<CarriedDelivery>>(&stored.3).unwrap(),
         vec![CarriedDelivery { receipt: carried, native_sequence: sequence }]

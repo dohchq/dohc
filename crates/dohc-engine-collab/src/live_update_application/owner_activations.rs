@@ -33,7 +33,8 @@ const COLUMNS: &str =
     "relay_database_namespace,activation_id,binding_json,source_moment_id,source_digest,
     source_byte_length,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,
     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,
-    released_at_ms IS NOT NULL,workspace_id,main_version_id,object_id,lineage_claim_id";
+    released_at_ms IS NOT NULL,workspace_id,main_version_id,object_id,lineage_claim_id,
+    predecessor_activation_id";
 
 /// One activation as its row records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,8 @@ pub struct OwnerActivation {
     pub activation_id: String,
     pub key: DocKey,
     pub lineage_claim_id: String,
+    /// The released activation it followed; none for a chain's first.
+    pub predecessor_activation_id: Option<String>,
     pub binding_json: String,
     pub source_moment_id: String,
     pub source_digest: String,
@@ -96,6 +99,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnerActivation> {
         activation_id: row.get(1)?,
         key,
         lineage_claim_id: row.get(19)?,
+        predecessor_activation_id: row.get(20)?,
         binding_json: row.get(2)?,
         source_moment_id: row.get(3)?,
         source_digest: row.get(4)?,
@@ -246,9 +250,26 @@ pub fn released_chain_tail(
     Ok(tails.pop())
 }
 
+/// The activation a capture in `namespace` follows. While one is current
+/// there, its own predecessor, so an unchanged capture names it again;
+/// otherwise the released chain tail.
+pub fn capture_predecessor(
+    conn: &Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> Result<Option<String>, ApplicationError> {
+    if let Some((current, _)) = current_activation(conn, Some(namespace), key, lineage_claim_id)? {
+        return Ok(current.predecessor_activation_id);
+    }
+    released_chain_tail(conn, namespace, key, lineage_claim_id)
+}
+
 /// The activation a registration serves. A named one is the lineage's current
 /// activation, or a retained source no activation recorded yet while nothing
-/// holds the lineage, which its adoption will activate. Without a name, the
+/// holds the lineage, which its adoption will activate. On a lineage this
+/// relay adopted, that source must follow the released chain tail, as only
+/// its successor may adopt. Without a name, the
 /// registration serves the current activation, if any. A lineage this relay
 /// adopted whose activation is released takes no unnamed registration: only
 /// an activation gives it live authority again. Neither serves an activation
@@ -292,16 +313,39 @@ fn resolve_registration(
     identifier(requested, 1024)?;
     let serves = match current {
         Some(current) => current.namespace == namespace && current.activation_id == requested,
-        None => conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources WHERE activation_id=?1
-                   AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id=?4 AND object_id=?5
-                   AND lineage_claim_id=?6)
-                 AND NOT EXISTS(SELECT 1 FROM live_owner_activations WHERE relay_database_namespace=?2 AND activation_id=?1)",
-                params![requested, namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id],
-                |row| row.get(0),
-            )
-            .map_err(read_sql)?,
+        None => {
+            let descriptor: Option<String> = conn
+                .query_row(
+                    "SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1
+                       AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id=?4 AND object_id=?5
+                       AND lineage_claim_id=?6
+                       AND NOT EXISTS(SELECT 1 FROM live_owner_activations WHERE relay_database_namespace=?2 AND activation_id=?1)",
+                    params![requested, namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(read_sql)?;
+            match descriptor {
+                None => false,
+                Some(_)
+                    if lineage_origin_id(
+                        conn,
+                        Some(namespace),
+                        &key,
+                        &binding.lineage_claim_id,
+                    )?
+                    .is_none() =>
+                {
+                    true
+                }
+                Some(descriptor) => {
+                    let source: super::activation::ImportedOwnerSource =
+                        serde_json::from_str(&descriptor).map_err(|_| ApplicationError::Corrupt)?;
+                    source.predecessor_activation_id
+                        == released_chain_tail(conn, namespace, &key, &binding.lineage_claim_id)?
+                }
+            }
+        }
     };
     if !serves {
         return Err(ApplicationError::Conflict);

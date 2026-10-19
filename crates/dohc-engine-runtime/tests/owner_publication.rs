@@ -7,6 +7,12 @@ use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::{path::PathBuf, sync::Arc};
 
+fn adoption_reconstruction() -> NativeHistoryReconstruction {
+    NativeHistoryReconstruction {
+        working_reserve_bytes: 8 * 1024 * 1024,
+    }
+}
+
 struct Fixture {
     db: PathBuf,
     store: EngineStore,
@@ -143,10 +149,12 @@ impl Fixture {
                     expected_local_sequence,
                     events: vec![],
                     terminal_receipt: None,
+                    retained_prefix: None,
                     outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                         max_pending_bytes: 1_000_000,
                         max_pending_age_ms: 100_000,
                     },
+                    reconstruction: adoption_reconstruction(),
                 },
                 1_000_000,
                 100,
@@ -1250,10 +1258,12 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
                 expected_local_sequence: captured.source.native_head_sequence,
                 events: vec![],
                 terminal_receipt: None,
+                retained_prefix: None,
                 outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                     max_pending_bytes: 1_000_000,
                     max_pending_age_ms: 100_000,
                 },
+                reconstruction: adoption_reconstruction(),
             },
             1_000_000,
             100,
@@ -2478,7 +2488,9 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
                     update_bytes: update,
                 }],
                 terminal_receipt: Some(receipt.clone()),
+                retained_prefix: None,
                 outbox_limits: limits,
+                reconstruction: adoption_reconstruction(),
             },
             1_000_000,
             100,

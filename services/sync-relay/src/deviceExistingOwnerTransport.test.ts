@@ -139,7 +139,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     }));
     const adopt = (id: number) => peer!.sendLiveOwnerAdoption({id,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
       { relayDatabaseNamespace: "namespace",adoptionId: "adoption",sourceMomentId: "source",sourceDigest: "b".repeat(64),sourceByteLength: 0,baselineMomentRelaySequence: 1,
-        baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
+        baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,retainedPrefix: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
     const firstAdoption = adopt(6);
     await expect.poll(() => singleton.forwardLiveOwnerAdoption.mock.calls.length).toBe(1);
     const beforeDuplicate = owner.finishHandoff.mock.calls.length;

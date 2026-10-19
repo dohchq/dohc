@@ -2953,6 +2953,7 @@ fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &s
         native_head_sequence: 1,
         full_state_digest: full_state_digest.clone(),
         full_state_byte_length: full_state.len(),
+        predecessor_activation_id: None,
     };
     let descriptor = serde_json::to_string(&source).expect("descriptor");
     let activation_id = format!("ordinary-activation-{}", hex_sha256(descriptor.as_bytes()));

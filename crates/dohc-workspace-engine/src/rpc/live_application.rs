@@ -2926,6 +2926,7 @@ mod tests {
                 native_head_sequence: 0,
                 full_state_digest: lineage,
                 full_state_byte_length: 0,
+                predecessor_activation_id: None,
             },
             baseline_bytes: Vec::new(),
             full_state: Vec::new(),

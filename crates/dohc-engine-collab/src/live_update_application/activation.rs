@@ -24,6 +24,10 @@ pub struct ImportedOwnerSource {
     pub native_head_sequence: i64,
     pub full_state_digest: String,
     pub full_state_byte_length: usize,
+    /// The released chain tail this capture follows. Absent, the descriptor
+    /// and so the activation ID are those of a capture that follows none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_activation_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -212,12 +216,15 @@ pub fn capture_imported_owner_activation(
         let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
         let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
         original_doc.validate_public_baseline(&baseline_bytes)?;
+        // A retirement still settling this document leaves no tail to follow yet.
+        if super::retirement::retiring(tx, key)? { return Err(ApplicationError::Conflict); }
+        let predecessor_activation_id = owner_activations::capture_predecessor(tx, namespace, key, &lineage)?;
         let source = ImportedOwnerSource {version: 1, relay_database_namespace: namespace.to_owned(),
             workspace_id: key.workspace_id.clone(), main_version_id: key.version_id.clone(), object_id: key.object_id.clone(),
             lineage_claim_id: lineage, current_path: path.to_owned(), replication_epoch: epoch, stream_identity: stream,
             committed_cursor: cursor, base_origin_id, base_origin_seq, base_relay_seq, source_moment_id: moment,
             source_digest, source_byte_length: source_length, native_head_sequence: marker.head_update_seq,
-            full_state_digest: hex_sha256(&full_state), full_state_byte_length: full_state.len()};
+            full_state_digest: hex_sha256(&full_state), full_state_byte_length: full_state.len(), predecessor_activation_id};
         let descriptor = serde_json::to_string(&source).map_err(|_| ApplicationError::Corrupt)?;
         if descriptor.len() > max_bytes.saturating_sub(baseline_bytes.len()).saturating_sub(full_state.len()) {
             return Err(ApplicationError::ConfiguredByteBudgetExceeded);
@@ -313,7 +320,11 @@ pub fn resume_imported_owner_activation(
                 || marker.head_update_seq<sequence || moment!=source.source_moment_id
                 || digest!=source.source_digest || length!=source.source_byte_length { return Err(ApplicationError::Conflict); }
         } else {
-            if marker.head_update_seq!=source.native_head_sequence { return Err(ApplicationError::Conflict); }
+            // A capture taken now would follow the same activation.
+            if marker.head_update_seq!=source.native_head_sequence || source.predecessor_activation_id
+                !=owner_activations::capture_predecessor(conn,namespace,key,&source.lineage_claim_id)? {
+                return Err(ApplicationError::Conflict);
+            }
             adoption::require_local_replay_budget(conn,key,max_bytes)?;
             let local=durable::load_doc_in(conn,key)?;
             let full=local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))

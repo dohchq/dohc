@@ -16,15 +16,18 @@ export interface ServiceSeedDelivery { readonly activationId: string }
 interface SeedScope {
   storage: object; transport: object; activationId: string; binding: LiveObjectBinding; host: LiveHostConnectionCoordinate;
 }
-const seedDeliveries = new WeakMap<ServiceSeedDelivery, SeedScope & {deliveryId(): string | undefined; updateDigest: string}>();
+const seedDeliveries = new WeakMap<ServiceSeedDelivery, SeedScope & {deliveryId(sequence: number): string | undefined; updateDigest: string}>();
 
-/** The seed `capability` lets this transport acknowledge first, when it was issued for exactly this scope. */
+/**
+ * The seed `capability` lets this transport acknowledge first, when it was
+ * issued for exactly this scope. Its delivery is the one native gives its
+ * outbox's entry at `sequence`, the place the engine reports for the seed.
+ */
 export function receiptFirstSeed(capability: ServiceSeedDelivery | undefined, scope: SeedScope) {
   const held = capability && seedDeliveries.get(capability);
   if (!held || held.storage !== scope.storage || held.transport !== scope.transport || held.activationId !== scope.activationId ||
     !isDeepStrictEqual(held.binding, scope.binding) || !isDeepStrictEqual(held.host, scope.host)) return undefined;
-  const deliveryId = held.deliveryId();
-  return deliveryId === undefined ? undefined : {deliveryId, updateDigest: held.updateDigest};
+  return {deliveryId: (sequence: number) => held.deliveryId(sequence), updateDigest: held.updateDigest};
 }
 
 /**
@@ -138,13 +141,15 @@ export function serviceOwnerTransport(options: {
     const value=Reflect.get(target,property,target);
     return typeof value==="function"?value.bind(target):value;
   }});
-  // A divergent adoption queues the captured full state as its outbox's first
-  // entry. A fresh adoption names that outbox only when the drain reads it.
+  // A divergent adoption queues the captured full state in its outbox, after
+  // any entries a released predecessor left there, so the engine names its
+  // sequence. A fresh adoption names that outbox only when the drain reads it.
   const seedDelivery=():ServiceSeedDelivery|undefined=>{
     if(!adopted || !captured)return undefined;
     const updateDigest=captured.source.fullStateDigest,delivery=Object.freeze({activationId:captured.activationId});
     seedDeliveries.set(delivery,{storage:options.storage,transport:facade,activationId:captured.activationId,updateDigest,
-      deliveryId:()=>outboxId===undefined?undefined:`owner-delivery-${createHash("sha256").update(`${outboxId}\0${1}\0${updateDigest}`).digest("hex")}`,
+      deliveryId:(sequence:number)=>outboxId===undefined || !Number.isSafeInteger(sequence) || sequence<1?undefined
+        :`owner-delivery-${createHash("sha256").update(`${outboxId}\0${sequence}\0${updateDigest}`).digest("hex")}`,
       binding:structuredClone(binding),host:{...options.host}});
     return delivery;
   };

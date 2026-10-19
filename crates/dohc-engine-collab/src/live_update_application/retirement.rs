@@ -800,13 +800,32 @@ fn accepted_history_receipt(
     retiring: &Retiring,
     entry: &RetainedEntry,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
-    let doc = &retiring.doc;
+    accepted_receipt(
+        conn,
+        namespace,
+        &retiring.doc,
+        &retiring.lineage_claim_id,
+        &entry.delivery_id,
+        &entry.update_digest,
+    )
+}
+
+/// The receipt the lineage's accepted history kept for `delivery`, if any.
+/// Another document's, or other bytes, under the same delivery conflict.
+fn accepted_receipt(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    expected_lineage: &str,
+    delivery: &str,
+    update_digest: &str,
+) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let row: Option<(String, String, String, String, String, String)> = conn
         .query_row(
             "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,update_sha256,
                 json_extract(metadata_json,'$.accepted.receipt')
              FROM live_accepted_updates WHERE relay_database_namespace=?1 AND delivery_id=?2",
-            params![namespace, entry.delivery_id],
+            params![namespace, delivery],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -829,10 +848,10 @@ fn accepted_history_receipt(
     if workspace != doc.workspace_id
         || version != doc.version_id
         || object != doc.object_id
-        || lineage != retiring.lineage_claim_id
-        || update != entry.update_digest
-        || receipt.delivery_id != entry.delivery_id
-        || receipt.update_digest != entry.update_digest
+        || lineage != expected_lineage
+        || update != update_digest
+        || receipt.delivery_id != delivery
+        || receipt.update_digest != update_digest
     {
         return Err(ApplicationError::Conflict);
     }
@@ -964,10 +983,41 @@ fn applications(
 /// its lineage's accepted history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetainedPrefixBody {
+    pub terminal_receipt: Option<LiveUpdateReceipt>,
+    pub event_count: i64,
+    pub history_evidence_digest: String,
+}
+
+/// The released prefix a successor adopts: its predecessor, the released
+/// chain tail, and the boundary that tail kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RetainedPrefix {
     pub terminal_receipt: Option<LiveUpdateReceipt>,
     pub event_count: i64,
     pub history_evidence_digest: String,
+    pub predecessor_activation_id: String,
+}
+
+impl RetainedPrefix {
+    pub fn body(&self) -> RetainedPrefixBody {
+        RetainedPrefixBody {
+            terminal_receipt: self.terminal_receipt.clone(),
+            event_count: self.event_count,
+            history_evidence_digest: self.history_evidence_digest.clone(),
+        }
+    }
+
+    pub(super) fn validate(&self) -> Result<(), ApplicationError> {
+        identifier(&self.predecessor_activation_id, 1024)?;
+        integer(self.event_count, 0, SAFE)?;
+        digest(&self.history_evidence_digest)?;
+        if let Some(receipt) = &self.terminal_receipt {
+            receipt.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// A delivery the relay accepted from the activation after its boundary,
@@ -983,7 +1033,7 @@ pub struct CarriedDelivery {
 pub enum Release {
     Released {
         replayed: bool,
-        boundary: Option<RetainedPrefix>,
+        boundary: Option<RetainedPrefixBody>,
     },
     Pending(ReleasePending),
 }
@@ -1039,7 +1089,7 @@ fn stored_boundary(
     conn: &Connection,
     namespace: &str,
     activation_id: &str,
-) -> Result<Option<RetainedPrefix>, ApplicationError> {
+) -> Result<Option<RetainedPrefixBody>, ApplicationError> {
     let json: String = conn
         .query_row(
             "SELECT released_boundary_json FROM live_owner_activations
@@ -1202,7 +1252,7 @@ fn release_unadopted(
             .map_err(read_sql)?,
         None => ("null".into(), "[]".into()),
     };
-    let inherited: Option<RetainedPrefix> =
+    let inherited: Option<RetainedPrefixBody> =
         serde_json::from_str(&boundary).map_err(|_| ApplicationError::Corrupt)?;
     serde_json::from_str::<Vec<CarriedDelivery>>(&carried)
         .map_err(|_| ApplicationError::Corrupt)?;
@@ -1250,21 +1300,20 @@ fn applied_boundary(
     retiring: &Retiring,
     adopted: &ActivationAdoption,
     through: i64,
-) -> Result<RetainedPrefix, ApplicationError> {
+) -> Result<RetainedPrefixBody, ApplicationError> {
     let doc = &retiring.doc;
-    let document = params![
-        namespace,
-        doc.workspace_id,
-        doc.version_id,
-        doc.object_id,
-        retiring.lineage_claim_id
-    ];
     let latest: Option<LiveUpdateReceipt> = conn
         .query_row(
             "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications
              WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4
                AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
-            document,
+            params![
+                namespace,
+                doc.workspace_id,
+                doc.version_id,
+                doc.object_id,
+                retiring.lineage_claim_id
+            ],
             |row| {
                 Ok(LiveUpdateReceipt {
                     delivery_id: row.get(0)?,
@@ -1286,6 +1335,28 @@ fn applied_boundary(
         _ => serde_json::from_str(&adopted.terminal_receipt_json)
             .map_err(|_| ApplicationError::Corrupt)?,
     };
+    let endpoint = accepted_endpoint(conn, namespace, doc, &retiring.lineage_claim_id)?;
+    if endpoint.terminal_receipt != applied {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(endpoint)
+}
+
+/// Where the lineage's accepted history ends: its last event, or a later
+/// checkpoint.
+pub(super) fn accepted_endpoint(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<RetainedPrefixBody, ApplicationError> {
+    let document = params![
+        namespace,
+        doc.workspace_id,
+        doc.version_id,
+        doc.object_id,
+        lineage
+    ];
     let endpoint = |sql: &str| -> Result<Option<(i64, String, String)>, ApplicationError> {
         conn.query_row(sql, document, |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -1308,13 +1379,8 @@ fn applied_boundary(
         (Some(endpoint), _) | (None, Some(endpoint)) => endpoint,
         (None, None) => return Err(ApplicationError::Corrupt),
     };
-    let terminal: Option<LiveUpdateReceipt> =
-        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
-    if terminal != applied {
-        return Err(ApplicationError::Conflict);
-    }
-    Ok(RetainedPrefix {
-        terminal_receipt: applied,
+    Ok(RetainedPrefixBody {
+        terminal_receipt: serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?,
         event_count,
         history_evidence_digest: evidence,
     })
@@ -1329,7 +1395,7 @@ fn classify(
     conn: &Connection,
     namespace: &str,
     retiring: &Retiring,
-    boundary: &RetainedPrefix,
+    boundary: &RetainedPrefixBody,
     through: i64,
 ) -> Result<Vec<CarriedDelivery>, ApplicationError> {
     let applied_through = boundary
@@ -1390,6 +1456,213 @@ fn classify(
         });
     }
     Ok(carried)
+}
+
+/// What a released activation left its successor: the boundary it kept and
+/// the deliveries it carried.
+pub(super) fn released_tail(
+    conn: &Connection,
+    namespace: &str,
+    activation_id: &str,
+) -> Result<(Option<RetainedPrefixBody>, Vec<CarriedDelivery>), ApplicationError> {
+    let (boundary, carried): (String, String) = conn
+        .query_row(
+            "SELECT released_boundary_json,carried_manifest_json FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND released_at_ms IS NOT NULL",
+            params![namespace, activation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(read_sql)?;
+    Ok((
+        serde_json::from_str(&boundary).map_err(|_| ApplicationError::Corrupt)?,
+        serde_json::from_str(&carried).map_err(|_| ApplicationError::Corrupt)?,
+    ))
+}
+
+/// A released activation of the lineage as its release left it, to judge a
+/// seed it abandoned.
+fn released_retiring(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    activation_id: &str,
+) -> Result<Option<Retiring>, ApplicationError> {
+    let Some(activation) = activation_by_id(conn, namespace, activation_id)?
+        .filter(|found| found.released && found.key == *doc && found.lineage_claim_id == lineage)
+    else {
+        return Ok(None);
+    };
+    let through: i64 = conn
+        .query_row(
+            "SELECT released_accepted_cursor FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2",
+            params![namespace, activation_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    Ok(Some(Retiring {
+        doc: doc.clone(),
+        lineage_claim_id: lineage.to_owned(),
+        activation_id: activation_id.to_owned(),
+        activation: Some(activation),
+        released_through: Some(through),
+    }))
+}
+
+/// A successor's coverage of the outbox its released chain left: each entry
+/// Covered by accepted history at or below the prefix, Carried under the
+/// chain's manifest, or a seed its activation strictly abandoned. Anything
+/// else refuses the succession, and so does a carried delivery it lacks.
+/// Each entry names its sequence and receipt; an abandoned seed has none.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn retained_coverage(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    outbox_id: &str,
+    prefix: &RetainedPrefixBody,
+    carried: &[CarriedDelivery],
+    max_events: usize,
+) -> Result<Vec<(i64, Option<LiveUpdateReceipt>)>, ApplicationError> {
+    let through = prefix
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |receipt| receipt.journal_cursor);
+    let limit = i64::try_from(max_events)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or(invalid("owner adoption capacity"))?;
+    let mut query = conn
+        .prepare(
+            "SELECT sequence,append_key,delivery_id,update_digest,native_source_json,accepted_receipt_json,pending,
+                terminal_reason,update_blob_digest,terminal_blob_digest,length(CAST(native_source_json AS BLOB))
+             FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 ORDER BY sequence LIMIT ?2",
+        )
+        .map_err(read_sql)?;
+    let mut rows = query.query(params![outbox_id, limit]).map_err(read_sql)?;
+    let mut coverage = Vec::new();
+    let mut found = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(read_sql)? {
+        if coverage.len() >= max_events {
+            return Err(invalid(
+                "owner adoption retained outbox coverage exceeds its budget",
+            ));
+        }
+        let sequence: i64 = row.get(0).map_err(read_sql)?;
+        if sequence != coverage.len() as i64 + 1 || row.get::<_, bool>(6).map_err(read_sql)? {
+            return Err(ApplicationError::Conflict);
+        }
+        let append_key: String = row.get(1).map_err(read_sql)?;
+        let delivery: String = row.get(2).map_err(read_sql)?;
+        let digest: String = row.get(3).map_err(read_sql)?;
+        let source = match row.get::<_, Option<String>>(4).map_err(read_sql)? {
+            None => None,
+            Some(json) => {
+                let length: i64 = row.get(10).map_err(read_sql)?;
+                if !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
+                    return Err(ApplicationError::Corrupt);
+                }
+                let source: OwnerOutboxNativeSource =
+                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+                source
+                    .validate(&append_key)
+                    .map_err(|_| ApplicationError::Corrupt)?;
+                let b = &source.binding;
+                if b.workspace_id != doc.workspace_id
+                    || b.main_version_id != doc.version_id
+                    || b.object_id != doc.object_id
+                    || b.lineage_claim_id != lineage
+                    || source.update_digest != digest
+                {
+                    return Err(ApplicationError::Corrupt);
+                }
+                Some(source)
+            }
+        };
+        let saved = row
+            .get::<_, Option<String>>(5)
+            .map_err(read_sql)?
+            .map(|json| {
+                let saved: OwnerDeliveryReceipt =
+                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+                Ok::<_, ApplicationError>(LiveUpdateReceipt {
+                    delivery_id: saved.delivery_id,
+                    update_digest: saved.update_digest,
+                    journal_cursor: saved.journal_cursor,
+                    accepting_host_epoch: saved.accepting_host_epoch,
+                })
+            })
+            .transpose()?;
+        if let Some(receipt) = accepted_receipt(conn, namespace, doc, lineage, &delivery, &digest)?
+        {
+            if receipt.journal_cursor > through
+                || saved.as_ref().is_some_and(|saved| *saved != receipt)
+            {
+                return Err(ApplicationError::Conflict);
+            }
+            coverage.push((sequence, Some(receipt)));
+            continue;
+        }
+        if let (Some(saved), Some(source)) = (&saved, &source) {
+            let listed = carried.iter().any(|delivery| {
+                delivery.receipt == *saved && delivery.native_sequence == source.native_sequence
+            });
+            let applied: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
+                       AND delivery_id=?2)",
+                    params![namespace, delivery],
+                    |row| row.get(0),
+                )
+                .map_err(read_sql)?;
+            if !listed
+                || saved.delivery_id != delivery
+                || saved.update_digest != digest
+                || saved.journal_cursor <= through
+                || applied
+            {
+                return Err(ApplicationError::Conflict);
+            }
+            found.insert(delivery);
+            coverage.push((sequence, Some(saved.clone())));
+            continue;
+        }
+        let abandoned = match (source, saved) {
+            (Some(source), None) => {
+                let entry = RetainedEntry {
+                    outbox_id: outbox_id.to_owned(),
+                    sequence,
+                    delivery_id: delivery,
+                    update_digest: digest,
+                    receipt: None,
+                    pending: false,
+                    terminal_reason: row.get(7).map_err(read_sql)?,
+                    update_blob: row.get(8).map_err(read_sql)?,
+                    terminal_blob: row.get(9).map_err(read_sql)?,
+                    quarantined: false,
+                    source,
+                };
+                match released_retiring(conn, namespace, doc, lineage, &entry.source.adoption_id)? {
+                    Some(retiring) => is_abandoned_seed(conn, namespace, &retiring, &entry)?,
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !abandoned {
+            return Err(ApplicationError::Conflict);
+        }
+        coverage.push((sequence, None));
+    }
+    if carried
+        .iter()
+        .any(|delivery| !found.contains(&delivery.receipt.delivery_id))
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(coverage)
 }
 
 /// The registration a retirement settles through: the activation's own
