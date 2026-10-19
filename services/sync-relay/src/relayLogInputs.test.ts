@@ -1,6 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseAuthenticatedLogOps, parseNamedShareLogOps } from "./relayLogInputs";
 import { stableJsonStringify } from "./canonicalJson";
+import { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
+
+it.each([false, true])("bounds a hung account-name lookup and preserves the authenticated principal (named share=%s)", async named => {
+  vi.useFakeTimers();
+  try {
+    const agent = {agentId: "writer", agentName: "Writer", onBehalfOf: "forged-owner", depth: 1};
+    const edit = {originSeq: 0, recordedAtMs: 1, opKind: "ydoc.update", payload: {
+      authorContext: {kind: "account", accountId: "recipient", agent},
+    }};
+    const lookup = vi.fn(() => new Promise<string | null>(() => {}));
+    let result: Awaited<ReturnType<typeof parseAuthenticatedLogOps>> | undefined;
+    const parse = named ? parseNamedShareLogOps : parseAuthenticatedLogOps;
+    const admission = parse(named ? [edit, {...message("human"), originSeq: 1}] : [edit], "recipient", lookup)
+      .then(ops => {result = ops;});
+    await vi.advanceTimersByTimeAsync(ACCOUNT_NAME_LOOKUP_DEADLINE_MS - 1);
+    expect(result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result).toBeDefined();
+    const human = {kind: "human", humanId: "recipient", humanName: "Unnamed"};
+    expect(result?.[0]?.admittedAuthorSnapshot).toEqual([human, {kind: "agent", ...agent, onBehalfOf: "recipient"}]);
+    if (named) expect(result?.[1]?.admittedAuthorSnapshot).toEqual([human]);
+    expect(lookup).toHaveBeenCalledExactlyOnceWith("recipient");
+    expect(vi.getTimerCount()).toBe(0);
+    await admission;
+  } finally {vi.useRealTimers();}
+});
+
+it.each(["throw", "reject"])("admits an unnamed authenticated author when account lookup fails by %s", async kind => {
+  const lookup = () => {
+    if (kind === "throw") throw new Error("accounts unavailable");
+    return Promise.reject(new Error("accounts unavailable"));
+  };
+  const [op] = await parseAuthenticatedLogOps([{originSeq: 0, recordedAtMs: 1, opKind: "ydoc.update", payload: {
+    authorContext: {kind: "account", accountId: "recipient"},
+  }}], "recipient", lookup);
+  expect(op?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "recipient", humanName: "Unnamed"}]);
+});
 
 function message(authorKind: unknown, authorDisplayName: unknown = "Writer") {
   return {originSeq: 0, recordedAtMs: 1, opKind: "chat.message.append", payload: {

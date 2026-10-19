@@ -2,6 +2,7 @@ import { jsonResponse, type TokenBucketLimiter } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import {linkRefusal} from "./linkRefusal";
 import {
   DiscussionActivityCapacityError,
@@ -25,7 +26,6 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
   LINK_DISCUSSION_PAGE_LIMIT,
-  normalizeDiscussionDisplayName,
   type SyncRelayShareDiscussionCursor,
   type SyncRelayShareDiscussionMessageRow,
   type SyncRelayShareDiscussionActivityPage,
@@ -35,48 +35,9 @@ import {
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
-export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
 const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
 const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 
-type LookupUserDisplayName = (
-  userId: string,
-) => Promise<string | null> | string | null;
-
-// The account's display name, or null when it has none or the lookup fails
-// or runs past its deadline.
-export async function accountDisplayName(
-  lookupUserDisplayName:
-    | LookupUserDisplayName
-    | undefined,
-  userId: string,
-): Promise<string | null> {
-  if (!lookupUserDisplayName) return null;
-
-  let lookup: Promise<string | null>;
-  try {
-    lookup = Promise.resolve(lookupUserDisplayName(userId));
-  } catch {
-    return null;
-  }
-
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const deadlineResult = new Promise<null>((resolve) => {
-      deadline = setTimeout(
-        () => resolve(null),
-        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
-      );
-      deadline.unref();
-    });
-    const lookedUpName = await Promise.race([lookup, deadlineResult]);
-    return normalizeDiscussionDisplayName(lookedUpName);
-  } catch {
-    return null;
-  } finally {
-    if (deadline) clearTimeout(deadline);
-  }
-}
 
 export function createDiscussionRoutes(
   storage: Pick<

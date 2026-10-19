@@ -59,6 +59,15 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -144,6 +153,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -215,6 +233,15 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -414,6 +441,15 @@ jobs:
       # Required for creating GitHub releases via softprops/action-gh-release.
       contents: write
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

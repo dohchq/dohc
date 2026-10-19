@@ -83,6 +83,7 @@ impl Fixture {
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
             apply_probe: probe,
+            import_priority: None,
         }
     }
 

@@ -1,6 +1,6 @@
 import {AutomationRunWait} from "@dohc/automation-executor/button-presser";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {accountDisplayName} from "./discussionRoutes";
+import {accountDisplayName} from "./accountDisplayName";
 import {captureOwnerLiveFrameHost, type NamedFrameNativeHost} from "./namedLiveFrameHost";
 import type {AutomationServerOptions} from "./automationServer";
 

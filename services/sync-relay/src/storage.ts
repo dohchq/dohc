@@ -229,7 +229,6 @@ export {
   currentFileStateQuery,
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
-export { normalizeDiscussionDisplayName } from "./storage/discussion";
 export { CollectionWriteStaleError, type CollectionWriteReceipt, type CommitCollectionWriteInput } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";

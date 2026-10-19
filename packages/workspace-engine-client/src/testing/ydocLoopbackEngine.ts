@@ -859,7 +859,9 @@ export class YdocLoopbackEngine implements EngineTransport {
     }
 
     this.sessions.delete(sessionId);
-    return { closed: true };
+    // Like the daemon, a close that settled says whether it wrote the file;
+    // the loopback always writes.
+    return settled === null ? { closed: true } : { closed: true, materialized: true };
   }
 
   // The daemon drops the session and its lease and leaves the durable lineage

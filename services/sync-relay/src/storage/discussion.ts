@@ -23,7 +23,7 @@ import {
 import { rowToLinkPrincipalRow, rowToShareDiscussionMessageRow } from "./rows";
 import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
 
-export function normalizeDiscussionDisplayName(value: unknown): string | null {
+function normalizeDiscussionDisplayName(value: unknown): string | null {
   const result = normalizeShareDiscussionDisplayName(value);
   return result.ok ? result.value : null;
 }

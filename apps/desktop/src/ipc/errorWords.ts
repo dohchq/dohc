@@ -12,6 +12,7 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 type Words = string | null;
 
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
+const NOT_READ = "dohc has not read this file yet. Try again when it has.";
 const TOO_LARGE = "It is too large.";
 const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try again later.";
 const CONTENT_MISSING = "Some file contents are missing on the server.";
@@ -89,6 +90,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     ...ENGINE_CODE_WORDS,
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
+    "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
     "file-locked": "Another program has this file open. Close it there, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",

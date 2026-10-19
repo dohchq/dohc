@@ -215,6 +215,16 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
   });
 
+  it("says a file is not read yet without promising that the workspace will finish", () => {
+    const received = acrossIpc(refusal("OVERLOADED", "dohc has not read this file yet. Open it again once dohc has read it."));
+    expect(readError(received)).toEqual({
+      words: "dohc has not read this file yet. Try again when it has.",
+      mapped: true,
+      cause: "DaemonRefusalError [OVERLOADED]: dohc has not read this file yet. Open it again once dohc has read it.",
+    });
+    expect(isWorkspaceUpdatingError(received)).toBe(false);
+  });
+
   it("knows a shared live file's restore refusal across IPC, and keeps its words", () => {
     const refused = new LiveDocumentMutationError(
       "dohc could not restore notes/plan.md. This action is unavailable for shared live files. Continue editing at the current location.",

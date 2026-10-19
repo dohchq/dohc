@@ -5,6 +5,7 @@ use dohc_engine_collab::OwnerOutboxError;
 use dohc_engine_collab::live_update_application::ApplicationError;
 use dohc_engine_domain::DomainError;
 use dohc_engine_protocol::error::ErrorCode;
+use dohc_engine_protocol::error::Retryability;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_runtime::RuntimeError;
 use dohc_engine_runtime::SearchError;
@@ -611,6 +612,17 @@ pub(super) fn initial_capture_updating() -> WireError {
         ErrorCode::Overloaded,
         "Workspace is still updating. Try again.",
     )
+}
+
+/// The initial capture ended without reading the file. No capture wake will
+/// follow, so the refusal is not retryable, but a later capture pass can still
+/// read the file, and the caller can open it then.
+pub(super) fn initial_capture_degraded() -> WireError {
+    WireError {
+        code: ErrorCode::Overloaded,
+        message: "dohc has not read this file yet. Open it again once dohc has read it.".to_owned(),
+        retry: Retryability::No,
+    }
 }
 
 pub(super) fn workspace_unavailable() -> WireError {
