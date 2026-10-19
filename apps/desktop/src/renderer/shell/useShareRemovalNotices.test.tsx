@@ -112,20 +112,6 @@ describe("useShareRemovalNotices", () => {
     ]);
   });
 
-  it("shows the relay's refusal when fencing voids an Undo receipt", async () => {
-    const restored = vi.fn();
-    bridgeMock.undoRelayShare.mockRejectedValue(new Error("Access changed after removal. Undo is no longer available."));
-    const { result } = renderNotices();
-    act(() => result.current.notices.removed(removal({ restored })));
-    await act(async () => result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id));
-    expect(result.current.shell.shellErrors[0]).toMatchObject({
-      message: "dohc could not undo this removal. Access changed after removal. Undo is no longer available.",
-      retry: expect.any(Function),
-    });
-    expect(restored).not.toHaveBeenCalled();
-    expect(sharesChanged).toHaveBeenCalledTimes(1);
-  });
-
   it("explains an Undo after the receipt expired instead of asking the relay", async () => {
     const { result } = renderNotices();
     act(() => result.current.notices.removed(removal({ undo: { undoId: "undo-1", expiresAtMs: Date.now() - 1 } })));

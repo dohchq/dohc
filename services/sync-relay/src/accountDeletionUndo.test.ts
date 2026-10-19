@@ -8,7 +8,7 @@ import { closeTestStorages, request, testHandler, testStorage } from "./testing"
 
 afterEach(closeTestStorages);
 const key = "fenced-undo-test-key-at-least-thirty-two-bytes";
-const owner = "owner@dohc.test", deleted = "deleted@dohc.test", survivor = "survivor@dohc.test";
+const owner = "owner@dohc.test", deleted = "deleted-user", survivor = "survivor@dohc.test";
 const removal = { shareId: "share", actorUserId: owner, nowMs: 1000 };
 
 async function fixture(principalKind: "user" | "email", mixed: boolean) {
