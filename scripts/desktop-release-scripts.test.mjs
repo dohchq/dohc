@@ -36,6 +36,7 @@ import {
 } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
 import { checkDesktopReleasePublication } from "./check-desktop-release-publication.mjs";
+import { LEGACY_NIGHTLIES, selectUpgradeNightly } from "./select-upgrade-nightly.mjs";
 import {
   createMockUpdateServer,
   resolveServablePath,
@@ -549,6 +550,54 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
       else assert.ok(published, `${target.label} publishing can use configured secrets`);
     }
   }
+});
+
+test("the upgrade check opens the newest published nightly, and only legacy nightlies skip it", () => {
+  const nightly = (tag_name, published_at, names = [`dohc-${tag_name}-linux-x86_64.AppImage`], draft = false) =>
+    ({ tag_name, published_at, draft, assets: names.map((name) => ({ name })) });
+  const older = nightly("v0.1.2-nightly.20261017.40.1", "2026-10-17T04:00:00Z");
+  const newer = nightly("v0.1.2-nightly.20261018.41.1", "2026-10-18T04:00:00Z");
+  const stable = nightly("v0.1.2", "2026-10-19T04:00:00Z");
+  const draft = nightly("v0.1.2-nightly.20261019.42.1", "2026-10-19T05:00:00Z", undefined, true);
+  assert.deepEqual(selectUpgradeNightly([older, newer, stable, draft]), { tag: newer.tag_name }, "drafts and stable releases are not nightlies");
+  assert.match(selectUpgradeNightly([stable]).notice, /No nightly is published yet/u);
+  assert.equal(selectUpgradeNightly([]).tag, null);
+  assert.deepEqual(LEGACY_NIGHTLIES, ["v0.1.1-nightly.20260622.15.1"]);
+  const legacy = nightly(LEGACY_NIGHTLIES[0], "2026-06-22T09:42:56Z");
+  assert.equal(selectUpgradeNightly([legacy]).tag, null, "a nightly from before the packaged engine skips the check");
+  assert.equal(selectUpgradeNightly([legacy, older]).tag, older.tag_name, "a later nightly replaces the legacy one");
+  // A newer nightly without an AppImage must not hand the check to an older one.
+  const windowsOnly = nightly("v0.1.2-nightly.20261019.43.1", "2026-10-19T06:00:00Z", ["dohc-setup.exe"]);
+  assert.throws(() => selectUpgradeNightly([older, windowsOnly]), /v0\.1\.2-nightly\.20261019\.43\.1, the newest published nightly, has no Linux AppImage/u);
+  assert.throws(() => selectUpgradeNightly([{ ...older, published_at: null }]), /no publication time/u);
+});
+
+test("the Linux package opens a workspace from the previous nightly before anything uploads it", () => {
+  const { build } = releaseWorkflow.jobs;
+  const choose = releaseStep(build, "scripts/select-upgrade-nightly.mjs");
+  assert.equal(choose.id, "previous-nightly");
+  assert.equal(choose.if, "runner.os == 'Linux'");
+  assert.equal(choose.env.GH_TOKEN, "${{ github.token }}", "the step reads releases with the job token");
+  assert.match(choose.run, /--jq '\.\[\] \| \{tag_name, draft, published_at, assets: \[\.assets\[\] \| \{name\}\]\}'/u, "the helper sees every release and decides");
+  assert.match(choose.run, /--github-output$/mu);
+  const upgrade = releaseStep(build, "src/workspaces/engineUpgrade.e2e.test.ts");
+  assert.equal(upgrade.if, "runner.os == 'Linux' && steps.previous-nightly.outputs.tag != ''", "only the helper's skip skips the check");
+  assert.equal(upgrade.env.PREVIOUS_NIGHTLY, "${{ steps.previous-nightly.outputs.tag }}");
+  assert.equal(upgrade.env.GH_TOKEN, "${{ github.token }}");
+  assert.equal(upgrade.env.DOHC_REQUIRE_UPGRADE_E2E, "1", "a missing engine fails the check instead of skipping it");
+  assert.equal(upgrade.env.DOHC_TEST_ENGINE_BINARY,
+    "${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/workspace-engine/dohc-workspace-engine",
+    "the check opens the workspace with the engine this run packaged");
+  assert.match(upgrade.run, /--appimage-extract/u, "the AppImage is extracted without FUSE");
+  assert.match(upgrade.run, /download="\$\{RUNNER_TEMP\}\/previous-nightly"/u, "the previous nightly stays out of apps/desktop/release");
+  assert.match(upgrade.run, /gh release download "\$PREVIOUS_NIGHTLY" .*--dir "\$download"/u);
+  assert.match(upgrade.run, /export DOHC_UPGRADE_PREVIOUS_ENGINE="\$download\/squashfs-root\/resources\/workspace-engine\/dohc-workspace-engine"/u);
+  assert.match(upgrade.run, /if \[\[ ! -x "\$DOHC_UPGRADE_PREVIOUS_ENGINE" \]\]; then\n\s+echo "::error::[^\n]+"\n\s+exit 1/u, "a nightly without an executable engine fails the check");
+  assert.doesNotMatch(upgrade.run, /exit 0/u, "the check step itself never skips");
+  const order = step => build.steps.indexOf(step);
+  assert.ok(order(releaseStep(build, "smoke:fuses:desktop")) < order(choose), "the check runs after the fuse smoke");
+  assert.equal(order(upgrade), order(choose) + 1);
+  assert.ok(order(upgrade) < order(releaseStep(build, "actions/upload-artifact@")), "the check runs before the upload");
 });
 
 test("desktop release stages the Rust engine and Collection compiler for the packaged architecture", async () => {
