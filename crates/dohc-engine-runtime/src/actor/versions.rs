@@ -597,7 +597,10 @@ fn plan_plaintext_switch(
                 }
                 SnapshotContent::Binary { sha256 } => (sha256.clone(), None),
             };
-            if projection_matches(&state, &desired_sha256) {
+            if projection_matches(&state, &desired_sha256)
+                && !(cfg!(windows)
+                    && dohc_engine_files::stored_under_other_spelling(root_dir, &snapshot.path))
+            {
                 continue;
             }
             projections.push(planned_projection(

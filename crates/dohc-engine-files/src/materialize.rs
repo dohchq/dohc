@@ -1630,6 +1630,7 @@ fn materialize_ordinary_write(
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
         && sha == job.content_sha256
+        && !(cfg!(windows) && crate::stored_under_other_spelling(root, &job.target_path))
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -4351,6 +4352,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     #[cfg(windows)]
     {
+        let requested_leaf = out.file_name().unwrap().to_os_string();
         // Check links before resolving aliases. Resolve the deepest existing
         // path once, including an existing leaf so file aliases cannot bypass
         // the sidecar and conflict-artifact floor.
@@ -4384,6 +4386,17 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
         let relative = relative.to_string_lossy().replace('\\', "/");
         if is_excluded_file(&relative) || crate::policy::is_shared_with_me_path(&relative) {
             return Err(MaterializeError::UnsafeTargetPath);
+        }
+        // Validate the resolved alias first, including the short-name floor.
+        // Publication must still use the requested case of an ordinary leaf.
+        if requested_leaf
+            .to_str()
+            .zip(out.file_name().and_then(OsStr::to_str))
+            .is_some_and(|(requested, resolved)| {
+                crate::floor::fold_segment(requested) == crate::floor::fold_segment(resolved)
+            })
+        {
+            out.set_file_name(requested_leaf);
         }
     }
     Ok(out)
@@ -7007,6 +7020,52 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .expect("enqueue materialization job");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_publication_keeps_the_requested_leaf_case_even_with_equal_bytes() {
+        for desired in [b"Before.\n".as_slice(), b"After.\n".as_slice()] {
+            let scratch = Scratch::new("publication-leaf-case");
+            let root = scratch.root.path();
+            std::fs::write(root.join("held.md"), b"Before.\n").unwrap();
+            if !root.join("HELD.MD").exists() {
+                continue;
+            }
+            let (_db, mut store) = flush_store();
+            let before = store.put_binary_blob(b"Before.\n").unwrap();
+            let content = store.put_binary_blob(desired).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "leaf-case".into(),
+                            workspace_id: "ws".into(),
+                            target_path: "HELD.MD".into(),
+                            content_sha256: content,
+                            preimage: Preimage::Present(before),
+                            target_generation: 1,
+                            now_ms: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("leaf-case")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                materialize_one(&store, root, &job, &options_with(&StdReplacer)).unwrap(),
+                JobOutcome::Completed
+            );
+            assert_eq!(
+                dohc_windows_files::stored_leaf_name(&root.join("HELD.MD")).unwrap(),
+                "HELD.MD"
+            );
+            assert_eq!(std::fs::read(root.join("HELD.MD")).unwrap(), desired);
+            assert!(!crate::stored_under_other_spelling(root, "HELD.MD"));
+        }
     }
 
     fn capture_file_hold_fixture(store: &mut EngineStore, outside: &[u8]) {
