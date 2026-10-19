@@ -4,7 +4,7 @@ import type {
   ChatFileMentionRecord,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { ipcErrorMessage } from "./ipcError";
+import { isChatMentionPageChanged } from "../ipc/errorWords";
 import { Ref } from "./ui/Ref";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
@@ -211,7 +211,7 @@ export function BacklinksPanel(props: {
         } while (cursor);
       } catch (error) {
         if (!active) return;
-        if (ipcErrorMessage(error, "").includes("Chat access changed")) {
+        if (isChatMentionPageChanged(error)) {
           setLoadedChats(null);
           retained = false;
           if (!restarted) { restarted = true; void walk(); return; }

@@ -89,7 +89,7 @@ describe("chat mention page authority", () => {
     if(change==="principal")h.changePrincipal();
     if(change==="membership")h.change({sharedChannels:[{shareId:"new"} as NonNullable<RegistryEntry["sharedChannels"]>[number]]});
     pending.resolve(page());
-    await expect(result).rejects.toThrow("Chat access changed");
+    await expect(result).rejects.toThrow("chat-mention-access-changed");
   });
   it("checks the renderer request after awaits", async () => {
     const h = harness();

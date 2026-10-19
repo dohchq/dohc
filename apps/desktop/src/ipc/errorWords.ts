@@ -81,6 +81,11 @@ const ENGINE_CODE_WORDS = {
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 
+const CHAT_MENTION_PAGE_CHANGED_WORDS = {
+  "chat-mention-access-changed": "Chat access changed. Try again.",
+  "chat-mention-version-changed": ENGINE_CODE_WORDS.CONFLICT,
+} as const;
+
 // The one map from an error's class, then its message or code, to words. A
 // class listed here writes its messages for developers, so none of them
 // reaches a person. Keys are tried in order: the message, the message before
@@ -88,6 +93,7 @@ const ENGINE_CODE_WORDS = {
 export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>>>> = {
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
+    ...CHAT_MENTION_PAGE_CHANGED_WORDS,
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
@@ -161,6 +167,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
+    ...CHAT_MENTION_PAGE_CHANGED_WORDS,
     EACCES: "dohc does not have permission to use this file or folder.",
     EPERM: "dohc does not have permission to use this file or folder.",
     ENOENT: "The file or folder is not there anymore.",
@@ -330,6 +337,13 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";
+}
+
+/** A chat page cursor lost its access or version binding. Restart the walk once. */
+export function isChatMentionPageChanged(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return ((name === "DaemonRefusalError" && code === "CONFLICT") || (name === "Error" && code === undefined)) &&
+    Object.hasOwn(CHAT_MENTION_PAGE_CHANGED_WORDS, message);
 }
 
 export function isCaptureFileHeldRefusal(error: unknown): boolean {

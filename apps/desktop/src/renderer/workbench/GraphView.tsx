@@ -11,6 +11,7 @@ import {
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import { graphWalk, degrees, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
 import { bridge } from "../bridge";
+import { isChatMentionPageChanged } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 
 type WorkspaceGraphNode = GraphNode;
@@ -879,7 +880,7 @@ export function GraphView(props: {
         setChatWalking(false);
       } catch (error) {
         if (!current()) return;
-        if (ipcErrorMessage(error, "").includes("Chat access changed")) {
+        if (isChatMentionPageChanged(error)) {
           setChatRows(null);
           retained = false;
           if (!restarted) { restarted = true; void walk(); return; }

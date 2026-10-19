@@ -1,5 +1,7 @@
-import * as graphData from "./graphData";
 // @vitest-environment jsdom
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "../../ipc/errorWords";
+import * as graphData from "./graphData";
 import {
   act,
   cleanup,
@@ -794,6 +796,7 @@ function stubFileGraph(mock: { linksEdges: (...args: never[]) => Promise<GraphFi
 
 it("paints the first chat page, continues once, and deduplicates attachments across pages", async()=>{
   const overlay = vi.spyOn(graphData, "withChatMentions");
+  try {
   const later=deferred<unknown>();
   const row=(id:string,title:string)=>({attachment:{attachmentId:id,objectId:"a.md",pathHint:"a.md"},thread:{id,title}} as ChatFileMentionRecord);
   const first=row("one","First discussion"), second=row("two","Second discussion");
@@ -810,8 +813,10 @@ it("paints the first chat page, continues once, and deduplicates attachments acr
   await screen.findAllByText("Second discussion");
   expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
   expect(overlay.mock.lastCall?.[1]).toHaveLength(2);
-  overlay.mockRestore();
   expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+  } finally {
+    overlay.mockRestore();
+  }
 });
 it("discards a continuation after the chat toggle is disabled",async()=>{
   const later=deferred<unknown>();
@@ -827,7 +832,7 @@ it("discards a continuation after the chat toggle is disabled",async()=>{
   expect(chatFileMentionsPage).toHaveBeenCalledTimes(2);
 });
 
-it("clears chat rows on access changes, restarts once, then reports a repeated change", async () => {
+it.each(["chat-mention-access-changed", "chat-mention-version-changed"])("clears chat rows for %s, restarts once, then reports a repeated change", async reason => {
   const changed = deferred<unknown>(), restarted = deferred<unknown>();
   const row = { attachment: { attachmentId: "old", objectId: "a.md", pathHint: "a.md" }, thread: { id: "old", title: "Old access" } };
   const chatFileMentionsPage = vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"old-cursor"})
@@ -839,12 +844,12 @@ it("clears chat rows on access changes, restarts once, then reports a repeated c
   fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
   await screen.findAllByText("Old access");
   await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
-  await act(async()=>changed.reject(new Error("Chat access changed. Try again.")));
+  await act(async()=>changed.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
   await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(3));
   expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws"});
   expect(screen.queryByText("Old access")).toBeNull();
   expect(onError).not.toHaveBeenCalled();
-  await act(async()=>restarted.reject(new Error("Chat access changed. Try again.")));
+  await act(async()=>restarted.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
   expect(onError).toHaveBeenCalledOnce();
   expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
   expect(screen.getAllByText("a.md").length).toBeGreaterThan(0);

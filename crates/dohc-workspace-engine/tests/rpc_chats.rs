@@ -955,7 +955,7 @@ async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
                 )
                 .await;
                 assert_eq!(error.code, if index == 0 { ErrorCode::Conflict } else { ErrorCode::InvalidParams });
-                if index == 0 { assert_eq!(error.message, "Chat access changed. Try again."); }
+                if index == 0 { assert_eq!(error.message, "chat-mention-access-changed"); }
             }
         }
 

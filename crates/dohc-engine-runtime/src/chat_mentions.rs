@@ -75,11 +75,14 @@ fn decode(
     let bytes = open(cursor_key()?, ws, PURPOSE, &sealed).map_err(|_| invalid_cursor())?;
     let (format, v, s, a, pos): (u8, String, Value, String, Position) =
         serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid_cursor())?;
+    if format != 1 || s != *subject || pos.phase > 1 {
+        return Err(invalid_cursor());
+    }
     if a != scope {
         return Err(RuntimeError::ChatMentionAccessChanged);
     }
-    if format != 1 || v != version || s != *subject || pos.phase > 1 {
-        return Err(invalid_cursor());
+    if v != version {
+        return Err(RuntimeError::ChatMentionVersionChanged);
     }
     Ok(pos)
 }
@@ -346,6 +349,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn cursor_changes_distinguish_restartable_access_and_version_from_invalid_input() {
+        let subject = Value::Null;
+        let cursor = encode("ws", "main", &subject, "grant-1", &Position::default()).unwrap();
+        assert!(matches!(
+            decode("ws", "main", &subject, "grant-2", Some(cursor.clone())),
+            Err(RuntimeError::ChatMentionAccessChanged)
+        ));
+        assert!(matches!(
+            decode("ws", "captured", &subject, "grant-1", Some(cursor.clone())),
+            Err(RuntimeError::ChatMentionVersionChanged)
+        ));
+        assert!(matches!(
+            decode("ws", "main", &json!({"path":"other.md"}), "grant-1", Some(cursor)),
+            Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
+        ));
     }
     #[test]
     fn traversal_windows_seek_existing_indexes_without_sorting() {

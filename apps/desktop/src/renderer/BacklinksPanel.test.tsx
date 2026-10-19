@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "../ipc/errorWords";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -602,7 +604,7 @@ it("does not show gathering while an empty file's chat page is pending", async (
   await act(async()=>pending.resolve({entries:[],nextCursor:null}));
   expect(screen.queryByTestId("backlinks")).toBeNull();
 });
-it("clears stale chat rows and restarts once when access changes", async () => {
+it.each(["chat-mention-access-changed", "chat-mention-version-changed"])("clears stale chat rows and restarts once for %s", async reason => {
   const changed = deferred<unknown>(), restarted = deferred<unknown>();
   const row={attachment:{attachmentId:"a",threadId:"t",messageId:"m",pathHint:"target.md"},message:{id:"m",authorDisplayName:"Ada",preview:"Old access",createdAtMs:1},thread:{id:"t",title:"Discussion"}};
   const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"next"})
@@ -612,11 +614,11 @@ it("clears stale chat rows and restarts once when access changes", async () => {
   render(<BacklinksPanel workspaceId="ws" path="target.md" onError={onError} chatMentionsAvailable/>);
   await screen.findByText("Old access");
   await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
-  await act(async()=>changed.reject(new Error("Chat access changed. Try again.")));
+  await act(async()=>changed.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
   expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws",subject:{path:"target.md"}});
   expect(screen.queryByText("Old access")).toBeNull();
   expect(onError).not.toHaveBeenCalled();
-  await act(async()=>restarted.reject(new Error("Chat access changed. Try again.")));
+  await act(async()=>restarted.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
   expect(onError).toHaveBeenCalledOnce();
   expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
 });

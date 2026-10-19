@@ -27,7 +27,7 @@ export function createChatFileMentionsReader(deps: {
       const check = () => {
         assertCurrent();
         const current = deps.readWorkspace(workspaceId);
-        if (!current || binding(current) !== key) throw new Error("Chat access changed. Try again.");
+        if (!current || binding(current) !== key) throw new Error("chat-mention-access-changed");
       };
       check();
       // Continuations retain coverage in the sealed cursor. Received views never sync owner channels.
