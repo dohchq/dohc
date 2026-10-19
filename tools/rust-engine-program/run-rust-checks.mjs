@@ -57,6 +57,7 @@ import {
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
+import { readerTestNode } from "./reader-test-node.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -135,6 +136,11 @@ process.env.DOHC_TEST_SCRATCH_ROOT = scratchRunRoot;
 // row never reached the tree the tests used, whatever the entry count says.
 mkdirSync(scratchRunRoot, { recursive: true });
 writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
+// The Markdown reader refuses a Node under a linked or shared-writable
+// directory, such as Homebrew's Cellar. On macOS the test step first stages the
+// app compiler's pinned Node, and the reader's tests run it.
+const stagesReaderNode = platform() === "darwin";
+if (stagesReaderNode) process.env.DOHC_READER_TEST_NODE = readerTestNode();
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
@@ -181,7 +187,10 @@ const required = [
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
-  { name: "test --workspace", cmd: `cargo ${nextest.join(" ")} --no-fail-fast` },
+  {
+    name: "test --workspace",
+    cmd: `${stagesReaderNode ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
+  },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   // Test builds enable fault hooks through testkit. Finish with the shipping
   // daemon so desktop preparation sees the default production features.

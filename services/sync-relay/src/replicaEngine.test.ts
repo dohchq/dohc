@@ -1,10 +1,13 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}) }));
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}), status: "Seccomp:\t2\n" }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("node:fs", () => ({readFileSync: () => mocks.status}));
+vi.mock("node:os", () => ({release: () => "6.18.54"}));
+beforeEach(() => {mocks.status = "Seccomp:\t2\n"; vi.stubGlobal("process", {...process, platform: "linux"});});
 vi.mock("./replicaRelaySocket", () => ({
   serveReplicaRelay: async (dir: string) => ({socketPath: `${dir}/relay.sock`, close: mocks.closeSocket}),
 }));
@@ -18,6 +21,8 @@ class Child extends EventEmitter {
   stdin = new PassThrough(); stdout = new PassThrough(); stderr = new PassThrough(); pid = 123;
   manualClose = false;
   mode = "replica";
+  abi: unknown = 2;
+  limitOnPull?: string;
   requests: Array<{ method: string; workspace?: string; params: Record<string, unknown> }> = [];
   pages = [{ status: "complete", nextCursor: 2, pendingCursor: { kind: "relay", token: "issued-2" }, hasMore: true },
     { status: "complete", nextCursor: 3, pendingCursor: { kind: "relay", token: "issued-3" }, hasMore: false }];
@@ -34,7 +39,8 @@ class Child extends EventEmitter {
             maxCollectionLen: 16_384, maxJsonDepth: 32, maxBatchLen: 64, maxBlobChunkBytes: 262_144 } }));
         else {
           this.requests.push(row);
-          const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, sandboxLevel: "none"} : row.method === "workspace.open" ? { workspace: "private-handle" } :
+          if (row.method === "sync.pull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
+          const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, landlockAbi: this.abi} : row.method === "workspace.open" ? { workspace: "private-handle" } :
             row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
             row.method === "sync.pull" ? this.pages.shift() : { adopted: true, committed: true };
           this.stdout.write(frame({ type: "response", id: row.id, result }));
@@ -42,13 +48,13 @@ class Child extends EventEmitter {
       }
     });
   }
-  finish() { this.stdout.end(); this.stderr.end(); this.emit("close", 0, "SIGKILL"); }
+  finish(signal: string = "SIGKILL") { this.stdout.end(); this.stderr.end(); this.emit("close", 0, signal); }
 }
 const input = () => ({ storeDir: process.cwd(), relayHandler: vi.fn(async (_request: Request) => Response.json({rows: [], nextCursor: 0, hasMore: false})), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
   streamIdentity: "stream", epochLogFloor: 0, logSeq: 3, journalCursor: 0, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
 async function fixture(child = new Child()) {
   mocks.spawn.mockReturnValue(child);
-  const start = createReplicaEngineStarter({ engineExecutable: process.execPath, allowUnisolatedDevelopment: true });
+  const start = createReplicaEngineStarter({ engineExecutable: process.execPath, allowDevelopment: true });
   const childInput = input();
   return { child, childInput, replica: await start(childInput) };
 }
@@ -66,7 +72,8 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     expect(child.requests[6]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
     expect(command).toBe(process.execPath); expect(args).toEqual(["--replica"]); expect(options.cwd).toBe(input().storeDir);
-    expect(Object.keys(options.env).sort()).toEqual(process.platform === "win32" ? ["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"] : ["DOHC_ENGINE_AUTH_TOKEN"]);
+    expect(Object.keys(options.env).sort()).toEqual(["DOHC_ENGINE_AUTH_TOKEN", "TMPDIR"]);
+    expect(options.env.TMPDIR).toBe(childInput.storeDir);
     expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
     expect(childInput.relayHandler).toHaveBeenCalledOnce();
     const journalRequest = childInput.relayHandler.mock.calls[0]![0] as Request;
@@ -86,7 +93,7 @@ it("kills a child that does not attest replica mode before opening a workspace",
 
 it("closes the listener when spawn throws", async () => {
   mocks.spawn.mockImplementation(() => { throw Error("spawn failed"); });
-  const start = createReplicaEngineStarter({engineExecutable: process.execPath, allowUnisolatedDevelopment: true});
+  const start = createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true});
   await expect(start(input())).rejects.toThrow("spawn failed");
   expect(mocks.closeSocket).toHaveBeenCalled();
 });
@@ -107,20 +114,23 @@ it("waits for actual child termination before closing", async () => {
   child.finish(); await closing; expect(closed).toBe(true);
 });
 
-it("requires development opt-in even on Linux until isolation exists", () => {
+it("requires development opt-in even on Linux with isolation", () => {
   vi.stubGlobal("process", { ...process, platform: "linux" });
   expect(() => createReplicaEngineStarter({ engineExecutable: process.execPath })).toThrow(/development/i);
 });
 
-it("gives a Windows development child SystemRoot without inheriting other environment", async () => {
-  vi.stubGlobal("process", { ...process, platform: "win32" });
-  vi.stubEnv("SystemRoot", "C:\\Windows");
-  const { replica } = await fixture();
-  try {
-    const env = mocks.spawn.mock.calls[0]![2].env;
-    expect(env.SystemRoot).toBe("C:\\Windows");
-    expect(Object.keys(env).sort()).toEqual(["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"]);
-  } finally { await replica.close(); }
+it.each(["win32", "darwin", "freebsd"])("refuses %s before spawn even with development opt-in", platform => {
+  vi.stubGlobal("process", {...process, platform});
+  expect(() => createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true})).toThrow(/Linux 5.19.*Landlock/);
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+it.each([undefined, null, 0, 1, "2", 2.5])("kills a child with invalid Landlock ABI %s before open", async abi => {
+  const child = new Child(); child.abi = abi;
+  await expect(fixture(child)).rejects.toThrow(/Landlock/);
+  expect(child.requests.map(row => row.method)).toEqual(["engine.ping"]);
+  expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  expect(mocks.closeSocket).toHaveBeenCalled();
 });
 
 it("exposes child exit while idle so the supervisor can retire it", async () => {
@@ -130,4 +140,24 @@ it("exposes child exit while idle so the supervisor can retire it", async () => 
     expect(exited).toBeInstanceOf(Promise);
     child.finish(); await exited;
   } finally { await replica.close(); }
+});
+
+it("refuses an unfiltered relay before spawn", () => {
+  mocks.status = "Seccomp:\t0\n";
+  expect(() => createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true})).toThrow(/outer seccomp filter/);
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"], ["SIGKILL", "RLIMIT_CPU"], ["SIGABRT", "RLIMIT_AS"]])("preserves a resource-limit diagnosis for %s", async (signal, limit) => {
+  const {child, replica} = await fixture();
+  child.finish(signal);
+  expect(String(await replica.exited)).toContain(limit);
+  await replica.close();
+});
+
+it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"]])("reports %s during the first pull as a budget failure", async (signal, limit) => {
+  const child = new Child(); child.limitOnPull = signal;
+  const {replica} = await fixture(child);
+  try {await expect(replica.pull()).rejects.toMatchObject({message: expect.stringContaining(limit), constructor: expect.objectContaining({name: "ReplicaBudgetError"})});}
+  finally {await replica.close();}
 });

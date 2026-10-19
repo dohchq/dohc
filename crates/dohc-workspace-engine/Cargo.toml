@@ -8,6 +8,7 @@ publish.workspace = true
 description = "The workspace engine daemon the desktop app runs: composes the engine crates behind the framed stdio protocol."
 
 [dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
 # Constant-time token comparison on the daemon handshake. Already in the
 # lockfile transitively; this makes it a direct dependency.
 subtle = { version = "2.6", default-features = false }
@@ -44,6 +45,11 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keeps the engine's folder out of iCloud Drive.
 dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+rustix = { version = "1", features = ["process", "thread"] }
 
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).

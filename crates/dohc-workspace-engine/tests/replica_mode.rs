@@ -94,7 +94,7 @@ async fn replica_ping_reports_mode_and_unapplied_sandbox() {
         .result;
     assert_eq!(
         answer,
-        json!({"ok":true,"mode":"replica","sandboxLevel":"none"})
+        json!({"ok":true,"mode":"replica","landlockAbi":null})
     );
 }
 

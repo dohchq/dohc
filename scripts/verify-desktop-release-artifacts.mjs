@@ -5,10 +5,12 @@ import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+// Each platform's artifacts, and whether its updater installs from one. electron-builder names an x64
+// AppImage x86_64 and an x64 .deb amd64. Each Linux updater installs its own kind, so the manifest lists both.
 const platforms = {
-  mac: { suffix: "-mac", extensions: ["dmg", "zip"], updateExtension: "zip", arches: ["arm64"] },
-  win: { suffix: "", extensions: ["exe"], updateExtension: "exe", arches: ["x64"] },
-  linux: { suffix: "-linux", extensions: ["AppImage"], updateExtension: "AppImage", arches: ["x64"], artifactArch: "x86_64" },
+  mac: { suffix: "-mac", arches: ["arm64"], artifacts: [{ extension: "dmg" }, { extension: "zip", update: true }] },
+  win: { suffix: "", arches: ["x64"], artifacts: [{ extension: "exe", update: true }] },
+  linux: { suffix: "-linux", arches: ["x64"], artifacts: [{ extension: "AppImage", arch: "x86_64", update: true }, { extension: "deb", arch: "amd64", update: true }] },
 };
 
 function parseScalar(value) {
@@ -23,7 +25,7 @@ function parseScalar(value) {
   return trimmed;
 }
 
-function parseUpdateManifest(raw, sourcePath = "manifest") {
+export function parseUpdateManifest(raw, sourcePath = "manifest") {
   const manifest = { files: [] };
   let currentFile = null;
   for (const line of raw.split(/\r?\n/)) {
@@ -116,10 +118,10 @@ export async function verifyDesktopReleaseArtifacts({ directory, platform, arch,
   if (!legacy || legacy.sha512 !== manifest.sha512) {
     throw new Error("Manifest path and SHA-512 must match a listed artifact.");
   }
-  for (const extension of target.extensions) {
-    const name = `dohc-${version}-${platform}-${target.artifactArch ?? arch}.${extension}`;
+  for (const artifact of target.artifacts) {
+    const name = `dohc-${version}-${platform}-${artifact.arch ?? arch}.${artifact.extension}`;
     await inspect(name);
-    if (extension === target.updateExtension && !seen.has(name)) {
+    if (artifact.update && !seen.has(name)) {
       throw new Error(`Update manifest does not list the ${arch} update artifact: ${name}`);
     }
   }

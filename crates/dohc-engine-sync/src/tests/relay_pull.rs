@@ -144,9 +144,9 @@ fn open_document_pull_measurement() {
 }
 
 #[derive(Default)]
-struct ClaimRelay {
+pub(super) struct ClaimRelay {
     relay: FakeRelay,
-    refusal: Mutex<Option<RelayError>>,
+    pub(super) refusal: Mutex<Option<RelayError>>,
     claims: Mutex<Vec<ClaimRequest>>,
 }
 
@@ -2251,7 +2251,8 @@ fn mixed_base_group_repairs_present_or_absent(present: bool) {
     let changes = engine
         .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
         .unwrap();
-    assert_eq!(changes > revision, present);
+    // Every pass writes its own ordinary pull token.
+    assert_eq!(changes > revision + 1, present);
 }
 
 #[test]
@@ -2353,7 +2354,8 @@ fn base_repair_updates_foreign_deferred_coordinate_after_confirming_own_is_unsen
     assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
     engine
         .read_with(|conn| {
-            assert_eq!(conn.total_changes(), changes + 1);
+            // The repaired coordinate and the pass's own pull token.
+            assert_eq!(conn.total_changes(), changes + 2);
             let pending: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
                 [],
@@ -4795,6 +4797,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
@@ -5592,6 +5595,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     commit_relay_cursor(
         &mut engine,
@@ -5622,6 +5626,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),

@@ -6,20 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
-import { build } from "esbuild";
 
-export const NODE_VERSION = "24.16.0";
-// https://nodejs.org/dist/v24.16.0/SHASUMS256.txt names each download. The
-// macOS archive is checked against it, then the node binary inside against
-// its own pin.
-const release = `https://nodejs.org/dist/v${NODE_VERSION}`;
-export const PINNED_NODE = {
-  "win32-x64": { url: `${release}/win-x64/node.exe`, file: "node.exe", sha256: "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3" },
-  "darwin-arm64": {
-    url: `${release}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`, archiveSha256: "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
-    member: `node-v${NODE_VERSION}-darwin-arm64/bin/node`, file: "node", sha256: "1ee75375e33b94fc34b3b19aede049e11dae90efb63b374dc96d6bdace70c4b8",
-  },
-};
+import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -65,7 +53,7 @@ export async function requireAppCompiler(root = join(desktopRoot, "resources/app
   const files = stagedFiles(platform, arch);
   if (!files) return;
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  const node = PINNED_NODE[`${platform}-${arch}`];
+  const node = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
   if (node && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== node.sha256) ||
       manifest.platform !== platform || manifest.arch !== arch ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
@@ -115,7 +103,7 @@ export function archiveMember(archive, name) {
 /** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
 export async function readPinnedCompilerNode(options = {}) {
   const target = `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
-  const node = PINNED_NODE[target];
+  const node = target.startsWith("linux-") ? undefined : PINNED_NODE[target];
   if (!node) throw new Error(`App compiler has no pinned Node for ${target}.`);
   if (options.nodeExecutable) {
     const bytes = await readFile(options.nodeExecutable);
@@ -154,13 +142,15 @@ export async function stageAppCompiler(options = {}) {
   if (!files) return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const pinned = PINNED_NODE[`${platform}-${arch}`];
+  const pinned = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
   // A temporary destination reuses the copy that development staging keeps.
   const stagedNodePaths = pinned ? [join(destination, pinned.file), join(sourceRoot, "resources/app-compiler", pinned.file)] : [];
   const node = pinned ? await readPinnedCompilerNode({ platform, arch, nodeExecutable: options.nodeExecutable, stagedNodePaths }) : null;
   const require = createRequire(join(sourceRoot, "package.json"));
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
+  // Loaded here so the Rust gate can read the pinned Node without installed packages.
+  const { build } = await import("esbuild");
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
   const nativePackage = `@esbuild/${platform}-${arch}`;
   let platformRoot;

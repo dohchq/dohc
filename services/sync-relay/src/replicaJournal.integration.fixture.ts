@@ -94,7 +94,7 @@ const server = createServer(async (incoming, outgoing) => {
 server.listen(0, "127.0.0.1"); await once(server, "listening");
 const address = server.address(); assert(address && typeof address !== "string");
 const baseUrl = `http://127.0.0.1:${address.port}`;
-const startReplica = createReplicaEngineStarter({engineExecutable: executable, allowUnisolatedDevelopment: true});
+const startReplica = createReplicaEngineStarter({engineExecutable: executable, allowDevelopment: true});
 const supervisor = createReplicaSupervisor({storage, storeRoot: join(root, "replicas"), idleMs: 600_000,
   onError: (_, error) => errors.push(String(error)), startChild: async input => {
     starts++; replicaDir = input.storeDir; replica = await startReplica({...input, relayHandler: async request => {

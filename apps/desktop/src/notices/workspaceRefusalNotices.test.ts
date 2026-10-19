@@ -9,6 +9,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createWorkspaceRefusalNotices } from "./workspaceRefusalNotices";
 import { createNoticeStore, type NoticeStore } from "./noticeStore";
+import { deferred, type Deferred } from "../testing/deferred";
 
 const notice = { noticeId: "refusal", originId: "peer", originSeq: 1,
   refusalCoordinates: [{ originId: "peer", originSeq: 1 }], reason: "seed-lineage-conflict", document: null };
@@ -24,7 +25,14 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     createState: () => ({}),
   });
   let pending = [notice];
+  let heldRead: { started: Deferred; release: Deferred } | null = null;
   const sendRequest = vi.fn(async (request: Request): Promise<Response> => {
+    if (request.method === "sync.refusalNotices" && heldRead) {
+      const held = heldRead;
+      heldRead = null;
+      held.started.resolve();
+      await held.release.promise;
+    }
     if (request.method === "sync.dismissRefusal") {
       const { noticeId, refusalCoordinates } = request.params as { noticeId: string; refusalCoordinates: typeof notice.refusalCoordinates };
       pending = pending.filter(row => row.noticeId !== noticeId || !refusalCoordinates.some(
@@ -40,6 +48,7 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
   });
   const client = { sendRequest, close() {} };
   let store: NoticeStore | undefined;
+  const stores: NoticeStore[] = [];
   let refreshed: Promise<void> | undefined;
   const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
     onOpened: workspace => { refreshed = store?.refreshRefusals(workspace.workspaceId); },
@@ -48,19 +57,33 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     sessions: () => sessions, createStores: createCaptureLiveStores,
     relayClient: () => { throw new Error("No relay needed."); },
   });
-  const deps = {
+  // Each workspace authority the refusal adapter acquires, and whether
+  // authority close had begun by then.
+  const acquisitions: ("open" | "closing")[] = [];
+  let closing = false;
+  const deps: Parameters<typeof createWorkspaceRefusalNotices>[0] = {
     sessions: () => sessions,
     workspaces: () => [workspace],
-    withOperation: authorities.withOperation.bind(authorities),
+    withOperation: (workspaceId, work) => {
+      acquisitions.push(closing ? "closing" : "open");
+      return authorities.withOperation(workspaceId, work);
+    },
     workspaceForRegistered: received.workspaceForRegistered,
   };
   const refusals = createWorkspaceRefusalNotices(deps);
   const directory = await createTestScratch("refusal-notices-");
   const onChanged = vi.fn();
   let now = Date.now();
-  const createStore = () => store = createNoticeStore({ directory, session: async () => null,
-    installId: () => "install", onChanged, nowMs: () => now, ...refusals });
-  return { ...refusals, deps, sendRequest, authorities, createStore, onChanged,
+  const createStore = () => {
+    store = createNoticeStore({ directory, session: async () => null,
+      installId: () => "install", onChanged, nowMs: () => now, ...refusals });
+    stores.push(store);
+    return store;
+  };
+  const closeAuthorities = async () => { closing = true; await authorities.close(); };
+  return { ...refusals, deps, sendRequest, authorities, createStore, onChanged, acquisitions, closeAuthorities,
+    requests: (method: string) => sendRequest.mock.calls.filter(([request]) => request.method === method).length,
+    holdRefusalRead: () => heldRead = { started: deferred(), release: deferred() },
     arriveRefusal: () => { pending.push({ ...notice, originSeq: 2, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }); },
     advanceYear: () => { now += 365 * 24 * 60 * 60_000; },
     closeEditor: () => authorities.withOperation(workspace.workspaceId, operation =>
@@ -71,7 +94,11 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
       await refreshed;
       return handle;
     },
-    close: async () => { await sessions.closeAll(); await authorities.close(); },
+    close: async () => {
+      await Promise.all(stores.map(each => each.stopWorkspaceRefusals()));
+      await sessions.closeAll();
+      await closeAuthorities();
+    },
   };
 }
 
@@ -163,6 +190,69 @@ describe("workspace refusal notices", () => {
         refusalCoordinates: [{ originId: "peer", originSeq: 2 }] });
       expect(f.sendRequest.mock.calls.find(([request]) => request.method === "sync.dismissRefusal")?.[0].params)
         .toEqual({ workspaceId: "workspace", noticeId: "refusal", refusalCoordinates: notice.refusalCoordinates });
+    } finally { await f.close(); }
+  });
+
+  it("stops refusal work before authorities close, finishing only the read already running", async () => {
+    const f = await fixture();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      const store = f.createStore();
+      await f.openEditor();
+      const [row] = (await store.list()).notices;
+      const reads = f.requests("sync.refusalNotices");
+      const held = f.holdRefusalRead();
+      const running = store.list();
+      await held.started.promise;
+      // The open observer's refresh and another list wait behind the running read.
+      const opened = store.refreshRefusals("workspace");
+      const queuedList = store.list();
+      const drain = store.stopWorkspaceRefusals();
+      held.release.resolve();
+      await drain;
+      expect(f.requests("sync.refusalNotices")).toBe(reads + 1);
+      await expect(opened).resolves.toBeUndefined();
+      expect((await running).notices).toEqual([row]);
+      expect((await queuedList).notices).toEqual([row]);
+      const acquired = f.acquisitions.length;
+
+      // A late open, list, or dismissal reaches no engine.
+      await f.closeEditor();
+      await f.openEditor();
+      await expect(store.mark([row!], "dismissed", null)).rejects.toMatchObject({ name: "AbortError" });
+      expect((await store.list()).notices).toEqual([row]);
+      await f.closeAuthorities();
+      expect((await store.list()).notices).toEqual([row]);
+      await store.refreshRefusals("workspace");
+
+      expect(f.requests("sync.refusalNotices")).toBe(reads + 1);
+      expect(f.requests("sync.dismissRefusal")).toBe(0);
+      expect(f.acquisitions).toHaveLength(acquired);
+      expect(f.acquisitions).not.toContain("closing");
+      expect(warn.mock.calls.flat().map(String).join("\n")).not.toContain("closing");
+    } finally {
+      warn.mockRestore();
+      await f.close();
+    }
+  });
+
+  it("creates the store at quit and stops refusal work before any read", async () => {
+    const f = await fixture();
+    try {
+      await f.openEditor();
+      let cached: NoticeStore | undefined;
+      const noticeStore = () => cached ??= f.createStore();
+      const stopNoticeRefusals = () => noticeStore().stopWorkspaceRefusals();
+      const stopped = stopNoticeRefusals();
+      const late = noticeStore();
+      expect(f.requests("sync.refusalNotices")).toBe(0);
+      expect(f.acquisitions).toEqual([]);
+      await stopped;
+      await f.closeEditor();
+      await f.openEditor();
+      expect(await late.list()).toEqual({ account: null, notices: [] });
+      expect(f.requests("sync.refusalNotices")).toBe(0);
+      expect(f.acquisitions).toEqual([]);
     } finally { await f.close(); }
   });
 

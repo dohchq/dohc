@@ -9,10 +9,11 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn }));
-afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllEnvs(); });
 
 it.each([false, true])("forwards explicit sync config (%s) and uses the native grace twice when EOF and TERM are ignored", async enabled => {
   vi.useFakeTimers();
+  vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "untrusted-inherited-reader");
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
     exitCode: null as number | null, signalCode: null as string | null,
@@ -40,6 +41,7 @@ it.each([false, true])("forwards explicit sync config (%s) and uses the native g
   } });
   await ready;
   const options = spawn.mock.calls[0]![2];
+  expect(options.env.DOHC_ENGINE_READER_CONFIG).toBeUndefined();
   const saved = JSON.parse(readFileSync(options.env.DOHC_ENGINE_LIVE_HOST_CONFIG, "utf8"));
   expect(saved.sync).toEqual(sync);
   const closed = transport.close();

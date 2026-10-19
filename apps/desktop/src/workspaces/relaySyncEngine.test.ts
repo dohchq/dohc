@@ -107,6 +107,7 @@ function engine(input: {
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
   afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
   waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
@@ -120,6 +121,7 @@ function engine(input: {
     ...(input.afterSuccessfulPull
       ? { afterSuccessfulPull: input.afterSuccessfulPull }
       : {}),
+    ...(input.afterPass ? { afterPass: input.afterPass } : {}),
     ...(input.idlePullMs === undefined ? {} : { idlePullMs: input.idlePullMs }),
     ...(input.waitForChange === undefined ? {} : { waitForChange: input.waitForChange }),
     operations: input.operations ?? mockOperations(),
@@ -204,6 +206,41 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersToNextTimerAsync();
     expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2", "pull"]);
     expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
+    await sync.stop();
+  });
+
+  it("tells its owner how each pass ended while it still syncs, and announces what that answer changed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const onChange = vi.fn();
+    let changed = false;
+    const ended: Array<{ failed: boolean; syncing: boolean }> = [];
+    const afterPass = vi.fn(async ({ failed }: { failed: boolean }) => {
+      ended.push({ failed, syncing: sync.snapshot().syncing });
+      return changed;
+    });
+    const sync = engine({ capture: capture(), onChange, afterPass });
+    await sync.start();
+    // A quiet pass announces nothing, unless the owner's answer changed the status.
+    onChange.mockClear();
+    sync.queuePull();
+    await vi.runAllTimersAsync();
+    expect(onChange).not.toHaveBeenCalled();
+    changed = true;
+    sync.queuePull();
+    await vi.runAllTimersAsync();
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncing).toBe(false);
+    // A failed answer never fails the pass.
+    afterPass.mockRejectedValueOnce(new Error("daemon busy"));
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot()).toMatchObject({ syncing: false, syncFailure: null });
+    pullMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(ended).toEqual([
+      { failed: false, syncing: true }, { failed: false, syncing: true }, { failed: false, syncing: true },
+      { failed: true, syncing: true },
+    ]);
+    expect(afterPass).toHaveBeenCalledTimes(5);
     await sync.stop();
   });
 

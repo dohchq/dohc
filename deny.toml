@@ -29,8 +29,8 @@ version = 2
 # Only licenses currently present in the graph. Add new ones deliberately,
 # with review, as dependencies are introduced.
 allow = [
-    "MIT",
-    "Apache-2.0",
+    "MIT", # landlock
+    "Apache-2.0", # landlock and seccompiler
     "Unicode-3.0",
     # Zlib: permissive, OSI-approved, FSF-libre. Enters via
     # foldhash (rusqlite → hashlink → hashbrown → foldhash).

@@ -41,7 +41,7 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
       journalPaused && new URL(request.url).pathname === "/sync/workspace/live-journal"
         ? new Response(JSON.stringify({rows:[],nextCursor:0,hasMore:false}),{headers:{"content-type":"application/json"}})
         : await principal.handle(request);
-  const startChild=()=>createReplicaEngineStarter({engineExecutable:binary.require(),allowUnisolatedDevelopment:true})({storeDir:root,lease,relayHandler});
+  const startChild=()=>createReplicaEngineStarter({engineExecutable:binary.require(),allowDevelopment:true})({storeDir:root,lease,relayHandler});
   let child: ReplicaChild;
   try { child=await startChild();
   } catch(error) {
@@ -64,7 +64,7 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
   },async close(){await child.close();f.close();await rm(root,{recursive:true,force:true});}};
 }
 
-it.skipIf(binary.missing || process.platform === "win32")("drains pre-epoch retired journal rows without fetching their missing baseline",async()=>{
+it.skipIf(binary.missing || process.platform !== "linux")("drains pre-epoch retired journal rows without fetching their missing baseline",async()=>{
   const f=await fixture(true);try {
     await f.child.pull();
     f.read(db=>{
@@ -74,7 +74,7 @@ it.skipIf(binary.missing || process.platform === "win32")("drains pre-epoch reti
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing || process.platform === "win32")("drains pre-floor journal rows whose stale authority is still current",async()=>{
+it.skipIf(binary.missing || process.platform !== "linux")("drains pre-floor journal rows whose stale authority is still current",async()=>{
   const f=await fixture(true,false);try {
     expect((await f.f.storage.readReplicaLiveJournal({workspaceId:"workspace",after:0,limit:500})).rows[0]!.authority).not.toBeNull();
     await f.child.pull();
@@ -85,7 +85,7 @@ it.skipIf(binary.missing || process.platform === "win32")("drains pre-floor jour
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing || process.platform === "win32")("drains canonical journal pages into native heads without projecting or originating",async()=>{
+it.skipIf(binary.missing || process.platform !== "linux")("drains canonical journal pages into native heads without projecting or originating",async()=>{
   const f=await fixture();try {
     await f.child.pull();
     const before=f.read(db=>db.prepare("SELECT count(*) AS n FROM snapshots").get()?.n);
@@ -101,7 +101,7 @@ it.skipIf(binary.missing || process.platform === "win32")("drains canonical jour
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing || process.platform === "win32" || process.env.DOHC_REPLICA_MEASURE!=="1")("measures release driver time from one and 500 commits through an on-demand projection",async()=>{
+it.skipIf(binary.missing || process.platform !== "linux" || process.env.DOHC_REPLICA_MEASURE!=="1")("measures release driver time from one and 500 commits through an on-demand projection",async()=>{
   const results=[];
   for(const size of [1,500]) {
     const samples:number[]=[];
@@ -119,7 +119,7 @@ it.skipIf(binary.missing || process.platform === "win32" || process.env.DOHC_REP
   }
 },600_000);
 
-it.skipIf(binary.missing || process.platform === "win32")("current views preserve nested-list bytes through the accepted journal lane",async()=>{
+it.skipIf(binary.missing || process.platform !== "linux")("current views preserve nested-list bytes through the accepted journal lane",async()=>{
   const original=markdownToYDoc("- one\n  - child\n    - grandchild\n- two"),baselineBytes=Y.encodeStateAsUpdate(original);original.destroy();
   const f=await fixture(false,true,baselineBytes);try{
     await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));

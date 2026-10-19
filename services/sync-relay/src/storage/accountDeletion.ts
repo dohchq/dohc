@@ -69,6 +69,12 @@ export function fenceAccount(storage: StorageContext, key: string, userId: strin
       revokeShareInTransaction(storage, shareId, Date.now());
     }
     storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=?,generation=generation+1 WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)").run(Date.now(), userId, normalizeEmail(email));
+    storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+      WHERE voided = 0 AND EXISTS (
+        SELECT 1 FROM json_each(grants_json) receipt_grant
+        JOIN sync_relay_share_grants g ON g.grant_id = json_extract(receipt_grant.value, '$.grantId')
+        WHERE g.principal_user_id = ? OR lower(g.principal_email) = ?
+      )`).run(userId, normalizeEmail(email));
     storage.db.prepare("DELETE FROM sync_relay_link_sessions WHERE grant_id IN (SELECT g.grant_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id) WHERE s.granter_user_id=?)").run(userId);
     storage.db.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1 WHERE owner_user_id=?").run(userId);
     storage.db.prepare("DELETE FROM sync_relay_live_session_tickets WHERE principal_id=? OR workspace_id IN (SELECT workspace_id FROM sync_relay_workspaces WHERE owner_user_id=?)").run(userId,userId);

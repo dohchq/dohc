@@ -57,6 +57,8 @@ describe("CLI, MCP, and app channel reference", () => {
       ...Object.values(ACCESS_RESULTS),
       ...Object.values(ACCOUNT_RESULTS),
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
+      // dohc_workspace_status reports it as its `collectionsWaiting` field.
+      "collectionsWaiting",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);

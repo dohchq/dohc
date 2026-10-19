@@ -22,7 +22,7 @@ Live editing covers existing Markdown documents on the main version.
 Moving, deleting, or replacing an enrolled document pauses its live editing.
 The server preserves its accepted state; it does not silently bind that state to a different file.
 
-The release workflow builds Windows x64, macOS arm64 (Apple silicon), and Linux x64.
+Releases ship for Windows x64, macOS arm64 (Apple silicon), and Linux x64.
 There is no build for Intel Macs.
 Every release target compiles Collection actions. App publishing and local app
 launch need the installed app compiler, which ships for Windows x64 and macOS.

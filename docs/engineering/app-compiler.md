@@ -105,4 +105,4 @@ Linux has no app compiler yet.
   Each macOS case fails without its mechanism.
 - `node --test scripts/stage-app-compiler.test.mjs` checks staging, the pins and a relocated packaged compile.
 - `cargo nextest run -p dohc-compiler-owner` checks path encoding, argument parsing and the libproc and Seatbelt calls.
-- The release workflow's macOS packaged smoke builds one app through the signed arm64 package's compiler.
+- The macOS release command's packaged smoke builds one app through the signed arm64 package's compiler.

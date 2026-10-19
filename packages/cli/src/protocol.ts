@@ -453,6 +453,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
@@ -522,6 +523,7 @@ export const CLI_CAPABILITIES = {
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
   keptCopies: ["file.kept.list"],
+  collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
@@ -1391,6 +1393,11 @@ export const cliResultSchemas = {
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
   keptCopies: keptCopiesResultSchema,
+  // The engine's answer: Collection updates wait for an unfinished pull.
+  collectionsWaiting: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), waiting: z.boolean() }).strict(),
+    rawFailureSchema,
+  ]),
   saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,

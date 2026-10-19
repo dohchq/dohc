@@ -14,6 +14,7 @@ function answer(r) {
   const fault = r.currentPath;
   if (fault === 'crash') return process.exit(17);
   if (fault === 'hang') return;
+  if (fault === 'memory') {const allocations = []; for (let i = 0; i < 40; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
   if (fault === 'stderr') process.stderr.write(Buffer.alloc(100000, 120));
   if (fault === 'malformed') return process.stdout.write(Buffer.alloc(12));
   if (fault === 'oversize') {const h = frame(1, 0, Buffer.alloc(0)); h.writeUInt32LE(65537, 8); return process.stdout.write(h);}
@@ -55,8 +56,10 @@ process.stdin.on('data', chunk => {
     if (r.method === 'hello') {
       const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=256'];
       const env = Object.keys(process.env);
+      // Windows receives SystemRoot. On macOS, CoreFoundation sets this variable inside Node itself.
+      const allowed = {win32: ['SystemRoot'], darwin: ['__CF_USER_TEXT_ENCODING']}[process.platform] ?? [];
       if (JSON.stringify(process.execArgv) !== JSON.stringify(expected)
-        || JSON.stringify(env.sort()) !== JSON.stringify(process.platform === 'win32' ? ['SystemRoot'] : [])
+        || JSON.stringify(env.sort()) !== JSON.stringify(allowed)
         || !process.permission || process.permission.has('fs.write') || process.permission.has('child')
         || process.cwd() === manifest.parentCwd) process.exit(19);
       if (mode === 'startup-hang') continue;
@@ -73,4 +76,4 @@ process.stdin.on('data', chunk => {
     else request = r;
   }
 });
-process.stdin.on('end', () => process.exit(0));
+process.stdin.on('end', () => {if (mode === 'ignore-eof') setInterval(() => {}, 1000); else process.exit(0)});

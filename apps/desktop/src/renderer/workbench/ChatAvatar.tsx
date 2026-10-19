@@ -1,5 +1,5 @@
 import { useSyncExternalStore, type ReactNode } from "react";
-import { Sparkles, Zap } from "lucide-react";
+import { Link2, Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
 
@@ -86,6 +86,18 @@ export function ChatAvatar(props: {
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}
+    </span>
+  );
+}
+
+// A share link has no face: a dashed ring around the link mark, at the strip size.
+export function LinkMark() {
+  return (
+    <span
+      aria-hidden
+      className="inline-grid size-[18px] shrink-0 place-items-center rounded-full border border-dashed border-subtle text-subtle"
+    >
+      <Link2 size={10} />
     </span>
   );
 }

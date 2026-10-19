@@ -114,6 +114,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       budgetMs: 3000,
       deadlineExitCode: 0,
       beginEngineShutdown: vi.fn(() => { log.push("begin-shutdown"); }),
+      stopNoticeRefusals: vi.fn(async () => { log.push("notice-refusals-stop"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
@@ -771,15 +772,16 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
-  it.each(["search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
+  it.each(["notices", "search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
     "waits for %s before releasing workspace authority",
     async (heldProducer) => {
       vi.useFakeTimers();
       const gates = {
-        search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
+        notices: deferred(), search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
         ydoc: deferred(), integration: deferred(), cli: deferred(),
       };
       const f = fixture((d) => {
+        d.shutdown.stopNoticeRefusals = () => gates.notices.promise;
         d.shutdown.stopSearch = () => gates.search.promise;
         d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
         d.services.dispatch.stop = () => gates.dispatch.promise;
@@ -804,13 +806,14 @@ describe("desktop shutdown", () => {
   it("settles every producer before closing authorities, then closes database, relay, and daemon", async () => {
     vi.useFakeTimers();
     const gates = {
-      search: deferred(), sitePreviews: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
+      notices: deferred(), search: deferred(), sitePreviews: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
     };
     const integrationStarted = deferred();
     const cliStarted = deferred();
     const workspacesClosed = deferred();
     const exited = deferred();
     const f = fixture((d) => {
+      d.shutdown.stopNoticeRefusals = vi.fn(() => gates.notices.promise);
       d.shutdown.stopSearch = () => gates.search.promise;
       d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
       d.services.dispatch.stop = () => gates.dispatch.promise;
@@ -826,6 +829,9 @@ describe("desktop shutdown", () => {
     expect(quit.preventDefault).toHaveBeenCalledOnce();
     expect(f.lifecycle.isQuitting()).toBe(true);
     expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
+    // Refusal Notices stop before any producer starts to drain.
+    expect(vi.mocked(f.dependencies.shutdown.stopNoticeRefusals).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(f.dependencies.shutdown.beginEngineShutdown).mock.invocationCallOrder[0]!);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     await integrationStarted.promise;
     gates.dispatch.resolve();
@@ -838,6 +844,9 @@ describe("desktop shutdown", () => {
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     expect(f.app.exit).not.toHaveBeenCalled();
     gates.ydoc.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    gates.notices.resolve();
     await workspacesClosed.promise;
     await exited.promise;
     expect(f.log.slice(-3)).toEqual(["database-stop", "relay-close", "engine-stop"]);
@@ -910,6 +919,28 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledOnce();
   });
 
+  it.each([0, 1] as const)("exits once with deadline status %s while refusal Notice work holds authorities open", async (deadlineExitCode) => {
+    vi.useFakeTimers();
+    const notices = deferred();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = deadlineExitCode;
+      d.shutdown.stopNoticeRefusals = () => notices.promise;
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    expect(f.dependencies.shutdown.flushReports).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    notices.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
   it("stops waiting on a dispatch stop at its limit and still closes within the budget", async () => {
     vi.useFakeTimers();
     const f = fixture((d) => {
@@ -925,6 +956,26 @@ describe("desktop shutdown", () => {
     expect(f.log.slice(-4)).toEqual(["workspaces-close", "database-stop", "relay-close", "engine-stop"]);
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
     expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
+  });
+
+  it("keeps refusal Notice work ahead of authority close after dispatch reaches its limit", async () => {
+    vi.useFakeTimers();
+    const notices = deferred();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.shutdown.stopNoticeRefusals = () => notices.promise;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    notices.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("sends reports alongside teardown and exits only once both finish", async () => {

@@ -52,11 +52,12 @@ function fakeUpdater() {
   return updater;
 }
 
-async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
+async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean }, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
   quitForStagedRestart?: () => void;
+  platform?: NodeJS.Platform;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
@@ -66,7 +67,25 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
     pollIntervalMs: 60 * 60_000,
     quitForStagedRestart: options.quitForStagedRestart,
     importUpdater: async () => ({ autoUpdater: updater }),
+    platform: options.platform ?? "win32",
   });
+}
+
+// electron-updater emits "error" with the provider's coded error, then
+// rejects the check with the same error.
+function failChecksWith(updater: ReturnType<typeof fakeUpdater>, error: Error) {
+  updater.checkForUpdates.mockImplementation(async () => {
+    updater.emit("checking-for-update");
+    updater.emit("error", error);
+    throw error;
+  });
+}
+
+function channelFileNotFound(): Error {
+  return Object.assign(
+    new Error("Cannot find nightly-mac.yml in the latest release artifacts (https://github.com/dohchq/dohc/releases/download/v0.1.1-nightly.20261019.42.1/nightly-mac.yml): HttpError: 404"),
+    { code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" },
+  );
 }
 
 describe("electron updater configuration", () => {
@@ -119,6 +138,47 @@ describe("electron updater configuration", () => {
     });
   });
 
+  it("installs on Linux only when the person asks, never at quit", async () => {
+    for (const platform of ["win32", "darwin"] as const) {
+      const updater = fakeUpdater();
+      await startWith(updater, { platform });
+      expect(updater.autoInstallOnAppQuit).toBe(true);
+    }
+    const updater = fakeUpdater();
+    const controller = await startWith(updater, { platform: "linux" });
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+    expect(updater.autoDownload).toBe(true);
+    updater.emit("checking-for-update");
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect((await controller!.installUpdate()).accepted).toBe(true);
+    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+  });
+
+  it("starts no updater where it cannot install, so no check waits forever", async () => {
+    const inactive = Object.assign(fakeUpdater(), { isUpdaterActive: () => false });
+    await expect(startWith(inactive, { platform: "linux" })).resolves.toBeNull();
+    expect(inactive.on).not.toHaveBeenCalled();
+    expect(inactive.checkForUpdates).not.toHaveBeenCalled();
+    const active = Object.assign(fakeUpdater(), { isUpdaterActive: () => true });
+    await expect(startWith(active, { platform: "linux" })).resolves.not.toBeNull();
+  });
+
+  // patches/electron-updater@6.8.9.patch: upstream asks again after a cancelled prompt and then reports success.
+  it("installs a .deb under one password prompt and never lets apt-get remove a package", async () => {
+    const { DebUpdater } = await import("electron-updater");
+    const commands: string[][] = [];
+    const cancelled = (command: string[]) => {
+      commands.push(command);
+      throw new Error("Command pkexec exited with code 126");
+    };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    expect(() => DebUpdater.installWithCommandRunner("dpkg", "/tmp/dohc.deb", cancelled, logger)).toThrow("126");
+    expect(commands).toEqual([[
+      "dpkg", "-i", "/tmp/dohc.deb", "||",
+      "(", "apt-get", "install", "-f", "-y", "--no-remove", "&&", "dpkg", "-i", "/tmp/dohc.deb", ")",
+    ]]);
+  });
+
   it("sets nightly channel flags explicitly", async () => {
     const updater = fakeUpdater();
     await startWith(updater, { currentVersion: "1.2.4-nightly.20260621.123" });
@@ -126,6 +186,61 @@ describe("electron updater configuration", () => {
     expect(updater.channel).toBe("nightly");
     expect(updater.allowPrerelease).toBe(true);
     expect(updater.allowDowngrade).toBe(false);
+  });
+});
+
+describe("electron updater release without this platform's files", () => {
+  // The Mac files join a release after the workflow publishes it.
+  it("reports no update on macOS while the newest release has no Mac channel file", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, channelFileNotFound());
+    const controller = await startWith(updater, { platform: "darwin", currentVersion: "0.1.1-nightly.20261018.41.1" });
+
+    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+      checked: true,
+      state: { status: "up-to-date", canCheck: true },
+    });
+  });
+
+  it("reports a missing channel file as an error on Windows and Linux, whose files ship with the release", async () => {
+    for (const platform of ["win32", "linux"] as const) {
+      const updater = fakeUpdater();
+      failChecksWith(updater, channelFileNotFound());
+      const controller = await startWith(updater, { platform });
+
+      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+        checked: false,
+        state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
+      });
+    }
+  });
+
+  it("reports a missing channel file as an error on macOS for a custom feed", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, channelFileNotFound());
+    const controller = await startWith(updater, { platform: "darwin", env: { DOHC_UPDATE_URL: "https://updates.example.test/dohc" } });
+
+    expect(updater.setFeedURL).toHaveBeenCalledWith({ provider: "generic", url: "https://updates.example.test/dohc" });
+    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+      checked: false,
+      state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
+    });
+  });
+
+  it("still reports other update errors on macOS", async () => {
+    for (const error of [
+      new Error("sha512 checksum mismatch"),
+      Object.assign(new Error("Unable to find latest version on GitHub"), { code: "ERR_UPDATER_LATEST_VERSION_NOT_FOUND" }),
+    ]) {
+      const updater = fakeUpdater();
+      failChecksWith(updater, error);
+      const controller = await startWith(updater, { platform: "darwin" });
+
+      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+        checked: false,
+        state: { status: "error", message: expect.stringContaining(error.message) },
+      });
+    }
   });
 });
 
