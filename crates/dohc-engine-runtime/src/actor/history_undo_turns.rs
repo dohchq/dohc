@@ -303,12 +303,15 @@ impl ActorHandle {
                     .get_active_version(&w)?
                     .version_id;
                 let members = store.read_with(|conn| -> Result<_, RuntimeError> {
+                    // Capture holds take precedence over History and disk refusals.
+                    for effect in operation_moments_in(conn, &w, &version, &o)? {
+                        check_undo_ownership(conn, &w, &version, &effect)?;
+                    }
                     let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
                     originals.sort_by_key(|m| m.operation != "rename");
                     originals
                         .into_iter()
                         .map(|effect| {
-                            check_undo_ownership(conn, &w, &version, &effect)?;
                             let head = signature(conn, &w, &version, &effect.object_id)?;
                             let sha = if effect.operation == "rename" {
                                 Some(rename_head_sha(conn, &w, &version, &effect.object_id)?)

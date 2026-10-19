@@ -517,8 +517,9 @@ pub(super) fn test_undo_in_turns(
             .join()
             .unwrap()
     });
-    drop(link_drain);
+    // Keep derived link writes outside the fixture's Undo commit accounting.
     supervisor.close_all()?;
+    drop(link_drain);
     *store = EngineStore::open(&db, now)?;
     outcome
 }

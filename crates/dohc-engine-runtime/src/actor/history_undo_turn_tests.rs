@@ -830,6 +830,13 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
         .unwrap();
     assert_eq!(result.moments.len(), 3);
     assert!(result.not_restored.is_empty());
+    let rename_inverse = result
+        .moments
+        .iter()
+        .find(|m| m.operation == "rename")
+        .unwrap();
+    let rename_jobs = undo_job_ids(WS, "main", rename_inverse);
+    let parked_write = rename_jobs[0].clone();
     let placed = actor
         .history_undo_place(
             WS.into(),
@@ -852,7 +859,22 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
             .unwrap()
             .is_empty()
     );
+    let expected_write = parked_write.clone();
     actor
+        .run(move |store, _| {
+            let job = store.load_materialization_job(&expected_write)?.unwrap();
+            assert_eq!(job.target_path, "old.md");
+            assert_ne!(
+                job.status,
+                JobStatus::Complete,
+                "rename placement remains for Retry held"
+            );
+            eprintln!("parked rename job: {job:?}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let switched = actor
         .set_active_version(
             crate::ActiveVersionSwitch {
                 workspace_id: WS.into(),
@@ -864,8 +886,30 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
             Arc::new(NoFaults),
             crate::CancellationToken::new(),
         )
-        .await
-        .unwrap();
+        .await;
+    // Decision 17 completes Undo, but a switch still reports the parked rename placement.
+    assert!(
+        matches!(
+            switched,
+            Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+        ),
+        "{switched:?}"
+    );
+    actor.run(move |store, _| {
+        let write = store.load_materialization_job(&parked_write)?.unwrap();
+        assert_ne!(write.status, JobStatus::Complete);
+        let incomplete: Vec<(String,String,String)> = store.read_with(|conn| {
+            conn.prepare("SELECT job_id,target_path,status FROM materialization_jobs WHERE workspace_id=?1 AND status!='complete' AND job_id GLOB 'version-switch-*'")?.query_map([WS], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<Result<_,_>>()
+        }).map_err(StorageError::corrupt_public)?;
+        eprintln!("switch incomplete jobs: {incomplete:?}; parked rename write: {write:?}");
+        assert_eq!(incomplete.len(), 1, "only the parked rename path remains incomplete");
+        assert_eq!(incomplete[0].1, write.target_path, "the switch reports that same parked path");
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("old.md")).unwrap(),
+        "outside edit"
+    );
     assert_eq!(
         actor.active_version(WS.into()).await.unwrap().version_id,
         "other"
