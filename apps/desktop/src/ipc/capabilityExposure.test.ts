@@ -52,7 +52,7 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 }
 
 describe("main inventories", () => {
-  it("preserves every IPC wire name and the 26 enforced table guards", () => {
+  it("preserves every IPC wire name and the enforced table guards", () => {
     expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual([...mainIpc.names].sort());
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
