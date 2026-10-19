@@ -1450,7 +1450,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return captureSqliteReadRevisionMatches(this.db);
   }
 
-  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null {
+  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null | "reset" {
     return currentFilesStorage.currentObjectFile(this, input);
   }
 

@@ -33,6 +33,7 @@ import {
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
+import type { SqliteDb } from "./storage/types";
 import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import {
   appendLog,
@@ -1168,6 +1169,104 @@ describe("relay capability reads", () => {
     ]) {
       expect(serialized).not.toContain(privateValue);
     }
+  });
+
+  it.each(["view", "comment"] as const)("resets a %s feed for a deleted object beyond 32 moments", async (access) => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, access);
+    appendStoredMoments(storage, Array.from({ length: 32 }, (_, index) =>
+      moment(index + 3, "docs/shared.md", "# shared\n", 1_300 + index, {
+        objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      })));
+    appendStoredMoments(storage, [moment(35, "docs/shared.md", "# shared\n", 1_400, {
+      objectId: "object-shared", operation: "delete", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      afterContent: null, afterPath: null,
+    })]);
+    const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+    expect(current.files).toEqual([]);
+    const page = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=500&current=true")));
+    expect((page.ops as RelayOp[]).length).toBeGreaterThan(32);
+    expect((page.ops as RelayOp[]).every(op => op.opKind === "files.reset")).toBe(true);
+  });
+
+  it("executes one bounded object lookup for a 500-row current-only page", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    appendStoredMoments(storage, Array.from({ length: 2_000 }, (_, index) =>
+      moment(index + 3, "docs/shared.md", "# shared\n", 1_300 + index, {
+        objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      })));
+    appendStoredMoments(storage, [moment(2_003, "docs/shared.md", "# shared\n", 3_400, {
+      objectId: "object-shared", operation: "delete", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      afterContent: null, afterPath: null,
+    })]);
+    const db = (storage as unknown as { db: SqliteDb }).db;
+    const prepare = db.prepare.bind(db);
+    let executions = 0;
+    const returnedRows: number[] = [];
+    const spy = vi.spyOn(db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (!sql.includes("current.blob_sha256") || !sql.includes("sync_relay_object_moments")) return statement;
+      return new Proxy(statement, { get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property === "get" || property === "all") return (...params: unknown[]) => {
+          executions++;
+          const result = value.apply(target, params);
+          returnedRows.push(Array.isArray(result) ? result.length : result ? 1 : 0);
+          return result;
+        };
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      const page = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=500&current=true")));
+      expect(page.ops).toHaveLength(500);
+      expect(executions).toBe(1);
+      expect(returnedRows).toEqual([32]);
+      expect((page.ops as RelayOp[]).every(op => op.opKind === "files.reset")).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("keeps exact object results at the 32-moment boundary and above the epoch floor", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    const lookup = (epochLogFloor = 0) => storage.currentObjectFile({ workspaceId: WORKSPACE, versionId: "main", objectId: "object-shared", epochLogFloor });
+    const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+    const floor = Number(current.nextCursor);
+    await putBlob(h, "refused\n");
+    await putBlob(h, "wrong before\n");
+    const refused = (index: number) => moment(index + 3, "docs/shared.md", "refused\n", 1_300 + index, {
+      objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "wrong before\n",
+    });
+    appendStoredMoments(storage, Array.from({ length: 31 }, (_, index) => refused(index)));
+    expect(lookup()).toEqual({ path: "docs/shared.md", blobSha256: seeded.sharedSha, contentKind: "text" });
+    expect(lookup(floor)).toBeNull();
+    appendStoredMoments(storage, [refused(31)]);
+    expect(lookup()).toBe("reset");
+    expect(lookup(floor)).toBeNull();
+  });
+
+  it("reports an exact removal when the 32nd moment is the object's oldest", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    appendStoredMoments(storage, Array.from({ length: 30 }, (_, index) =>
+      moment(index + 3, "docs/shared.md", "# shared\n", 1_300 + index, {
+        objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      })));
+    appendStoredMoments(storage, [moment(33, "docs/shared.md", "# shared\n", 1_400, {
+      objectId: "object-shared", operation: "delete", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      afterContent: null, afterPath: null,
+    })]);
+    expect(storage.currentObjectFile({ workspaceId: WORKSPACE, versionId: "main", objectId: "object-shared", epochLogFloor: 0 })).toBeNull();
+    const page = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=500&current=true")));
+    expect(page.ops).toHaveLength(32);
+    expect(page.ops).toEqual(Array.from({ length: 32 }, () => expect.objectContaining({
+      opKind: "file.current", payload: expect.objectContaining({ file: null }),
+    })));
   });
 
   it.each(["view", "comment"] as const)("keeps the %s feed equal to current files after refused moments", async (access) => {

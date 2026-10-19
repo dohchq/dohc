@@ -688,19 +688,28 @@ export function currentObjectPath(storage: StorageContext, input: { workspaceId:
 
 export function currentObjectFile(storage: StorageContext, input: {
   workspaceId: string; versionId: string; objectId: string; epochLogFloor: number;
-}): CurrentFileStateRow | null {
-  const row = storage.db.prepare(
-    `SELECT current.path, current.blob_sha256, current.content_kind
-     FROM sync_relay_object_moments moment INDEXED BY idx_sync_relay_object_moments_latest
-     JOIN sync_relay_current_files current
+}): CurrentFileStateRow | null | "reset" {
+  const params = [input.workspaceId, input.versionId, input.objectId, input.epochLogFloor];
+  const rows = storage.db.prepare(
+    `WITH moments AS MATERIALIZED (
+       SELECT workspace_id, version_id, path, relay_seq
+       FROM sync_relay_object_moments INDEXED BY idx_sync_relay_object_moments_latest
+       WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND relay_seq > ?
+       ORDER BY relay_seq DESC LIMIT 32
+     )
+     SELECT current.path, current.blob_sha256, current.content_kind, moment.relay_seq,
+       (SELECT MIN(relay_seq) FROM sync_relay_object_moments INDEXED BY idx_sync_relay_object_moments_latest
+        WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND relay_seq > ?) AS oldest_relay_seq
+     FROM moments moment LEFT JOIN sync_relay_current_files current
        ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
       AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
-     WHERE moment.workspace_id = ? AND moment.version_id = ? AND moment.object_id = ?
-       AND current.state_relay_seq > ?
-     ORDER BY moment.relay_seq DESC LIMIT 1`,
-  ).get(input.workspaceId, input.versionId, input.objectId, input.epochLogFloor);
-  return row ? { path: String(row.path), blobSha256: String(row.blob_sha256),
-    contentKind: row.content_kind === "binary" ? "binary" : "text" } : null;
+     ORDER BY moment.relay_seq DESC`,
+  ).all(...params, ...params);
+  const row = rows.find(candidate => typeof candidate.path === "string");
+  if (row) return { path: String(row.path), blobSha256: String(row.blob_sha256),
+    contentKind: row.content_kind === "binary" ? "binary" : "text" };
+  const last = rows.at(-1);
+  return last && Number(last.relay_seq) > Number(last.oldest_relay_seq) ? "reset" : null;
 }
 
 export function currentFileObjectId(storage: StorageContext, input: {

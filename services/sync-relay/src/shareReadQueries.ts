@@ -206,6 +206,7 @@ export function createShareReadQueries(
       audience === "accountless" && fileSelector
         ? createAccountlessPathProjection(fileSelector)
         : null;
+    const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
     const page = scanFilteredLog(
       storage,
       {
@@ -259,7 +260,11 @@ export function createShareReadQueries(
           const receivedObject = identity.object(recipient, workspaceId, objectId);
           if (typeof objectId !== "string" || !receivedObject) return reset;
           const versionId = targetVersionId(fileSelector);
-          const current = storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor });
+          if (!currentFiles.has(objectId)) {
+            currentFiles.set(objectId, storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }));
+          }
+          const current = currentFiles.get(objectId)!;
+          if (current === "reset") return reset;
           const projected = current === null ? null : accountlessProjection.projectPath(current.path);
           return {
             relaySeq: row.relaySeq,
