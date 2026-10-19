@@ -842,11 +842,11 @@ export function GraphView(props: {
     return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
   }, [requestIdentity, load, props.workspaceId, chatMentionsEnabled]);
 
-  // Keyed on the drawn files, so switching to a file that draws the same set
-  // doesn't sync channels and ask for every mention again.
+  // Keyed on the drawn files, sorted because the active file is drawn first,
+  // so opening a file that draws the same set asks for nothing again.
   const mentionPathsKey = useMemo(() => {
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    return JSON.stringify(graph ? visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path) : []);
+    return JSON.stringify(graph ? visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path).sort() : []);
   }, [state.graph, state.workspaceId, props.workspaceId, props.activePath, variant]);
 
   useEffect(() => {

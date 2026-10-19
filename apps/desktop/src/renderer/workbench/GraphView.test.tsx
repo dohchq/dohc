@@ -751,8 +751,10 @@ describe("GraphView", () => {
     expect(listChatFileMentions).toHaveBeenCalledWith({ workspaceId: "ws", paths: ["a.md", "picture.svg"] });
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
     // Opening another file that draws the same files asks for nothing new.
-    rerender(<GraphView workspaceId="ws" activePath="a.md" refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
-    await screen.findAllByText("Picture discussion");
+    for (const activePath of ["a.md", "picture.svg"]) {
+      rerender(<GraphView workspaceId="ws" activePath={activePath} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+      await screen.findAllByText("Picture discussion");
+    }
     expect(listChatFileMentions).toHaveBeenCalledOnce();
   });
 
