@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { freemem } from "node:os";
-import { join, resolve } from "node:path";
+import { join, win32 } from "node:path";
 import { acquireBuildSlot, acquireLinuxSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { clippy } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
@@ -44,9 +44,9 @@ export function linuxDistro(env = process.env, platform = process.platform) {
   return name;
 }
 
-/** A Windows path as WSL mounts it. */
+/** A Windows path as WSL mounts it, read as a Windows path on any host. */
 export function wslPath(path) {
-  const [, drive, rest] = resolve(path).match(/^([A-Za-z]):[\\/](.*)$/u) ?? [];
+  const [, drive, rest] = win32.resolve(path).match(/^([A-Za-z]):[\\/](.*)$/u) ?? [];
   if (!drive) throw new Error(`${path} is not on a Windows drive.`);
   return `/mnt/${drive.toLowerCase()}/${rest.replaceAll("\\", "/")}`;
 }

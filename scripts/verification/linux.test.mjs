@@ -274,10 +274,11 @@ test("the job waits for memory at its cargo lane, gives up at its deadline, and 
   const short = await job({ synced: "cached 0\n", freeMemory: () => 1, waitMs: 300 });
   assert.equal(short.error.environment, "linux admission");
   assert.deepEqual(short.slotsLeft, []);
+  // The stop arrives during the memory wait: the hold's first look at memory sends it.
   const stop = new AbortController();
-  const stopped = job({ synced: "cached 0\n", freeMemory: () => 1, signal: stop.signal });
-  setTimeout(() => stop.abort(stopReason()), 50);
-  const { error, calls } = await stopped;
+  let looked = false;
+  const { error, calls } = await job({ synced: "cached 0\n", signal: stop.signal, freeMemory: () => { looked = true; stop.abort(stopReason()); return 1; } });
+  assert.equal(looked, true);
   assert.equal(error.stopped, true);
   assert.equal(calls.some(call => call.args.at(-1).endsWith("wsl-run.sh")), false);
 });
