@@ -11,10 +11,12 @@
 // node on PATH.
 //
 // The Node lives in this user's private scratch parent under its own hash,
-// whatever folder holds the checkout. A published Node is never replaced: a
-// reader that is starting compares the identity of the file it hashed.
-import { createHash, randomBytes } from "node:crypto";
-import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+// whatever folder holds the checkout. A stager writes it into a private
+// temporary folder and renames that folder into place, so nothing ever
+// touches a published file: a reader that is starting compares the inode and
+// change time of the file it hashed.
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PINNED_NODE } from "../../apps/desktop/scripts/pinned-node.mjs";
@@ -22,6 +24,8 @@ import { testScratchParent } from "./scratch-leak-report.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+// No stager takes this long, so an older temporary folder belongs to one that stopped.
+const abandonedMs = 60 * 60 * 1000;
 
 function pinnedHash() {
   const pin = process.platform === "darwin" && PINNED_NODE[`darwin-${process.arch}`];
@@ -39,27 +43,40 @@ async function readPinnedNode(stagedNodePaths) {
   return readPinnedCompilerNode({ stagedNodePaths });
 }
 
-async function holds(path, hash) {
-  const bytes = await readFile(path).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-  return bytes !== null && sha256(bytes) === hash;
+/** Whether the Node is published. A damaged one is reported, never replaced. */
+async function published(node, hash) {
+  const bytes = await readFile(node).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  if (bytes === null) return false;
+  if (sha256(bytes) !== hash) throw new Error(`${node} does not hold the pinned Node. Remove ${dirname(node)}, then run again.`);
+  return true;
+}
+
+async function removeAbandoned(folder) {
+  for (const name of await readdir(folder)) {
+    if (!name.includes(".tmp-")) continue;
+    const stats = await lstat(join(folder, name)).catch(() => null);
+    if (stats?.isDirectory() && Date.now() - stats.mtimeMs > abandonedMs) await rm(join(folder, name), { recursive: true, force: true });
+  }
 }
 
 export async function stageReaderTestNode({ root = repoRoot, parent, hash = pinnedHash(), readNode = readPinnedNode } = {}) {
   const node = readerTestNode({ parent, hash });
-  if (await holds(node, hash)) return node;
+  const folder = dirname(dirname(node));
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  await removeAbandoned(folder);
+  if (await published(node, hash)) return node;
   const bytes = await readNode([join(root, "apps/desktop/resources/app-compiler/node")]);
   if (sha256(bytes) !== hash) throw new Error("The reader test Node does not match its pin.");
-  await mkdir(dirname(node), { recursive: true, mode: 0o700 });
-  const temporary = join(dirname(node), `.node-${process.pid}-${randomBytes(6).toString("hex")}`);
+  const temporary = await mkdtemp(join(folder, `${hash}.tmp-`));
   try {
-    await writeFile(temporary, bytes, { mode: 0o555, flag: "wx" });
-    // link refuses an existing name, so a concurrent stager's Node stays in place.
-    await link(temporary, node).catch(async error => {
-      if (error.code !== "EEXIST") throw error;
-      if (!(await holds(node, hash))) throw new Error(`${node} does not hold the pinned Node. Remove its folder, then run again.`);
+    await writeFile(join(temporary, "node"), bytes, { mode: 0o555, flag: "wx" });
+    // A non-empty folder already in place means another stager published first.
+    await rename(temporary, dirname(node)).catch(async error => {
+      if (!["ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
+      if (!(await published(node, hash))) throw new Error(`${dirname(node)} holds no Node. Remove it, then run again.`);
     });
   } finally {
-    await rm(temporary, { force: true });
+    await rm(temporary, { recursive: true, force: true });
   }
   return node;
 }

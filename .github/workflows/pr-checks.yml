@@ -172,6 +172,8 @@ jobs:
               - '**/package.json'
               # Most verification tests import the desktop's engine staging.
               - 'apps/desktop/scripts/require-e2e-engine.mjs'
+              # The gate and reader test Node tests import the Node pin table.
+              - 'apps/desktop/scripts/pinned-node.mjs'
               # desktop-build-cancellation.test.mjs runs the engine build and
               # the dev launcher; desktop-release-scripts.test.mjs reads the
               # engine build and the packaging configuration.
