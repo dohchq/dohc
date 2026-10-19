@@ -24,8 +24,6 @@ export interface RelaySyncOperations {
     materializePage: MaterializeRelayPullPage,
   ): Promise<PullWorkspaceFromRelayResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
-  // Collections updates wait for a pull that has not committed its last page.
-  collectionsWaiting?(): Promise<boolean>;
 }
 
 export interface CloudSyncEngineOptions {
@@ -66,6 +64,11 @@ export interface CloudSyncEngineOptions {
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
   afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs as every pass ends, while the snapshot still says it is syncing, so
+  // the owner can read what the pass left behind, such as a pull it did not
+  // finish. Resolves whether that changed what the status shows. A failure
+  // is logged and never fails the pass.
+  afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   // Runs before each pull request is sent, and must finish any durable write
   // it needs before it returns. The function it returns runs when that pull
   // ends, whatever the outcome.
@@ -116,9 +119,6 @@ export interface CloudSyncSnapshot {
   syncFailure: CloudSyncFailure | null;
   // A pass someone asked for with retryNow is running.
   retrying: boolean;
-  // Between passes, Collections updates wait for a pull that has not
-  // committed its last page. Local writes still save.
-  collectionsWaiting: boolean;
 }
 
 export interface CloudSyncEngine {
@@ -153,7 +153,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let authExpired = false;
   let syncFailure: CloudSyncFailure | null = null;
   let retrying = false;
-  let collectionsWaiting = false;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
@@ -482,19 +481,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
   // every pass, so they do not count.
   function visibleState(): string {
-    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending,
-      collectionsWaiting]);
+    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
   }
 
-  // A failed pass can leave a pull unfinished, and only a later pass can
-  // finish it, so the engine is asked after a failure and while it waits.
-  // A failed read keeps the last answer.
-  async function readCollectionsWaiting(failed: boolean): Promise<void> {
-    if (!operations.collectionsWaiting || (!failed && !collectionsWaiting)) return;
+  async function afterPass(failed: boolean): Promise<boolean> {
+    if (!options.afterPass) return false;
     try {
-      collectionsWaiting = await operations.collectionsWaiting();
+      return await options.afterPass({ failed });
     } catch (error) {
-      console.error(`[desktop] Collections wait check failed for ${options.rootDir}:`, error);
+      console.error(`[desktop] after-pass check failed for ${options.rootDir}:`, error);
+      return false;
     }
   }
 
@@ -540,6 +536,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const stateBefore = visibleState();
         let applied = false;
         let failed = false;
+        let statusChanged = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
@@ -550,10 +547,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
-          await readCollectionsWaiting(failed);
+          statusChanged = await afterPass(failed);
           syncing = false;
           retrying = false;
-          if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+          if (!quiet || applied || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
         }
@@ -611,7 +608,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         syncFailure: syncFailure ? { ...syncFailure } : null,
         retrying,
-        collectionsWaiting,
       };
     },
 

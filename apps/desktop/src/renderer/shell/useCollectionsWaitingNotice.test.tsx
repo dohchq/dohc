@@ -117,6 +117,23 @@ describe("useCollectionsWaitingNotice", () => {
     expect(view.rows()[0]!.message).toBe(collectionsWaitingMessage("sync"));
   });
 
+  it("keeps a dismissed wait dismissed through signing in and out", () => {
+    const view = renderNotice({ waiting: "sync" });
+    act(() => {
+      view.result.current.notice.noteDismissed();
+      view.result.current.errors.dismissShellError(view.rows()[0]!.id);
+    });
+    // Signing in reloads the status, and the new sync engine's passes and
+    // signing out report the same wait.
+    for (const waiting of [undefined, "sync", "sync", undefined, "sync"] as const) {
+      view.rerender({ workspaceId: "ws-a", waiting });
+    }
+    expect(view.rows()).toEqual([]);
+    view.rerender({ workspaceId: "ws-a", waiting: null });
+    view.rerender({ workspaceId: "ws-a", waiting: "sync" });
+    expect(view.toasts()).toHaveLength(1);
+  });
+
   it("warns while updates wait and reports a failed reopen as a failure", () => {
     const view = renderNotice({ waiting: "sync" });
     expect(view.rows()[0]!.tone).toBe("warning");

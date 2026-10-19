@@ -68,9 +68,14 @@ async function fixture(synced = true, collectionsWaiting = false) {
       id => !store.find(id)?.remote),
     { transportRebindAttempts: 1 },
   );
+  const reads: Promise<boolean>[] = [];
   const service = createWorkspaceActivity(vi.fn(), {
-    collectionsWaitingFor: engineWorkspace => sessions.run(engineWorkspace, ({ client, workspace: handle }) =>
-      new VersionedLiveAdapter(client, handle, { workspaceId: engineWorkspace.workspaceId }).collectionsWaiting()),
+    collectionsWaitingFor: engineWorkspace => {
+      const read = sessions.run(engineWorkspace, ({ client, workspace: handle }) =>
+        new VersionedLiveAdapter(client, handle, { workspaceId: engineWorkspace.workspaceId }).collectionsWaiting());
+      reads.push(read);
+      return read;
+    },
     onAgentRunState: event => runStates.push(event),
     observationFor: (_workspace, callbacks) => {
       observation = callbacks;
@@ -82,7 +87,7 @@ async function fixture(synced = true, collectionsWaiting = false) {
         syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person") : undefined };
     },
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
-      start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({ collectionsWaiting }),
+      start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
     } as never) : null,
     captureFor: () => {
       let activeRun: ActiveAgentRun | null = null;
@@ -99,9 +104,12 @@ async function fixture(synced = true, collectionsWaiting = false) {
   });
   const state = new WorkspaceActivityState();
   await service.open(workspace, state);
+  // The answer the open asked for in the background.
+  await reads[0];
   steps.length = 0;
   let current = true;
-  const closeRelay = vi.fn(async () => { steps.push("relay-close"); });
+  // As in the app, closing the relay closes the workspace's engine sessions.
+  const closeRelay = vi.fn(async () => { steps.push("relay-close"); await sessions.closeWorkspace(workspace); });
   const pauseRemote = vi.fn((id: string, pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => { steps.push("pause"); store.pauseRemote(id, pause); });
   const cleanupFailed = vi.fn();
   const person = vi.fn(async () => ({ kind: "person" as const, personId: "local-person" }));

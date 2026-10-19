@@ -2295,8 +2295,12 @@ function engineForWorkspace(
         }
       },
       recoverOrigin: () => daemonRelay.recoverOrigin(),
-      collectionsWaiting: () => daemonRelay.collectionsWaiting(),
     },
+    // Workspace activity keeps the Collections wait, so it outlasts this
+    // engine when the person signs out.
+    afterPass: ({ failed }) =>
+      withWorkspaceAttachment(workspace, lease => workspaceActivity.syncPassEnded(canonicalWorkspaceFor(lease),
+        lease.state.activity, failed, () => daemonRelay.collectionsWaiting())) ?? Promise.resolve(false),
     capture,
     onChange: createRelayOnChange(workspace),
     // MU-C4: joined shared channels refresh on the same cadence as the

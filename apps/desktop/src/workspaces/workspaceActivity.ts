@@ -54,9 +54,13 @@ interface WatchedWorkspace {
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
-  // The engine's answer at open: Collection updates wait for an unfinished
-  // pull. A running sync engine asks again after its passes.
+  // The engine's latest answer: Collection updates wait for an unfinished
+  // pull. Asked at open and after sync passes, and kept as sync engines
+  // attach and detach. Reads are numbered so an older answer that resolves
+  // late cannot replace a newer one.
   collectionsWaiting: boolean;
+  collectionsWaitingAsked: number;
+  collectionsWaitingAnswered: number;
 }
 
 /**
@@ -241,12 +245,10 @@ export function createWorkspaceActivity(
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
     const w = state.entry;
     const snap = w?.engine?.snapshot();
-    // The wait itself, held through a running pass: only an answer that
-    // nothing waits ends it. With no sync engine, as when signed out, the
-    // engine's answer at open stands.
+    // Only an engine answer that nothing waits ends the wait: not a running
+    // pass, and not signing in or out.
     const collectionsWaitingForSync: SyncStatusResult["collectionsWaitingForSync"] =
-      state.syncPauseReopenFailed ? "reopen"
-        : (snap ? snap.collectionsWaiting : w?.collectionsWaiting) ? "sync" : undefined;
+      state.syncPauseReopenFailed ? "reopen" : w?.collectionsWaiting ? "sync" : undefined;
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
@@ -376,6 +378,8 @@ export function createWorkspaceActivity(
         keptFiles: [],
         heldFiles: [],
         collectionsWaiting: false,
+        collectionsWaitingAsked: 0,
+        collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
       // Resolve the engine capture before the watcher starts, so the mode is
@@ -513,22 +517,57 @@ export function createWorkspaceActivity(
   }
 
   // Asks the engine whether Collection updates wait for an unfinished pull,
-  // and keeps the answer for this open. An answer that nothing waits also
-  // ends a failed reopen after a pause.
+  // and keeps the answer for this open unless a later read already
+  // answered. An answer that nothing waits also ends a failed reopen after a
+  // pause. Resolves the answer and whether the status changed.
+  async function askCollectionsWaiting(
+    state: WorkspaceActivityState,
+    read: () => Promise<boolean>,
+  ): Promise<{ waiting: boolean; changed: boolean }> {
+    const entry = state.entry;
+    const asked = entry ? ++entry.collectionsWaitingAsked : 0;
+    const waiting = await read();
+    if (state.entry !== entry) return { waiting, changed: false };
+    if (entry) {
+      if (asked < entry.collectionsWaitingAnswered) return { waiting, changed: false };
+      entry.collectionsWaitingAnswered = asked;
+    }
+    const reopened = !waiting && state.syncPauseReopenFailed;
+    if (entry && entry.collectionsWaiting === waiting && !reopened) return { waiting, changed: false };
+    if (entry) entry.collectionsWaiting = waiting;
+    if (reopened) state.syncPauseReopenFailed = false;
+    return { waiting, changed: true };
+  }
+
   async function readCollectionsWaiting(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
   ): Promise<boolean> {
-    if (!options.collectionsWaitingFor) throw new Error("dohc cannot ask the engine about Collection updates.");
-    const entry = state.entry;
-    const waiting = await options.collectionsWaitingFor(workspace);
-    if (state.entry !== entry) return waiting;
-    const reopened = !waiting && state.syncPauseReopenFailed;
-    if (entry && entry.collectionsWaiting === waiting && !reopened) return waiting;
-    if (entry) entry.collectionsWaiting = waiting;
-    if (reopened) state.syncPauseReopenFailed = false;
-    notify({ workspaceId: workspace.workspaceId });
+    const collectionsWaitingFor = options.collectionsWaitingFor;
+    if (!collectionsWaitingFor) throw new Error("dohc cannot ask the engine about Collection updates.");
+    const { waiting, changed } = await askCollectionsWaiting(state, () => collectionsWaitingFor(workspace));
+    if (changed) notify({ workspaceId: workspace.workspaceId });
     return waiting;
+  }
+
+  // A sync pass ended. A failed pass can leave a pull unfinished, and only a
+  // later pass can finish it, so the engine is asked after a failure and
+  // while Collection updates wait. A failed read keeps the last answer. The
+  // sync engine announces the change itself, once the pass has ended.
+  async function syncPassEnded(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+    failed: boolean,
+    read: () => Promise<boolean>,
+  ): Promise<boolean> {
+    const entry = state.entry;
+    if (!entry || (!failed && !entry.collectionsWaiting)) return false;
+    try {
+      return (await askCollectionsWaiting(state, read)).changed;
+    } catch (error) {
+      console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error);
+      return false;
+    }
   }
 
   // The pause saved, but the workspace did not reopen while Collection
@@ -916,6 +955,7 @@ export function createWorkspaceActivity(
     prepareSyncPause,
     recordSyncPauseReopenFailed,
     readCollectionsWaiting,
+    syncPassEnded,
     reconcileCloud,
     stopEngine,
     getStatus,
