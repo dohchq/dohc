@@ -1,22 +1,27 @@
-import { formatChatTime } from "../time";
-import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, Database, FileArchive, FileText, History, Info, Layers, Lock, RotateCcw, Search, TriangleAlert, X, Zap } from "lucide-react";
+import { formatChatTime, formatClock } from "../time";
+import { basenameOf, dirnameOf } from "../path";
+import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, HardDrive, History, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { EmptyState } from "../ui/controls";
 import { Ref } from "../ui/Ref";
-import { useCallback, useId, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type TimelineEntry } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
+import { AgentName, ChatAvatar, LinkMark } from "./ChatAvatar";
+import { neutralPresentation } from "./actorPresentation";
 
 // The History timeline: file moments, version markers and Collection
 // changes, newest first, in the order main merged them. File moments keep
 // their summaries ("Saved latest edits", "Merged version X into Main",
 // "Reconciled offline edits", ...) and a multi-file pass (reconcile, switch,
 // merge, restore) groups into one expandable item via its correlationId.
+// An agent's consecutive edits to one file fold into one row, a run.
 // Product vocabulary only, no git terms.
 
 interface EngineHistoryGroup {
   key: string;
+  // A run lists one agent's edits to one file; a pass lists the files it changed.
+  run: boolean;
   summary: string;
   recordedAtMs: number;
   correlationId?: string;
@@ -157,13 +162,24 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
+// Whether `older` continues the run `newer` is in: the same agent editing the
+// same file, on the same day.
+function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
+  return newer.agentAuthorName !== undefined && newer.agentAuthorName === older.agentAuthorName &&
+    newer.path === older.path && newer.operation === "write" && older.operation === "write" &&
+    dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs);
+}
+
 // Keeps the order main merged and groups consecutive file moments that share
 // a correlationId (one pass records its per-file moments contiguously on the
 // capture chain). A version or Collection row between them ends the group.
-// Moments without a correlationId stay singletons.
+// An agent's consecutive edits to one file fold into a run, keyed by its
+// oldest edit so a new edit on top keeps the row. Each edit may carry its own
+// one-moment operation; a moment of a multi-file pass never joins a run.
+// Other moments stay single.
 export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[] {
   const items: TimelineItem[] = [];
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
     if (entry.kind === "version") {
       items.push({ kind: "version", key: `version:${entry.version.id}`, version: entry.version });
       continue;
@@ -182,11 +198,21 @@ export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[]
       previous.group.moments.push(moment);
       continue;
     }
+    const next = entries[index + 1];
+    const startsPass = moment.correlationId !== undefined && next?.kind === "file" && next.moment.correlationId === moment.correlationId;
+    if (previous?.kind === "files" && (previous.group.run || previous.group.moments.length === 1) && !startsPass &&
+      continuesRun(previous.group.moments[previous.group.moments.length - 1]!, moment)) {
+      previous.group.moments.push(moment);
+      previous.group.run = true;
+      previous.key = previous.group.key = moment.id;
+      continue;
+    }
     items.push({
       kind: "files",
       key: moment.id,
       group: {
         key: moment.id,
+        run: false,
         summary: engineMomentSummary(moment),
         recordedAtMs: moment.recordedAtMs,
         ...(moment.correlationId !== undefined
@@ -197,6 +223,25 @@ export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[]
     });
   }
   return items;
+}
+
+export type MomentStep = { momentId: string; path: string };
+export type MomentSteps = { older: MomentStep | null; newer: MomentStep | null };
+
+// Each loaded change's nearest older and newer change to the same file, so
+// the diff page can step through one file's History. One pass, newest first.
+export function fileMomentSteps(entries: readonly TimelineEntry[]): Map<string, MomentSteps> {
+  const steps = new Map<string, MomentSteps>();
+  const newest = new Map<string, MomentStep>();
+  for (const entry of entries) {
+    if (entry.kind !== "file") continue;
+    const step = { momentId: entry.moment.id, path: entry.moment.path };
+    const newer = newest.get(step.path) ?? null;
+    if (newer) steps.get(newer.momentId)!.older = step;
+    steps.set(step.momentId, { older: null, newer });
+    newest.set(step.path, step);
+  }
+  return steps;
 }
 
 function automationName(automation: NonNullable<CollectionEntry["change"]["automation"]>): string {
@@ -302,93 +347,215 @@ export function missingSourcesWords(
   };
 }
 
-// One change in the timeline. The states page renders it too.
+// One timeline row: 30px, inset, with no rule between rows. Hover and the
+// open change take the list ladder's fills. A mark takes an avatar's 18px.
+const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
+const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
+const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
+const COUNT = "shrink-0 rounded border border-line px-1 font-mono text-[10px] leading-[14px] text-muted";
+
+// Who made a change, as chats draw them: an agent's square, a person's face,
+// an automation's mark, a share link's ring. A change with no one author,
+// or several, draws the caller's `fallback`.
+export function MomentAuthor(props: { moment: EngineMomentRecord; fallback: ReactNode }) {
+  const { moment } = props;
+  const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
+  if (moment.agentAuthorName !== undefined) {
+    return <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
+  }
+  if (moment.automationAuthor) return <ChatAvatar presentation={presentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
+  const person = moment.namedAuthor?.label ?? moment.personAuthorName
+    ?? (moment.authors?.[0]?.kind === "human" ? moment.liveAuthorName : undefined);
+  if (person !== undefined) return <ChatAvatar presentation={presentation} name={person} kind="human" size="strip" />;
+  if (moment.publicAuthor || moment.linkAuthor || moment.liveAuthorName !== undefined) return <LinkMark />;
+  return <>{props.fallback}</>;
+}
+
+// Where a change with no one author came from, as a mark the size of an
+// avatar. Its title names the origin; an unknown origin is a dot.
+const ORIGIN_MARKS: Partial<Record<EngineMomentRecord["origin"], LucideIcon>> = {
+  "local-file": HardDrive,
+  ydoc: PenLine,
+  sync: Cloud,
+  restore: RotateCcw,
+  "capture-recovery": Keyboard,
+  "capture-recovery-cleared": Keyboard,
+};
+
+function OriginMark(props: { moment: EngineMomentRecord }) {
+  const Icon = ORIGIN_MARKS[props.moment.origin];
+  return (
+    <span aria-hidden title={engineMomentSourceLabel(props.moment)} className={`${MARK_BOX} text-subtle`}>
+      {Icon ? <Icon size={14} strokeWidth={1.9} /> : <span className="size-1 rounded-full bg-subtle" />}
+    </span>
+  );
+}
+
+// A row's title: the engine's own summary, else the file's name. The
+// operation stays in the title only when it is not an edit.
+export function momentRowTitle(moment: EngineMomentRecord): string {
+  return moment.summary || moment.operation !== "write" ? engineMomentSummary(moment) : basenameOf(moment.path);
+}
+
+// Where the file is, after a title, so the row names it once: its folder
+// after its name, its path after a summary that does not name it.
+function momentRowPlace(moment: EngineMomentRecord, title: string): string {
+  if (title.includes(moment.path)) return "";
+  return title.includes(basenameOf(moment.path)) ? dirnameOf(moment.path) : moment.path;
+}
+
+// Who made a top-level change, after its title. An agent's or an
+// automation's name shows; anyone else shows the file's folder, and their
+// avatar's title and the hidden source name them.
+function MomentDetail(props: { moment: EngineMomentRecord; id: string }) {
+  const { moment } = props;
+  const label = engineMomentSourceLabel(moment);
+  if (moment.agentAuthorName !== undefined) {
+    return (
+      <span data-testid="engine-moment-source" id={props.id} className="min-w-0 max-w-[50%] shrink-0 truncate text-[11px]">
+        <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
+      </span>
+    );
+  }
+  if (moment.automationAuthor) {
+    return (
+      <span data-testid="engine-moment-source" id={props.id} className="min-w-0 flex-1 basis-0 truncate text-[11px] text-muted">
+        <span className="sr-only">Automation </span>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <>
+      <span className="min-w-0 flex-1 basis-0 truncate text-[11px] text-subtle">
+        {momentRowPlace(moment, momentRowTitle(moment))}
+      </span>
+      <span data-testid="engine-moment-source" id={props.id} className="sr-only">{label}</span>
+    </>
+  );
+}
+
+// One change in the timeline. The states page renders it too. A run's head
+// carries `fold`: its count opens the run's earlier edits.
 export function MomentRow(props: {
   moment: EngineMomentRecord;
-  nested?: boolean;
+  // A file in a multi-file pass, or an earlier edit in an agent's run.
+  nested?: "pass" | "run";
+  // The change open in the focused editor group.
+  selected?: boolean;
+  fold?: { count: number; expanded: boolean; onToggle: () => void };
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
-  const { moment } = props;
+  const { moment, nested, fold } = props;
+  const selected = props.selected === true;
   const recordedAt = formatChatTime(moment.recordedAtMs);
   // The row's name says what it opens, so an automation that wrote the
   // change is its description.
   const sourceId = useId();
-  const describedBySource = moment.automationAuthor !== undefined && !props.nested;
-  // A state mark sits on the first line's center: the 22px chip in a nested
-  // row, the 13px summary otherwise.
-  const mark = props.nested ? "mt-[5px]" : "mt-0.5";
-  return (
+  const describedBySource = moment.automationAuthor !== undefined && !nested;
+  const open = (
     <button
       type="button"
       aria-describedby={describedBySource ? sourceId : undefined}
+      aria-current={selected ? "true" : undefined}
       data-testid="engine-moment-open"
       data-moment-id={moment.id}
       data-moment-path={moment.path}
       title={`Open diff for ${moment.path}`}
       aria-label={`Open diff for ${moment.path}`}
       onClick={() => props.onOpenMoment(moment.id, moment.path)}
-      className={`block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-        props.nested ? "pl-8" : ""
-      }`}
+      // A run's head lays out on its row's grid, so the count sits between
+      // the name and the time, as a button beside this one.
+      className={`${ROW} ${fold ? "col-span-full row-start-1 grid grid-cols-subgrid" : `flex ${rowTone(selected)}`} ${nested ? "pl-8" : ""}`}
     >
-      <span className="flex min-w-0 items-start gap-2">
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        {nested ? null : <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />}
+        {nested === "pass" ? (
+          <span className="flex min-w-0">
+            <Ref path={moment.path} folder />
+          </span>
+        ) : (
+          // A run is one file's edits, so its head names the file; each
+          // edit's own summary is under it.
+          <span className={`min-w-0 truncate ${nested ? "" : "text-ink"}`}>{fold ? basenameOf(moment.path) : momentRowTitle(moment)}</span>
+        )}
         {moment.protected ? (
           // Secret-backed file moment: the lock is the affordance —
           // the row is metadata-only and its page shows no contents.
-          <Lock
-            size={12}
-            aria-hidden
-            data-testid="engine-moment-lock"
-            className={`${mark} shrink-0 text-subtle`}
-          />
+          <Lock size={12} aria-hidden data-testid="engine-moment-lock" className="shrink-0 text-subtle" />
         ) : moment.contentKind === "binary" ? (
-          <FileArchive
-            size={12}
-            aria-hidden
-            data-testid="engine-moment-binary"
-            className={`${mark} shrink-0 text-subtle`}
-          />
-        ) : moment.origin === "restore" ? (
-          <RotateCcw size={12} aria-hidden className={`${mark} shrink-0 text-subtle`} />
-        ) : props.nested ? (
-          // The file's own chip carries its kind.
-          <span aria-hidden className="size-3 shrink-0" />
-        ) : (
-          <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+          <FileArchive size={12} aria-hidden data-testid="engine-moment-binary" className="shrink-0 text-subtle" />
+        ) : null}
+        {nested === "pass" ? (
+          <span className="shrink-0 text-[11px] text-subtle">{engineOperationLabel(moment)}</span>
+        ) : nested ? null : (
+          <MomentDetail moment={moment} id={sourceId} />
         )}
-        <span className="min-w-0 flex-1">
-          {props.nested ? (
-            <span className="flex min-w-0">
-              <Ref path={moment.path} folder />
-            </span>
-          ) : (
-            <span className="block truncate text-[13px] font-medium text-ink">
-              {engineMomentSummary(moment)}
-            </span>
-          )}
-          <span className="mt-0.5 block truncate text-[11px] text-subtle">
-            {props.nested ? (
-              engineOperationLabel(moment)
-            ) : (
-              <>
-                <EngineMomentSource moment={moment} testId="engine-moment-source" id={sourceId} />
-                {" · "}
-                <time
-                  data-testid="engine-moment-recorded-at"
-                  dateTime={recordedAt.iso}
-                  title={recordedAt.iso}
-                  className="font-mono"
-                >
-                  {recordedAt.label}
-                </time>
-                {" · "}
-                <span className="font-mono">{moment.path}</span>
-              </>
-            )}
-          </span>
-        </span>
       </span>
+      {/* A pass's files share their group's time. */}
+      {nested === "pass" ? null : (
+        <time
+          data-testid="engine-moment-recorded-at"
+          dateTime={recordedAt.iso}
+          title={recordedAt.iso}
+          className={`shrink-0 font-mono text-[11px] text-subtle ${fold ? "col-start-3" : ""}`}
+        >
+          {formatClock(moment.recordedAtMs)}
+        </time>
+      )}
     </button>
+  );
+  if (!fold) return open;
+  return (
+    <div className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 rounded-md transition-colors duration-75 ${rowTone(selected)}`}>
+      {open}
+      <button
+        type="button"
+        data-testid="engine-moment-run-toggle"
+        aria-expanded={fold.expanded}
+        aria-label={`${fold.count} changes`}
+        title={`${fold.count} changes`}
+        onClick={fold.onToggle}
+        className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      >
+        <span className={COUNT}>{fold.count}</span>
+      </button>
+    </div>
+  );
+}
+
+// An agent's run of edits to one file: its newest edit, with the count that
+// lists the earlier ones under it.
+function RunRow(props: {
+  group: EngineHistoryGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  openMomentId: string | null;
+  onOpenMoment: (momentId: string, filePath: string) => void;
+}) {
+  const [newest, ...earlier] = props.group.moments;
+  return (
+    <div data-testid="engine-moment-run">
+      <MomentRow
+        moment={newest!}
+        selected={newest!.id === props.openMomentId}
+        fold={{ count: props.group.moments.length, expanded: props.expanded, onToggle: props.onToggle }}
+        onOpenMoment={props.onOpenMoment}
+      />
+      {props.expanded ? (
+        <div data-testid="engine-moment-run-earlier">
+          {earlier.map((moment) => (
+            <MomentRow
+              key={moment.id}
+              moment={moment}
+              nested="run"
+              selected={moment.id === props.openMomentId}
+              onOpenMoment={props.onOpenMoment}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -396,6 +563,7 @@ function GroupRow(props: {
   group: EngineHistoryGroup;
   expanded: boolean;
   onToggle: () => void;
+  openMomentId: string | null;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { group } = props;
@@ -404,6 +572,7 @@ function GroupRow(props: {
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
+  const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
     <div data-testid="engine-moment-group">
       <button
@@ -411,47 +580,25 @@ function GroupRow(props: {
         data-testid="engine-moment-group-toggle"
         aria-expanded={expanded}
         onClick={props.onToggle}
-        className="block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+        className={`${ROW} flex ${rowTone(false)}`}
       >
-        <span className="flex min-w-0 items-start gap-2">
-          {expanded ? (
-            <ChevronDown size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-          ) : (
-            <ChevronRight size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-          )}
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] font-medium text-ink">
-              {group.summary}
-            </span>
-            <span className="mt-0.5 block truncate text-[11px] text-subtle">
-              {agentAuthorName !== undefined ? (
-                <>
-                  <span
-                    data-testid="engine-moment-group-source"
-                    className="text-agent"
-                  >
-                    {chatAuthorLabel({
-                      authorKind: "agent",
-                      authorDisplayName: agentAuthorName,
-                    })}
-                  </span>
-                  {" · "}
-                </>
-              ) : null}
-              <time
-                dateTime={recordedAt.iso}
-                title={recordedAt.iso}
-                className="font-mono"
-              >
-                {recordedAt.label}
-              </time>
-              {" · "}
-              <span className="font-mono">
-                {group.moments.length} file{group.moments.length === 1 ? "" : "s"}
-              </span>
-            </span>
-          </span>
+        <span className={`${MARK_BOX} text-subtle`}>
+          <Chevron size={14} aria-hidden />
         </span>
+        <span className="min-w-0 truncate text-ink">{group.summary}</span>
+        {agentAuthorName !== undefined ? (
+          <span data-testid="engine-moment-group-source" className="min-w-0 max-w-[50%] shrink-0 truncate text-[11px] text-agent">
+            {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
+          </span>
+        ) : null}
+        <span className="min-w-0 flex-1" />
+        <span className={COUNT}>
+          {group.moments.length}
+          <span className="sr-only"> files</span>
+        </span>
+        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+          {formatClock(group.recordedAtMs)}
+        </time>
       </button>
       {expanded ? (
         <div data-testid="engine-moment-group-files">
@@ -459,7 +606,8 @@ function GroupRow(props: {
             <MomentRow
               key={moment.id}
               moment={moment}
-              nested
+              nested="pass"
+              selected={moment.id === props.openMomentId}
               onOpenMoment={props.onOpenMoment}
             />
           ))}
@@ -474,18 +622,14 @@ function GroupRow(props: {
 function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   const createdAt = formatChatTime(props.version.createdAtMs);
   return (
-    <div className="flex min-w-0 items-start gap-2 px-3 py-2">
-      <Layers size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] text-muted">
-          {versionMarkerTitle(props.version)}
-        </span>
-        <span className="mt-0.5 block truncate text-[11px] text-subtle">
-          <time dateTime={createdAt.iso} title={createdAt.iso} className="font-mono">
-            {createdAt.label}
-          </time>
-        </span>
+    <div className="flex h-[30px] min-w-0 items-center gap-1.5 px-2 text-[13px]">
+      <span className={`${MARK_BOX} text-subtle`}>
+        <Layers size={14} aria-hidden />
       </span>
+      <span className="min-w-0 flex-1 truncate text-muted">{versionMarkerTitle(props.version)}</span>
+      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+        {formatClock(props.version.createdAtMs)}
+      </time>
     </div>
   );
 }
@@ -503,8 +647,10 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
   // The row's name says what it opens, so the change is its description.
   const metaId = useId();
   const body = (
-    <span className="flex min-w-0 items-start gap-2">
-      <Database size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+    <span className="flex min-w-0 items-start gap-1.5">
+      <span className={`${MARK_BOX} text-subtle`}>
+        <Database size={14} aria-hidden />
+      </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-medium text-ink">
           {collectionChangeTitle(props.entry, props.label)}
@@ -547,12 +693,12 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       aria-label={`Open Collection history for ${name}`}
       title={`Open Collection history for ${name}`}
       onClick={props.openHistory}
-      className="block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+      className="block w-full rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
     >
       {body}
     </button>
   ) : (
-    <div className="px-3 py-2">{body}</div>
+    <div className="px-2 py-1.5">{body}</div>
   );
 }
 
@@ -600,6 +746,8 @@ export function EngineHistoryView(props: {
   loadingMore: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  // The change open in the focused editor group, marked as selected.
+  openMomentId?: string | null;
   unavailableSources?: readonly { datasetId: string }[];
   omittedSources?: number;
   collections?: HistoryCollections;
@@ -655,10 +803,17 @@ export function EngineHistoryView(props: {
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
   const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
+  const openMomentId = props.openMomentId ?? null;
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId],
   );
+  const toggleGroup = (key: string) => setExpandedGroups((current) => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
   const partial = words.unavailable !== null || words.omitted !== null;
 
   // A known page with no rows. The caller renders this view only when it
@@ -733,7 +888,7 @@ export function EngineHistoryView(props: {
         className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
-        estimatedItemSize={56}
+        estimatedItemSize={30}
         getItemType={(row) => (row.day ? "day" : row.item.kind)}
         stickyHeaderIndices={stickyHeaderIndices}
         recycleItems={false}
@@ -777,7 +932,7 @@ export function EngineHistoryView(props: {
             data-testid={item.item.kind === "files" ? "engine-moment"
               : item.item.kind === "version" ? "history-version" : "history-collection-change"}
             data-history-key={item.key}
-            className="border-b border-line"
+            className="px-1"
           >
             {item.item.kind === "version" ? (
               <VersionMarkerRow version={item.item.version} />
@@ -788,19 +943,29 @@ export function EngineHistoryView(props: {
                 openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
               />
             ) : item.item.group.moments.length > 1 ? (
-              <GroupRow
-                group={item.item.group}
-                expanded={expandedGroups.has(item.key)}
-                onToggle={() => setExpandedGroups((current) => {
-                  const next = new Set(current);
-                  if (next.has(item.key)) next.delete(item.key);
-                  else next.add(item.key);
-                  return next;
-                })}
+              item.item.group.run ? (
+                <RunRow
+                  group={item.item.group}
+                  expanded={expandedGroups.has(item.key)}
+                  onToggle={() => toggleGroup(item.key)}
+                  openMomentId={openMomentId}
+                  onOpenMoment={props.onOpenMoment}
+                />
+              ) : (
+                <GroupRow
+                  group={item.item.group}
+                  expanded={expandedGroups.has(item.key)}
+                  onToggle={() => toggleGroup(item.key)}
+                  openMomentId={openMomentId}
+                  onOpenMoment={props.onOpenMoment}
+                />
+              )
+            ) : (
+              <MomentRow
+                moment={item.item.group.moments[0]}
+                selected={item.item.group.moments[0].id === openMomentId}
                 onOpenMoment={props.onOpenMoment}
               />
-            ) : (
-              <MomentRow moment={item.item.group.moments[0]} onOpenMoment={props.onOpenMoment} />
             )}
           </li>
         )}
@@ -809,14 +974,14 @@ export function EngineHistoryView(props: {
             role="listitem"
             aria-posinset={listItemCount}
             aria-setsize={listItemCount}
-            className="border-b border-line"
+            className="px-1 pb-1"
           >
             <button
               type="button"
               data-testid="engine-history-load-more"
               disabled={props.loadingMore}
               onClick={props.onLoadMore}
-              className="block w-full cursor-pointer px-3 py-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="block h-[30px] w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {props.loadingMore ? "Loading…" : "Show earlier changes"}
             </button>

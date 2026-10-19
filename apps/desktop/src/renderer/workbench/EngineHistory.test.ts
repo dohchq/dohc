@@ -4,6 +4,7 @@ import {
   engineMomentSourceLabel,
   engineMomentSummary,
   engineOriginLabel,
+  fileMomentSteps,
   groupAgentAuthorName,
   groupTimeline,
   collectionListPhrase,
@@ -243,6 +244,46 @@ describe("groupTimeline", () => {
     expect(groups).toHaveLength(2);
   });
 
+  it("folds an agent's consecutive edits to one file into a run, keyed by its oldest edit", () => {
+    const nova = (id: string, overrides: Partial<EngineMomentRecord> = {}) =>
+      moment({ id, agentAuthorName: "Nova", ...overrides });
+    const items = groupTimeline([
+      nova("m6"),
+      nova("m5"),
+      nova("m4"),
+      // Each of these ends the run before it.
+      nova("m3", { path: "notes/other.md" }),
+      nova("m2", { path: "notes/other.md", agentAuthorName: "Pat" }),
+      moment({ id: "m1", path: "notes/other.md" }),
+    ].map((entry) => ({ kind: "file" as const, moment: entry })));
+    expect(items.map((item) => item.kind === "files" ? [item.key, item.group.run, item.group.moments.map((entry) => entry.id)] : null))
+      .toEqual([["m4", true, ["m6", "m5", "m4"]], ["m3", false, ["m3"]], ["m2", false, ["m2"]], ["m1", false, ["m1"]]]);
+    // A new edit on top keeps the run's row.
+    expect(groupTimeline([nova("m7"), nova("m6")].map((entry) => ({ kind: "file" as const, moment: entry })))[0]!.key).toBe("m6");
+  });
+
+  // An agent's file write is its own one-moment operation.
+  it("folds an agent's writes that each carry their own operation", () => {
+    const groups = groupEngineMoments(["op-3", "op-2", "op-1"].map((correlationId, index) =>
+      moment({ id: `m${3 - index}`, agentAuthorName: "Nova", correlationId, summary: "Updated plan.md" })));
+    expect(groups.map((group) => [group.run, group.moments.map((entry) => entry.id)])).toEqual([[true, ["m3", "m2", "m1"]]]);
+  });
+
+  it("never folds a delete, a multi-file pass, another day, or edits with no agent", () => {
+    const day = new Date(2026, 9, 16, 12).getTime();
+    const cases: Array<[EngineMomentRecord[], number[]]> = [
+      [[moment({ id: "a", agentAuthorName: "Nova" }), moment({ id: "b", agentAuthorName: "Nova", operation: "delete" })], [1, 1]],
+      // The pass's first file stays with the pass, and the pass stays whole.
+      [[moment({ id: "a", agentAuthorName: "Nova" }), moment({ id: "b", agentAuthorName: "Nova", correlationId: "pass" }),
+        moment({ id: "c", agentAuthorName: "Nova", correlationId: "pass", path: "notes/other.md" })], [1, 2]],
+      [[moment({ id: "a", agentAuthorName: "Nova", correlationId: "pass" }), moment({ id: "b", agentAuthorName: "Nova", correlationId: "pass", path: "notes/other.md" }),
+        moment({ id: "c", agentAuthorName: "Nova", path: "notes/other.md" })], [2, 1]],
+      [[moment({ id: "a", agentAuthorName: "Nova", recordedAtMs: day }), moment({ id: "b", agentAuthorName: "Nova", recordedAtMs: day - 86_400_000 })], [1, 1]],
+      [[moment({ id: "a" }), moment({ id: "b" })], [1, 1]],
+    ];
+    for (const [moments, sizes] of cases) expect(groupEngineMoments(moments).map((group) => group.moments.length)).toEqual(sizes);
+  });
+
   // The history view never re-sorts: the order the merge in
   // workspaceEngineCapture hands over is the order the user reads. Moments
   // that share a millisecond would be free to move if it did.
@@ -257,6 +298,23 @@ describe("groupTimeline", () => {
     expect(
       groupEngineMoments([...tied].reverse()).map((group) => group.moments[0].id),
     ).toEqual(["earlier", "later"]);
+  });
+});
+
+describe("fileMomentSteps", () => {
+  it("steps to the nearest older and newer change of the same file, across other rows", () => {
+    const steps = fileMomentSteps([
+      { kind: "file", moment: moment({ id: "m4" }) },
+      { kind: "file", moment: moment({ id: "m3", path: "b.md" }) },
+      { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: 90 } },
+      { kind: "file", moment: moment({ id: "m2" }) },
+      { kind: "file", moment: moment({ id: "m1" }) },
+    ]);
+    const plan = (momentId: string) => ({ momentId, path: "notes/plan.md" });
+    expect(steps.get("m4")).toEqual({ newer: null, older: plan("m2") });
+    expect(steps.get("m2")).toEqual({ newer: plan("m4"), older: plan("m1") });
+    expect(steps.get("m1")).toEqual({ newer: plan("m2"), older: null });
+    expect(steps.get("m3")).toEqual({ newer: null, older: null });
   });
 });
 

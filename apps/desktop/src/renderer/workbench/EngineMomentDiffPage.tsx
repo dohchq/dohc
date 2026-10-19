@@ -1,4 +1,4 @@
-import { ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
@@ -16,9 +16,10 @@ import {
   computeTextDiff,
   type UnifiedDiffLine,
 } from "./unifiedDiff";
-import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
+import { EngineMomentSource, engineMomentSummary, type MomentSteps } from "./EngineHistory";
 import { parseTab } from "./workbenchState";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { IconButton } from "../ui/controls";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -81,6 +82,8 @@ export function EngineMomentDiffPage({
   onReopenRestore,
   restoreRequested,
   onRestoreRequestTaken,
+  steps,
+  onOpenMoment,
 }: {
   workspaceId: string;
   tabPath: string;
@@ -111,6 +114,10 @@ export function EngineMomentDiffPage({
   onReopenRestore: (momentId: string, path: string) => void;
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
+  // The older and newer change to this file in the loaded History, which
+  // the page opens in its place with its arrows or [ and ].
+  steps?: MomentSteps | undefined;
+  onOpenMoment?: (momentId: string, filePath: string) => void;
 }) {
   const momentId = useMemo(() => {
     const tab = parseTab(tabPath);
@@ -216,6 +223,16 @@ export function EngineMomentDiffPage({
     setSharedRestoreOpen(false);
     setUndoMomentId(null);
   }, [tabPath]);
+  // A step reads the next change in this page's place, which drops focus
+  // while it loads. Focus goes back to the step's arrow, so the next step
+  // needs no click.
+  const stepFocus = useRef<"newer" | "older" | null>(null);
+  useEffect(() => {
+    if (state.status === "loading" || stepFocus.current === null) return;
+    const arrow = pageRef.current?.querySelector<HTMLButtonElement>(`[data-testid="engine-diff-${stepFocus.current}"]:not(:disabled)`);
+    stepFocus.current = null;
+    arrow?.focus();
+  }, [state]);
 
   const diffMoment = state.status === "ready" ? state.moment : null;
   const moment = useMemo(() => state.status === "ready" && state.moment
@@ -436,6 +453,12 @@ export function EngineMomentDiffPage({
     if (!canRestore || restoreBusy) return;
     await runRestore("restore", moment.id, moment.path, liveToken.current);
   };
+  const stepTo = (direction: "newer" | "older") => {
+    const step = steps?.[direction];
+    if (!step || !onOpenMoment) return;
+    stepFocus.current = direction;
+    onOpenMoment(step.momentId, step.path);
+  };
 
   return (
     <section
@@ -443,6 +466,13 @@ export function EngineMomentDiffPage({
       data-testid="engine-moment-diff-page"
       data-moment-id={moment.id}
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
+      onKeyDown={(event) => {
+        if (event.ctrlKey || event.metaKey || event.altKey || isEditableShortcutTarget(event.target)) return;
+        const direction = event.key === "[" ? "older" : event.key === "]" ? "newer" : null;
+        if (direction === null || !steps?.[direction]) return;
+        event.preventDefault();
+        stepTo(direction);
+      }}
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line px-4 py-3">
         {isProtected ? (
@@ -553,6 +583,32 @@ export function EngineMomentDiffPage({
             <ExternalLink size={12} aria-hidden />
             Open file
           </button>
+        ) : null}
+        {steps && onOpenMoment ? (
+          <span className="flex shrink-0 items-center">
+            <IconButton
+              data-testid="engine-diff-newer"
+              aria-label="Newer change"
+              aria-keyshortcuts="]"
+              title="Newer change  ]"
+              disabled={!steps.newer}
+              onClick={() => stepTo("newer")}
+              className="size-7"
+            >
+              <ChevronUp size={14} aria-hidden />
+            </IconButton>
+            <IconButton
+              data-testid="engine-diff-older"
+              aria-label="Older change"
+              aria-keyshortcuts="["
+              title="Older change  ["
+              disabled={!steps.older}
+              onClick={() => stepTo("older")}
+              className="size-7"
+            >
+              <ChevronDown size={14} aria-hidden />
+            </IconButton>
+          </span>
         ) : null}
       </header>
       <div className="min-h-0 overflow-auto overflow-x-hidden">

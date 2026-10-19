@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -91,6 +91,8 @@ import type { AboutConversation } from "../workbench/aboutConversation";
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { DismissConfirm, RecoveryList } from "../RecoveryList";
+import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
@@ -587,6 +589,12 @@ function recoveryNotice(id: string, shared: boolean) {
     onDismiss: noop,
   };
 }
+// Set-aside edits with their workspace's name: one that survives a restart,
+// and one that lives only in this window.
+const SET_ASIDE_ROWS: OrphanedDraftRow[] = [
+  { workspaceId: "states", workspaceLabel: "Trip planning", path: RECOVERY_PATH, persisted: true, draft: { id: 1, text: "# Plan\n", capturedAtMs: 0 } },
+  { workspaceId: "states", workspaceLabel: "Trip planning", path: "trip/.env", persisted: false, draft: { id: 2, text: "KEY=1\n", capturedAtMs: 0 } },
+];
 const RECOVERY_MOMENT: EngineMomentRecord = {
   id: "moment-capture-recovery",
   versionId: "main",
@@ -633,6 +641,28 @@ const TIMELINE_MIXED: TimelineEntry[] = [
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
   timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
 ];
+// One afternoon in History, one line per change: Nova's three edits to one
+// file fold into one row, a person's edit shows their face, and the machine's
+// show their origin. Local times, as above.
+const storyAt = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
+function storyMoment(id: string, recordedAtMs: number, fields: Partial<EngineMomentRecord> = {}): EngineMomentRecord {
+  return { id, versionId: "main", path: "notes/product-plan.md", recordedAtMs, operation: "write", origin: "ydoc", momentOrder: 0, ...fields };
+}
+const novaEdit = (id: string, recordedAtMs: number) => storyMoment(id, recordedAtMs, {
+  agentAuthorName: "Nova", authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+  authorPresentations: [{ group: "states-nova", hue: null, self: false }],
+});
+const STORY_RUN = [novaEdit("story-nova-3", storyAt(14, 51)), novaEdit("story-nova-2", storyAt(14, 47)), novaEdit("story-nova-1", storyAt(14, 44))];
+const TIMELINE_STORY: TimelineEntry[] = [
+  ...STORY_RUN,
+  storyMoment("story-sam", storyAt(14, 40), { path: "research/competitors.md", origin: "sync", namedAuthor: { userId: "sam", label: "Sam Rivera" },
+    authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
+  storyMoment("story-local", storyAt(14, 31), { path: "data/funnel.csv", origin: "local-file" }),
+  storyMoment("story-restore", storyAt(14, 12), { origin: "restore", summary: "Restored notes/product-plan.md" }),
+  storyMoment("story-env", storyAt(13, 20), { path: ".env", origin: "local-file", protected: true }),
+  storyMoment("story-unknown", storyAt(12, 58), { origin: "unknown" }),
+].map((moment) => ({ kind: "file", moment }));
+
 // Budget's definition labels its operation; Guests' is not loaded here.
 const TIMELINE_COLLECTIONS = new Map([
   [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
@@ -1097,8 +1127,9 @@ const versionRows: MenuEntry[] = [
 const radioMenuItems: MenuEntry[] = [
   ...versionRows,
   { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
-  { id: "compare", label: "Compare with Main", onSelect: noop },
-  { id: "merge", label: "Merge into Main…", disabled: true, onSelect: noop },
+  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
+  { id: "merge", label: "Merge into Main…", icon: <Merge size={14} aria-hidden />, disabled: true, onSelect: noop },
 ];
 const fieldMenuItems: MenuEntry[] = [
   ...versionRows,
@@ -1110,7 +1141,6 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
-      hint: "Press Enter to create and start working in it.",
     },
   },
 ];
@@ -1617,7 +1647,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, hint">
+        <Specimen label="field: focus, Enter at its end">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
@@ -1736,6 +1766,21 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
+        <Specimen label="one line per change: an agent's folded edits, open; a person; origins; a protected file">
+          <div className="flex h-[300px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_STORY} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              openMomentId="story-nova-3" onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="the agent's run, listed: its earlier edit open; count hovered">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
+            <li data-force-state="hover" data-force-target="[data-testid=engine-moment-run-toggle]">
+              <MomentRow moment={STORY_RUN[0]!} fold={{ count: 3, expanded: true, onToggle: noop }} onOpenMoment={noop} />
+              <MomentRow moment={STORY_RUN[1]!} nested="run" selected onOpenMoment={noop} />
+              <MomentRow moment={STORY_RUN[2]!} nested="run" onOpenMoment={noop} />
+            </li>
+          </ul>
+        </Specimen>
         <Specimen label="files, versions and Collections, with day headings">
           <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
@@ -1934,11 +1979,28 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="History at its default width: the recovery change">
-          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-0">
-            <li className="border-b border-line last:border-b-0">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
+            <li>
               <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
             </li>
           </ul>
+        </Specimen>
+      </Section>
+
+      <Section part="recovery-row" title="Set-aside edits">
+        <Specimen label="rows with their workspace: kept across a restart; only in this window">
+          <div className="w-[440px] rounded-lg border border-line bg-panel px-3">
+            <RecoveryList rows={SET_ASIDE_ROWS} showWorkspace />
+          </div>
+        </Specimen>
+        <Specimen label="Dismiss asks first, at the row's height">
+          <div className="flex w-[440px] items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[11px]">
+            <span className="min-w-0 flex-1 truncate font-mono text-muted">{SET_ASIDE_ROWS[0]!.path}</span>
+            <div className="flex shrink-0 items-center gap-2">
+              <CopyButton testId={`states-recovery-copy-${theme}`} getText={() => null} />
+              <DismissConfirm dismissing={false} onDismiss={noop} onKeep={noop} />
+            </div>
+          </div>
         </Specimen>
       </Section>
 

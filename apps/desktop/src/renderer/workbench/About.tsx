@@ -10,7 +10,6 @@ import {
   FileText,
   FileX,
   History,
-  Link2,
   LogIn,
   MessageSquare,
   Pencil,
@@ -30,9 +29,9 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
-import { ChatAvatar } from "./ChatAvatar";
+import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -219,18 +218,6 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
   );
 }
 
-// A share link has no face: a dashed ring around the link mark.
-export function LinkMark() {
-  return (
-    <span
-      aria-hidden
-      className="inline-grid size-[18px] shrink-0 place-items-center rounded-full border border-dashed border-subtle text-subtle"
-    >
-      <Link2 size={10} />
-    </span>
-  );
-}
-
 // The answer for one workspace and file. A key that is not the current one is
 // still loading, so the first render after a switch shows nothing stale.
 type Keyed<View> = { key: string; view: View };
@@ -296,20 +283,8 @@ export type HistoryView =
 const HISTORY_ROWS = 5;
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 
-// One author looks as chats draw them. Several authors keep the file mark.
-function MomentAuthor(props: { moment: EngineMomentRecord }) {
-  const { moment } = props;
-  const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
-  if (moment.agentAuthorName !== undefined) {
-    return <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
-  }
-  if (moment.automationAuthor) return <ChatAvatar presentation={presentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
-  const person = moment.namedAuthor?.label ?? moment.personAuthorName
-    ?? (moment.authors?.[0]?.kind === "human" ? moment.liveAuthorName : undefined);
-  if (person !== undefined) return <ChatAvatar presentation={presentation} name={person} kind="human" size="strip" />;
-  if (moment.publicAuthor || moment.linkAuthor || moment.liveAuthorName !== undefined) return <LinkMark />;
-  return <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
-}
+// A change with no one author, or several, keeps the file mark here.
+const FILE_MARK = <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
 
 export function AboutHistory(props: {
   workspaceId: string;
@@ -408,7 +383,7 @@ export function AboutHistoryView(props: {
                   onClick={() => props.onOpenMoment(moment.id, moment.path)}
                   className={`${ABOUT_ROW_BUTTON} h-7`}
                 >
-                  <MomentAuthor moment={moment} />
+                  <MomentAuthor moment={moment} fallback={FILE_MARK} />
                   <span className="min-w-0 flex-1 truncate">{engineMomentSummary(moment)}</span>
                   <span className="sr-only">{source}</span>
                   <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">

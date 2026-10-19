@@ -22,14 +22,13 @@ import {
   accessReasonForLane,
   AccessUnknown,
   LEVELS,
-  LinkMark,
   useSectionRead,
   type AboutNotices,
   type AccessContext,
   type AccessSetup,
   type AccessView,
 } from "./About";
-import { ChatAvatar } from "./ChatAvatar";
+import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";
 
