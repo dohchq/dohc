@@ -20,9 +20,9 @@ on:
         required: false
         type: string
       platforms:
-        description: Platforms to build
+        description: Platforms to build. A published nightly needs windows-linux.
         required: true
-        default: windows
+        default: windows-linux
         type: choice
         options:
           - windows
@@ -59,6 +59,15 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -144,6 +153,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -154,7 +172,9 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Keep published update platforms
+      # Publish checks these rules again, because a run can publish after
+      # midnight UTC or be re-run.
+      - name: Check publication rules
         if: needs.preflight.outputs.dry_run != 'true'
         shell: bash
         env:
@@ -164,8 +184,8 @@ jobs:
         run: |
           set -euo pipefail
           gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq '.[] | {draft, assets: [.assets[] | {name}]}' > release-history.jsonl
-          node scripts/check-desktop-release-platforms.mjs \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
             --channel "$RELEASE_CHANNEL" \
             --platforms "$RELEASE_PLATFORMS" \
             --releases release-history.jsonl
@@ -213,6 +233,15 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -339,6 +368,48 @@ jobs:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
+      # A workspace the newest published nightly wrote must open under this
+      # package's engine with its files and history intact. It runs on every
+      # nightly, so a new engine migration never ships unchecked.
+      - id: previous-nightly
+        name: Choose the previous nightly
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {tag_name, draft, published_at, assets: [.assets[] | {name}]}' > "${RUNNER_TEMP}/nightly-history.jsonl"
+          node scripts/select-upgrade-nightly.mjs --releases "${RUNNER_TEMP}/nightly-history.jsonl" --github-output
+
+      - name: Engine upgrade check
+        if: runner.os == 'Linux' && steps.previous-nightly.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_NIGHTLY: ${{ steps.previous-nightly.outputs.tag }}
+          DOHC_TEST_ENGINE_BINARY: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/workspace-engine/dohc-workspace-engine
+          DOHC_REQUIRE_UPGRADE_E2E: "1"
+        run: |
+          set -euo pipefail
+          # Outside apps/desktop/release, so the upload never includes it.
+          download="${RUNNER_TEMP}/previous-nightly"
+          rm -rf "$download"
+          mkdir "$download"
+          gh release download "$PREVIOUS_NIGHTLY" --repo "$GITHUB_REPOSITORY" --pattern '*.AppImage' --dir "$download"
+          appimages=("$download"/*.AppImage)
+          (( ${#appimages[@]} == 1 )) || { echo "::error::${PREVIOUS_NIGHTLY} has ${#appimages[@]} AppImages; expected one."; exit 1; }
+          chmod +x "${appimages[0]}"
+          (cd "$download" && "${appimages[0]}" --appimage-extract > /dev/null)
+          export DOHC_UPGRADE_PREVIOUS_ENGINE="$download/squashfs-root/resources/workspace-engine/dohc-workspace-engine"
+          if [[ ! -x "$DOHC_UPGRADE_PREVIOUS_ENGINE" ]]; then
+            echo "::error::${PREVIOUS_NIGHTLY}'s AppImage has no executable engine at resources/workspace-engine/dohc-workspace-engine."
+            exit 1
+          fi
+          echo "Opening a workspace from ${PREVIOUS_NIGHTLY} with this package's engine."
+          pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts
+
       - name: Windows packaged smoke
         if: runner.os == 'Windows'
         shell: pwsh
@@ -370,10 +441,41 @@ jobs:
       # Required for creating GitHub releases via softprops/action-gh-release.
       contents: write
     steps:
+      # A desktop build on Linux leaves the staged Markdown reader folder
+      # read-only, so checkout could not clean this runner's workspace.
+      - name: Let checkout remove an earlier build's reader folder
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
+          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
+
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      # This job holds the channel's concurrency lock, so no other release on
+      # the channel can publish between this check and the publish step.
+      - name: Check publication rules
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
+            --channel "$RELEASE_CHANNEL" \
+            --platforms "$RELEASE_PLATFORMS" \
+            --releases release-history.jsonl
 
       - name: Download packaged artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

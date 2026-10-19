@@ -123,7 +123,7 @@ export function SectionLabel({
   children,
   ...rest
 }: {
-  as?: "span" | "p" | "div" | "header" | "h3";
+  as?: "span" | "p" | "div" | "header" | "h3" | "h4";
   children: ReactNode;
 } & HTMLAttributes<HTMLElement>) {
   return (

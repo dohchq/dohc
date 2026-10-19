@@ -119,7 +119,7 @@ mod tests {
             idempotency_key: None,
             progress: false,
             deadline_ms: None,
-            params: json!({"selectors":[]}),
+            params: json!({"incarnation":"test","selectors":[]}),
         };
         assert_eq!(
             service
@@ -197,7 +197,7 @@ mod tests {
         let result = service
             .replica_cut(
                 Some(handle.clone()),
-                json!({"selectors":[{"versionId":"main","paths":["docs"]}]}),
+                json!({"incarnation":"test","selectors":[{"versionId":"main","paths":["docs"]}]}),
             )
             .await
             .unwrap();
@@ -237,7 +237,7 @@ mod tests {
             .iter()
             .map(|f| f["sha256"].clone())
             .collect::<Vec<_>>();
-        let repeat=service.replica_cut(Some(handle.clone()),json!({"selectors":[{"versionId":"main","paths":["docs"]}],"knownTextShas":known.iter().map(|v|v.as_str().unwrap()).collect::<String>()})).await.unwrap();
+        let repeat=service.replica_cut(Some(handle.clone()),json!({"incarnation":"test","selectors":[{"versionId":"main","paths":["docs"]}],"knownTextShas":known.iter().map(|v|v.as_str().unwrap()).collect::<String>()})).await.unwrap();
         assert_eq!(repeat["texts"], json!([]));
         service.workspace_close(Some(handle)).await.unwrap();
     }

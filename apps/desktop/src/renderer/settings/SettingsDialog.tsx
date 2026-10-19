@@ -44,6 +44,7 @@ import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
+import { KeyboardSettings } from "./KeyboardSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
@@ -748,6 +749,12 @@ export function SettingsDialog(props: {
                 onChange={(sidebar) => void saveUserSettings({ ...userSettings, sidebar })}
               />
             </SettingRow>
+          </div>
+        );
+      case "keyboard":
+        return (
+          <div data-testid={settingsSectionPin("keyboard")}>
+            <KeyboardSettings platform={shortcutPlatform} devTools={bridge().devTools} query={query} />
           </div>
         );
       case "agents":

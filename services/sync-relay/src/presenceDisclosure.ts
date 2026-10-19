@@ -1,7 +1,7 @@
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { createHmac, randomBytes } from "node:crypto";
 import { badRequest } from "./errors";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import type { PresenceEntry, PresenceSnapshot } from "./presence";
 
 function record(value: unknown): Record<string, unknown> | null {

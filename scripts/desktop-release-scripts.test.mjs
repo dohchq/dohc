@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp as createTemporaryDirectory,
   readFile,
@@ -35,7 +36,8 @@ import {
   writeGithubOutput,
 } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
-import { checkDesktopReleasePlatforms } from "./check-desktop-release-platforms.mjs";
+import { checkDesktopReleasePublication } from "./check-desktop-release-publication.mjs";
+import { LEGACY_NIGHTLIES, selectUpgradeNightly } from "./select-upgrade-nightly.mjs";
 import {
   createMockUpdateServer,
   resolveServablePath,
@@ -82,21 +84,21 @@ test("resolves stable and nightly desktop release metadata", async () => {
   assert.equal(nightly.version, "0.1.1-nightly.20260621.12.2");
   assert.equal(nightly.release_channel, "nightly");
   assert.equal(nightly.make_latest, "false");
-  assert.deepEqual(JSON.parse(nightly.matrix).map((target) => target.os), ["Windows"]);
+  assert.deepEqual(JSON.parse(nightly.matrix).map((target) => target.os), ["Windows", "Linux"]);
 });
 
-test("release platform selection defaults to Windows and leaves macOS to the Mac release command", () => {
-  const windows = desktopReleaseTargets();
-  assert.equal(windows.length, 1);
-  assert.deepEqual(windows[0].runner, ["self-hosted", "windows", "x64"]);
-  assert.equal(windows[0].target, "x86_64-pc-windows-msvc");
-  const linux = desktopReleaseTargets("linux");
-  assert.equal(linux.length, 1);
-  assert.deepEqual(linux[0].runner, ["self-hosted", "linux", "x64"]);
-  assert.equal(linux[0].target, "x86_64-unknown-linux-gnu");
-  assert.equal(linux[0].require_signing, "0");
-  assert.deepEqual(desktopReleaseTargets("windows-linux"), [windows[0], linux[0]]);
-  for (const target of desktopReleaseTargets("windows-linux")) assert.equal(target.runner[0], "self-hosted");
+test("release platform selection defaults to every workflow platform and leaves macOS to the Mac release command", () => {
+  const both = desktopReleaseTargets();
+  assert.deepEqual(desktopReleaseTargets("windows-linux"), both);
+  const [windows, linux] = both;
+  assert.deepEqual(desktopReleaseTargets("windows"), [windows]);
+  assert.deepEqual(windows.runner, ["self-hosted", "windows", "x64"]);
+  assert.equal(windows.target, "x86_64-pc-windows-msvc");
+  assert.deepEqual(desktopReleaseTargets("linux"), [linux]);
+  assert.deepEqual(linux.runner, ["self-hosted", "linux", "x64"]);
+  assert.equal(linux.target, "x86_64-unknown-linux-gnu");
+  assert.equal(linux.require_signing, "0");
+  for (const target of both) assert.equal(target.runner[0], "self-hosted");
   for (const platforms of ["mac", "macos", "all"]) assert.throws(() => desktopReleaseTargets(platforms), /Invalid release platforms/);
 });
 
@@ -111,53 +113,71 @@ test("Linux nightly metadata keeps the version generator and selects only Linux"
   }
 });
 
-test("Linux and combined publication preserve previously shipped platform feeds", () => {
-  for (const channel of ["nightly", "latest"]) {
-    const release = (names) => [{ draft: false, assets: names.map((name) => ({ name })) }];
-    const linuxOnly = release([`${channel}-linux.yml`]);
-    const windowsAndLinux = release([`${channel}.yml`, `${channel}-linux.yml`]);
-    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: linuxOnly }));
-    assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: windowsAndLinux }), /win update manifests/);
-    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows-linux", releases: windowsAndLinux }));
-    // The Mac release command adds the macOS manifest after the workflow publishes.
-    for (const platforms of ["windows", "linux", "windows-linux"]) {
-      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms, releases: release([`${channel}-mac.yml`]) }));
+const publishedRelease = (tag_name, names = [], published_at = "2026-10-18T10:00:00Z") => ({ draft: false, tag_name, published_at, assets: names.map((name) => ({ name })) });
+const draftRelease = (tag_name, names = []) => ({ draft: true, tag_name, published_at: null, assets: names.map((name) => ({ name })) });
+
+test("stable publication preserves every platform previously published on its channel", () => {
+  const check = (platforms, releases) => checkDesktopReleasePublication({ channel: "latest", platforms, releases });
+  const linuxOnly = [publishedRelease("v0.0.9", ["latest-linux.yml"])];
+  const windowsAndLinux = [publishedRelease("v0.0.9", ["latest.yml", "latest-linux.yml"])];
+  assert.doesNotThrow(() => check("linux", linuxOnly));
+  assert.throws(() => check("linux", windowsAndLinux), /win update manifests/);
+  assert.throws(() => check("windows", windowsAndLinux), /linux update manifests.*Select platforms=windows-linux/);
+  assert.doesNotThrow(() => check("windows-linux", windowsAndLinux));
+  // The Mac release command adds the macOS manifest after the workflow publishes.
+  for (const platforms of ["windows", "linux", "windows-linux"]) assert.doesNotThrow(() => check(platforms, [publishedRelease("v0.0.9", ["latest-mac.yml"])]));
+  // A draft and the other channel's manifests deliver no update to this channel.
+  for (const releases of [[], [draftRelease("v0.0.9", ["latest-linux.yml"])], [publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml", "nightly-linux.yml"])]]) {
+    assert.doesNotThrow(() => check("windows", releases));
+  }
+});
+
+test("a nightly publishes every platform the workflow builds", () => {
+  for (const platforms of ["windows", "linux"]) {
+    assert.throws(() => checkDesktopReleasePublication({ channel: "nightly", platforms, releases: [] }), /A nightly publishes every platform this workflow builds\. Select platforms=windows-linux/);
+  }
+  assert.doesNotThrow(() => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases: [] }));
+});
+
+test("at most one nightly publishes per UTC day, counted by when it published", () => {
+  const now = new Date("2026-10-19T09:00:00Z");
+  const check = (releases, at = now) => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases, now: at });
+  // A run that started before midnight and published after it holds the day it published on.
+  const lateRun = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
+  assert.throws(() => check([lateRun]), (error) => error.message.startsWith("v0.1.1-nightly.20261018.37.1 published at 2026-10-19T00:30:00Z, so 2026-10-19 (UTC) already has its nightly."));
+  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /2026-10-19 \(UTC\) already has its nightly/);
+  // A draft never reached an updater, and earlier days and stable releases do not count.
+  assert.doesNotThrow(() => check([
+    draftRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"]),
+    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T23:59:59Z"),
+    publishedRelease("v0.1.0", ["latest.yml"], "2026-10-19T08:00:00Z"),
+  ]));
+  assert.doesNotThrow(() => check([lateRun], new Date("2026-10-20T00:00:01Z")));
+});
+
+test("publication history fails closed on incomplete input", () => {
+  for (const releases of [null, {}, [{}], [{ draft: false, assets: [] }], [{ draft: false, tag_name: "v0.1.0", assets: [] }],
+    [{ draft: false, tag_name: "v0.1.0", published_at: "2026-10-18T10:00:00Z", assets: [{}] }], [[[]]]]) {
+    for (const channel of ["nightly", "latest"]) {
+      assert.throws(() => checkDesktopReleasePublication({ channel, platforms: "windows-linux", releases }), /Release history/);
     }
   }
 });
 
-test("publication preserves every platform previously published on its channel", () => {
-  const release = (names, draft = false) => ({ draft, assets: names.map((name) => ({ name })) });
-  for (const channel of ["nightly", "latest"]) {
-    const releases = [release([`${channel}.yml`]), release([`${channel}-linux.yml`])];
-    assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }), /Select platforms=windows-linux/);
-    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows-linux", releases }));
-    const other = channel === "nightly" ? "latest" : "nightly";
-    for (const releases of [[], [release([`${channel}.yml`])], [release([`${channel}-mac.yml`, `${channel}-linux.yml`], true)], [release([`${other}-mac.yml`, `${other}-linux.yml`])]]) {
-      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }));
-    }
-  }
-});
-
-test("publication platform history fails closed on incomplete input", () => {
-  for (const releases of [null, {}, [{}], [{ draft: false, assets: [{}] }], [[[]]]]) {
-    assert.throws(() => checkDesktopReleasePlatforms({ channel: "nightly", platforms: "windows", releases }), /Release history/);
-  }
-});
-
-test("publication platform check exits unsuccessfully when a channel would lose updates", async () => {
+test("the publication check exits unsuccessfully when a release breaks a rule", async () => {
   const root = await fixtureRoot();
   const history = join(root, "releases.jsonl");
-  await writeFile(history, [
-    { draft: false, assets: [{ name: "nightly.yml" }] },
-    { draft: false, assets: [{ name: "nightly-linux.yml" }, { name: "nightly-mac.yml" }] },
-  ].map((release) => JSON.stringify(release)).join("\n") + "\n");
-  const script = fileURLToPath(new URL("./check-desktop-release-platforms.mjs", import.meta.url));
+  const writeHistory = (publishedAt) => writeFile(history,
+    JSON.stringify(publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml", "nightly-linux.yml", "nightly-mac.yml"], publishedAt)) + "\n");
+  await writeHistory(new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString());
+  const script = fileURLToPath(new URL("./check-desktop-release-publication.mjs", import.meta.url));
   const args = [script, "--channel", "nightly", "--platforms", "windows", "--releases", history];
   await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /Select platforms=windows-linux/.test(error.stderr));
   args[4] = "windows-linux";
   const { stdout } = await promisify(execFile)(process.execPath, args);
-  assert.match(stdout, /keeps every previously published platform/);
+  assert.match(stdout, /meets the publication rules/);
+  await writeHistory(new Date().toISOString());
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /already has its nightly/.test(error.stderr));
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -452,14 +472,23 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
   // Draft and published versions must both be refused before packaging.
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
   assert.equal(jobs["unused-version"].permissions.contents, "write");
-  // A channel keeps every platform it has published, unless the dispatch selects them all.
-  const keepPlatforms = releaseStep(jobs["unused-version"], "check-desktop-release-platforms.mjs");
-  assert.equal(keepPlatforms.if, "needs.preflight.outputs.dry_run != 'true'");
-  assert.match(keepPlatforms.run, /set -euo pipefail/);
-  assert.match(keepPlatforms.run, /gh api --paginate/);
-  assert.match(keepPlatforms.run, /--releases release-history\.jsonl/);
-  assert.equal(keepPlatforms.env.RELEASE_CHANNEL, "${{ needs.preflight.outputs.release_channel }}");
-  assert.equal(keepPlatforms.env.RELEASE_PLATFORMS, "${{ inputs.platforms }}");
+  // Publishing checks the release history: a nightly ships every workflow platform at
+  // most once a UTC day, and a channel keeps every platform it has published. The check
+  // runs before packaging, and again in Publish, because a run can publish after midnight.
+  const rulesBeforePackaging = releaseStep(jobs["unused-version"], "check-desktop-release-publication.mjs");
+  const rulesBeforePublishing = releaseStep(jobs.publish, "check-desktop-release-publication.mjs");
+  assert.equal(rulesBeforePackaging.if, "needs.preflight.outputs.dry_run != 'true'");
+  for (const publicationRules of [rulesBeforePackaging, rulesBeforePublishing]) {
+    assert.match(publicationRules.run, /set -euo pipefail/);
+    assert.match(publicationRules.run, /gh api --paginate/);
+    assert.match(publicationRules.run, /\{draft, tag_name, published_at, assets: /);
+    assert.match(publicationRules.run, /--releases release-history\.jsonl/);
+    assert.equal(publicationRules.env.RELEASE_CHANNEL, "${{ needs.preflight.outputs.release_channel }}");
+    assert.equal(publicationRules.env.RELEASE_PLATFORMS, "${{ inputs.platforms }}");
+  }
+  assert.ok(jobs.publish.steps.indexOf(rulesBeforePublishing) < jobs.publish.steps.indexOf(releaseStep(jobs.publish, "softprops/action-gh-release@")),
+    "Publish checks the rules before it creates the release");
+  assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.platforms.default, "windows-linux");
   // Both steps list releases, so the refusal is found by its tag lookup.
   const refuseUsedVersion = releaseStep(jobs["unused-version"], "git/matching-refs/tags/").run;
   assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
@@ -522,6 +551,54 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
       else assert.ok(published, `${target.label} publishing can use configured secrets`);
     }
   }
+});
+
+test("the upgrade check opens the newest published nightly, and only legacy nightlies skip it", () => {
+  const nightly = (tag_name, published_at, names = [`dohc-${tag_name}-linux-x86_64.AppImage`], draft = false) =>
+    ({ tag_name, published_at, draft, assets: names.map((name) => ({ name })) });
+  const older = nightly("v0.1.2-nightly.20261017.40.1", "2026-10-17T04:00:00Z");
+  const newer = nightly("v0.1.2-nightly.20261018.41.1", "2026-10-18T04:00:00Z");
+  const stable = nightly("v0.1.2", "2026-10-19T04:00:00Z");
+  const draft = nightly("v0.1.2-nightly.20261019.42.1", "2026-10-19T05:00:00Z", undefined, true);
+  assert.deepEqual(selectUpgradeNightly([older, newer, stable, draft]), { tag: newer.tag_name }, "drafts and stable releases are not nightlies");
+  assert.match(selectUpgradeNightly([stable]).notice, /No nightly is published yet/u);
+  assert.equal(selectUpgradeNightly([]).tag, null);
+  assert.deepEqual(LEGACY_NIGHTLIES, ["v0.1.1-nightly.20260622.15.1"]);
+  const legacy = nightly(LEGACY_NIGHTLIES[0], "2026-06-22T09:42:56Z");
+  assert.equal(selectUpgradeNightly([legacy]).tag, null, "a nightly from before the packaged engine skips the check");
+  assert.equal(selectUpgradeNightly([legacy, older]).tag, older.tag_name, "a later nightly replaces the legacy one");
+  // A newer nightly without an AppImage must not hand the check to an older one.
+  const windowsOnly = nightly("v0.1.2-nightly.20261019.43.1", "2026-10-19T06:00:00Z", ["dohc-setup.exe"]);
+  assert.throws(() => selectUpgradeNightly([older, windowsOnly]), /v0\.1\.2-nightly\.20261019\.43\.1, the newest published nightly, has no Linux AppImage/u);
+  assert.throws(() => selectUpgradeNightly([{ ...older, published_at: null }]), /no publication time/u);
+});
+
+test("the Linux package opens a workspace from the previous nightly before anything uploads it", () => {
+  const { build } = releaseWorkflow.jobs;
+  const choose = releaseStep(build, "scripts/select-upgrade-nightly.mjs");
+  assert.equal(choose.id, "previous-nightly");
+  assert.equal(choose.if, "runner.os == 'Linux'");
+  assert.equal(choose.env.GH_TOKEN, "${{ github.token }}", "the step reads releases with the job token");
+  assert.match(choose.run, /--jq '\.\[\] \| \{tag_name, draft, published_at, assets: \[\.assets\[\] \| \{name\}\]\}'/u, "the helper sees every release and decides");
+  assert.match(choose.run, /--github-output$/mu);
+  const upgrade = releaseStep(build, "src/workspaces/engineUpgrade.e2e.test.ts");
+  assert.equal(upgrade.if, "runner.os == 'Linux' && steps.previous-nightly.outputs.tag != ''", "only the helper's skip skips the check");
+  assert.equal(upgrade.env.PREVIOUS_NIGHTLY, "${{ steps.previous-nightly.outputs.tag }}");
+  assert.equal(upgrade.env.GH_TOKEN, "${{ github.token }}");
+  assert.equal(upgrade.env.DOHC_REQUIRE_UPGRADE_E2E, "1", "a missing engine fails the check instead of skipping it");
+  assert.equal(upgrade.env.DOHC_TEST_ENGINE_BINARY,
+    "${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/workspace-engine/dohc-workspace-engine",
+    "the check opens the workspace with the engine this run packaged");
+  assert.match(upgrade.run, /--appimage-extract/u, "the AppImage is extracted without FUSE");
+  assert.match(upgrade.run, /download="\$\{RUNNER_TEMP\}\/previous-nightly"/u, "the previous nightly stays out of apps/desktop/release");
+  assert.match(upgrade.run, /gh release download "\$PREVIOUS_NIGHTLY" .*--dir "\$download"/u);
+  assert.match(upgrade.run, /export DOHC_UPGRADE_PREVIOUS_ENGINE="\$download\/squashfs-root\/resources\/workspace-engine\/dohc-workspace-engine"/u);
+  assert.match(upgrade.run, /if \[\[ ! -x "\$DOHC_UPGRADE_PREVIOUS_ENGINE" \]\]; then\n\s+echo "::error::[^\n]+"\n\s+exit 1/u, "a nightly without an executable engine fails the check");
+  assert.doesNotMatch(upgrade.run, /exit 0/u, "the check step itself never skips");
+  const order = step => build.steps.indexOf(step);
+  assert.ok(order(releaseStep(build, "smoke:fuses:desktop")) < order(choose), "the check runs after the fuse smoke");
+  assert.equal(order(upgrade), order(choose) + 1);
+  assert.ok(order(upgrade) < order(releaseStep(build, "actions/upload-artifact@")), "the check runs before the upload");
 });
 
 test("desktop release stages the Rust engine and Collection compiler for the packaged architecture", async () => {
@@ -1368,4 +1445,33 @@ test("release-desktop-macos refuses incomplete arguments when run as a command",
     runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
     (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
   );
+});
+
+// A Linux desktop build leaves apps/desktop/resources/engine-reader/<generation>
+// read-only (stage-engine-reader.mjs), and checkout cannot clean a workspace
+// that holds it. Every job can land on the Linux runner, so each one makes it
+// writable before checkout.
+test("every release job lets checkout remove an earlier build's read-only reader folder", async () => {
+  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
+    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
+    assert.ok(checkout > 0, `${name} prepares its workspace before checkout`);
+    const prepare = job.steps[checkout - 1];
+    assert.equal(prepare.if, "runner.os != 'Windows'", `${name} skips the step on Windows, where the folder stays writable`);
+    assert.equal(prepare.shell, "bash");
+    assert.match(prepare.run, /reader="\$\{GITHUB_WORKSPACE\}\/apps\/desktop\/resources\/engine-reader"/);
+  }
+  if (process.platform === "win32") return;
+  // Run the step itself against a workspace an earlier build left behind.
+  const workspace = await createTemporaryDirectory(join(tmpdir(), "dohc-release-workspace-"));
+  const generation = join(workspace, "apps/desktop/resources/engine-reader/generation");
+  await mkdir(generation, { recursive: true });
+  await writeFile(join(generation, "reader.cjs"), "reader");
+  await chmod(join(generation, "reader.cjs"), 0o444);
+  await chmod(generation, 0o555);
+  const step = releaseWorkflow.jobs.build.steps.find(candidate => candidate.name === "Let checkout remove an earlier build's reader folder");
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
+  await rm(workspace, { recursive: true });
+  assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
+  // A fresh runner has no workspace yet.
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
 });

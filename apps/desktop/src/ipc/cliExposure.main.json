@@ -35,6 +35,7 @@
     "historyUndo",
     "inbox",
     "keptCopies",
+    "linksEdges",
     "linksIn",
     "linksResolve",
     "moment",
@@ -88,6 +89,7 @@
     "historyOperation",
     "historyUndo",
     "inbox",
+    "linksEdges",
     "linksIn",
     "linksResolve",
     "moment",
@@ -115,6 +117,7 @@
     "account"
   ],
   "publicVerbs": [
+    "links edges",
     "links in",
     "links resolve",
     "sync stop",
@@ -200,17 +203,50 @@
     "top": {
       "prefix": "Usage: dohc <command> <verb> [arguments] [options]\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nCommands:\n",
       "commands": [
-        {"group":"links","block":"  links        Read and resolve document links.\n               in, resolve\n"},
-        {"group":"sync","block":"  sync         Stop syncing this workspace on this computer.\n               stop\n"},
-        {"group":"access","block":"  access       Read observed object grants and Sharing inventories.\n               object, sharing\n"},
-        {"group":"share","block":"  share        Read copy details for an owned share grant.\n               copy\n"},
-        {"group":"document","block":"  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files.\n               read, edit, create, chats, comment\n"},
-        {"group":"chat","block":"  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n"},
-        {"group":"dataset","block":"  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"},
-        {"group":"app","block":"  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"},
-        {"group":"history","block":"  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"},
-        {"group":"automation","block":"  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"},
-        {"group":"account","block":"  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"}
+        {
+          "group": "links",
+          "block": "  links        Read and resolve document links.\n               edges, in, resolve\n"
+        },
+        {
+          "group": "sync",
+          "block": "  sync         Stop syncing this workspace on this computer.\n               stop\n"
+        },
+        {
+          "group": "access",
+          "block": "  access       Read observed object grants and Sharing inventories.\n               object, sharing\n"
+        },
+        {
+          "group": "share",
+          "block": "  share        Read copy details for an owned share grant.\n               copy\n"
+        },
+        {
+          "group": "document",
+          "block": "  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files.\n               read, edit, create, chats, comment\n"
+        },
+        {
+          "group": "chat",
+          "block": "  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n"
+        },
+        {
+          "group": "dataset",
+          "block": "  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"
+        },
+        {
+          "group": "app",
+          "block": "  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"
+        },
+        {
+          "group": "history",
+          "block": "  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"
+        },
+        {
+          "group": "automation",
+          "block": "  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"
+        },
+        {
+          "group": "account",
+          "block": "  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"
+        }
       ],
       "suffix": "\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
     },
@@ -302,8 +338,9 @@
     "account delete": "Usage: dohc account delete [options]\n\nDelete the connected server account and the workspaces it owns on the server.\n\ndohc reads the account password from stdin, or asks for it when stdin is a\nterminal. Never pass it as an argument.\nThis cannot be undone. Copies on this computer stay. People you shared with lose\naccess and keep their copies.\nIf you create an account again later, the server will not accept your old copies\nof the deleted workspaces. Its backups keep the data until they expire.\nWhen the server cannot finish at once, the account stays blocked and the server\nfinishes later. Either way, the dohc app disconnects from the server. If it\ncannot, delete exits 1 and says how to finish.\nIf the preview expired or changed, run deletePreview again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --server <address>        Use server from deletePreview. Required.\n  --preview-token <token>   Use previewToken from deletePreview. Required.\n  --as-agent                Post and read chat as an agent.\n  --json                    Print the result as JSON.\n  --help                    Show help. -h does the same.\n",
     "sync": "Usage: dohc sync <verb> [arguments] [options]\n\nStop syncing this workspace on this computer.\n\nVerbs:\n  stop   Stop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nGroups you joined and received-share mounts keep syncing.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc sync <verb> --help to see its arguments and options.\n",
     "sync stop": "Usage: dohc sync stop [options]\n\nStop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nGroups you joined and received-share mounts keep syncing.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --agent <name>   Record this agent name when --as-agent is set.\n  --as-agent       Post and read chat as an agent.\n  --json           Print the result as JSON.\n  --help           Show help. -h does the same.\n",
-    "links": "Usage: dohc links <verb> [arguments] [options]\n\nRead and resolve document links.\n\nVerbs:\n  in        Read documents that link to a file.\n  resolve   Resolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc links <verb> --help to see its arguments and options.\n",
+    "links": "Usage: dohc links <verb> [arguments] [options]\n\nRead and resolve document links.\n\nVerbs:\n  edges     Read a bounded page of file links.\n  in        Read documents that link to a file.\n  resolve   Resolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc links <verb> --help to see its arguments and options.\n",
     "links in": "Usage: dohc links in <subject-json> [options]\n\nRead documents that link to a file.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
-    "links resolve": "Usage: dohc links resolve <source> <literals-json> [options]\n\nResolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n"
+    "links resolve": "Usage: dohc links resolve <source> <literals-json> [options]\n\nResolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
+    "links edges": "Usage: dohc links edges [options]\n\nRead a bounded page of file links.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n"
   }
 }

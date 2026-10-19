@@ -1,4 +1,4 @@
-import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
@@ -70,6 +70,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_links_edges: ["links.edges"],
   dohc_links_in: ["links.in"],
   dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
@@ -2329,3 +2330,5 @@ export async function startFileChat(
 }
 
 export { safeResolve };
+
+export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }

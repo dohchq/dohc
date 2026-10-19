@@ -1,3 +1,4 @@
+import { LinksEdgesInput, LinksEdgesResult } from "./links";
 import { expect, it } from "vitest";
 import { LinksInResult, LinksResolveResult } from "./links";
 
@@ -33,4 +34,13 @@ it("distinguishes building from lasting unchecked sources", () => {
   expect(LinksInResult.parse({ ...base, indexBuilding: true })?.indexBuilding).toBe(true);
   const { indexBuilding: _building, ...missing } = base;
   expect(LinksInResult.safeParse(missing).success).toBe(false);
+});
+
+it("shares the edge record and UTF-8 envelope budgets across all arrays", () => {
+  const page = {versionId:"main",files:[{objectId:"a",path:"a.md",title:"A"}],entries:[],unchecked:Array.from({length:99},()=>"pending.md"),complete:false,indexBuilding:true,mountsCovered:false,nextCursor:null};
+  expect(LinksEdgesResult.parse(page)).toEqual(page);
+  expect(LinksEdgesResult.safeParse({...page,unchecked:[...page.unchecked,"extra.md"]}).success).toBe(false);
+  expect(LinksEdgesResult.safeParse({...page,unchecked:Array.from({length:99},()=> "😀".repeat(1024))}).success).toBe(false);
+  expect(LinksEdgesInput.safeParse({subject:{path:"a.md"}}).success).toBe(false);
+  expect(LinksEdgesInput.safeParse({cursor:"x".repeat(32769)}).success).toBe(false);
 });

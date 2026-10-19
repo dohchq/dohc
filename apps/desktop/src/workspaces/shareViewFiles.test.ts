@@ -3092,3 +3092,24 @@ it("keeps link reads inside the share target gate and tracked-path floor, includ
   }).then(async ({ pending }) => { await expect(pending).rejects.toThrow(); });
   expect(openStore).toHaveBeenCalledTimes(3);
 });
+
+it("filters edge file metadata, both endpoints, and unchecked paths through the projected share lease", async () => {
+  const rootPath=await workspaceRoot();
+  const requested={kind:"standalone" as const,workspaceId:"workspace-a"};
+  let current: ResolvedShareViewFilesTarget | null={...target(rootPath),ended:true};
+  const page={versionId:"main",files:[{objectId:"a",path:"notes/a.md",title:"A"},{objectId:"secret",path:".env",title:"Secret"}],
+    entries:[{source:"notes/a.md",target:"notes/b.md",kind:"markdown" as const,ordinal:0},
+      {source:"notes/a.md",target:".env",kind:"markdown" as const,ordinal:1},
+      {source:".env",target:"notes/a.md",kind:"markdown" as const,ordinal:2}],
+    unchecked:["notes/pending.md",".env"],complete:false,indexBuilding:false,mountsCovered:true,nextCursor:"sealed"};
+  const store=Object.assign(readStore({text:""}),{linkEdges:vi.fn(async()=>page)});
+  const openStore=vi.fn(()=>store);
+  const files=createShareViewFiles({...unusedReconcilePorts,resolveTarget:()=>current,openStore});
+  expect(await files.linksEdges(requested,{})).toEqual({...page,files:[page.files[0]],entries:[page.entries[0]],unchecked:["notes/pending.md"]});
+  await withShareViewRefreshLifecycleLock(rootPath,async()=>{
+    const pending=files.linksEdges(requested,{cursor:"sealed"});
+    current=null;
+    return {pending};
+  }).then(async({pending})=>{await expect(pending).rejects.toThrow();});
+  expect(openStore).toHaveBeenCalledOnce();
+});

@@ -8,7 +8,7 @@ const DATE_PATTERN = /^\d{8}$/;
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
-export function desktopReleaseTargets(platforms = "windows") {
+export function desktopReleaseTargets(platforms = "windows-linux") {
   const targets = [
     {
       label: "Windows x64",

@@ -46,7 +46,8 @@ describe("ordinary admitted authorship", () => {
         ops: [update({authorContext: context}, seq)]})));
       expect(response.status).toBe(200);
     }
-    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0})?.admittedAuthorSnapshot).toBeUndefined();
+    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0})?.admittedAuthorSnapshot)
+      .toEqual([{kind: "human", humanId: "alice", humanName: "Unnamed"}]);
     expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 1})?.admittedAuthorSnapshot).toEqual(snapshot);
     expect(lookup).toHaveBeenCalledTimes(2);
   });
@@ -179,7 +180,7 @@ describe("ordinary admitted authorship", () => {
       const row = storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0});
       const {authorContext: _claim, ...content} = payload;
       expect(row?.payloadJson).toBe(stableJsonStringify(opKind === "moment.append" ? content : payload));
-      expect(row?.admittedAuthorSnapshot).toBeUndefined();
+      expect(row?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "alice", humanName: "Unnamed"}]);
     }
   });
 

@@ -1,27 +1,21 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { shortcutName } from "../shortcuts/shortcutNames";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
-import { isEditorMenuCommand, type EditorMenuCommand } from "../ipc/channels";
-import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
+import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
 
 // Each item's label is its palette row's label, so the menu and the palette
 // cannot disagree. The menu already groups by category, so "View: Chats" shows
-// as "Chats". The palette does not list itself, so it has no row. macOS's app
-// menu adds the ellipsis of Settings…, a command that opens a window.
-// macOS's Edit > Find has no rows: each of its items acts on the editor that
-// has focus, which the palette would take.
-const FIND_LABELS: Record<EditorMenuCommand, string> = {
-  "editor-find": "Find…",
-  "editor-replace": "Find and replace…",
-  "find-again-next": "Find next",
-  "find-again-previous": "Find previous",
-};
+// as "Chats". The palette does not list itself, and macOS's Edit > Find items
+// act on the editor that has focus, which the palette would take, so neither
+// has a row: they take their shortcut's name. macOS adds the ellipsis of a
+// command that asks for more: Settings… in the app menu, and Find… and Find
+// and replace…, which open the find bar.
 function menuLabel(id: MenuCommand | StaticCommandId): string {
-  if (id === "command-palette") return "Command palette";
-  if (isEditorMenuCommand(id)) return FIND_LABELS[id];
-  return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  if (isStaticCommandId(id)) return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  return id === "editor-find" || id === "editor-replace" ? `${shortcutName(id)}…` : shortcutName(id);
 }
 
 // Real application menu (File/Edit/View/Go/Help on Windows and Linux; the

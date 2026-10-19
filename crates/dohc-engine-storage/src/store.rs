@@ -73,6 +73,9 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 }
 
 pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageError> {
+    // Keep replica change keys within the child's address-space limit, without temporary disk files.
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(StorageError::persist)?;
     conn.execute_batch(
         "CREATE TEMP TRIGGER IF NOT EXISTS passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
          BEGIN SELECT RAISE(IGNORE); END;
