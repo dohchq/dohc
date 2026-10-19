@@ -59,11 +59,12 @@ test("packaged agent probe runs on the compiler's pinned Node and checks its clo
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /asset changed/);
   await writeFile(relayPath, relay);
   const node = await readFile(owner.node);
-  await writeFile(join(packagedCompiler, "node.exe"), "not Node");
+  await writeFile(owner.node, "not Node");
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /Node identity/);
-  await rm(join(packagedCompiler, "node.exe"));
+  await rm(owner.node);
   assert.throws(() => windowsProbeOwner(resourcesRoot), /missing/);
   await writeFile(owner.node, node);
+  await requireAgentProbe(probeRoot, packagedCompiler);
   const tool = join(root, "tool.cmd");
   await writeFile(tool, "@echo off\r\necho tool 9.8.7\r\n");
   const result = await runProbeProcess(resolveSpawnCommand(tool, ["--version"], { cwd: homedir() }), new AbortController().signal, owner);
