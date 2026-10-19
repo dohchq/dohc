@@ -7,7 +7,9 @@ import {fileSideOf, targetVersionId} from "./shareFilter";
 import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
 import {replicaGrantFloor, replicaViewReachesFloor} from "./storage/replicaGrantFloors";
-import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
+import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText, readReplicaCurrentViewHead, isReplicaStoredHead, replicaFileFromRow} from "./storage/replicaCurrentViews";
+import {replicaStatement as statement} from "./storage/replicaStatements";
+import {inventoryPageCursor} from "./replicaInventoryCursor";
 import {ReplicaMap} from "./replicaMap";
 
 export interface ReplicaCurrentViewReadInput {
@@ -16,7 +18,7 @@ export interface ReplicaCurrentViewReadInput {
   readonly principal: CurrentShareGrantPrincipal;
 }
 export interface ReplicaCurrentViewSource {
-  currentReadView(workspaceId: string): {view: ReplicaCurrentView; previous?: ReplicaCurrentView} | null;
+  currentReadView(workspaceId: string, readStored?:()=>ReplicaCurrentView|null): {view: ReplicaCurrentView; previous?: ReplicaCurrentView} | null;
 }
 export type ReplicaCurrentViewFile = {
   path: string;
@@ -27,7 +29,7 @@ export type ReplicaCurrentViewFile = {
   sha256?: string;
 } | {path: string; status: "updating"};
 type Unavailable = {status: "denied" | "not-ready" | "updating"};
-export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string};
+export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string; nextCursor?:string};
 export type ReplicaCurrentViewRead = Unavailable | {status: "not-found" | "not-text"} |
   {status: "ready"; file: Extract<ReplicaCurrentViewFile, {status: "ready"}>; text: string};
 
@@ -124,6 +126,55 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], held
   return index;
 }
 
+// These maps live only inside a read transaction. They retain no manifest or authorization.
+class QueryMap<V> extends ReplicaMap<V> {
+  constructor(private readonly lookup:(key:string)=>V|undefined, private readonly scan:()=>Generator<V>) {super();}
+  override get(key:string) {return this.lookup(key);}
+  override *values() {yield* this.scan();}
+}
+function storedIndex(storage:StorageContext, workspace:string, version:string, after="", end?:string, paths?:string[]):ViewIndex {
+  const indexed=(row:Record<string,unknown>|undefined):IndexedFile|undefined=>{
+    if(!row)return;
+    const file=replicaFileFromRow(row),path=prepareSharePath(file.path);
+    if(!validRow(file,path))throw new Error("Invalid stored replica row.");
+    return {row:file,path:path!,lineage:lineageKey(version,file.objectId,file.lineageClaimId),projected:new Map()};
+  };
+  function* scan(table:string):Generator<Record<string,unknown>> {
+    let path=after;
+    const suffix=(end===undefined ? "" : " AND path<=?")+(paths ? " AND path IN (SELECT value FROM json_each(?))" : "");
+    const bounds=[...(end===undefined ? [] : [end]),...(paths ? [JSON.stringify(paths)] : [])];
+    for(;;) {
+      const rows=statement(storage,`SELECT * FROM ${table} WHERE workspace_id=? AND version_id=? AND path>?${suffix} ORDER BY path LIMIT 256`)
+        .all(workspace,version,path,...bounds);
+      yield* rows;
+      if(rows.length<256)return;
+      path=String(rows.at(-1)!.path);
+    }
+  }
+  const files=new QueryMap<IndexedFile>(path=>indexed(statement(storage,"SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND path=?").get(workspace,version,path)),
+    function*(){for(const row of scan("sync_relay_replica_cut_files"))yield indexed(row)!;});
+  const omission=(row:Record<string,unknown>)=>{
+      const file={versionId:version,objectId:String(row.object_id),path:String(row.path),sha256:String(row.sha256),reason:"text-frame-limit" as const};
+      const path=prepareSharePath(file.path);if(!validRow(file,path))throw new Error("Invalid stored replica omission.");
+      return {row:file,path:path!};
+  };
+  const omitted=new QueryMap(key=>{
+    const [v,object]=JSON.parse(key) as [string,string];
+    const row=statement(storage,"SELECT * FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND object_id=?").get(workspace,v,object);
+    return row ? omission(row) : undefined;
+  },function*(){
+    for(const row of scan("sync_relay_replica_cut_omitted"))yield omission(row);
+  });
+  return {files:new ReplicaMap([[version,files]]),lineages:new QueryMap(key=>{
+    const [v,object,lineage]=JSON.parse(key) as [string,string,string|null];
+    return indexed(statement(storage,"SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND object_id=? AND lineage_claim_id IS ?").get(workspace,v,object,lineage));
+  },function*(){}),omittedPaths:new QueryMap(key=>{
+    const [v,path]=JSON.parse(key) as [string,string];
+    const row=statement(storage,"SELECT object_id FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND path=?").get(workspace,v,path);
+    return row ? String(row.object_id) : undefined;
+  },function*(){}),omitted,texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0};
+}
+
 /** Validate changes; update an existing index only when at most half the rows changed. */
 export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous:ReplicaCurrentView|undefined,
   changes:ReplicaCurrentView, before:Array<Row>, texts:ReplicaMap<string>, smallChange:boolean) {
@@ -211,7 +262,9 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
+    nextCursor?:string;
   }) => T, requestedPath?: string, includeRows = false,
+  paging?:{limit?:number;cursor?:string},
 ): T | Unavailable {
   return storage.readTx(() => {
     if (!Number.isSafeInteger(input.generation) || input.generation < 1) return {status:"denied"};
@@ -225,20 +278,24 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     if (standing.ownerUserId !== authorized.share.granterUserId) return {status:"denied"};
     const projection = input.principal.kind === "link" ? createAccountlessPathProjection(selector) : null;
     const realPath = requestedPath === undefined ? undefined : projection ? projection.resolvePath(requestedPath) ?? "" : requestedPath;
-    const stored = source ? null : storage.readReplicaCurrentView(workspace);
-    const snapshot = source ? source.currentReadView(workspace) : stored && {view:stored,previous:stored};
+    const stored = readReplicaCurrentViewHead(storage,workspace);
+    const snapshot = source ? source.currentReadView(workspace,()=>stored) : stored && {view:stored,previous:stored};
     if (!snapshot) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     const {view} = snapshot;
     const floor = replicaGrantFloor(storage,input.grantId,workspace);
     if (floor && !replicaViewReachesFloor(view,floor)) return {status:"updating"};
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
+    const version = targetVersionId(selector);
+    const page=paging && inventoryPageCursor(storage,input,selector,view,stored,paging);
+    if(page?.status==="updating")return page;
+    const pagePaths=page && new Set(page.paths);
     const latest = touchLatestIndex(storage,workspace);
-    const index = indexView(view,latest.get(workspace));
+    const indexFor=(v:ReplicaCurrentView,previous?:ViewIndex["files"])=>isReplicaStoredHead(v) ? storedIndex(storage,workspace,version,page?.after,page?.end,page?.paths) : indexView(v,previous);
+    const index = indexFor(view,latest.get(workspace));
     if (!index) return {status:"updating"};
     // Keep only metadata for reuse, so retired live texts can be collected.
-    touchLatestIndex(storage,workspace,index.files);
-    const version = targetVersionId(selector);
+    touchLatestIndex(storage,workspace,isReplicaStoredHead(view) ? new ReplicaMap() : index.files);
     const visible = (v: string, path: string | NonNullable<ReturnType<typeof prepareSharePath>>) => {
       if (v !== version) return false;
       const canonical = visibleSharePath(selector, path);
@@ -248,7 +305,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     const files = new Map<string, ReplicaCurrentViewFile>(), rows = new Map<string, ViewFile>();
     if (snapshot.previous && snapshot.previous.workspaceId !== workspace) return {status:"updating"};
     const previousView = snapshot.previous && (!floor || replicaViewReachesFloor(snapshot.previous,floor)) ? snapshot.previous : undefined;
-    const previous = previousView && indexView(previousView,index.files);
+    const previous = previousView===view ? index : previousView && indexFor(previousView,index.files);
     if (previousView && !previous) return {status:"updating"};
     // An open needs only the incoming row and a row that can carry the saved path.
     const direct = realPath === undefined ? undefined : index.files.get(version)?.get(realPath);
@@ -263,7 +320,10 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const occupant = old && index.files.get(version)?.get(old.path)?.row;
       if (occupant?.lineageClaimId != null) objects.add(occupant.objectId);
     }
-    let fences = realPath === undefined ? readFences(storage,"workspace_id=? AND main_version_id=? AND restore_fence_generation>1",[workspace,version]) : objects.size ?
+    let fences = realPath === undefined ? page && isReplicaStoredHead(view) ? readFences(storage,`workspace_id=? AND main_version_id=? AND restore_fence_generation>1 AND
+      (current_path IN (SELECT value FROM json_each(?)) OR object_id IN (SELECT object_id FROM sync_relay_replica_cut_files
+      WHERE workspace_id=? AND version_id=? AND path IN (SELECT value FROM json_each(?))))`,[workspace,version,JSON.stringify(page.paths),workspace,version,JSON.stringify(page.paths)]) :
+      readFences(storage,"workspace_id=? AND main_version_id=? AND restore_fence_generation>1",[workspace,version]) : objects.size ?
       readFences(storage,"workspace_id=? AND main_version_id=? AND object_id IN (SELECT value FROM json_each(?))",[workspace,version,JSON.stringify([...objects])]) : [];
     const generations = new Map(fences.map(f=>[String(f.object_id),{lineageClaimId:String(f.lineage_claim_id),generation:Number(f.restore_fence_generation)}]));
     const generationFor = (row: ViewFile) => {
@@ -281,14 +341,18 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const file = row;
       if (!visible(file.versionId, indexed.path)) continue;
       const path = project(file.path);
+      if(pagePaths && !pagePaths.has(file.path))continue;
       if (path === null || requestedPath !== undefined && path !== requestedPath) continue;
       if (!current(indexed)) {files.set(path, {path, status:"updating"}); continue;}
       files.set(path,projectedFile(indexed,path));
       if (requestedPath !== undefined || includeRows) rows.set(path, file);
     }
-    for (const omitted of index.omitted.values()) {
+    const omittedObject=realPath===undefined ? undefined : index.omittedPaths.get(pathKey(version,realPath));
+    const directOmitted=omittedObject===undefined ? undefined : index.omitted.get(JSON.stringify([version,omittedObject]));
+    for (const omitted of realPath===undefined ? index.omitted.values() : directOmitted ? [directOmitted] : []) {
       if (!visible(omitted.row.versionId, omitted.path)) continue;
       const path = project(omitted.row.path);
+      if(pagePaths && !pagePaths.has(omitted.row.path))continue;
       if (path !== null && (requestedPath === undefined || path === requestedPath)) files.set(path, {path, status:"updating"});
     }
     if (realPath !== undefined && files.size === 0) fences = readFences(storage,
@@ -300,13 +364,14 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const pending = inView ? inView.row.restoreGeneration! < generation : fence.admission_state === "closed";
       if (!pending) continue;
       const currentPath = String(fence.current_path);
+      if(pagePaths && !pagePaths.has(currentPath))continue;
       if (realPath !== undefined && currentPath !== realPath) continue;
       const path = project(currentPath);
       if (path === null || files.has(path) || !visible(String(fence.main_version_id), currentPath)) continue;
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, workspace, floor,
+    return read({files:sorted, rows, workspace, floor,nextCursor:page?.nextCursor,
       visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);
@@ -334,10 +399,11 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
   });
 }
 
-export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput,
+export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput & {limit?:number;cursor?:string},
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewList {
-  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag}):ReplicaCurrentViewList =>
-    ({status:"ready",files,etag:inventoryEtag()}));
+  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag,nextCursor}):ReplicaCurrentViewList =>
+    ({status:"ready",files,etag:inventoryEtag(),...(nextCursor ? {nextCursor} : {})}),undefined,false,
+    input.limit!==undefined || input.cursor!==undefined ? input : undefined);
 }
 
 export function readReplicaCurrentViewFile(storage: StorageContext, input: ReplicaCurrentViewReadInput & {path: string},

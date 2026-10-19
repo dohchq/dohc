@@ -14,6 +14,10 @@ import {deleteUnreferencedReplicaTexts, hasReplicaText, readReplicaText} from ".
 const STAGE_BYTES = 8 * 1024 * 1024;
 const incarnations = new WeakMap<StorageContext, Map<string, ReplicaReadLease>>();
 const readCaches = new WeakMap<StorageContext, Map<string, {key: string; view: ReplicaCurrentView}>>();
+const headCaches = new WeakMap<StorageContext, Map<string, {key: string; view: ReplicaCurrentView}>>();
+const storedHeads = new WeakSet<ReplicaCurrentView>();
+const validatedFiles = new WeakMap<ReplicaCurrentView["files"],string>();
+export const isReplicaStoredHead = (view: ReplicaCurrentView) => storedHeads.has(view);
 const MAX_READ_CACHE_WORKSPACES = 4;
 const headerSql = "SELECT replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor FROM sync_relay_replica_cuts WHERE workspace_id=?";
 export interface StagedCurrentView {readonly staged: true}
@@ -53,10 +57,39 @@ export function replicaCurrentViewSelectors(storage: StorageContext, workspace: 
 export function currentViewFileVisible(selectors: ReplicaCurrentViewSelector[], file: {versionId: string; path: string}) {
   return selectors.some(selector => file.versionId === targetVersionId(selector) && visibleSharePath(selector, file.path) === file.path);
 }
-function storedFiles(storage: StorageContext, workspace: string): ReplicaCurrentView["files"] {
-  return statement(storage, "SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? ORDER BY version_id,path").all(workspace).map(row => ({
+/** The share mutation owns this transaction. Retain only the surviving selector union. */
+export function pruneReplicaCurrentView(storage:StorageContext,workspace:string) {
+  const selectors=replicaCurrentViewSelectors(storage,workspace);
+  const references=new Map<string,number>();
+  let removed=0;
+  for(const file of storedFiles(storage,workspace))if(!currentViewFileVisible(selectors,file)) {
+    removed++;
+    statement(storage,"DELETE FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND object_id=?").run(workspace,file.versionId,file.objectId);
+    if(file.contentKind==="text")references.set(file.sha256,(references.get(file.sha256) ?? 0)-1);
+  }
+  for(const [sha,delta]of references)statement(storage,"UPDATE sync_relay_replica_cut_text_refs SET ref_count=ref_count+? WHERE workspace_id=? AND sha256=?").run(delta,workspace,sha);
+  for(const row of statement(storage,"SELECT pin_id,version_id,path FROM sync_relay_history_pins WHERE workspace_id=?").all(workspace))
+    if(!currentViewFileVisible(selectors,{versionId:String(row.version_id),path:String(row.path)}))statement(storage,"DELETE FROM sync_relay_history_pins WHERE pin_id=?").run(row.pin_id);
+  const header=statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace);
+  if(header) {
+    const omitted:ReplicaCurrentView["omitted"]=JSON.parse(String(header.omitted_json));
+    const retained=omitted.filter(f=>currentViewFileVisible(selectors,f));
+    for(const row of omitted)if(!currentViewFileVisible(selectors,row))statement(storage,"DELETE FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND object_id=?").run(workspace,row.versionId,row.objectId);
+    if(removed || retained.length!==omitted.length)statement(storage,"UPDATE sync_relay_replica_cuts SET cut_seq=cut_seq+1,omitted_json=? WHERE workspace_id=?").run(JSON.stringify(retained),workspace);
+  }
+  statement(storage,`DELETE FROM sync_relay_history_clocks AS c WHERE workspace_id=? AND NOT EXISTS
+    (SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
+    AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cut_omitted o WHERE o.workspace_id=c.workspace_id AND o.version_id=c.version_id AND o.object_id=c.object_id)`).run(workspace);
+  deleteUnreferencedReplicaTexts(storage,workspace);
+  forgetReplicaCurrentViewStoredCache(storage,workspace);
+}
+export function replicaFileFromRow(row: Record<string,unknown>): ReplicaCurrentView["files"][number] {
+  return {
     versionId: String(row.version_id), objectId: String(row.object_id), path: String(row.path), contentKind: row.content_kind as "text" | "binary", sha256: String(row.sha256), byteLength: Number(row.byte_length),
-    lineageClaimId: row.lineage_claim_id === null ? null : String(row.lineage_claim_id), restoreGeneration: row.restore_generation === null ? null : Number(row.restore_generation)}));
+    lineageClaimId: row.lineage_claim_id === null ? null : String(row.lineage_claim_id), restoreGeneration: row.restore_generation === null ? null : Number(row.restore_generation)};
+}
+function storedFiles(storage: StorageContext, workspace: string): ReplicaCurrentView["files"] {
+  return statement(storage, "SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? ORDER BY version_id,path").all(workspace).map(replicaFileFromRow);
 }
 const filePathKey = (file: {versionId: string; path: string}) => JSON.stringify([file.versionId, file.path]);
 const fileLineageKey = (file: ReplicaCurrentView["files"][number]) => JSON.stringify([file.versionId, file.objectId, file.lineageClaimId]);
@@ -97,7 +130,9 @@ function validateReplicaPosition(storage: StorageContext, lease: ReplicaReadLeas
 function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView, observations: ReplicaHistoryObservation[]) {
   const saved = validateReplicaPosition(storage,lease,view);
   const selectors = replicaCurrentViewSelectors(storage, lease.workspaceId), paths = new Set<string>(), objects = new Set<string>();
-  const previous = new Map(storedFiles(storage, lease.workspaceId).map(f => [fileLineageKey(f), f]));
+  const stored=readReplicaCurrentView(storage,lease.workspaceId);
+  const selectorKey=JSON.stringify(selectors), trusted=!!stored && validatedFiles.get(stored.files)===selectorKey;
+  const previous = new Map((stored?.files ?? []).map(f => [fileLineageKey(f), f]));
   const remaining = new Map([...previous.values()].map(f=>[historyObjectKey(f),f]));
   const previousOmitted = new Map<string,ReplicaCurrentView["omitted"][number]>(JSON.parse(String(saved?.omitted_json ?? "[]")).map((f: ReplicaCurrentView["omitted"][number])=>[historyObjectKey(f),f]));
   const changes: ReplicaHistoryChanges = new Map();
@@ -106,13 +141,14 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
   const predecessors=new Set(observations.filter(o=>o.beforeStructuralChange).map(o=>JSON.stringify([o.versionId,o.objectId])));
   const files: ReplicaCurrentView["files"] = [];
   for (let file of view.files) {
-    if (!file.objectId || !currentViewFileVisible(selectors, file) || !/^[a-f0-9]{64}$/.test(file.sha256) ||
-        !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || !["text", "binary"].includes(file.contentKind) ||
-        (file.lineageClaimId === null) !== (file.restoreGeneration === null)) fail();
     const old = previous.get(fileLineageKey(file));
+    const unchanged=trusted && old && sameHistoryState(old,file) && old.byteLength===file.byteLength;
+    if (!unchanged && (!file.objectId || !currentViewFileVisible(selectors, file) || !/^[a-f0-9]{64}$/.test(file.sha256) ||
+        !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || !["text", "binary"].includes(file.contentKind) ||
+        (file.lineageClaimId === null) !== (file.restoreGeneration === null))) fail();
     if (old?.restoreGeneration != null && (file.restoreGeneration === null || file.restoreGeneration < old.restoreGeneration)) fail();
     if (file.lineageClaimId !== null) {
-      if (!/^[a-f0-9]{64}$/.test(file.lineageClaimId) || !Number.isSafeInteger(file.restoreGeneration) || file.restoreGeneration! < 0) fail();
+      if (!unchanged && (!/^[a-f0-9]{64}$/.test(file.lineageClaimId) || !Number.isSafeInteger(file.restoreGeneration) || file.restoreGeneration! < 0)) fail();
       const generation = fences.get(fileLineageKey(file)) ?? 1;
       // Save the supervisor's pre-change frame for a structural pin. Reads still enforce the raised fence.
       const predecessor=predecessors.has(JSON.stringify([file.versionId,file.objectId])) && old?.restoreGeneration === file.restoreGeneration && old.path === file.path;
@@ -126,7 +162,7 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
     if (objects.has(object) || paths.has(path)) fail();
     objects.add(object); paths.add(path); files.push(file);
     const before=remaining.get(object);
-    if (!before || !sameHistoryState(before,file)) changes.set(object,{before,after:file});
+    if (!before || !sameHistoryState(before,file) || before.byteLength!==file.byteLength) changes.set(object,{before,after:file});
     remaining.delete(object); previousOmitted.delete(object);
   }
   for (const omitted of view.omitted) {
@@ -140,7 +176,8 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
   }
   for (const [key,before] of remaining) changes.set(key,{before});
   for (const [key,omitted] of previousOmitted) changes.set(key,{departed:omitted});
-  return {view:{...view, files},changes};
+  validatedFiles.set(files,selectorKey);
+  return {view:{...view, files},changes,saved};
 }
 export function discardReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease) {
   if (statement(storage,"SELECT 1 FROM sync_relay_replica_cut_text_refs WHERE workspace_id=? AND ref_count=0 LIMIT 1").get(lease.workspaceId)) {
@@ -191,10 +228,12 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
     if (!state || state.storage !== storage || state.lease !== lease) fail();
     stagedViews.delete(staged);
     return storage.replicaViewTx(() => {
-      const {view,changes} = validateReplicaCurrentView(storage, lease, state.view,state.observations);
+      const {view,changes,saved} = validateReplicaCurrentView(storage, lease, state.view,state.observations);
+      headCaches.get(storage)?.delete(lease.workspaceId);
       const chunks = statement(storage,"SELECT count(*) AS n,min(ordinal) AS first,max(ordinal) AS last,sum(length(bytes)) AS bytes FROM sync_relay_replica_cut_texts WHERE workspace_id=? AND sha256=?");
       const checked = new Map<string, number>();
-      for (const file of view.files) {
+      for (const {before,after:file} of changes.values()) {
+        if (!file || before?.contentKind===file.contentKind && before.sha256===file.sha256 && before.byteLength===file.byteLength) continue;
         if (file.contentKind !== "text") continue;
         if (checked.has(file.sha256)) {
           if (checked.get(file.sha256) !== file.byteLength) fail();
@@ -204,25 +243,43 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
         const row = chunks.get(lease.workspaceId, file.sha256)!;
         if (!row.n || row.first !== 0 || Number(row.last) !== Number(row.n) - 1 || row.bytes !== file.byteLength) fail();
       }
-      const saved=statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(lease.workspaceId);
       if (!changes.size && saved?.omitted_json===JSON.stringify(view.omitted)) return writeReplicaHeader(storage,lease,view);
       // Also invalidate when deletion/recreation repeats a cut sequence and header.
       readCaches.get(storage)?.delete(lease.workspaceId);
       const references=pinReplicaHistory(storage,view,changes,state.observations);
-      for (const row of statement(storage,"SELECT sha256,count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=? AND content_kind='text' GROUP BY sha256").all(lease.workspaceId))
-        references.set(String(row.sha256),(references.get(String(row.sha256)) ?? 0)-Number(row.n));
-      for (const file of view.files) if (file.contentKind === "text") references.set(file.sha256,(references.get(file.sha256) ?? 0)+1);
+      for (const {before,after} of changes.values()) {
+        if (before?.contentKind === "text") references.set(before.sha256,(references.get(before.sha256) ?? 0)-1);
+        if (after?.contentKind === "text") references.set(after.sha256,(references.get(after.sha256) ?? 0)+1);
+      }
       statement(storage,`INSERT INTO sync_relay_replica_cuts VALUES (?,?,?,?,1,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET
         replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity,incarnation=excluded.incarnation,
         cut_seq=sync_relay_replica_cuts.cut_seq+1,revision=excluded.revision,log_cursor=excluded.log_cursor,journal_cursor=excluded.journal_cursor,omitted_json=excluded.omitted_json`)
         .run(lease.workspaceId, lease.replicationEpoch, lease.streamIdentity, lease.incarnation, view.revision, view.logCursor, view.journalCursor, JSON.stringify(view.omitted));
-      statement(storage,"DELETE FROM sync_relay_replica_cut_files WHERE workspace_id=?").run(lease.workspaceId);
-      const insert = statement(storage,"INSERT INTO sync_relay_replica_cut_files VALUES (?,?,?,?,?,?,?,?,?)");
-      for (const f of view.files) insert.run(lease.workspaceId, f.versionId, f.objectId, f.path, f.contentKind, f.sha256, f.byteLength, f.lineageClaimId, f.restoreGeneration);
+      const remove=statement(storage,"DELETE FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND object_id=?");
+      // Release every changed path before publishing any replacement, including swaps.
+      for (const {before,after} of changes.values()) if (before && (!after || before.path!==after.path)) remove.run(lease.workspaceId,before.versionId,before.objectId);
+      const insert = statement(storage,`INSERT INTO sync_relay_replica_cut_files VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET path=excluded.path,content_kind=excluded.content_kind,
+        sha256=excluded.sha256,byte_length=excluded.byte_length,lineage_claim_id=excluded.lineage_claim_id,restore_generation=excluded.restore_generation`);
+      for (const {after:f} of changes.values()) if (f) insert.run(lease.workspaceId, f.versionId, f.objectId, f.path, f.contentKind, f.sha256, f.byteLength, f.lineageClaimId, f.restoreGeneration);
+      const removeOmitted=statement(storage,"DELETE FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND object_id=?");
+      for (const change of changes.values()) {
+        const row=(change.after ?? change.before ?? change.omitted ?? change.departed)!;
+        removeOmitted.run(lease.workspaceId,row.versionId,row.objectId);
+      }
+      const insertOmitted=statement(storage,"INSERT INTO sync_relay_replica_cut_omitted VALUES (?,?,?,?,?,?)");
+      for (const {omitted:f} of changes.values()) if(f) insertOmitted.run(lease.workspaceId,f.versionId,f.objectId,f.path,f.sha256,f.reason);
       const reference=statement(storage,"UPDATE sync_relay_replica_cut_text_refs SET ref_count=ref_count+? WHERE workspace_id=? AND sha256=?");
       for (const [sha,delta] of references) if (delta) reference.run(delta,lease.workspaceId,sha);
       thinReplicaHistoryPins(storage,lease.workspaceId);
       deleteUnreferencedReplicaTexts(storage,lease.workspaceId);
+      const cachedView={...view,files:view.files.map(f=>Object.freeze({...f})).sort((a,b)=>a.versionId<b.versionId ? -1 : a.versionId>b.versionId ? 1 : a.path<b.path ? -1 : a.path>b.path ? 1 : 0),omitted:view.omitted.map(f=>Object.freeze({...f})),texts:[]};
+      validatedFiles.set(cachedView.files,validatedFiles.get(view.files)!);
+      Object.freeze(cachedView.files);Object.freeze(cachedView.omitted);Object.freeze(cachedView.texts);Object.freeze(cachedView);
+      let cache=readCaches.get(storage);if(!cache)readCaches.set(storage,cache=new Map());
+      cache.delete(lease.workspaceId);
+      cache.set(lease.workspaceId,{key:JSON.stringify([statement(storage,headerSql).get(lease.workspaceId),statement(storage,"PRAGMA data_version").get()]),view:cachedView});
+      while(cache.size>MAX_READ_CACHE_WORKSPACES)cache.delete(cache.keys().next().value!);
       return view;
     });
   } catch (error) {discardReplicaCurrentView(storage, lease); throw error;}
@@ -233,16 +290,18 @@ function sampleStoredReplicaHistory(storage: StorageContext, view: Pick<ReplicaC
     statement(storage,"UPDATE sync_relay_replica_cut_text_refs SET ref_count=ref_count+? WHERE workspace_id=? AND sha256=?").run(delta,view.workspaceId,sha);
 }
 function writeReplicaHeader(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView) {
+  headCaches.get(storage)?.delete(lease.workspaceId);
   const header=statement(storage,headerSql).get(lease.workspaceId)!;
   const version=statement(storage,"PRAGMA data_version").get();
   const cached=readCaches.get(storage)?.get(lease.workspaceId);
   const reusable=cached?.key===JSON.stringify([header,version]);
   sampleStoredReplicaHistory(storage,view);
-  statement(storage,`UPDATE sync_relay_replica_cuts SET log_cursor=?,journal_cursor=?,revision=?,cut_seq=cut_seq+1 WHERE workspace_id=?`)
-    .run(view.logCursor,view.journalCursor,view.revision,lease.workspaceId);
+  // Record the publishing lease; authorization uses the live lease binding.
+  statement(storage,`UPDATE sync_relay_replica_cuts SET log_cursor=?,journal_cursor=?,revision=?,incarnation=?,cut_seq=cut_seq+1 WHERE workspace_id=?`)
+    .run(view.logCursor,view.journalCursor,view.revision,lease.incarnation,lease.workspaceId);
   if (cached && reusable) {
     const position={revision:view.revision,logCursor:view.logCursor,journalCursor:view.journalCursor};
-    cached.key=JSON.stringify([{...header,revision:view.revision,log_cursor:view.logCursor,journal_cursor:view.journalCursor,cut_seq:Number(header.cut_seq)+1},version]);
+    cached.key=JSON.stringify([{...header,incarnation:lease.incarnation,revision:view.revision,log_cursor:view.logCursor,journal_cursor:view.journalCursor,cut_seq:Number(header.cut_seq)+1},version]);
     cached.view=Object.freeze({...cached.view,...position});
   } else readCaches.get(storage)?.delete(lease.workspaceId);
   return view;
@@ -251,7 +310,7 @@ function writeReplicaHeader(storage: StorageContext, lease: ReplicaReadLease, vi
 export function advanceReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView, previous: ReplicaCurrentView) {
   return storage.replicaViewTx(() => {
     const saved=validateReplicaPosition(storage,lease,view);
-    if (!saved || saved.replication_epoch!==lease.replicationEpoch || saved.stream_identity!==lease.streamIdentity ||
+    if (!saved ||
         saved.revision!==previous.revision || saved.log_cursor!==previous.logCursor || saved.journal_cursor!==previous.journalCursor ||
         saved.omitted_json!==JSON.stringify(view.omitted)) fail();
     return writeReplicaHeader(storage,lease,view);
@@ -266,19 +325,30 @@ export function sampleReplicaHistory(storage: StorageContext, lease: ReplicaRead
   });
 }
 export function readReplicaCurrentView(storage: StorageContext, workspace: string): ReplicaCurrentView | null {
+  return readStoredView(storage,workspace,false);
+}
+/** A position only; rows are selected in the reader's authorization transaction. */
+export function readReplicaCurrentViewHead(storage: StorageContext, workspace: string): ReplicaCurrentView | null {
+  return readStoredView(storage,workspace,true);
+}
+function readStoredView(storage: StorageContext, workspace: string, headOnly: boolean): ReplicaCurrentView | null {
   const standing = readReplicaStanding(storage, workspace);
   const header = statement(storage,headerSql).get(workspace);
-  let cache = readCaches.get(storage);
-  if (!cache) readCaches.set(storage, cache = new Map());
+  const caches=headOnly ? headCaches : readCaches;
+  let cache = caches.get(storage);
+  if (!cache) caches.set(storage, cache = new Map());
   if (!standing || !header || header.replication_epoch !== standing.replicationEpoch || header.stream_identity !== standing.streamIdentity) {
     forgetReplicaCurrentViewStoredCache(storage,workspace); return null;
   }
   // data_version detects flips/deletions by other connections, within this read snapshot.
   const key = JSON.stringify([header, statement(storage, "PRAGMA data_version").get()]);
+  const full = headOnly && readCaches.get(storage)?.get(workspace);
+  if (full && full.key === key) return full.view;
   const saved = cache.get(workspace);
   if (saved?.key === key) { cache.delete(workspace); cache.set(workspace,saved); return saved.view; }
-  const omitted = statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace)!;
-  const view = {workspaceId: workspace, revision: Number(header.revision), logCursor: Number(header.log_cursor), journalCursor: Number(header.journal_cursor), files: storedFiles(storage, workspace), texts: [], omitted: JSON.parse(String(omitted.omitted_json))};
+  const omitted = headOnly ? "[]" : statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace)!.omitted_json;
+  const view: ReplicaCurrentView = {workspaceId: workspace, revision: Number(header.revision), logCursor: Number(header.log_cursor), journalCursor: Number(header.journal_cursor), files: headOnly ? [] : storedFiles(storage, workspace), texts: [], omitted: JSON.parse(String(omitted))};
+  if(headOnly)storedHeads.add(view);
   for (const file of [...view.files, ...view.omitted]) Object.freeze(file);
   Object.freeze(view.files); Object.freeze(view.texts); Object.freeze(view.omitted); Object.freeze(view);
   cache.delete(workspace); cache.set(workspace, {key, view});
@@ -289,11 +359,12 @@ export function readReplicaCurrentView(storage: StorageContext, workspace: strin
 /** Drop a stored snapshot without changing the replica lease. */
 export function forgetReplicaCurrentViewStoredCache(storage: StorageContext, workspace: string) {
   readCaches.get(storage)?.delete(workspace);
+  headCaches.get(storage)?.delete(workspace);
 }
 
 /** @internal Test-only cache accounting. */
 export function replicaCurrentViewStoredCacheSize(storage: StorageContext) {
-  return readCaches.get(storage)?.size ?? 0;
+  return new Set([...(readCaches.get(storage)?.keys() ?? []),...(headCaches.get(storage)?.keys() ?? [])]).size;
 }
 
 /** Internal only: the reader has authorized this exact row in the same read transaction. */
