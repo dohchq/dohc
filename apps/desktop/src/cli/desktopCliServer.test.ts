@@ -1221,7 +1221,8 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   await vi.waitFor(() => expect(f.dependencies.links.resolve).toHaveBeenCalledOnce());
   const retired = f.authorities.invalidate(f.workspace.workspaceId);
   held.release();
-  await expect(pending).rejects.toThrow();
+  // Finished work reports as finished when the workspace closes during it.
+  await expect(pending).resolves.toEqual(resolved);
   await retired;
 });
 
