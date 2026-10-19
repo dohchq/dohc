@@ -55,7 +55,7 @@ fn secret_write(version: &str, path: &str, moment: &str, now_ms: i64) -> SecretW
     }
 }
 
-async fn secret_merge_replay(write_completed: bool, delete_first: bool) {
+async fn secret_merge_replay(write_completed: bool, delete_first: bool, extra_deletes: usize) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -127,7 +127,7 @@ async fn secret_merge_replay(write_completed: bool, delete_first: bool) {
     }
     supervisor.close(&db).unwrap();
     {
-        let store = EngineStore::open(&db, 5).unwrap();
+        let mut store = EngineStore::open(&db, 5).unwrap();
         let jobs = store.list_pending_materialization_jobs().unwrap();
         let merge_jobs: Vec<_> = jobs
             .iter()
@@ -141,10 +141,33 @@ async fn secret_merge_replay(write_completed: bool, delete_first: bool) {
                 .mark_materialization_complete("secret-mat_merge-Foo.env", 5)
                 .unwrap();
         }
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = put_binary_blob(tx, b"old")?;
+                for n in 0..extra_deletes {
+                    enqueue_delete_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: format!("extra-delete-{n}"),
+                            workspace_id: WS.into(),
+                            target_path: format!("retired-{n}.md"),
+                            content_sha256: sha.clone(),
+                            preimage: Preimage::Present(hex_sha256(b"old")),
+                            target_generation: 4,
+                            now_ms: 4,
+                        },
+                    )?;
+                }
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
     }
-    // The desktop's merge places deletes before writes (#2240).
+    for n in 0..extra_deletes {
+        std::fs::write(root.join(format!("retired-{n}.md")), "old").unwrap();
+    }
     std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
     if !delete_first {
+        // The desktop's merge places deletes before writes (#2240).
         std::fs::remove_file(root.join("foo.env")).unwrap();
         std::fs::write(root.join("Foo.env"), "TOKEN=target").unwrap();
     }
@@ -177,20 +200,25 @@ async fn secret_merge_replay(write_completed: bool, delete_first: bool) {
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_reopen_replay() {
-    secret_merge_replay(false, false).await;
+    secret_merge_replay(false, false, 0).await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_replay_after_write_completed() {
-    secret_merge_replay(true, false).await;
+    secret_merge_replay(true, false, 0).await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_delete_first_survives_reopen() {
-    secret_merge_replay(false, true).await;
+    secret_merge_replay(false, true, 0).await;
 }
 
-async fn text_merge_replay(delete_first: bool) {
+#[tokio::test]
+async fn secret_case_only_merge_survives_batched_replay() {
+    secret_merge_replay(true, false, 8).await;
+}
+
+async fn text_merge_replay(delete_first: bool, legacy_write: bool) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -298,11 +326,22 @@ async fn text_merge_replay(delete_first: bool) {
     }
     supervisor.close(&db).unwrap();
     {
-        let store = EngineStore::open(&db, 5).unwrap();
+        let mut store = EngineStore::open(&db, 5).unwrap();
         let jobs = store.list_pending_materialization_jobs().unwrap();
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].target_path, paths[0]);
         assert_eq!(jobs[1].target_path, paths[1]);
+        if legacy_write {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE materialization_jobs SET workspace_id='' WHERE operation='write'",
+                        [],
+                    )
+                    .map_err(dohc_engine_storage::StorageError::persist_public)
+                })
+                .unwrap();
+        }
     }
     let actor = supervisor.open(&db, 5).unwrap().actor;
     actor
@@ -384,12 +423,17 @@ async fn text_merge_replay(delete_first: bool) {
 
 #[tokio::test]
 async fn text_case_only_merge_known_bug_respells_to_old_disk_name() {
-    text_merge_replay(false).await;
+    text_merge_replay(false, false).await;
 }
 
 #[tokio::test]
 async fn text_case_only_merge_delete_first_survives_reopen() {
-    text_merge_replay(true).await;
+    text_merge_replay(true, false).await;
+}
+
+#[tokio::test]
+async fn text_case_only_merge_delete_first_waits_for_legacy_write() {
+    text_merge_replay(true, true).await;
 }
 
 async fn ordinary_delete_replay(exact_tip: bool, fence: bool) {

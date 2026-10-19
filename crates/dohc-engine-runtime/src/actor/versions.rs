@@ -497,7 +497,7 @@ fn complete_held_switch_jobs(
     Ok(())
 }
 
-pub(super) fn projection_target_contains<'a>(
+fn projection_target_contains<'a>(
     root: &std::path::Path,
     path: &str,
     targets: &HashSet<&'a str>,
@@ -532,11 +532,7 @@ pub(super) fn projection_target_alias<'a>(
         .find(|target| projection_paths_share_entry(root, path, target))
 }
 
-pub(super) fn projection_paths_share_entry(
-    root: &std::path::Path,
-    path: &str,
-    target: &str,
-) -> bool {
+fn projection_paths_share_entry(root: &std::path::Path, path: &str, target: &str) -> bool {
     let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
         return false;
     };

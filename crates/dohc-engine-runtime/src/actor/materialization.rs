@@ -683,16 +683,13 @@ pub(super) fn replay_pending_materializations(
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
-    // Replay changes disk and the job ledger, never active tips.
-    let active_paths = if jobs
+    // Filter small replays in SQL; cache the full version only for larger batches.
+    let cache_all_paths = jobs
         .iter()
-        .any(|job| job.operation == MaterializationOperation::Delete)
-    {
-        active_projection_paths(store, scope.workspace_id)?
-    } else {
-        Vec::new()
-    };
-    let active_targets: HashSet<&str> = active_paths.iter().map(String::as_str).collect();
+        .filter(|job| job.operation == MaterializationOperation::Delete)
+        .take(9)
+        .count()
+        > 8;
     let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
@@ -701,19 +698,55 @@ pub(super) fn replay_pending_materializations(
             selected_seen: 0,
         };
         let mut secret_key: Option<SecretDataKey> = None;
-        let mut case_paths = None;
-        let mut retire_delete = |store: &EngineStore, job: &MaterializationJob| {
-            if job.operation != MaterializationOperation::Delete
-                || active_targets.contains(job.target_path.as_str())
-            {
+        // Replay changes disk and the job ledger, never active tips.
+        let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut paths_loaded = false;
+        let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
+            if job.operation != MaterializationOperation::Delete {
                 return Ok::<_, RuntimeError>(false);
             }
-            let Some(alias) = projection_target_alias(
-                root_dir,
-                &job.target_path,
-                &active_targets,
-                &mut case_paths,
-            ) else {
+            if std::fs::canonicalize(root_dir.join(&job.target_path)).is_err() {
+                return Ok(false);
+            }
+            let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
+            if !paths_loaded && !active_paths.contains_key(&key) {
+                // Small replays fold only SQL candidates. Check the exact path
+                // before loading the shared cache for a larger batch.
+                let candidates = active_projection_paths(store, scope.workspace_id, Some(&key))?;
+                if candidates.iter().any(|path| path == &job.target_path) {
+                    return Ok(false);
+                }
+                if cache_all_paths {
+                    for path in active_projection_paths(store, scope.workspace_id, None)? {
+                        active_paths
+                            .entry(dohc_engine_files::floor::path_collision_key(&path))
+                            .or_default()
+                            .push(path);
+                    }
+                    paths_loaded = true;
+                } else {
+                    active_paths.insert(
+                        key.clone(),
+                        candidates
+                            .into_iter()
+                            .filter(|path| {
+                                dohc_engine_files::floor::path_collision_key(path) == key
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let Some(candidates) = active_paths.get(&key) else {
+                return Ok(false);
+            };
+            // The replay cache already narrowed this to one collision group.
+            let active_targets: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+            if active_targets.contains(job.target_path.as_str()) {
+                return Ok(false);
+            }
+            let Some(alias) =
+                projection_target_alias(root_dir, &job.target_path, &active_targets, &mut None)
+            else {
                 return Ok(false);
             };
             if store.read_with(|conn| projection_write_pending(conn, scope.workspace_id, alias))? {
@@ -1102,24 +1135,35 @@ pub(super) fn replay_pending_materializations(
     Ok(summary)
 }
 
-const ACTIVE_PROJECTION_PATHS: &str = "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
-     UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2";
+// ASCII collision keys lowercase each segment and strip trailing dots/spaces.
+// Keep Unicode and trailing aliases for the full Rust collision-key check.
+const ACTIVE_PROJECTION_PATHS: &str =
+    "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')
+     UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')";
 
 fn active_projection_paths(
-    store: &EngineStore,
+    store: &mut EngineStore,
     workspace_id: &str,
+    collision_key: Option<&str>,
 ) -> Result<Vec<String>, RuntimeError> {
+    let version = match VersionedTextStore::new(store).get_active_version(workspace_id) {
+        Ok(version) => version,
+        Err(DomainError::WorkspaceNotFound) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
     store.read_with(|conn| {
-        let version = match dohc_engine_domain::store::get_active_version_in(conn, workspace_id) {
-            Ok(version) => version,
-            Err(DomainError::WorkspaceNotFound) => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
         let mut statement = conn
             .prepare_cached(ACTIVE_PROJECTION_PATHS)
             .map_err(StorageError::corrupt_public)?;
         let paths = statement
-            .query_map(params![workspace_id, version.version_id], |row| row.get(0))
+            .query_map(
+                params![workspace_id, version.version_id, collision_key],
+                |row| row.get(0),
+            )
             .map_err(StorageError::corrupt_public)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::corrupt_public)?;
@@ -1136,7 +1180,8 @@ fn projection_write_pending(
 ) -> Result<bool, StorageError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM materialization_jobs
-         WHERE workspace_id=?1 AND target_path=?2 AND status='pending' AND operation='write')",
+         WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?2
+           AND status='pending' AND operation='write')",
         params![workspace_id, path],
         |row| row.get(0),
     )
@@ -1392,13 +1437,59 @@ mod rollback_identity_tests {
 }
 
 #[cfg(test)]
+mod projection_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn materialization_candidates_keep_unicode_and_trailing_aliases() {
+        let paths = [
+            "Notes.md",
+            "notes.md",
+            "K.md",
+            "k.md",
+            "k.md.",
+            "k. /child.md",
+            "unrelated.md",
+        ];
+        let (_root, mut store) = super::delete_benchmarks::fixture(paths.len(), 0);
+        store
+            .write_with(&NoFaults, |tx| {
+                for (n, path) in paths.iter().enumerate() {
+                    tx.execute(
+                        "UPDATE snapshots SET path=?1 WHERE object_id=?2",
+                        params![path, format!("live-{n}")],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        for key in ["notes.md", "k.md", "k/child.md"] {
+            let mut actual = active_projection_paths(&mut store, "delete-benchmark", Some(key))
+                .unwrap()
+                .into_iter()
+                .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                .collect::<Vec<_>>();
+            let mut expected = paths
+                .iter()
+                .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
 mod delete_benchmarks {
     use super::*;
     use dohc_engine_storage::{MaterializationJobSpec, Preimage, enqueue_delete_job};
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
     use std::time::Instant;
 
-    fn fixture(active_paths: usize, deletes: usize) -> (ScratchDir, EngineStore) {
+    pub(super) fn fixture(active_paths: usize, deletes: usize) -> (ScratchDir, EngineStore) {
         let root = ScratchDir::new().unwrap();
         let db = engine_db_path(&root).unwrap();
         let mut store = EngineStore::open(&db, 1).unwrap();
@@ -1438,35 +1529,38 @@ mod delete_benchmarks {
         (root, store)
     }
 
-    // Run explicitly with --ignored --nocapture; fixture creation is outside the timer.
     #[test]
-    #[ignore = "direct delete timing at 0 and 20,000 live paths"]
-    fn alias_free_direct_delete_scaling() {
+    #[ignore = "single-delete replay timing at 0 and 20,000 live paths"]
+    fn alias_free_single_delete_replay_scaling() {
         for active_paths in [0, 20_000] {
-            let (root, store) = fixture(active_paths, 7);
-            for (sample, job) in store
-                .list_pending_materialization_jobs()
-                .unwrap()
-                .into_iter()
-                .enumerate()
-            {
+            for sample in 0..7 {
+                let (root, store) = fixture(active_paths, 1);
+                let db = engine_db_path(&root).unwrap();
+                drop(store);
+                let mut store = EngineStore::open(&db, 3).unwrap();
                 let start = Instant::now();
-                let (completed, outcome) = materialize_pending_job(
-                    &store,
+                let summary = replay_pending_materializations(
+                    &mut store,
                     &root,
-                    "delete-benchmark",
-                    &job,
-                    &(),
+                    MaterializationReplayScope {
+                        holds: None,
+                        workspace_id: "delete-benchmark",
+                        self_writes: None,
+                        progress: None,
+                        file_outcomes_settled: false,
+                        released_hold_paths: None,
+                    },
                     3,
                     &NoFaults,
                     None,
-                );
+                    false,
+                )
+                .unwrap();
                 let elapsed = start.elapsed();
-                assert!(completed);
-                assert_eq!(outcome, PostCommitMaterializeOutcome::Applied);
-                assert!(!root.join(&job.target_path).exists());
+                assert_eq!(summary.completed, 1);
+                assert!(!root.join("deleted-0.md").exists());
                 println!(
-                    "direct_delete_benchmark active_paths={active_paths} sample={sample} elapsed_ms={:.3}",
+                    "single_delete_replay active_paths={active_paths} sample={sample} elapsed_ms={:.3}",
                     elapsed.as_secs_f64() * 1000.0
                 );
             }
