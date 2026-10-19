@@ -114,6 +114,69 @@ describe("Menu", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
+  // A context menu has no trigger: it opens at a point and gives focus back
+  // to what had it, such as the row that was right-clicked.
+  describe("opened at a point", () => {
+    function AtPoint(props: { at: { x: number; y: number }; onClose: () => void }) {
+      return (
+        <>
+          <button type="button">Row</button>
+          <button type="button">Elsewhere</button>
+          <Menu label="Row actions" at={props.at} open onOpenChange={(open) => { if (!open) props.onClose(); }} items={items} width={200} />
+        </>
+      );
+    }
+
+    it("draws no trigger, starts at the point, and keeps inside the window", () => {
+      const view = render(<AtPoint at={{ x: 40, y: 50 }} onClose={vi.fn()} />);
+      expect(screen.queryByRole("button", { name: "Row actions" })).toBeNull();
+      const menu = screen.getByRole("menu", { name: "Row actions" });
+      expect(menu.style.left).toBe("40px");
+      expect(menu.style.top).toBe("50px");
+      view.unmount();
+      render(<AtPoint at={{ x: window.innerWidth - 20, y: 50 }} onClose={vi.fn()} />);
+      expect(screen.getByRole("menu").style.left).toBe(`${window.innerWidth - 12 - 200}px`);
+    });
+
+    it("focuses its first row, and gives focus back to what had it on Escape", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      function Owner() {
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            <button type="button" onClick={() => setOpen(true)}>Row</button>
+            {open ? <Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={(next) => { if (!next) { setOpen(false); onClose(); } }} items={items} /> : null}
+          </>
+        );
+      }
+      render(<Owner />);
+      const row = screen.getByRole("button", { name: "Row" });
+      row.focus();
+      await user.keyboard("{Enter}");
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(document.activeElement).toBe(row));
+    });
+
+    it("closes on a press anywhere outside the list", () => {
+      const onClose = vi.fn();
+      render(<AtPoint at={{ x: 0, y: 0 }} onClose={onClose} />);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Row" }));
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("shows a row's shortcut after its label and names it for assistive technology", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={[{ id: "rename", label: "Rename", onSelect: rename, shortcut: { label: "F2", keys: "F2" } }]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const row = screen.getByRole("menuitem", { name: "Rename" });
+    expect(row.getAttribute("aria-keyshortcuts")).toBe("F2");
+    expect(row.querySelector("kbd")?.textContent).toBe("F2");
+  });
+
   it("keeps focus on its rows when the list itself is pressed", async () => {
     const user = userEvent.setup();
     render(

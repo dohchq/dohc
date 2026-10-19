@@ -51,6 +51,7 @@ function explorerProps(
     onShare: vi.fn(),
     onRefresh: vi.fn(),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };

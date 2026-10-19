@@ -243,5 +243,7 @@
   "device.privacy.open",
   "agent.color.set",
   "links.in",
-  "links.resolve"
+  "links.resolve",
+  "file.reveal",
+  "explorer.menu.read"
 ]

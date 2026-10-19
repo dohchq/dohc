@@ -22,7 +22,7 @@ async function pathExists(path: string): Promise<boolean> {
   );
 }
 
-test("Explorer creates, renames, cancels, and confirms recoverable deletion", async () => {
+test("Explorer creates, renames, deletes from its menu, and undoes the delete", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -71,23 +71,35 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
       .toBe(true);
+    const notice = page.getByTestId("workspace-shell-notice");
+    await expect(notice).toContainText("Renamed notes.txt to plan.txt");
+    await expect(notice.getByRole("button", { name: "Undo" })).toBeVisible();
 
+    // The row's menu, opened from the keyboard, gives focus back on Escape.
+    const menu = page.getByTestId("explorer-menu");
     await renamed.click();
-    await renamed.press("Delete");
-    const confirmation = page.getByTestId("delete-confirm");
-    await expect(confirmation).toContainText(
-      "It moves to the system trash, or to this workspace's .dohc/trash folder",
-    );
-    await confirmation.getByRole("button", { name: "Cancel" }).click();
-    await expect(renamed).toBeVisible();
+    await renamed.press("Shift+F10");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Rename" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(renamed).toBeFocused();
 
-    await renamed.click();
-    await renamed.press("Delete");
-    await page.getByTestId("confirm-delete").click();
+    // A delete goes to the trash at once, and its notice offers Undo.
+    await renamed.click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "Delete" }).click();
+    await expect(page.getByTestId("delete-confirm")).toHaveCount(0);
     await expect(renamed).toHaveCount(0);
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
       .toBe(false);
+    await expect(notice).toContainText("Deleted plan.txt");
+    await notice.getByRole("button", { name: "Undo" }).click();
+    await expect(renamed).toBeVisible();
+    await expect
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .toBe(true);
+    await expect(notice).toContainText("Restored plan.txt");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -6,6 +6,7 @@ import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
+import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
@@ -38,7 +39,6 @@ import {
   EngineYDocSaveStateEvent,
   ExitRoundAnswerPayload,
   ExitRoundMessage,
-  ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
   NoticesChangedEvent,
@@ -132,6 +132,7 @@ const relay = operationBridge(relayShareOperations, invoke);
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
+  ...operationBridge(explorerMenuOperations, invoke),
   ...operationBridge(settingsOperations, invoke),
   ...operationBridge(chatOperations, invoke),
   ...operationBridge(shareHandoffOperations, invoke),
@@ -188,12 +189,6 @@ const bridge: DohcDesktopBridge = {
   // The invoke RESULT is validated like main→renderer events are: only a
   // member of the closed command set reaches renderer code — anything else
   // reads as null ("dismissed").
-  showExplorerMenu: async (payload) => {
-    const result = ExplorerMenuCommand.safeParse(
-      await ipcRenderer.invoke(CHANNELS.showExplorerMenu, payload),
-    );
-    return result.success ? result.data : null;
-  },
   showWorkbenchMenu: async (payload) => {
     const result = WorkbenchMenuCommand.safeParse(
       await ipcRenderer.invoke(CHANNELS.showWorkbenchMenu, payload),

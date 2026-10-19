@@ -1642,10 +1642,12 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
   });
 
+  const IMPORT_FILES_ENTRY = { kind: "item" as const, label: "Import files…", id: "import-files" as const };
+
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
         ? {
@@ -1676,6 +1678,7 @@ describe("file transfers", () => {
     const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
     if (!folder) throw new Error("notes folder row missing");
     fireEvent.contextMenu(folder);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-import-files"));
     await waitFor(() =>
       expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
     );
@@ -1710,7 +1713,7 @@ describe("file transfers", () => {
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],
       skipped: 0,

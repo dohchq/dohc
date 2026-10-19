@@ -105,6 +105,8 @@ import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
+import { createExplorerMenuIpc } from "./ipc/explorerMenuIpc";
+import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
 import {
   createWorkspaceRootApproval,
   registerWorkspaceRegistryIpcHandlers,
@@ -6220,13 +6222,15 @@ function registerIpcHandlers(): void {
     assertTrustedSender,
     app,
     exactRendererWorkspaceReferences,
-    sharedViewOf,
     windowForSender: (sender) => BrowserWindow.fromWebContents(sender) ?? undefined,
     buildFromTemplate: (template) => Menu.buildFromTemplate(template),
     currentUpdateState,
-    ensureOwnedProjectionCurrent,
-    shell,
   });
+  registerOperations(operationBoundary, explorerMenuOperations, createExplorerMenuIpc<
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation
+  >({ sharedViewOf, ensureOwnedProjectionCurrent, shell, platform: process.platform }));
 
   registerWorkspaceGraphIpcHandlers<
     WebContents,

@@ -24,6 +24,8 @@ export type MenuItem = {
   /** A row that removes something reads in the danger color. */
   danger?: boolean;
   icon?: ReactNode;
+  /** The key that runs the row's action outside the menu, shown after its label. `keys` is its aria-keyshortcuts. */
+  shortcut?: { label: string; keys: string };
   title?: string;
   testId?: string;
   data?: Readonly<Record<`data-${string}`, string>>;
@@ -215,6 +217,10 @@ function isField(row: MenuRow): row is MenuField {
  * owner that answers inside the menu (a copied label, a refusal, a field)
  * passes `closeOnPick={false}` and closes when it is done.
  *
+ * A context menu passes `at` instead of a trigger: the list opens at that
+ * point, below it or over it as the room allows, and focus goes back to what
+ * had it when the list opened, such as the row that was right-clicked.
+ *
  * A field takes the typed keys: letters, Space, Home and End stay in it, and
  * the arrows move to the rows around it. Its Escape ends the typing, and the
  * next one closes the menu.
@@ -227,6 +233,8 @@ export function Menu(props: {
   onOpenChange: (open: boolean) => void;
   /** The control that opens the list; the ••• icon button named `label` by default. */
   trigger?: (trigger: MenuTriggerProps) => ReactNode;
+  /** Where a context menu opens, in window coordinates. No trigger is drawn. */
+  at?: { x: number; y: number };
   /** The default trigger's test id. */
   testId?: string;
   /** The default trigger stays in its place but cannot open the list. */
@@ -255,19 +263,25 @@ export function Menu(props: {
   const lead = rows.some((row) => !isField(row) && (row.icon !== undefined || row.checked !== undefined));
 
   // Measured before the first paint, at its full height, so the side with
-  // room is known before anything shows.
+  // room is known before anything shows. A context menu's point is a trigger
+  // with no size: the list starts at it, with no gap.
+  const at = props.at;
   useLayoutEffect(() => {
     if (!open) return;
-    const box = trigger.current?.getBoundingClientRect();
+    const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : trigger.current?.getBoundingClientRect();
+    const gap = at ? 0 : GAP_PX;
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
-      const above = box.top - GAP_PX - EDGE_PX;
+      // A trigger's list ends at its right edge; a context menu's starts at its point.
+      const left = at
+        ? Math.max(EDGE_PX, Math.min(at.x, window.innerWidth - EDGE_PX - width))
+        : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const below = window.innerHeight - box.bottom - gap - EDGE_PX;
+      const above = box.top - gap - EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - box.top + GAP_PX, maxHeight: above, above: true }
-          : { left, top: box.bottom + GAP_PX, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - box.top + gap, maxHeight: above, above: true }
+          : { left, top: box.bottom + gap, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.
@@ -276,7 +290,7 @@ export function Menu(props: {
       setPlace(null);
       setPointerMoved(false);
     };
-  }, [open, width]);
+  }, [open, width, at?.x, at?.y]);
 
   useLayoutEffect(() => {
     const id = refocus.current;
@@ -337,7 +351,7 @@ export function Menu(props: {
   return (
     // No box of its own: the trigger lays out where the owner puts it.
     <div ref={container} className="contents">
-      {props.trigger ? (
+      {at ? null : props.trigger ? (
         props.trigger(triggerProps)
       ) : (
         <IconButton {...triggerProps} disabled={props.disabled} data-testid={props.testId} aria-label={props.label} title={props.label} className="shrink-0">
@@ -432,6 +446,7 @@ export function Menu(props: {
                 aria-checked={entry.checked}
                 aria-current={entry.current || undefined}
                 aria-disabled={entry.disabled || undefined}
+                aria-keyshortcuts={entry.shortcut?.keys}
                 title={entry.title}
                 data-testid={entry.testId}
                 {...entry.data}
@@ -454,6 +469,7 @@ export function Menu(props: {
                   </span>
                 ) : null}
                 <span className={MENU_LABEL}>{entry.label}</span>
+                {entry.shortcut ? <kbd aria-hidden className={MENU_SHORTCUT}>{entry.shortcut.label}</kbd> : null}
               </button>
             );
           })}

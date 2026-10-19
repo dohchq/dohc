@@ -865,7 +865,7 @@ export function DesktopWorkspaceShell(props: {
   // polls and subscriptions off onError, so a fresh arrow per shell render
   // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
+    (message: string, cause?: unknown, retry?: () => void) => reportShellFailure({ message, cause, retry }),
     [reportShellFailure],
   );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
@@ -4607,6 +4607,7 @@ export function DesktopWorkspaceShell(props: {
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onError={reportFailureMessage}
+        onNotice={showSuccessNotice}
         onNewCollection={setNewCollectionFolder}
       />
     </>
