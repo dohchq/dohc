@@ -519,12 +519,20 @@ pub(super) fn projection_target_contains<'a>(
     let Some(candidates) = aliases.get(&path_collision_key(path)) else {
         return false;
     };
+    candidates
+        .iter()
+        .any(|target| projection_paths_share_entry(root, path, target))
+}
+
+pub(super) fn projection_paths_share_entry(
+    root: &std::path::Path,
+    path: &str,
+    target: &str,
+) -> bool {
     let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
         return false;
     };
-    candidates.iter().any(|target| {
-        std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
-    })
+    std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
 }
 
 fn case_alias_targets<'a>(

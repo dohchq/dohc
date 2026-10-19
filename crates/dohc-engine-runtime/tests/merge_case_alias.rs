@@ -4,7 +4,10 @@ use dohc_engine_domain::{
     SecretFileStore, SecretWrite, VersionedTextStore, WriteText,
 };
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
-use dohc_engine_storage::{EngineStore, JobStatus};
+use dohc_engine_storage::{
+    EngineStore, JobStatus, MaterializationJobSpec, Preimage, enqueue_delete_job, hex_sha256,
+    put_binary_blob,
+};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
@@ -174,7 +177,7 @@ async fn secret_case_only_merge_survives_replay_after_write_completed() {
 }
 
 #[tokio::test]
-async fn text_case_only_merge_survives_reopen_replay() {
+async fn text_case_only_merge_keeps_old_disk_bytes_and_new_tip_on_reopen() {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -193,7 +196,7 @@ async fn text_case_only_merge_survives_reopen_replay() {
                     version_id: "main".into(),
                     object_id: "notes".into(),
                     path: "notes.md".into(),
-                    text: "target text".into(),
+                    text: "old".into(),
                     moment_id: "base".into(),
                     metadata_origin: "api".into(),
                     metadata_summary: None,
@@ -224,12 +227,31 @@ async fn text_case_only_merge_survives_reopen_replay() {
                 &NoFaults,
             )
             .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.into(),
+                    version_id: "draft".into(),
+                    object_id: "notes".into(),
+                    path: "Notes.md".into(),
+                    text: "new".into(),
+                    moment_id: "draft-edit".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
     }
-    std::fs::write(root.join("notes.md"), "target text").unwrap();
+    std::fs::write(root.join("notes.md"), "old").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
     for path in ["Notes.md", "notes.md"] {
-        let result = actor
+        actor
             .versioned_text_merge(
                 MergeTextFileFromVersion {
                     workspace_id: WS.into(),
@@ -253,7 +275,6 @@ async fn text_case_only_merge_survives_reopen_replay() {
             )
             .await
             .unwrap();
-        eprintln!("text merge {path}: {:?}", result.materialize_outcome);
     }
     supervisor.close(&db).unwrap();
     let actor = supervisor.open(&db, 5).unwrap().actor;
@@ -264,6 +285,155 @@ async fn text_case_only_merge_survives_reopen_replay() {
     supervisor.close(&db).unwrap();
     assert_eq!(
         std::fs::read(root.join("Notes.md")).expect("text survives merge and reopen"),
-        b"target text"
+        b"old"
     );
+    let names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().any(|name| name == "notes.md"));
+    assert!(!names.iter().any(|name| name == "Notes.md"));
+    let conflict = names
+        .iter()
+        .find(|name| name.ends_with(".conflict"))
+        .unwrap();
+    assert_eq!(std::fs::read(root.join(conflict)).unwrap(), b"new");
+    let mut store = EngineStore::open(&db, 6).unwrap();
+    let versions = VersionedTextStore::new(&mut store);
+    assert!(
+        versions
+            .read_text(WS, "main", "notes.md")
+            .unwrap()
+            .is_none()
+    );
+    let tip = versions.read_text(WS, "main", "Notes.md").unwrap().unwrap();
+    assert_eq!(tip.text, "new");
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .is_empty()
+    );
+
+    // The remaining durability bug: capture would respell the merged tip back
+    // to the old disk name and ingest its old bytes. Keep this outcome explicit.
+    use dohc_engine_files::{
+        ManifestEntry, ReconcileController, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
+        Scanner,
+    };
+    let manifest = ScanManifest::from_entries([(
+        tip.path,
+        ManifestEntry {
+            size: 3,
+            sha256: tip.blob_sha256,
+            mtime_ms: 0,
+        },
+    )]);
+    let mut controller = ReconcileController::rehydrated(manifest, ScanGeneration(0));
+    let scanner = Scanner::new(ScanBounds::default()).unwrap();
+    let ReconcileRun::Completed(plan) = controller
+        .reconcile(&scanner, &root, &CancellationToken::new())
+        .unwrap()
+    else {
+        panic!("capture scan did not complete")
+    };
+    let respell = plan.respelled_retires.get("Notes.md").unwrap();
+    assert_eq!(respell.path, "notes.md");
+    assert_eq!(respell.sha256, hex_sha256(b"old"));
+}
+
+async fn ordinary_delete_replay(exact_tip: bool, fence: bool) {
+    let root = ScratchDir::new().unwrap();
+    if !ignores_case(&root) {
+        return;
+    }
+    let db = engine_db_path(&root).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .unwrap();
+        if exact_tip {
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        object_id: "exact-tip".into(),
+                        path: "delete.md".into(),
+                        text: "old".into(),
+                        moment_id: "base".into(),
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = put_binary_blob(tx, b"old")?;
+                enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "ordinary-delete".into(),
+                        workspace_id: WS.into(),
+                        target_path: "delete.md".into(),
+                        content_sha256: sha,
+                        preimage: Preimage::Present(hex_sha256(b"old")),
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )
+            })
+            .unwrap();
+    }
+    std::fs::write(root.join("delete.md"), "old").unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    if fence {
+        actor
+            .materialize_replay_pending_for_fence(root.path().into(), WS.into(), Arc::new(()), 3)
+            .await
+            .unwrap();
+    } else {
+        assert_eq!(
+            actor
+                .materialize_replay_pending(root.path().into(), WS.into(), 3)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    supervisor.close(&db).unwrap();
+    // Even an exact live tip must leave ordinary preimage-checked deletes alone.
+    assert!(!root.join("delete.md").exists());
+    let store = EngineStore::open(&db, 4).unwrap();
+    assert_eq!(
+        store
+            .load_materialization_job("ordinary-delete")
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Complete
+    );
+}
+
+#[tokio::test]
+async fn ordinary_delete_without_alias_still_unlinks() {
+    ordinary_delete_replay(false, false).await;
+}
+
+#[tokio::test]
+async fn exact_live_tip_does_not_skip_preimage_checked_delete() {
+    ordinary_delete_replay(true, false).await;
+}
+
+#[tokio::test]
+async fn exact_live_tip_does_not_skip_preimage_checked_delete_at_fence() {
+    ordinary_delete_replay(true, true).await;
 }

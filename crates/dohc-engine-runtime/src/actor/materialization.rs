@@ -1,5 +1,7 @@
 use super::ActorHandle;
-use super::versions::{projection_target_contains, switch_projection_job_id};
+use super::versions::{
+    projection_paths_share_entry, projection_target_contains, switch_projection_job_id,
+};
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -16,6 +18,7 @@ use dohc_engine_storage::{
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
 };
 use rusqlite::{OptionalExtension, params};
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -691,6 +694,33 @@ pub(super) fn replay_pending_materializations(
             selected_seen: 0,
         };
         let mut secret_key: Option<SecretDataKey> = None;
+        let active_paths = OnceCell::new();
+        let active_targets = OnceCell::new();
+        let mut case_paths = None;
+        // Replay changes disk and the job ledger, never active tips.
+        let mut retire_delete = |store: &EngineStore, job: &MaterializationJob| {
+            if job.operation != MaterializationOperation::Delete {
+                return Ok::<_, RuntimeError>(false);
+            }
+            if active_paths.get().is_none() {
+                let _ = active_paths.set(active_projection_paths(store, scope.workspace_id)?);
+            }
+            let targets = active_targets.get_or_init(|| {
+                active_paths
+                    .get()
+                    .expect("active paths loaded")
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>()
+            });
+            if targets.contains(job.target_path.as_str())
+                || !projection_target_contains(root_dir, &job.target_path, targets, &mut case_paths)
+            {
+                return Ok(false);
+            }
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            Ok(true)
+        };
         for job in jobs {
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
@@ -740,14 +770,7 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
-                    if retire_live_projection_delete(
-                        store,
-                        root_dir,
-                        scope.workspace_id,
-                        &job,
-                        now_ms,
-                        Some(holds),
-                    )? {
+                    if retire_delete(store, &job)? {
                         summary.completed += 1;
                         continue;
                     }
@@ -934,8 +957,12 @@ pub(super) fn replay_pending_materializations(
                     }
                 }
             }
+            if retire_delete(store, &job)? {
+                summary.completed += 1;
+                continue;
+            }
             let outcome = if let Some(self_writes) = scope.self_writes {
-                let (materialized, reported) = materialize_pending_job(
+                let (materialized, reported) = materialize_pending_job_inner(
                     store,
                     root_dir,
                     scope.workspace_id,
@@ -960,17 +987,6 @@ pub(super) fn replay_pending_materializations(
                     })
                 }
             } else {
-                if retire_live_projection_delete(
-                    store,
-                    root_dir,
-                    scope.workspace_id,
-                    &job,
-                    now_ms,
-                    Some(holds),
-                )? {
-                    summary.completed += 1;
-                    continue;
-                }
                 materialize_one(
                     store,
                     root_dir,
@@ -1085,6 +1101,31 @@ pub(super) fn replay_pending_materializations(
     Ok(summary)
 }
 
+const ACTIVE_PROJECTION_PATHS: &str = "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+     UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2";
+
+fn active_projection_paths(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    store.read_with(|conn| {
+        let version = match dohc_engine_domain::store::get_active_version_in(conn, workspace_id) {
+            Ok(version) => version,
+            Err(DomainError::WorkspaceNotFound) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut statement = conn
+            .prepare_cached(ACTIVE_PROJECTION_PATHS)
+            .map_err(StorageError::corrupt_public)?;
+        let paths = statement
+            .query_map(params![workspace_id, version.version_id], |row| row.get(0))
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)?;
+        Ok(paths)
+    })
+}
+
 fn retire_live_projection_delete(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -1096,6 +1137,37 @@ fn retire_live_projection_delete(
     if job.operation != MaterializationOperation::Delete {
         return Ok(false);
     }
+    let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
+    let has_alias = store.read_with(|conn| -> Result<bool, RuntimeError> {
+        let version = match dohc_engine_domain::store::get_active_version_in(conn, workspace_id) {
+            Ok(version) => version,
+            Err(DomainError::WorkspaceNotFound) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let mut statement = conn
+            .prepare_cached(ACTIVE_PROJECTION_PATHS)
+            .map_err(StorageError::corrupt_public)?;
+        let mut rows = statement
+            .query(params![workspace_id, version.version_id])
+            .map_err(StorageError::corrupt_public)?;
+        let mut has_alias = false;
+        while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+            let path: String = row.get(0).map_err(StorageError::corrupt_public)?;
+            if path == job.target_path {
+                return Ok(false);
+            }
+            if !has_alias
+                && dohc_engine_files::floor::path_collision_key(&path) == key
+                && projection_paths_share_entry(root_dir, &job.target_path, &path)
+            {
+                has_alias = true;
+            }
+        }
+        Ok(has_alias)
+    })?;
+    if !has_alias {
+        return Ok(false);
+    }
     let loaded_holds;
     let holds = match holds {
         Some(holds) => holds,
@@ -1105,26 +1177,6 @@ fn retire_live_projection_delete(
         }
     };
     if holds.blocks(&job.target_path) {
-        return Ok(false);
-    }
-    let paths = store.read_with(|conn| {
-        let mut statement = conn.prepare_cached(
-            "WITH active AS (SELECT COALESCE(\
-                (SELECT a.version_id FROM active_versions a JOIN versions v \
-                 ON v.workspace_id=a.workspace_id AND v.version_id=a.version_id \
-                 WHERE a.workspace_id=?1), \
-                (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1)) AS version_id) \
-             SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=(SELECT version_id FROM active) \
-             UNION SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=(SELECT version_id FROM active)",
-        ).map_err(StorageError::corrupt_public)?;
-        statement.query_map([workspace_id], |row| row.get::<_, String>(0))
-            .map_err(StorageError::corrupt_public)?
-            .collect::<Result<Vec<_>, _>>().map_err(StorageError::corrupt_public)
-    })?;
-    let targets = paths.iter().map(String::as_str).collect();
-    // A merge can leave the old spelling's delete pending after its write
-    // reached disk. Use the switch planner's rule before unlinking that entry.
-    if !projection_target_contains(root_dir, &job.target_path, &targets, &mut None) {
         return Ok(false);
     }
     store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -1153,6 +1205,29 @@ pub(super) fn materialize_pending_job(
             return (false, PostCommitMaterializeOutcome::Error);
         }
     }
+    materialize_pending_job_inner(
+        store,
+        root_dir,
+        workspace_id,
+        job,
+        self_writes,
+        now_ms,
+        faults,
+        holds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_pending_job_inner(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job: &MaterializationJob,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
+) -> (bool, PostCommitMaterializeOutcome) {
     // Register before replacement: the watcher may observe the write as soon
     // as the atomic rename lands. Every non-applied outcome retracts the
     // identity because no self-write is then available to consume it.

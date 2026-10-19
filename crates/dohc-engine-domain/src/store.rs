@@ -956,24 +956,8 @@ impl<'a> VersionedTextStore<'a> {
     /// to the main version (`versions-get-active-version`). Fails closed if
     /// neither resolves.
     pub fn get_active_version(&self, workspace_id: &str) -> Result<VersionRecord, DomainError> {
-        self.store.read_with(|conn| {
-            let active_id: Option<String> = conn
-                .query_row(
-                    "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
-                    params![workspace_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            let version_id = match active_id {
-                Some(id) if version_exists(conn, workspace_id, &id)? => id,
-                _ => workspace_main_version_id(conn, workspace_id)?
-                    .ok_or(DomainError::WorkspaceNotFound)?,
-            };
-            get_version(conn, workspace_id, &version_id)?.ok_or(DomainError::StateCorrupt {
-                reason: "active version row resolves to no version",
-            })
-        })
+        self.store
+            .read_with(|conn| get_active_version_in(conn, workspace_id))
     }
 
     // -------------------------------------------------------------- named version
@@ -1289,6 +1273,30 @@ fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainErr
         });
     }
     Ok(())
+}
+
+/// Resolve the active version for a reader using the same fallback as the domain store.
+pub fn get_active_version_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<VersionRecord, DomainError> {
+    let active_id: Option<String> = conn
+        .query_row(
+            "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let version_id = match active_id {
+        Some(id) if version_exists(conn, workspace_id, &id)? => id,
+        _ => {
+            workspace_main_version_id(conn, workspace_id)?.ok_or(DomainError::WorkspaceNotFound)?
+        }
+    };
+    get_version(conn, workspace_id, &version_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "active version row resolves to no version",
+    })
 }
 
 /// Whether `version_id` is the workspace version mirrored by the working tree.
