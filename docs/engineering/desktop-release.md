@@ -158,7 +158,7 @@ The Linux runner performs every job for this selection. A Windows runner is not 
 Download the run's `desktop-Linux-x64` artifact after every job passes.
 It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
 Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
-The Linux package job checks artifact hashes and runs the packaged fuse smoke before uploading.
+The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
 
 Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
 Both runners must be available. The Windows runner performs the coordinator jobs.
@@ -678,6 +678,18 @@ It then boots that package with an isolated profile and checks that the window c
 Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
+
+The Linux job also checks that a workspace survives an engine upgrade, because any nightly can add an engine migration.
+It extracts the engine from the newest published nightly's AppImage.
+That engine captures a test workspace with an edited Markdown file, a binary file, a nested folder, and a non-ASCII file name.
+The packaged engine then opens the same workspace.
+The check fails when a file's hash or latest moment changes, a recorded moment or its content disappears or changes, bytes on disk change, or a new edit is not captured.
+It covers the engine store and workspace files, not app settings or the desktop profile.
+It runs only on Linux, dry runs included.
+It fails when the newest published nightly has no AppImage or no executable engine.
+It skips with a notice when no nightly is published, or when the newest one predates the packaged engine.
+Those nightlies are listed in `scripts/select-upgrade-nightly.mjs`.
+To repeat a failure locally, set `DOHC_UPGRADE_PREVIOUS_ENGINE` to the older engine and run `pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts`.
 
 The workflow's checks do not prove code signing, OS installer registration, update
 installation, or an upgrade that preserves a user's profile. Release owners
