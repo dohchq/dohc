@@ -114,13 +114,14 @@ export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
+  refresh: "accessRefresh",
   object: "accessObject",
   sharing: "accessSharing",
 };
 
 const ACCESS_NOTES = [
-  "Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.",
-  "Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.",
+  "The object and sharing verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.",
+  "Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `pending`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. A request does not prove observations finished or succeeded; read `dohc access sharing` afterward. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.",
   "`unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.",
   "Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.",
   "Collection answers report current access and capabilities, not share grants.",

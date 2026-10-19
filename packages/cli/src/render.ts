@@ -301,6 +301,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "linksIn":
     case "linksResolve":
     case "shareCopy":
+    case "accessRefresh":
     case "accessObject":
     case "accessSharing":
       return JSON.stringify(result, null, 2);

@@ -56,7 +56,7 @@ export const CAPABILITIES = {
   "file.external.open": capability("Open a contained workspace file with its system application.", {ipc: ["openFileExternally"]}),
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"]}),
-  "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
+  "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"], mcpReason: "Available through dohc access refresh; no desktop MCP tool."}),
   "share.handoff.status.read": capability("Read the pending dohc://open handoff status on this computer.", {ipc: ["getShareHandoffStatus"]}),
   "share.handoff.accept": capability("Accept the pending dohc://open handoff on this computer.", {ipc: ["acceptShareHandoff"]}),
   "share.handoff.retry": capability("Retry the pending dohc://open handoff on this computer.", {ipc: ["retryShareHandoff"]}),

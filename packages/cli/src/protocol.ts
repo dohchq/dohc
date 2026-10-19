@@ -6,7 +6,7 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
-import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
+import { AccessAnswer, AccessRefreshInput, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
@@ -401,6 +401,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: AccessRefreshInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -494,6 +495,7 @@ export const CLI_CAPABILITIES = {
   shareCopy: ["share.copy.read"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
+  accessRefresh: ["access.refresh"],
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
@@ -1352,6 +1354,7 @@ export const cliResultSchemas = {
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
+  accessRefresh: AccessRefreshResult,
   accessObject: AccessAnswer,
   accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [

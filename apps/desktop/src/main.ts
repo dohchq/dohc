@@ -1606,7 +1606,9 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   refresh: async operation => {
     await warmCredentialCache().catch(() => undefined);
     operation.assertCurrent();
-    await accessAcquisition.request(operation.workspace.workspaceId);
+    if (!cachedCredentials) return { status: "unavailable", reason: "signed-out" };
+    if (!cachedCredentials.relayUrl) return { status: "unavailable", reason: "unreadable" };
+    return accessAcquisition.request(operation.workspace.workspaceId);
   },
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
@@ -6056,7 +6058,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
-    requestAccessRefresh: (_input, { operation }) => accessOwner.refresh(operation!),
+    requestAccessRefresh: async (_input, { operation }) => { await accessOwner.refresh(operation!); },
   });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,

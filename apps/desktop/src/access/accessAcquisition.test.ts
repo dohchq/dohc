@@ -36,9 +36,9 @@ function harness() {
 it("feeds both observations once, preserves cached reads, and paces repeated surface requests", async () => {
   const h = harness();
   try {
-    await Promise.all([h.owner.refresh("w"), h.owner.refresh("w")]);
+    expect(await Promise.all([h.owner.refresh("w"), h.owner.refresh("w")])).toEqual([{ status: "requested" }, { status: "pending" }]);
     for (const lane of ["granted", "received"] as const) expect(h.owner.sharing("w", { lane })).toMatchObject({ freshness: "fresh", checkedAtMs: 100_000 });
-    await h.owner.refresh("w");
+    expect(await h.owner.refresh("w")).toEqual({ status: "paced" });
     expect(h.listRoster).toHaveBeenCalledOnce(); expect(h.listReceived).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(60_000);
     await h.owner.refresh("w");

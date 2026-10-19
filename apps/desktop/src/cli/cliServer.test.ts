@@ -1,3 +1,5 @@
+import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
+import { createShareRosters } from "../automations/shareRoster";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { finishMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
@@ -503,12 +505,44 @@ describe("CLI socket server", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
+  it("uses the Access owner's paced window on read-only sockets and refuses caller scope", async () => {
+    let now = 100_000;
+    const workspace = { workspaceId: context.workspaceId, rootPath: workspaceRoot, remote: { ownerUserId: "owner", serverUrl: "server" } } as import("../workspaces/registryStore").RegistryEntry;
+    const listRoster = vi.fn(async () => ({ kind: "answered" as const, listing: { grants: [], links: [], formerGrants: [], endedGrants: [] } }));
+    const rosters = createShareRosters({ findWorkspace: id => id === workspace.workspaceId ? workspace : null,
+      saveRoster: vi.fn(), markRosterPulled: vi.fn(), listRoster, localUserId: async () => "owner",
+      localPersonId: async () => null, syncHistory: async () => "synced", logError: vi.fn(), nowMs: () => now });
+    const acquisition = createAccessAcquisition({ roster: id => rosters.requestRefresh(id), received: async () => "paced" });
+    const owner = createAccessOwner<string>({ resolve: async (_workspace, ref) => ({ ref, visibility: "visible" }),
+      roster: () => rosters.observation(workspace.workspaceId), received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
+      account: () => null, scope: id => id, assertCurrent: vi.fn(), permissions: vi.fn(), refresh: id => acquisition.request(id) });
+    context.access = accessCliQueries(owner, work => Promise.resolve(work(context.workspaceId)));
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: workspaceRoot, actor: "agent", reason: "sharing-open" } };
+    try {
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "paced" } });
+      expect(await owner.refresh(context.workspaceId)).toEqual({ status: "paced" });
+      expect(listRoster).toHaveBeenCalledExactlyOnceWith(workspace);
+      for (const extra of [{ workspaceId: "other" }, { accountId: "other" }]) {
+        expect(await rawRequest({ ...request, args: { ...request.args, ...extra } })).toMatchObject({ ok: false });
+      }
+      expect(await rawRequest({ ...request, args: { ...request.args, cwd: tempRoot } })).toMatchObject({ ok: false });
+      expect(listRoster).toHaveBeenCalledOnce();
+      now += 60_000;
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
+      expect(listRoster).toHaveBeenCalledTimes(2);
+      context.access = undefined;
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "unavailable", reason: "unreadable" } });
+    } finally { rosters.close(workspace.workspaceId); }
+  });
+
   it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
     const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
     const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
       unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
     const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
-    context.access = { object, sharing }; context.readOnly = true;
+    context.access = { object, sharing, refresh: vi.fn() }; context.readOnly = true;
     const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
       args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } } });
     expect(response).toMatchObject({ ok: true, result: { freshness: "stale", coverage: { complete: true } } });
