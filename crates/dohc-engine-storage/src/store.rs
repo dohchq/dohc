@@ -87,17 +87,17 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 }
 
 impl EngineStore {
-    /// Open a passive store; existing owner stores are refused.
     /// A bounded wait for the next checkpoint cycle, run off the writer.
-    pub fn checkpoint_cycle(&self) -> impl FnOnce() + Send + use<> {
+    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
         let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
         move || {
-            if let Some(wait) = wait {
+            if let Some(wait) = &wait {
                 wait();
             }
         }
     }
 
+    /// Open a passive store; existing owner stores are refused.
     pub fn open_passive(
         path: &Path,
         now_ms: i64,

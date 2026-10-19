@@ -262,9 +262,9 @@ pub fn replayed_undo_operation_in(
     request: &str,
     author: Option<&str>,
 ) -> Result<Option<(String, Vec<OperationMoment>)>, DomainError> {
-    let Some(recorded) = checked_undo_request_in(conn, ws, operation, request, author)? else {
+    if checked_undo_request_in(conn, ws, operation, request, author)?.is_none() {
         return Ok(None);
-    };
+    }
     let kind: String = conn
         .query_row(
             "SELECT kind FROM engine_requests WHERE request_id=?1",
@@ -288,25 +288,9 @@ pub fn replayed_undo_operation_in(
             undo_compensation_moments_in(conn, ws, &version, operation, request)?,
         )));
     }
-    let version: String = conn
-        .query_row(
-            "SELECT version_id FROM moments WHERE workspace_id=?1 AND moment_order=?2",
-            params![ws, recorded.result_seq],
-            |r| r.get(0),
-        )
-        .map_err(DomainError::sql_corrupt)?;
-    let moments = raw_operation_moments_in(
-        conn,
-        ws,
-        &version,
-        &undo_correlation_id(ws, operation, request),
-    )?;
-    if moments.is_empty() {
-        return Err(DomainError::StateCorrupt {
-            reason: "Undo lost result",
-        });
-    }
-    Ok(Some((version, moments)))
+    Err(DomainError::StateCorrupt {
+        reason: "Undo request kind",
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

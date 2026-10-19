@@ -107,12 +107,12 @@ impl Checkpoints {
         })
     }
 
-    pub(crate) fn next_cycle(&self) -> impl FnOnce() + Send + use<> {
+    pub(crate) fn next_cycle(&self) -> impl Fn() + Send + Sync + use<> {
         let completed = self.completed.clone();
         let requests = self.requests.clone();
-        let before = *completed.0.lock().unwrap();
         move || {
-            if let Some(requests) = requests {
+            let before = *completed.0.lock().unwrap();
+            if let Some(requests) = &requests {
                 let _ = requests.try_send(());
             }
             let (sequence, signal) = &*completed;
