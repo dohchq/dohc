@@ -109,12 +109,8 @@ impl Checkpoints {
 
     pub(crate) fn next_cycle(&self) -> impl Fn() + Send + Sync + use<> {
         let completed = self.completed.clone();
-        let requests = self.requests.clone();
         move || {
             let before = *completed.0.lock().unwrap();
-            if let Some(requests) = &requests {
-                let _ = requests.try_send(());
-            }
             let (sequence, signal) = &*completed;
             let _wait = signal
                 .wait_timeout_while(

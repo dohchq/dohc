@@ -627,9 +627,8 @@ impl VersionFence {
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
     /// the session sweep, forced reconcile, and version transaction. After the
-    /// fenced preflight, the destructive continuation moves into an owned task:
-    /// dropping the request future detaches it instead of releasing either
-    /// guard over a partially completed switch.
+    /// fenced preflight, fork and switch continue in an owned task. Undo runs
+    /// inline on the request cancellation token and stops between committed turns.
     pub(super) async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
@@ -948,22 +947,20 @@ impl VersionFence {
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
                     let placement_now = now_ms()?;
                     drop(_barriers);
-                    let result = open
-                        .actor
-                        .history_undo_in_turns(
-                            open.workspace_id.clone(),
-                            operation_id,
-                            request_id,
-                            author_json,
-                            open.root.clone(),
-                            Arc::new(NoFaults),
-                            placement_now,
-                            [open.capture_apply_gate.clone(), open.session_ops.clone()],
-                            Arc::new(self_writes.scoped(&open.root)),
-                            token,
-                        )
-                        .await
-                        .map_err(map_runtime)?;
+                    let result = Box::pin(open.actor.history_undo_in_turns(
+                        open.workspace_id.clone(),
+                        operation_id,
+                        request_id,
+                        author_json,
+                        open.root.clone(),
+                        Arc::new(NoFaults),
+                        placement_now,
+                        [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                        Arc::new(self_writes.scoped(&open.root)),
+                        token,
+                    ))
+                    .await
+                    .map_err(map_runtime)?;
                     let pending = result.clone();
                     tokio::spawn(async move {
                         if let Some(probe) = &probe {

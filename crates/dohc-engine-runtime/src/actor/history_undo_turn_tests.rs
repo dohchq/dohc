@@ -791,6 +791,144 @@ async fn repeating_member_errors_stop_after_three_attempts_across_opens() {
     close(supervisor).await;
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn parked_rename_after_restart_completes_and_allows_version_switch() {
+    let (root, supervisor, actor) = setup(3);
+    actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WS.into(),
+                new_version_id: "other".into(),
+                name: "Other".into(),
+                from_version_id: "main".into(),
+                now_ms: 5,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        run(
+            &actor,
+            &root,
+            "parked-resume",
+            Arc::new(CrashAfter(AtomicUsize::new(2)))
+        )
+        .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    close(supervisor).await;
+    std::fs::write(root.join("old.md"), "outside edit").unwrap();
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&engine_db_path(&root).unwrap(), 20)
+        .unwrap()
+        .actor;
+    let result = run(&actor, &root, "parked-resume", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.moments.len(), 3);
+    assert!(result.not_restored.is_empty());
+    let placed = actor
+        .history_undo_place(
+            WS.into(),
+            result,
+            root.to_path_buf(),
+            Arc::new(()),
+            21,
+            |_| {},
+        )
+        .await;
+    assert!(!placed.materialized, "conflicting placement stays parked");
+    assert_eq!(
+        std::fs::read_to_string(root.join("old.md")).unwrap(),
+        "outside edit"
+    );
+    assert!(
+        actor
+            .pending_history_undos(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    actor
+        .set_active_version(
+            crate::ActiveVersionSwitch {
+                workspace_id: WS.into(),
+                version_id: "other".into(),
+                root_dir: root.to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 22,
+            },
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        actor.active_version(WS.into()).await.unwrap().version_id,
+        "other"
+    );
+    close(supervisor).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transient_member_error_uses_only_one_attempt_per_call() {
+    let (root, supervisor, actor) = setup(3);
+    assert!(matches!(
+        run(
+            &actor,
+            &root,
+            "transient-error",
+            Arc::new(CrashAfter(AtomicUsize::new(2)))
+        )
+        .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    actor.run(|store,_| {
+        store.write_with(&NoFaults, |tx| tx.execute_batch(
+            "CREATE TRIGGER undo_transient_error BEFORE INSERT ON moments WHEN NEW.metadata_origin='restore' AND NEW.object_id='object-2' BEGIN SELECT RAISE(ABORT,'transient inverse error'); END;")
+            .map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+    assert!(
+        run(&actor, &root, "transient-error", Arc::new(NoFaults))
+            .await
+            .is_err()
+    );
+    let attempts: i64 = actor
+        .run(|store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+        "SELECT attempts FROM history_undo_plans WHERE request_id='transient-error'",[],|r|r.get(0))
+                })
+                .map_err(StorageError::corrupt_public)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1, "a single call must not burn every attempt");
+    actor
+        .run(|store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute_batch("DROP TRIGGER undo_transient_error")
+                    .map_err(StorageError::persist_public)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = run(&actor, &root, "transient-error", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.moments.len(), 3);
+    assert!(result.not_restored.is_empty());
+    close(supervisor).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_replay_reports_only_its_own_committed_work() {
     let (root, supervisor, actor) = setup(1);
     let (first, second) = tokio::join!(

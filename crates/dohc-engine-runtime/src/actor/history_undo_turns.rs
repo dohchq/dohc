@@ -362,7 +362,10 @@ impl ActorHandle {
                 match outcome? { TxnOutcome::Committed(()) => Ok(0), TxnOutcome::Crashed {..} => Err(RuntimeError::OperationCrashed) }
             }).await;
                 match outcome {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        locked_since = None;
+                        break;
+                    }
                     Err(RuntimeError::Storage(StorageError::FileLocked)) => {
                         Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone())
                             .await?;
@@ -422,11 +425,16 @@ impl ActorHandle {
                 let placed = self.run_undo_turn(request.clone(), "rename-placement", Some(placement_cursor), move |store,_| {
                     let _guards=(capture,sessions);
                     let exists: bool = store.read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",params![p.workspace,inverse.moment_id],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
-                    if exists && !place_undo_members(store,&p.workspace,&p.version,&[inverse],&root,recorder.as_ref(),&dohc_engine_storage::NoFaults,now)? { return Err(StorageError::FileLocked.into()); }
+                    if exists {
+                        // Parked jobs remain available to final placement or Retry held.
+                        place_undo_members(store,&p.workspace,&p.version,&[inverse],&root,recorder.as_ref(),&dohc_engine_storage::NoFaults,now)?;
+                    }
                     Ok(())
                 }).await;
                 match placed {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        locked_since = None;
+                    }
                     Err(RuntimeError::Storage(StorageError::FileLocked)) => {
                         Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone())
                             .await?;
@@ -493,6 +501,7 @@ impl ActorHandle {
                     let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || disk_changed;
                     if changed { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"source changed"}.into()) } else { admitted.and(disk.map(|_| ())) }
                     })();
+                    let mut retry_error = None;
                     let advanced = match store.write_background_with(f.as_ref(),|tx| -> Result<bool,RuntimeError> {
                         tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
                         let inverse = checks.and_then(|()| {
@@ -509,7 +518,7 @@ impl ActorHandle {
                                 if !refusal {
                                     tx.execute("UPDATE history_undo_plans SET attempts=attempts+1,last_error=?2 WHERE request_id=?1",params![p.request,error.to_string()]).map_err(StorageError::persist_public)?;
                                     let attempts: i64 = tx.query_row("SELECT attempts FROM history_undo_plans WHERE request_id=?1",[&p.request],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-                                    if attempts<3 { return Ok(false); }
+                                    if attempts<3 { retry_error = Some(error); return Ok(false); }
                                     tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),error.to_string()]).map_err(StorageError::persist_public)?;
                                 }
                                 let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
@@ -520,6 +529,8 @@ impl ActorHandle {
                         tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,cursor+1,if index+1==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
                         Ok(true)
                     })? { TxnOutcome::Committed(advanced) => advanced, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) };
+                    // Persist one failed attempt per call, so retries can outlive a transient error.
+                    if let Some(error) = retry_error { return Err(error); }
                     Ok((index + usize::from(advanced),advanced))
                 })
             }).await;

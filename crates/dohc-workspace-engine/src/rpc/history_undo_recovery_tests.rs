@@ -17,8 +17,12 @@ impl FaultInjector for CrashAfter {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
+async fn open_undo_fixture() -> (
+    ScratchDir,
+    Arc<EngineService>,
+    WorkspaceHandle,
+    Arc<OpenWorkspace>,
+) {
     let scratch = ScratchDir::new().unwrap();
     let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
@@ -92,7 +96,9 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
     drop(store);
     std::fs::write(scratch.path().join("moved.md"), "retained").unwrap();
     let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
-    let service = EngineService::new();
+    let mut service = EngineService::new();
+    service.capture_apply_probe = Some(capture_driver::CaptureApplyProbe::default());
+    let service = Arc::new(service);
     let opened = service
         .workspace_open(&RequestContext::unbounded(), params.clone())
         .await
@@ -101,6 +107,13 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
     let open = service.open(Some(&handle)).unwrap();
     let initial_recovery = lock(&open.undo_recovery).take().unwrap();
     initial_recovery.await.unwrap();
+    (scratch, service, handle, open)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
+    let (scratch, service, handle, open) = open_undo_fixture().await;
+    let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
     assert!(matches!(
         open.actor
             .history_undo_in_turns(
@@ -182,4 +195,74 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
     }
     assert!(!scratch.path().join("moved.md").exists());
     service.workspace_close(Some(handle)).await.unwrap();
+}
+
+struct PauseFirstInverse {
+    remaining: AtomicUsize,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl FaultInjector for PauseFirstInverse {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == FaultPoint::StorageBeforePersist
+            && self.remaining.fetch_sub(1, Ordering::SeqCst) == 1
+        {
+            let _ = lock(&self.entered).take().unwrap().send(());
+            lock(&self.released).recv().unwrap();
+        }
+        FaultAction::Continue
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_close_finishes_while_request_undo_waits_between_turns() {
+    let (_scratch, service, handle, open) = open_undo_fixture().await;
+    let (entered, reached) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let request_open = open.clone();
+    // This is a request-owned Undo, not the recovery task that close aborts.
+    let undo = tokio::spawn(async move {
+        request_open
+            .actor
+            .history_undo_in_turns(
+                "resume-undo".into(),
+                "dohc-operation:resume".into(),
+                "closing-request".into(),
+                None,
+                request_open.root.clone(),
+                Arc::new(PauseFirstInverse {
+                    remaining: AtomicUsize::new(2),
+                    entered: std::sync::Mutex::new(Some(entered)),
+                    released: std::sync::Mutex::new(released),
+                }),
+                10,
+                [
+                    request_open.capture_apply_gate.clone(),
+                    request_open.session_ops.clone(),
+                ],
+                Arc::new(()),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+    });
+    reached.await.unwrap();
+    // Close queues its capture barrier while the inverse still owns that gate.
+    let probe = service.capture_apply_probe.as_ref().unwrap();
+    probe.observe_next_apply_gate_wait();
+    let closing_service = service.clone();
+    let closing = tokio::spawn(async move { closing_service.workspace_close(Some(handle)).await });
+    probe.wait_until_apply_gate_waiting().await;
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), closing)
+        .await
+        .expect("close must not retain the checkpoint sender through Undo")
+        .unwrap()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), undo)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
 }
