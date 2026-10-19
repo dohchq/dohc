@@ -228,7 +228,7 @@ Without that file, nothing runs on Linux. Other hosts and CI do not have it.
   The next job stops a scope that a killed run left behind, and does not start while one still runs.
   The scope's peak memory and out-of-memory kills are in the job's `scope.json`. A failure after a kill at the limit is a machine failure.
 - Before it builds, the job waits until Windows has room for it. The VM's page cache already counts against Windows memory, so the job needs only the part of its limit that exceeds that cache, with 3 GB still free.
-- The job waits at most 30 minutes in all for the Linux slot, a cargo lane, and memory. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
+- The job waits at most 75 minutes in all for the Linux slot, a cargo lane, and memory, or 45 minutes in a full run. The run's own Windows jobs hold a cargo lane and memory for about 45 minutes, so the wait outlasts them. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
 - The step is `rust-linux`. Its evidence is in the attempt's `rust-linux` folder: a `result.json`, the logs, and the scripts that ran in WSL. In a full run, that `result.json` and the logs are the Linux verifier's own.
 - A clippy error or warning, or a failed Linux test, fails the change. A failed test appears under `failed` and `flaky` with the step `rust-linux`. A failure of WSL, of the transfer, or of the Linux host is a machine failure, and the queue retries it.
 - `pnpm verify:plan` shows the distro under `linux`. A run that reuses Rust evidence with `--reuse-rust` runs nothing on Linux, because a reuse covers renderer changes only.
