@@ -26,7 +26,6 @@ export const DEFAULT_KEYCHAIN_PROFILE = "dohc-notary";
 export const POSTHOG_KEYCHAIN_SERVICE = "dohc-posthog-cli-api-key";
 // Saved in the login keychain, the release keychain's password lets the command unlock it without anyone at the Mac.
 export const SAVED_PASSWORD_SERVICE = "dohc-release-keychain-password";
-export const LOGIN_KEYCHAIN = join(homedir(), "Library/Keychains/login.keychain-db");
 // Each release's throwaway checkout and built files live here, outside every checkout.
 export const WORK_ROOT = join(homedir(), "dohc-release");
 // The workflow's publish job. It runs only after Preflight, which runs only on refs/heads/main.
@@ -293,12 +292,13 @@ export async function unlockReleaseKeychain(plan, purpose, {
     const failure = lockKeychain(run, plan.keychain);
     if (failure) throw new Error(failure);
   }
-  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-w", LOGIN_KEYCHAIN]);
+  // add-generic-password saves to the default keychain, so the search covers the keychain list, which excludes the release keychain.
+  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-w"]);
   if (saved.status === 0) {
     console.log(`\n${purpose} unlocks the release keychain with the password saved in the login keychain.`);
     const result = unlockWith(plan.keychain, saved.stdout.replace(/\n$/, ""));
     if (result.status !== 0 || !unlocked()) {
-      throw new Error(`The password saved as ${SAVED_PASSWORD_SERVICE} in the login keychain did not unlock the release keychain: ${result.stderr.trim()}\nSave it again as docs/engineering/desktop-release.md describes. Nothing was signed or uploaded.`);
+      throw new Error(`The password saved as ${SAVED_PASSWORD_SERVICE} in the login keychain did not unlock the release keychain: ${result.stderr.trim()}\nSave the right one, or delete it, as docs/engineering/desktop-release.md describes. Nothing was signed or uploaded.`);
     }
     return;
   }

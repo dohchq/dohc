@@ -43,7 +43,7 @@ import {
 } from "./mock-update-server.mjs";
 import { scriptsWithoutChunkIds, sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 import {
-  DEFAULT_KEYCHAIN, LOGIN_KEYCHAIN, PUBLISH_JOB, SAVED_PASSWORD_SERVICE, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
+  DEFAULT_KEYCHAIN, PUBLISH_JOB, SAVED_PASSWORD_SERVICE, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
   macFileNames, macUploadPlan, parseMacReleaseArgs, preflightMacRelease, publishMacFiles, releaseEnvironment, signatureChecks,
   signingEnvironment, unlockReleaseKeychain, unlockedSigning, uploadCommands, verifyKeptFiles, withReleaseKeychain, RELEASE_REPOSITORY, releaseMac,
 } from "./release-desktop-macos.mjs";
@@ -1212,7 +1212,7 @@ test("a password saved in the login keychain unlocks the release keychain withou
     wait: async () => assert.fail("nothing waits for someone to unlock the keychain"),
     unlockWith: (path, password) => { unlocks.push([path, password]); open = true; return { status: 0, stderr: "" }; },
   };
-  const lookup = `security find-generic-password -s ${SAVED_PASSWORD_SERVICE} -w ${LOGIN_KEYCHAIN}`;
+  const lookup = `security find-generic-password -s ${SAVED_PASSWORD_SERVICE} -w`;
   await unlockReleaseKeychain(plan, "Checking the signing identity", keychain);
   assert.deepEqual(calls, [lookup]);
   assert.deepEqual(unlocks, [[KEYCHAIN, 'pass "word" \\ %s']], "the password passes as saved, without its final newline");
@@ -1231,6 +1231,29 @@ test("a password saved in the login keychain unlocks the release keychain withou
   );
   await assert.rejects(unlockReleaseKeychain(plan, "Packaging", { ...keychain, unlockWith: () => ({ status: 0, stderr: "" }) }), /did not unlock the release keychain/,
     "a keychain that stays locked fails even when security reports success");
+});
+
+test("the saved password reaches security on its input, in a session of its own, and never in its arguments", async t => {
+  const bin = await mkdtemp(join(tmpdir(), "dohc-security-"));
+  const record = join(bin, "record");
+  // A session leader's process group is its own process ID.
+  await writeFile(join(bin, "security"), `#!/bin/sh
+printf '%s\\n' "$*" > "${record}"
+[ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ] && echo own-session >> "${record}"
+cat >> "${record}"
+`, { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  t.after(() => { process.env.PATH = path; });
+  const password = 'pass "word" \\ %s';
+  await unlockReleaseKeychain({ keychain: KEYCHAIN }, "Packaging", {
+    keychainStatus: () => (existsSync(record) ? 7 : 2),
+    run: () => ({ status: 0, stdout: `${password}\n`, stderr: "" }),
+    step: async () => assert.fail("nobody is asked for the password"),
+    interactive: true,
+    cancelled: () => false,
+  });
+  assert.equal(readFileSync(record, "utf8"), `unlock-keychain ${KEYCHAIN}\nown-session\n${password}\n`);
 });
 
 test("the Mac release command loads only tracked files and Node's own modules, and uploads to the repository the updater reads", async () => {

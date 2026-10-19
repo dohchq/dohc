@@ -57,6 +57,7 @@ Run the real command from a clean checkout of `main`.
 If Ice saved the release keychain's password in the login keychain, the command unlocks the keychain itself.
 Otherwise, it asks for the password before it builds and before it packages, and Ice types it.
 Never ask for that password, never read the saved one, and never pass it to a command.
+Never create, change, or delete the saved password. If the command reports that it did not unlock the keychain, report that and stop.
 If an upload stops, run the same command again. It finishes from the files it kept in `~/dohc-release/<tag>/files`.
 If the command refuses, report its reason and stop.
 Run the `gh release delete-asset` commands it prints only when Ice asks.

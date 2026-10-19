@@ -374,8 +374,9 @@ not find it.
    The command locks the keychain itself, so this limit matters only if the
    command cannot. During a release, the longest time without use is one
    notarization wait.
-4. Import the Developer ID Application certificate. `-x` makes its private key
-   non-exportable, and `-T` lets `codesign` use the key without asking. While
+4. Import the Developer ID Application certificate. `-x` makes macOS refuse to
+   export its private key, though anyone with the keychain file and its
+   password can still decrypt it. `-T` lets `codesign` use the key without asking. While
    the keychain is unlocked, any program running as you can run `codesign`
    with this identity:
 
@@ -438,15 +439,31 @@ security add-generic-password -U -a "$USER" -s dohc-release-keychain-password -w
 ```
 
 The command then unlocks the release keychain itself at the same two points,
-and locks it again as before. This removes a protection. While you are logged
-in, any program running as you can read the saved password with `security`.
-With it, the program can unlock the release keychain, sign with your Developer
-ID, and notarize. Without a saved password, such a program can sign only while
-a release has the keychain unlocked.
+and locks it again as before.
+
+This gives up what the release keychain's own password protects. While you
+are logged in, any program running as you can read the saved password with
+`security`. With it, a program can:
+
+- Unlock the release keychain at any time, sign with your Developer ID,
+  notarize, and read the PostHog key.
+- Copy the keychain file and decrypt it on another computer. That gives it the
+  Developer ID private key, the App Store Connect API key, and the PostHog key.
+  `-x` does not prevent this. Deleting the saved password afterwards does not
+  take the keys back.
+
+The 30-minute and sleep locks no longer limit this. Code that runs during a
+build can unlock the keychain, sign, and lock it again without the command
+noticing. Anyone with your login password, or a backup of both keychain files,
+can also open the release keychain. Without a saved password, a program can
+sign only while a release has the keychain unlocked, and cannot take the keys.
+
+If you think a program took them, revoke the Developer ID certificate, the App
+Store Connect API key, and the PostHog key.
 
 If the saved password does not unlock the release keychain, the command stops
-before it signs anything. Run the same `add-generic-password` command to save
-the right one. To type the password again at each release, delete the saved one:
+before it signs anything. Save the right one with the same command, or delete
+it. To type the password again at each release, delete the saved one:
 
 ```sh
 security delete-generic-password -s dohc-release-keychain-password
