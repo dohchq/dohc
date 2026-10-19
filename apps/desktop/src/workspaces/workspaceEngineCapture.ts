@@ -769,7 +769,11 @@ export interface WorkspaceEngineCaptureOptions {
   store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
   secretStore?: SecretFileStore;
-  now?: () => number;
+  // Milliseconds on a monotonic clock, which times when the capture's delete
+  // records and expected removals expire. A wall clock that steps forward
+  // would expire them early. Injectable for tests; production reads
+  // performance.now().
+  monotonic?: () => number;
   // Injectable id seam (oracle/tests) for the correlationId stamped on every
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
@@ -1733,7 +1737,7 @@ export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath, attachmentId } = options;
-  const now = options.now ?? (() => Date.now());
+  const monotonic = options.monotonic ?? (() => performance.now());
   const createId = options.createId ?? (() => randomUUID());
   const teardownRetry = options.teardownRetryMs ?? {
     initial: TEARDOWN_RETRY_INITIAL_MS,
@@ -1998,7 +2002,7 @@ export function createWorkspaceEngineCapture(
   const RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS = 1_000;
   let recentExternalDeletesPrunedAtMs = -Infinity;
   function pruneRecentExternalDeletesWithNoDebt(): void {
-    const nowMs = now();
+    const nowMs = monotonic();
     if (nowMs - recentExternalDeletesPrunedAtMs < RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS) {
       return;
     }
@@ -2011,7 +2015,7 @@ export function createWorkspaceEngineCapture(
     pruneRecentExternalDeletesWithNoDebt();
     recentExternalDeletesWithNoDebt.set(path, {
       deletedSeq,
-      expiresAtMs: now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      expiresAtMs: monotonic() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
       expected,
     });
   }
@@ -2035,7 +2039,7 @@ export function createWorkspaceEngineCapture(
     const entry = recentExternalDeletesWithNoDebt.get(path);
     if (
       entry === undefined ||
-      entry.expiresAtMs <= now() ||
+      entry.expiresAtMs <= monotonic() ||
       sessionOpenedSeq > entry.deletedSeq
     ) {
       return null;
@@ -3732,7 +3736,7 @@ export function createWorkspaceEngineCapture(
 
   // Whether an engine-originated removal of `path` is registered and unexpired.
   function peekExpectedEvent(path: string): boolean {
-    const nowMs = now();
+    const nowMs = monotonic();
     if (!observationDrainUnavailable) expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
     return expectedEvents.some((event) => event.path === path);
   }
@@ -3742,7 +3746,7 @@ export function createWorkspaceEngineCapture(
   ): () => void {
     const registered: RegisteredExpectedEngineEvent[] = events.map((event) => ({
       ...event,
-      expiresAtMs: now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      expiresAtMs: monotonic() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
     }));
     expectedEvents.push(...registered);
     return () => {

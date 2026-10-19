@@ -4301,7 +4301,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 async function lockedRebindCapture(
   prefix: string,
   options?: {
-    now?: () => number;
+    monotonic?: () => number;
     teardownRetryMs?: WorkspaceEngineCaptureOptions["teardownRetryMs"];
     // Wraps the base provider open for one test's own generation, so it
     // can override a single method (e.g. `settleNow`'s timing) while
@@ -4577,7 +4577,7 @@ async function lockedRebindCapture(
         error instanceof Error ? error.message : String(error),
       );
     },
-    ...(options?.now ? { now: options.now } : {}),
+    ...(options?.monotonic ? { monotonic: options.monotonic } : {}),
     ...(options?.teardownRetryMs ? { teardownRetryMs: options.teardownRetryMs } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
@@ -5312,7 +5312,7 @@ it("an external delete observed before a debt registers cancels it at the door i
   // order once that order stopped matching what the fix actually checks.
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-late-registration-",
-    { now: frozenClock },
+    { monotonic: frozenClock },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5497,7 +5497,7 @@ it("expires an expected removal and honors its cancellation", async () => {
   let nowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-expected-expiry-",
-    { now: () => nowMs },
+    { monotonic: () => nowMs },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5544,6 +5544,46 @@ it("a cancelled expected removal reads as an external delete again", async () =>
     "ignore the cancel -> this cancellation names dohc's own removal for a registration the caller withdrew.",
   ).toBe(true);
   state.locked = false;
+  await capture.stop();
+});
+
+it("a forward jump of the wall clock expires no delete record, so a stale session still stands down", async () => {
+  // Delete records and expected removals expire on the monotonic clock. A
+  // wall clock that steps forward, as when the system clock is corrected,
+  // must not expire either early: the stale session's late debt would arm
+  // and write the deleted file back, under an external delete's name.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-wall-clock-jump-",
+    { monotonic: frozenClock },
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+  const realDateNow = Date.now.bind(Date);
+  let wallClockJumpMs = 0;
+  const wallClock = vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + wallClockJumpMs);
+  onTestFinished(() => wallClock.mockRestore());
+  const hourMs = 60 * 60_000;
+
+  capture.registerExpectedEngineEvents([{ path: "note.md" }]);
+  wallClockJumpMs += hourMs;
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  wallClockJumpMs += hourMs;
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+    "expire on the wall clock -> the delete record is gone and the debt arms.",
+  ).toBe(true);
+  await pastRetryRungs();
+  expect(state.generation).toBe(1);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 });
 
@@ -5845,7 +5885,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   let virtualNowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-close-retry-ttl-boundary-",
-    { now: () => virtualNowMs },
+    { monotonic: () => virtualNowMs },
   );
   const { session } = await openWithOneEdit(
     capture,
@@ -5896,7 +5936,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-settle-clear-race-",
     {
-      now: frozenClock,
+      monotonic: frozenClock,
       wrapProvider: (base) => async (openOptions) => {
         const inner = await base(openOptions);
         let token = 0;
