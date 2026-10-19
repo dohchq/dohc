@@ -247,24 +247,24 @@ async fn workspace_open_continues_after_one_pending_undo_fails_once() {
         pending.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
         ["a-failing-undo", "b-later-undo"]
     );
-    open.actor
-        .run(|store, _| {
-            store.write_with(&NoFaults, |tx| {
-                tx.execute_batch(
-                    "CREATE TRIGGER first_undo_fails_once BEFORE INSERT ON moments
-             WHEN NEW.metadata_origin='restore' AND NEW.object_id='object-0'
-             AND (SELECT attempts FROM history_undo_plans WHERE request_id='a-failing-undo')=0
-             BEGIN SELECT RAISE(ABORT,'one transient Undo failure'); END;",
-                )
-                .map_err(dohc_engine_storage::StorageError::persist_public)
-            })?;
-            Ok(())
-        })
-        .await
-        .unwrap();
     service.workspace_close(Some(handle)).await.unwrap();
     drop(open);
     drop(service);
+    // Install the durable failure after close, without a second live writer.
+    let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open(&db, 10).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER first_undo_fails_once BEFORE INSERT ON moments
+                 WHEN NEW.metadata_origin='restore' AND NEW.object_id='object-0'
+                 AND (SELECT attempts FROM history_undo_plans WHERE request_id='a-failing-undo')=0
+                 BEGIN SELECT RAISE(ABORT,'one transient Undo failure'); END;",
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
+    drop(store);
 
     let service = EngineService::new();
     let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
@@ -288,22 +288,17 @@ async fn workspace_open_continues_after_one_pending_undo_fails_once() {
     assert_eq!(pending[0].0, "dohc-operation:resume");
     assert_eq!(pending[0].1, "a-failing-undo");
     assert_eq!(pending[0].2, None);
-    let attempts: i64 = open
-        .actor
-        .run(|store, _| {
-            store
-                .read_with(|conn| {
-                    conn.query_row(
-                        "SELECT attempts FROM history_undo_plans WHERE request_id=?1",
-                        ["a-failing-undo"],
-                        |row| row.get(0),
-                    )
-                })
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-                .map_err(Into::into)
+    let store = EngineStore::open_read_only(&db).unwrap();
+    let attempts: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT attempts FROM history_undo_plans WHERE request_id=?1",
+                ["a-failing-undo"],
+                |row| row.get(0),
+            )
         })
-        .await
         .unwrap();
+    drop(store);
     assert_eq!(attempts, 1);
     let later = open
         .actor
