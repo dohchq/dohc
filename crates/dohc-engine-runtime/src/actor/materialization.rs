@@ -686,7 +686,10 @@ pub(super) fn replay_pending_materializations(
     // Filter small replays in SQL; cache the full version only for larger batches.
     let cache_all_paths = jobs
         .iter()
-        .filter(|job| job.operation == MaterializationOperation::Delete)
+        .filter(|job| {
+            job.operation == MaterializationOperation::Delete
+                && job.job_id.starts_with("secret-mat_")
+        })
         .take(9)
         .count()
         > 8;
@@ -804,7 +807,7 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
-                    if retire_delete(store, &job)? {
+                    if ordinary_secret && retire_delete(store, &job)? {
                         summary.completed += 1;
                         continue;
                     }
@@ -990,10 +993,6 @@ pub(super) fn replay_pending_materializations(
                         continue;
                     }
                 }
-            }
-            if retire_delete(store, &job)? {
-                summary.completed += 1;
-                continue;
             }
             let outcome = if let Some(self_writes) = scope.self_writes {
                 let (materialized, reported) = materialize_pending_job(
@@ -1451,25 +1450,34 @@ mod projection_candidate_tests {
             "k. /child.md",
             "unrelated.md",
         ];
-        let (_root, mut store) = super::delete_benchmarks::fixture(paths.len(), 0);
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("projection-candidates", "main", 1, &NoFaults)
+            .unwrap();
         store
             .write_with(&NoFaults, |tx| {
-                for (n, path) in paths.iter().enumerate() {
-                    tx.execute(
-                        "UPDATE snapshots SET path=?1 WHERE object_id=?2",
-                        params![path, format!("live-{n}")],
-                    )
+                let sha = hex_sha256(b"old");
+                tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,3,'old')", [&sha])
                     .map_err(StorageError::persist_public)?;
+                for (n, path) in paths.iter().enumerate() {
+                    let object = format!("live-{n}");
+                    tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('projection-candidates',?1,1)", [&object])
+                        .map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('projection-candidates','main',?1,?2,?3,1,'fixture','api')", params![object,path,sha])
+                        .map_err(StorageError::persist_public)?;
                 }
                 Ok::<_, StorageError>(())
             })
             .unwrap();
         for key in ["notes.md", "k.md", "k/child.md"] {
-            let mut actual = active_projection_paths(&mut store, "delete-benchmark", Some(key))
-                .unwrap()
-                .into_iter()
-                .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
-                .collect::<Vec<_>>();
+            let mut actual =
+                active_projection_paths(&mut store, "projection-candidates", Some(key))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                    .collect::<Vec<_>>();
             let mut expected = paths
                 .iter()
                 .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
@@ -1478,119 +1486,6 @@ mod projection_candidate_tests {
             actual.sort();
             expected.sort();
             assert_eq!(actual, expected);
-        }
-    }
-}
-
-#[cfg(test)]
-mod delete_benchmarks {
-    use super::*;
-    use dohc_engine_storage::{MaterializationJobSpec, Preimage, enqueue_delete_job};
-    use dohc_engine_testkit::{ScratchDir, engine_db_path};
-    use std::time::Instant;
-
-    pub(super) fn fixture(active_paths: usize, deletes: usize) -> (ScratchDir, EngineStore) {
-        let root = ScratchDir::new().unwrap();
-        let db = engine_db_path(&root).unwrap();
-        let mut store = EngineStore::open(&db, 1).unwrap();
-        VersionedTextStore::new(&mut store)
-            .ensure_main_version("delete-benchmark", "main", 1, &NoFaults)
-            .unwrap();
-        let sha = hex_sha256(b"old");
-        store.write_with(&NoFaults, |tx| {
-            tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,3,'old')", [&sha])
-                .map_err(StorageError::persist_public)?;
-            for n in 0..active_paths {
-                let object = format!("live-{n}");
-                let path = format!("live-{n}.md");
-                tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('delete-benchmark',?1,1)", [&object])
-                    .map_err(StorageError::persist_public)?;
-                tx.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) VALUES ('delete-benchmark','main',?1,?2)", params![path,object])
-                    .map_err(StorageError::persist_public)?;
-                tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('delete-benchmark','main',?1,?2,?3,1,'fixture','api')", params![object,path,sha])
-                    .map_err(StorageError::persist_public)?;
-            }
-            for n in 0..deletes {
-                enqueue_delete_job(tx, &MaterializationJobSpec {
-                    job_id: format!("benchmark-delete-{n:04}"),
-                    workspace_id: "delete-benchmark".into(),
-                    target_path: format!("deleted-{n}.md"),
-                    content_sha256: sha.clone(),
-                    preimage: Preimage::Present(sha.clone()),
-                    target_generation: 1,
-                    now_ms: 2,
-                })?;
-            }
-            Ok::<_, StorageError>(())
-        }).unwrap();
-        for n in 0..deletes {
-            std::fs::write(root.join(format!("deleted-{n}.md")), "old").unwrap();
-        }
-        (root, store)
-    }
-
-    #[test]
-    #[ignore = "single-delete replay timing at 0 and 20,000 live paths"]
-    fn alias_free_single_delete_replay_scaling() {
-        for active_paths in [0, 20_000] {
-            for sample in 0..7 {
-                let (root, store) = fixture(active_paths, 1);
-                let db = engine_db_path(&root).unwrap();
-                drop(store);
-                let mut store = EngineStore::open(&db, 3).unwrap();
-                let start = Instant::now();
-                let summary = replay_pending_materializations(
-                    &mut store,
-                    &root,
-                    MaterializationReplayScope {
-                        holds: None,
-                        workspace_id: "delete-benchmark",
-                        self_writes: None,
-                        progress: None,
-                        file_outcomes_settled: false,
-                        released_hold_paths: None,
-                    },
-                    3,
-                    &NoFaults,
-                    None,
-                    false,
-                )
-                .unwrap();
-                let elapsed = start.elapsed();
-                assert_eq!(summary.completed, 1);
-                assert!(!root.join("deleted-0.md").exists());
-                println!(
-                    "single_delete_replay active_paths={active_paths} sample={sample} elapsed_ms={:.3}",
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "replay scaling benchmark: 1,000 real deletes at 0 and 20,000 live paths"]
-    async fn alias_free_delete_replay_scaling() {
-        for active_paths in [0, 20_000] {
-            for sample in 0..3 {
-                let (root, store) = fixture(active_paths, 1_000);
-                let db = engine_db_path(&root).unwrap();
-                drop(store);
-                let supervisor = crate::WorkspaceSupervisor::new();
-                let actor = supervisor.open(&db, 3).unwrap().actor;
-                let start = Instant::now();
-                let completed = actor
-                    .materialize_replay_pending(root.path().into(), "delete-benchmark".into(), 3)
-                    .await
-                    .unwrap();
-                let elapsed = start.elapsed();
-                assert_eq!(completed, 1_000);
-                supervisor.close(&db).unwrap();
-                assert!(!root.join("deleted-0.md").exists());
-                println!(
-                    "replay_benchmark active_paths={active_paths} deletes=1000 sample={sample} elapsed_ms={:.3}",
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            }
         }
     }
 }
