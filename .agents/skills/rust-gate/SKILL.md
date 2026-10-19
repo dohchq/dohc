@@ -39,8 +39,9 @@ design, and that row is what proves the workspace's doctests still ran.
 
 On a host with a build-slot root, the gate enforces a shared build budget so
 several worktrees can build at once without exhausting the machine. The root
-comes from `DOHC_BUILD_SLOT_ROOT`; on Windows outside CI it defaults to
-`C:\w\_locks`. A host with no slot root, such as a CI runner, runs uncapped.
+comes from `DOHC_BUILD_SLOT_ROOT`. Outside CI it defaults to `C:\w\_locks`
+on Windows, and to `~/dev/worktrees/.locks` on a Mac where that folder exists.
+A host with no slot root, such as a CI runner, runs uncapped.
 You do not set these up:
 
 - It refuses to start below 40 GB free disk. The error names the floor;

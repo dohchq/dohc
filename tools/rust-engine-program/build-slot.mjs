@@ -39,22 +39,27 @@ import { execFileSync, spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { availableParallelism, platform } from "node:os";
+import { availableParallelism, homedir, platform } from "node:os";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+
+/** The slot root of a shared Mac. Its presence marks the Mac as shared; `pnpm verify:queue install` creates it. */
+export const macSlotRoot = (home = homedir()) => join(home, "dev", "worktrees", ".locks");
 
 /**
  * The budget this host imposes, or null on a single-tenant host (CI runners
  * have no slot root and run uncapped). The root comes from
- * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows outside CI —
- * the shared dev machine the budget exists for. Tests point the root at a private
+ * `DOHC_BUILD_SLOT_ROOT`, defaulting outside CI to `C:\w\_locks` on Windows and
+ * to `macSlotRoot()` on a Mac where that folder exists — the shared dev machines
+ * the budget exists for. Tests point the root at a private
  * directory so a suite run never holds a real lane's slot.
  */
 export function resolveBuildBudget(env = process.env, host = {}) {
   const os = host.platform ?? platform();
   const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
+  const mac = os === "darwin" && !ci ? macSlotRoot(host.home) : null;
   const root =
-    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : null);
+    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : mac && existsSync(mac) ? mac : null);
   if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();

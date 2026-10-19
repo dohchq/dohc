@@ -33,6 +33,7 @@ import {
   acquireVerificationSlot,
   buildQueueStatus,
   capBuildParallelism,
+  macSlotRoot,
   reclaimStaleSlots,
   resolveBuildBudget,
   processCreation,
@@ -896,6 +897,18 @@ test("Windows CI is uncapped unless an explicit slot root requests the workstati
       root: "C:\\w\\_locks", slots: 4, jobs: 8, diskFloorGb: 40,
     });
   }
+});
+
+test("a Mac takes the shared budget only where its slot root exists, and CI never does", t => {
+  const home = mkdtempSync(join(tmpdir(), "dohc-build-slot-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const host = { platform: "darwin", cores: 8, home };
+  assert.equal(macSlotRoot(home), join(home, "dev", "worktrees", ".locks"));
+  assert.equal(resolveBuildBudget({}, host), null, "an ordinary Mac runs uncapped");
+  mkdirSync(macSlotRoot(home), { recursive: true });
+  assert.deepEqual(resolveBuildBudget({}, host), { root: macSlotRoot(home), slots: 4, jobs: 2, diskFloorGb: 40 });
+  assert.equal(resolveBuildBudget({ CI: "true" }, host), null);
+  assert.equal(resolveBuildBudget({ DOHC_BUILD_SLOT_ROOT: join(home, "trial") }, host).root, join(home, "trial"));
 });
 
 test("released slots remove only their listeners and allow later interrupt cleanup", () => {
