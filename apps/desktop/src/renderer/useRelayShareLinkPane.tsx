@@ -392,8 +392,8 @@ function LinkAccessChoice(props: {
         onChange={props.onChange}
       />
       {props.access === "edit" && (
-        <p className="m-0 text-[12px] text-muted">
-          People who can edit can see this file's full History.
+        <p className="m-0 text-[11px] leading-relaxed text-subtle">
+          People who can edit can see the full History.
         </p>
       )}
     </>

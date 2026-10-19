@@ -85,6 +85,7 @@ import type {
   ShareProposalRow,
   ShareProposalState,
   FetchLogPageResult,
+  CurrentFileStateRow,
   CurrentFileStateSnapshot,
   LiveTicketLookup,
   LiveTicketMint,
@@ -1447,6 +1448,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   captureReadRevisionMatches(): () => boolean {
     return captureSqliteReadRevisionMatches(this.db);
+  }
+
+  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null {
+    return currentFilesStorage.currentObjectFile(this, input);
+  }
+
+  currentFileObjectId(input: { workspaceId: string; versionId: string; path: string }): string | undefined {
+    return currentFilesStorage.currentFileObjectId(this, input);
   }
 
   currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null {

@@ -476,6 +476,10 @@ export async function loadCurrentState(
       );
       return { ...caughtUp, meta: projection.meta };
     } catch (error: unknown) {
+      if (error instanceof ViewResponseError && error.status === 404) {
+        const meta = await loadMeta(session, signal);
+        if (meta.access !== "edit") continue;
+      }
       if (!(error instanceof EpochFloorChangedError)) throw error;
     }
   }

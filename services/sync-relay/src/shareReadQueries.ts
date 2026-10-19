@@ -56,8 +56,7 @@ export function createShareReadQueries(
     | "currentObjectBlobByteLength"
     | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
-    | "currentObjectPath"
-    | "readCurrentFileState"
+    | "currentObjectFile"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
@@ -195,6 +194,7 @@ export function createShareReadQueries(
     half?: "chat" | "files",
     recipient?: ReceivedRecipient,
     currentOnly = false,
+    epochLogFloor = 0,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -259,18 +259,14 @@ export function createShareReadQueries(
           const receivedObject = identity.object(recipient, workspaceId, objectId);
           if (typeof objectId !== "string" || !receivedObject) return reset;
           const versionId = targetVersionId(fileSelector);
-          const path = storage.currentObjectPath({ workspaceId, versionId, objectId });
-          const projected = path === null ? null : accountlessProjection.projectPath(path);
-          const current = path !== null && projected !== null
-            ? storage.readCurrentFileState({ workspaceId, versionId, selectorPaths: [path], limit: 1 })
-                .files.find(file => file.path === path)
-            : undefined;
+          const current = storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor });
+          const projected = current === null ? null : accountlessProjection.projectPath(current.path);
           return {
             relaySeq: row.relaySeq,
             opKind: "file.current",
             payload: {
               objectId: receivedObject,
-              file: current ? { objectId: receivedObject, path: projected,
+              file: current && projected !== null ? { objectId: receivedObject, path: projected,
                 blobSha256: current.blobSha256, contentKind: current.contentKind } : null,
             },
           };

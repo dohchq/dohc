@@ -143,7 +143,7 @@ it.each(["view", "comment"] as const)(
   },
 );
 
-it("current-only downgrade immediately removes an Edit link's earlier History", async () => {
+it("downgrading an Edit link refuses the raw log and historical blob routes", async () => {
   const storage = await newStorage(),
     h = editHandler(storage),
     link = await seed(h, "edit");
@@ -1167,6 +1167,49 @@ describe("relay capability reads", () => {
       "owner",
     ]) {
       expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it.each(["view", "comment"] as const)("keeps the %s feed equal to current files after refused moments", async (access) => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, access);
+    const occupied = "occupied\n";
+    const accepted = "accepted\n";
+    await putBlob(h, occupied);
+    await putBlob(h, accepted);
+    await putBlob(h, "stale\n");
+    await appendMoments(h, [
+      moment(3, "docs/taken.md", occupied, 1_300, { objectId: "object-taken" }),
+      moment(4, "docs/shared.md", accepted, 1_400, {
+        objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      }),
+    ]);
+    const snapshot = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+    const folded = accumulatorFromCurrentFiles(snapshot.files);
+    if (!folded) throw new Error("invalid snapshot");
+    let cursor = Number(snapshot.nextCursor);
+    const inventoryRead = vi.spyOn(storage, "readCurrentFileState");
+    const refused = [
+      moment(5, "docs/shared.md", "stale\n", 1_500, {
+        objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+      }),
+      moment(6, "docs/taken.md", accepted, 1_600, {
+        objectId: "object-shared", operation: "rename", beforePath: "docs/shared.md", beforeContent: accepted,
+      }),
+      moment(7, "docs/taken.md", "stale\n", 1_700, { objectId: "object-refused-create" }),
+    ];
+    for (const op of refused) {
+      inventoryRead.mockClear();
+      await appendMoments(h, [op]);
+      const page = await json(await h(linkRequest(seeded.capability,
+        `/sync/link/log?since=${cursor}&limit=100&current=true`)));
+      expect(page.ops).toHaveLength(1);
+      expect(inventoryRead).not.toHaveBeenCalled();
+      foldLogOps(folded, page.ops as RelayOp[]);
+      cursor = Number(page.nextCursor);
+      const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+      expect(filesFromAccumulator(folded)).toEqual(current.files);
     }
   });
 

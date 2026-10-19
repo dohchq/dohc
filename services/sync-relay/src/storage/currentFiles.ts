@@ -1,5 +1,5 @@
 import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
-import type { SqliteDb, CurrentFileStateSnapshot, SyncRelayLogRow } from "./types";
+import type { SqliteDb, CurrentFileStateRow, CurrentFileStateSnapshot, SyncRelayLogRow } from "./types";
 import { LINK_REVISION_SCAN_LIMIT, SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow } from "./rows";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -684,4 +684,34 @@ export function currentObjectPath(storage: StorageContext, input: { workspaceId:
        AND current.state_relay_seq > ?`,
   ).get(input.workspaceId, input.versionId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
   return typeof row?.path === "string" ? row.path : null;
+}
+
+export function currentObjectFile(storage: StorageContext, input: {
+  workspaceId: string; versionId: string; objectId: string; epochLogFloor: number;
+}): CurrentFileStateRow | null {
+  const row = storage.db.prepare(
+    `SELECT current.path, current.blob_sha256, current.content_kind
+     FROM sync_relay_object_moments moment INDEXED BY idx_sync_relay_object_moments_latest
+     JOIN sync_relay_current_files current
+       ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
+      AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
+     WHERE moment.workspace_id = ? AND moment.version_id = ? AND moment.object_id = ?
+       AND current.state_relay_seq > ?
+     ORDER BY moment.relay_seq DESC LIMIT 1`,
+  ).get(input.workspaceId, input.versionId, input.objectId, input.epochLogFloor);
+  return row ? { path: String(row.path), blobSha256: String(row.blob_sha256),
+    contentKind: row.content_kind === "binary" ? "binary" : "text" } : null;
+}
+
+export function currentFileObjectId(storage: StorageContext, input: {
+  workspaceId: string; versionId: string; path: string;
+}): string | undefined {
+  const row = storage.db.prepare(
+    `SELECT moment.object_id FROM sync_relay_current_files current
+     JOIN sync_relay_object_moments moment INDEXED BY idx_sync_relay_object_moments_path
+       ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
+      AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
+     WHERE current.workspace_id = ? AND current.version_id = ? AND current.path = ?`,
+  ).get(input.workspaceId, input.versionId, input.path);
+  return typeof row?.object_id === "string" ? row.object_id : undefined;
 }

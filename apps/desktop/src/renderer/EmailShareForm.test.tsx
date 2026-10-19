@@ -33,10 +33,10 @@ afterEach(() => {
 
 const spend = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
 
-it("discloses full History beside the edit choice", async()=>{
+it.each([["Trip"], ["first.md", "second.md"]])("discloses full History beside the edit choice for %j", async (...paths)=>{
   const user=userEvent.setup();
-  render(<EmailShareForm workspaceId="ws-1" target={{kind:"paths",paths:["Trip"]}} visible onDone={()=>{}} />);
-  const line="People who can edit can see this file's full History.";
+  render(<EmailShareForm workspaceId="ws-1" target={{kind:"paths",paths}} visible onDone={()=>{}} />);
+  const line="People who can edit can see the full History.";
   expect(screen.queryByText(line)).toBeNull();
   await user.click(screen.getByTestId("share-access-edit"));
   expect(screen.getByText(line)).toBeTruthy();

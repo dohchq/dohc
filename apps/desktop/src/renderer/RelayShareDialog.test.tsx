@@ -5867,16 +5867,16 @@ describe("advertised public Edit release", () => {
       : "Turn off editing for this link? The same link keeps working. Holders can view and comment.");
     expect(within(confirmation).getByRole("button", {name: access === "View" ? "Turn off editing" : "Use Comment access"})).toBeTruthy();
   });
-  it("offers Edit only after authenticated inventory advertises it", async () => {
+  it.each([["docs/plan.md"], ["docs"], ["docs/one.md", "docs/two.md"]])("offers Edit with its History disclosure for %j", async (...paths) => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});
     const user = userEvent.setup();
-    render(<RelayShareDialog workspaceId="ws-1" target={{kind: "paths", paths: ["docs/plan.md"]}} onClose={() => {}} />);
+    render(<RelayShareDialog workspaceId="ws-1" target={{kind: "paths", paths}} onClose={() => {}} />);
     await showLinkPane(user);
     const choices = screen.getByRole("radiogroup", {name: "Link access"});
     await user.click(await within(choices).findByRole("radio", {name: "Edit"}));
-    expect(screen.getByText("People who can edit can see this file's full History.")).toBeTruthy();
+    expect(screen.getByText("People who can edit can see the full History.")).toBeTruthy();
     await user.click(screen.getByRole("button", {name: "Create link"}));
-    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({workspaceId: "ws-1", paths: ["docs/plan.md"], access: "edit"});
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({workspaceId: "ws-1", paths, access: "edit"});
   });
   it("does not offer Edit for a pinned version even when advertised", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});

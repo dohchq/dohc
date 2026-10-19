@@ -50,6 +50,26 @@ it.each(["view", "comment"] as const)("current-only %s loading needs no History 
   } finally {fetcher.mockRestore();}
 });
 
+it("retries current state if Edit narrows during the initial raw catch-up", async () => {
+  const file: SharedFile = { path: "current.md", blobSha256: "a".repeat(64), contentKind: "text" };
+  const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+  const paths: string[] = [];
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+    const path = fullRequestPath(input);
+    paths.push(path);
+    if (path === "/api/view/current") return currentPage([file], 9, 0, paths.length === 1 ? DEFAULT_META : viewMeta);
+    if (path === "/api/view/log?since=9&limit=500") return new Response(null, { status: 404 });
+    if (path === "/api/view/meta") return jsonResponse(viewMeta);
+    throw new Error(path);
+  });
+  try {
+    const loaded = await loadCurrentState(SESSION);
+    expect(loaded.meta.access).toBe("view");
+    expect(loaded.fileAccumulator.get(file.path)).toEqual(file);
+    expect(paths).toEqual(["/api/view/current", "/api/view/log?since=9&limit=500", "/api/view/meta", "/api/view/current"]);
+  } finally { fetcher.mockRestore(); }
+});
+
 // Follower log requests carry `&hold=30000`; most suites match the held-log
 // path without it, so strip the suffix unless a test opts into the full path.
 function requestPath(input: RequestInfo | URL): string {
@@ -331,6 +351,58 @@ describe("App", () => {
       expect(inventories).toBe(1);
     },
   );
+
+  it.each(["downgrade", "reset"] as const)("refreshes current state after a follower %s and keeps following", async (reason) => {
+    const objectId = "share-object:v1:" + "a".repeat(64);
+    const file: SharedFile = { path: "note.md", objectId, blobSha256: "a".repeat(64), contentKind: "text" };
+    const meta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+    const paths: string[] = [];
+    let inventories = 0;
+    let deliver: ((response: Response) => void) | undefined;
+    let following: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = fullRequestPath(input);
+      paths.push(path);
+      if (path === "/api/view/current") {
+        inventories++;
+        return inventories === 1
+          ? currentPage([file], 7, 0, reason === "downgrade" ? DEFAULT_META : meta)
+          : currentPage([{ ...file, blobSha256: "b".repeat(64) }], 8, 0, meta);
+      }
+      if (path === "/api/view/meta") return jsonResponse(meta);
+      if (path === "/api/view/log?since=7&limit=500") return logOpsPage([], 7);
+      if (path === `/api/view/log?since=7&limit=500${reason === "reset" ? "&current=true" : ""}&hold=30000`) {
+        return new Promise<Response>(resolve => { deliver = resolve; });
+      }
+      if (path === "/api/view/log?since=8&limit=500&current=true&hold=30000") {
+        return new Promise<Response>(resolve => { following = resolve; });
+      }
+      if (path === "/api/view/blob/" + file.blobSha256) return new Response("# Original");
+      if (path === "/api/view/blob/" + "b".repeat(64)) return new Response("# Refreshed");
+      if (path === "/api/view/blob/" + "c".repeat(64)) return new Response("# Changed again");
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    }));
+    await renderApp();
+    await settle(() => deliver !== undefined && container.textContent.includes("Original"));
+    await act(async () => deliver?.(reason === "downgrade"
+      ? new Response(null, { status: 404 })
+      : logOpsPage([{ relaySeq: 8, opKind: "files.reset", payload: {} }], 8)));
+    await settle(() => following !== undefined && container.textContent.includes("Refreshed"));
+    expect(inventories).toBe(2);
+    if (reason === "downgrade") {
+      expect(paths.indexOf("/api/view/meta")).toBeLessThan(paths.lastIndexOf("/api/view/current"));
+      expect(paths.filter(path => path.includes("/api/view/log") && !path.includes("current=true")))
+        .toEqual(["/api/view/log?since=7&limit=500", "/api/view/log?since=7&limit=500&hold=30000"]);
+    }
+    await act(async () => following?.(logOpsPage([{
+      relaySeq: 9, opKind: "file.current", payload: { objectId, file: { ...file, blobSha256: "c".repeat(64) } },
+    }], 9)));
+    await settle(() => container.textContent.includes("Changed again"));
+    expect(inventories).toBe(2);
+    expect(container.querySelector("main.state")).toBeNull();
+  });
 
   it.each([
     ["view", null, "doc.md"],

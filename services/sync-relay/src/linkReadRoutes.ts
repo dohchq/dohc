@@ -31,7 +31,7 @@ export function createLinkReadRoutes(
     | "currentFileBlobByteLength"
     | "getBlob"
     | "automationSwitchableFolder"
-    | "objectIdAtPathInVersion"
+    | "currentFileObjectId"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -122,7 +122,7 @@ export function createLinkReadRoutes(
         if (path === null) throw notFound();
         return {
           path,
-          objectId: identity.object(["link", fresh.grantId], share.workspaceId, storage.objectIdAtPathInVersion({ workspaceId: share.workspaceId, versionId: targetVersionId(fresh.effectiveSelector), path: file.path })),
+          objectId: identity.object(["link", fresh.grantId], share.workspaceId, storage.currentFileObjectId({ workspaceId: share.workspaceId, versionId: targetVersionId(fresh.effectiveSelector), path: file.path })),
           blobSha256: file.blobSha256,
           contentKind: file.contentKind,
           ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml` ? { automationSwitchable: fresh.access === "edit"
@@ -170,6 +170,7 @@ export function createLinkReadRoutes(
 
         ["link", capability.grantId],
         currentOnly,
+        epochLogFloor,
       );
       if (
         hold > 0 &&
@@ -209,6 +210,7 @@ export function createLinkReadRoutes(
 
                       ["link", capability.grantId],
                       currentOnly,
+                      currentEpochLogFloor,
                     );
                     if (checked.ops.length > 0 || checked.hasMore) return false;
                     scanSince = checked.nextCursor;
@@ -242,6 +244,7 @@ export function createLinkReadRoutes(
 
             ["link", capability.grantId],
             currentOnly,
+            currentEpochLogFloor,
           );
           scanSince = page.nextCursor;
           if (
@@ -275,6 +278,7 @@ export function createLinkReadRoutes(
 
           ["link", capability.grantId],
           currentOnly,
+          currentEpochLogFloor,
         );
         freshRead();
         return linkJsonResponse(capability.shareId, capability.grantId, {
