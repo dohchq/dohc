@@ -1544,28 +1544,25 @@ fn publish_undo_member(
     }
     let rename = m.operation == dohc_engine_domain::MomentOp::Rename;
     let job_identity = binary_rollback_job_identity(ws, version_id, &m.moment_id);
-    let spec =
-        MaterializationJobSpec {
-            job_id: if rename {
-                binary_rename_write_job_id(&job_identity)
-            } else {
-                job_identity.clone()
-            },
-            workspace_id: ws.into(),
-            target_path: path,
-            content_sha256: sha.clone(),
-            preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
-                Preimage::Present(m.before_blob_sha256.clone().ok_or(
-                    DomainError::StateCorrupt {
-                        reason: "link inverse preimage",
-                    },
-                )?)
-            } else {
-                Preimage::Absent
-            },
-            target_generation: m.moment_order,
-            now_ms: now,
-        };
+    let spec = MaterializationJobSpec {
+        job_id: if rename {
+            binary_rename_write_job_id(&job_identity)
+        } else {
+            job_identity.clone()
+        },
+        workspace_id: ws.into(),
+        target_path: path,
+        content_sha256: sha.clone(),
+        preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
+            m.before_blob_sha256
+                .clone()
+                .map_or(Preimage::Absent, Preimage::Present)
+        } else {
+            Preimage::Absent
+        },
+        target_generation: m.moment_order,
+        now_ms: now,
+    };
     enqueue_job(tx, &spec)?;
     if rename {
         enqueue_delete_job(
