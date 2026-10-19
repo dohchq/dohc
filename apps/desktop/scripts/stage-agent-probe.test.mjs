@@ -38,7 +38,7 @@ test("agent probe staging refuses unsupported targets and incomplete closures", 
 test("packaged agent probe runs on the compiler's pinned Node and checks its closure",
   { skip: process.platform !== "win32" || process.arch !== "x64", timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-agent-probe-packaged-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const sourceRoot = join(root, "source");
   const compilerRoot = join(sourceRoot, "resources/app-compiler");
   await mkdir(compilerRoot, { recursive: true });
