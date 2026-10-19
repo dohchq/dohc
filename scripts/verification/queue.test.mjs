@@ -681,6 +681,11 @@ test("a lane's clean retries only after Git ran and failed, and fails when the r
   const timedOut = Object.assign(new Error("git failed (timed out after 900000ms)."), { timedOut: true });
   await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw timedOut; }, tmpdir()), /timed out/);
   assert.deepEqual(calls, ["clean"], "a timeout or a stop fails the lane without touching it again");
+  calls.length = 0;
+  // Windows' job relay exits with 0xD0C5 when Git never started.
+  const neverStarted = Object.assign(new Error("git failed (53445)."), { commandExitFailure: true, exitCode: 0xD0C5 });
+  await assert.rejects(cleanCheckout(async args => { calls.push(args[0]); throw neverStarted; }, tmpdir()), /53445/);
+  assert.deepEqual(calls, ["clean"]);
 });
 
 test("another run waits while free memory is low, but a lone run still starts", async t => {

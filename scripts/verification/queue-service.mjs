@@ -70,7 +70,10 @@ export async function cleanCheckout(gitOutput, root) {
   const caches = ["node_modules", "target"];
   const excludes = caches.map(name => `--exclude=${name}`);
   const clean = ["clean", "-ffdx", ...excludes];
-  try { return await gitOutput(clean); } catch (error) { if (!error?.commandExitFailure) throw error; }
+  try { return await gitOutput(clean); } catch (error) {
+    // windows-job.ps1 and windows-command.mjs exit with 0xD0C5 when Git never started.
+    if (!error?.commandExitFailure || error.exitCode === 0xD0C5) throw error;
+  }
   // What the clean left, as raw paths: -z neither quotes nor translates them.
   for (const path of (await gitOutput(["ls-files", "-z", "--others", "--directory", ...excludes])).split("\0")) {
     if (path) await makeWritable(join(root, path), caches);
