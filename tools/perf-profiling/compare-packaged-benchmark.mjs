@@ -15,11 +15,14 @@ import { summarize } from './summarize-packaged-benchmark.mjs';
 // Alternate baseline and candidate runs. --margin-percent, --automation-margin-percent and --floor-ms
 // control the recorded margins. The 17 ms floor is one 60 Hz frame, matching the timing endpoints.
 export const DEFAULT_MARGIN = { percent: 10, automationPercent: 25, floorMs: 17 };
+// Bump when a measurement's start or end changes. A receipt without the setting is version 1.
+// Version 2 starts a document open at the Explorer click, after the harness scrolls the row into view.
+export const METRIC_VERSION = 2;
 const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'documentMode', 'presencePeers', 'selectionHz', 'peerTypingHz', 'presenceTiming'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'documentMode', 'presencePeers', 'selectionHz', 'peerTypingHz', 'presenceTiming', 'typingTrace'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';
@@ -42,6 +45,10 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   const problems = [];
   for (const [label, summary] of [['baseline', baseline], ['candidate', candidate]]) {
     if (summary.status !== 'complete') problems.push(`The ${label} receipt is ${summary.status}, not complete.`);
+  }
+  const version = summary => summary.settings?.metricVersion ?? 1;
+  if (version(baseline) !== version(candidate)) {
+    problems.push(`The baseline uses metric version ${version(baseline)} and the candidate version ${version(candidate)}. Measure both packages with the same harness.`);
   }
   for (const key of COMPARED_SETTINGS.filter(key => candidate.settings?.scenario !== 'document-size' || !['runCount'].includes(key))) {
     if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key])) problems.push(`The receipts differ in ${key}.`);
