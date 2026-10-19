@@ -93,6 +93,11 @@ impl ActorHandle {
                         && usize::try_from(completed).ok() == Some(jobs.len()),
                 }));
             }
+            store.read_with(|conn| -> Result<(), RuntimeError> {
+                let prior: Option<String> = conn.query_row("SELECT r.kind FROM history_undo_plans p JOIN engine_requests r ON r.request_id=p.request_id WHERE p.workspace_id=?1 AND p.operation_id=?2 AND p.request_id!=?3",params![ws,operation,request],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
+                if let Some(kind)=prior { return Err(DomainError::UndoRefused {path:operation.clone(),reason:if kind=="history-undo-complete" {"Operation already undone"} else {"Undo in progress"}}.into()); }
+                Ok(())
+            })?;
             let available = store.read_with(|conn| -> Result<bool, DomainError> {
                 dohc_engine_domain::ensure_operation_published_in(conn, &ws, &version, &operation)?;
                 conn.query_row(
@@ -335,21 +340,10 @@ fn undo_job_ids(ws: &str, version: &str, m: &OperationMoment) -> Vec<String> {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static UNDO_PROBE_OBSERVER: std::cell::RefCell<Option<Box<dyn Fn()>>> = std::cell::RefCell::new(None);
-}
-
 fn probe_undo_source(
     probe: &dohc_engine_files::ProjectionProbe,
     path: &str,
 ) -> dohc_engine_files::ProjectionTargetState {
-    #[cfg(test)]
-    UNDO_PROBE_OBSERVER.with(|observer| {
-        if let Some(observer) = observer.borrow().as_ref() {
-            observer();
-        }
-    });
     probe.probe(path, dohc_engine_files::ProjectionTargetKind::Plaintext)
 }
 
@@ -444,6 +438,22 @@ fn place_undo_members(
 }
 
 #[cfg(test)]
+type FixtureHook = Box<dyn FnOnce(&mut EngineStore) + Send>;
+#[cfg(test)]
+fn fixture_hooks() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, FixtureHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, FixtureHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+#[cfg(test)]
+fn fixture_setup(store: &EngineStore, hook: impl FnOnce(&mut EngineStore) + Send + 'static) {
+    fixture_hooks()
+        .lock()
+        .unwrap()
+        .insert(store.database_path().to_path_buf(), Box::new(hook));
+}
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn test_undo_in_turns(
     store: &mut EngineStore,
@@ -461,32 +471,53 @@ pub(super) fn test_undo_in_turns(
     drop(std::mem::replace(store, reader));
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, now)?.actor;
-    let outcome = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let result = actor
-            .history_undo_in_turns(
-                ws.into(),
-                operation.into(),
-                request.into(),
-                author.map(str::to_owned),
-                root.to_path_buf(),
-                faults,
-                now,
-                [Arc::default(), Arc::default()],
-                Arc::new(()),
-                crate::CancellationToken::new(),
-            )
-            .await?;
-        Ok(actor
-            .history_undo_place(
-                ws.into(),
-                result,
-                root.to_path_buf(),
-                Arc::new(()),
-                now,
-                |_| {},
-            )
-            .await)
+    let link_drain = actor.hold_link_drain();
+    let outcome = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    actor
+                        .run(|store, _| {
+                            let hook = fixture_hooks()
+                                .lock()
+                                .unwrap()
+                                .remove(store.database_path());
+                            if let Some(hook) = hook {
+                                hook(store);
+                            }
+                            Ok(())
+                        })
+                        .await?;
+                    let result = actor
+                        .history_undo_in_turns(
+                            ws.into(),
+                            operation.into(),
+                            request.into(),
+                            author.map(str::to_owned),
+                            root.to_path_buf(),
+                            faults,
+                            now,
+                            [Arc::default(), Arc::default()],
+                            Arc::new(()),
+                            crate::CancellationToken::new(),
+                        )
+                        .await?;
+                    Ok(actor
+                        .history_undo_place(
+                            ws.into(),
+                            result,
+                            root.to_path_buf(),
+                            Arc::new(()),
+                            now,
+                            |_| {},
+                        )
+                        .await)
+                })
+            })
+            .join()
+            .unwrap()
     });
+    drop(link_drain);
     supervisor.close_all()?;
     *store = EngineStore::open(&db, now)?;
     outcome
@@ -621,10 +652,13 @@ mod tests {
             .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
             .unwrap()
     }
-    struct CrashCommit;
+    #[derive(Default)]
+    struct CrashCommit(std::sync::atomic::AtomicUsize);
     impl FaultInjector for CrashCommit {
         fn poll(&self, p: FaultPoint) -> FaultAction {
-            if p == FaultPoint::StorageAfterCommitBeforeAck {
+            if p == FaultPoint::StorageAfterCommitBeforeAck
+                && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+            {
                 FaultAction::Crash
             } else {
                 FaultAction::Continue
@@ -805,19 +839,22 @@ mod tests {
         let (root, mut store) = fixture();
         seed(&mut store, root.path(), "old.md", "one", "One");
         rename(&mut store, root.path(), "old.md", "new.md", "move", OP);
-        let conn = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
-        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
-        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = observed.clone();
-        UNDO_PROBE_OBSERVER.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                flag.set(conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok());
-            }))
-        });
+        let db = engine_db_path(&root).unwrap();
+        turns::tests::set_disk_observer(
+            root.path().to_path_buf(),
+            Some(Arc::new(move || {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+                assert!(conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok());
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })),
+        );
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
-        UNDO_PROBE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+        turns::tests::set_disk_observer(root.path().to_path_buf(), None);
         assert!(result.unwrap().materialized);
-        assert!(observed.get());
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
     }
     #[tokio::test]
     async fn history_operation_old_rename_cannot_reverse_a_later_move() {
@@ -884,13 +921,13 @@ mod tests {
         );
     }
     #[test]
-    fn history_operation_batches_search_deletes() {
-        use std::cell::Cell;
-        thread_local! {static DELETES:Cell<usize>=const {Cell::new(0)};}
+    fn history_operation_indexes_each_inverse_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DELETES: AtomicUsize = AtomicUsize::new(0);
         fn trace(event: rusqlite::trace::TraceEvent<'_>) {
             if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
                 if sql.starts_with("DELETE FROM engine_search_files_fts") {
-                    DELETES.with(|n| n.set(n.get() + 1));
+                    DELETES.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -926,16 +963,18 @@ mod tests {
                 )
             })
             .unwrap();
-        DELETES.with(|n| n.set(0));
-        store
-            .read_with(|conn| {
-                conn.trace_v2(
-                    rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-                    Some(trace),
-                );
-                Ok::<_, RuntimeError>(())
-            })
-            .unwrap();
+        DELETES.store(0, Ordering::Relaxed);
+        fixture_setup(&store, |store| {
+            store
+                .read_with(|conn| {
+                    conn.trace_v2(
+                        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                        Some(trace),
+                    );
+                    Ok::<_, RuntimeError>(())
+                })
+                .unwrap();
+        });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
             .read_with(|conn| {
@@ -945,9 +984,9 @@ mod tests {
             .unwrap();
         assert!(result.unwrap().materialized);
         assert_eq!(
-            DELETES.with(Cell::get),
-            1,
-            "one group must scan the search table once"
+            DELETES.load(Ordering::Relaxed),
+            8,
+            "one search delete per member turn"
         );
         let paths = store
             .read_with(|conn| {
@@ -960,7 +999,7 @@ mod tests {
         assert!(paths.iter().all(|p| p.starts_with("old-")));
     }
     #[test]
-    fn history_operation_batches_completion_commits() {
+    fn history_operation_commits_plan_inverses_and_immediate_placements() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let (root, mut store) = fixture();
         for i in 0..8 {
@@ -984,14 +1023,16 @@ mod tests {
         }
         let commits = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&commits);
-        store
-            .read_with(|conn| {
-                conn.commit_hook(Some(move || {
-                    observed.fetch_add(1, Ordering::Relaxed);
-                    false
-                }))
-            })
-            .unwrap();
+        fixture_setup(&store, move |store| {
+            store
+                .read_with(|conn| {
+                    conn.commit_hook(Some(move || {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }))
+                })
+                .unwrap();
+        });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
             .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
@@ -1001,8 +1042,8 @@ mod tests {
         let retention_commits = if cfg!(unix) { 8 } else { 0 };
         assert_eq!(
             commits.load(Ordering::Relaxed),
-            2 + retention_commits,
-            "one inverse commit, one completion commit, and per-file retention commits"
+            1 + 8 + 8 + retention_commits,
+            "one plan, eight inverses, eight placements and per-file retention commits"
         );
     }
 
@@ -1307,7 +1348,12 @@ mod tests {
         seed(&mut store, root.path(), "old.md", "one", "One");
         rename(&mut store, root.path(), "old.md", "new.md", "rename", OP);
         assert!(matches!(
-            undo(&mut store, root.path(), "undo", Arc::new(CrashCommit)),
+            undo(
+                &mut store,
+                root.path(),
+                "undo",
+                Arc::new(CrashCommit::default())
+            ),
             Err(RuntimeError::OperationCrashed)
         ));
         assert_eq!(count(&store), 3);
@@ -1359,7 +1405,7 @@ mod tests {
                     &request,
                     None,
                     root.path(),
-                    Arc::new(CrashCommit),
+                    Arc::new(CrashCommit::default()),
                     10
                 ),
                 Err(RuntimeError::OperationCrashed)

@@ -4340,6 +4340,10 @@ mod tests {
                 "v2-agent-run-failure-handled",
                 "56e87a5adcc33c2af1f301c3c25c91fe7c6b1c738f34e35ccd629080d89bcc50",
             ),
+            (
+                "v2-history-undo-plans",
+                "804873129399ca333652a5efdfc20b18e2219671d068e70ee2a78dc3a2c92783",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {

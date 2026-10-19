@@ -1303,12 +1303,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn history_operation_vacated_path_is_reserved_during_placement() {
+    async fn history_operation_restored_path_is_leased_during_final_placement() {
         undo_placement_proof(1).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn history_operation_retry_held_during_partial_placement() {
+    async fn history_operation_retry_held_after_immediate_rename_placement() {
         undo_placement_proof(2).await;
     }
 
@@ -1485,13 +1485,13 @@ mod tests {
         .unwrap();
         if mode == 1 {
             let admission = service
-                .ensure_path_not_leased(&open, "main", "new.md")
+                .ensure_path_not_leased(&open, "main", "old.md")
                 .await;
             if admission.is_ok() {
                 probe.release_undo_placement();
                 let _ = undo.await;
                 service.workspace_close(Some(handle)).await.unwrap();
-                panic!("a vacated path with pending Undo deletion must refuse writes");
+                panic!("the restored object must stay leased until final placement");
             }
         }
         let reply = tokio::time::timeout(Duration::from_secs(2), &mut undo).await;
@@ -1503,8 +1503,8 @@ mod tests {
         }
         let result = reply.unwrap().unwrap().unwrap();
         assert_eq!(result["materialized"], false);
-        assert!(scratch.path().join("new.md").exists());
-        assert!(!scratch.path().join("old.md").exists());
+        assert!(scratch.path().join("old.md").exists());
+        assert!(!scratch.path().join("new.md").exists());
         if mode == 2 {
             let replay = open
                 .actor
@@ -1518,23 +1518,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let member = &replay.moments[0];
-            let id = dohc_engine_domain::binary_rollback_job_identity(
-                "undo-placement",
-                "main",
-                &member.moment_id,
-            );
-            open.actor
-                .materialize_replay_selected_for_fence(
-                    open.root.clone(),
-                    "undo-placement".into(),
-                    Arc::new(service.self_writes.scoped(&open.root)),
-                    vec![dohc_engine_domain::binary_rename_write_job_id(&id)],
-                    5,
-                )
-                .await
-                .unwrap();
             assert!(scratch.path().join("old.md").exists());
-            assert!(scratch.path().join("new.md").exists());
+            assert!(!scratch.path().join("new.md").exists());
             let retried = service
                 .capture_retry_held(
                     &RequestContext::unbounded(),
@@ -1549,10 +1534,7 @@ mod tests {
                 std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
                 "Content"
             );
-            assert_eq!(
-                std::fs::read_to_string(scratch.path().join("new.md")).unwrap(),
-                "Content"
-            );
+            assert!(!scratch.path().join("new.md").exists());
             let pending = open
                 .actor
                 .preflight_history_undo(
@@ -1564,7 +1546,10 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(!pending.materialized);
+            assert!(
+                pending.materialized,
+                "the rename was placed before the reply"
+            );
             assert_eq!(pending.moments[0].moment_id, member.moment_id);
             assert_eq!(
                 open.actor
@@ -1634,7 +1619,7 @@ mod tests {
             .expect("committed retry must not wait for placement")
             .expect("committed retry must not reconcile again");
         assert_eq!(retry["deduped"], true);
-        assert_eq!(retry["materialized"], false);
+        assert_eq!(retry["materialized"], true);
         assert_eq!(
             retry["compensationOperationId"],
             result["compensationOperationId"]

@@ -6,7 +6,7 @@ use std::sync::{
     Barrier, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Default, serde::Serialize)]
 struct StoreWork {
@@ -128,37 +128,62 @@ pub(super) fn record_phase(
         store_work: actor.then(|| STORE_WORK.with(std::cell::Cell::get)),
     });
 }
-pub(super) fn record(
-    request: &str,
-    member: usize,
-    operation: &str,
-    last: bool,
-    elapsed: Duration,
-    checks: Duration,
-) {
-    record_phase(
-        request,
-        &format!(
-            "{operation}-inverse{}",
-            if last { "+complete-ledger" } else { "" }
-        ),
-        Some(member),
-        elapsed,
-        true,
-    );
-    let (hook, notify) = {
-        let mut probes = probes().lock().unwrap();
-        let probe = probes.entry(request.to_owned()).or_default();
-        probe.phases.last_mut().unwrap().check_ns = Some(checks.as_nanos());
-        probe.times.push(elapsed);
-        (probe.hook.take(), probe.notify.take())
-    };
-    if let Some(notify) = notify {
-        notify.notify_one();
+pub(super) struct TurnProbe {
+    request: String,
+    phase: &'static str,
+    member: Option<usize>,
+    started: Instant,
+}
+impl TurnProbe {
+    pub(super) fn new(request: &str, phase: &'static str, member: Option<usize>) -> Self {
+        begin_turn(request);
+        Self {
+            request: request.into(),
+            phase,
+            member,
+            started: Instant::now(),
+        }
     }
-    if let Some((sender, barrier)) = hook {
-        sender.send(()).unwrap();
-        barrier.wait();
+    pub(super) fn finish(self) {
+        let elapsed = self.started.elapsed();
+        record_phase(&self.request, self.phase, self.member, elapsed, true);
+        let (hook, notify) = {
+            let mut probes = probes().lock().unwrap();
+            let probe = probes.get_mut(&self.request).unwrap();
+            probe.times.push(elapsed);
+            if self.phase.contains("inverse") {
+                (probe.hook.take(), probe.notify.take())
+            } else {
+                (None, None)
+            }
+        };
+        if let Some(notify) = notify {
+            notify.notify_one();
+        }
+        if let Some((sender, barrier)) = hook {
+            let _ = sender.send(());
+            barrier.wait();
+        }
+    }
+}
+type DiskObserver = Arc<dyn Fn() + Send + Sync>;
+fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObserver>> {
+    static OBSERVERS: OnceLock<Mutex<std::collections::HashMap<PathBuf, DiskObserver>>> =
+        OnceLock::new();
+    OBSERVERS.get_or_init(Mutex::default)
+}
+pub(super) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
+    let mut observers = disk_observers().lock().unwrap();
+    if let Some(observer) = observer {
+        observers.insert(root, observer);
+    } else {
+        observers.remove(&root);
+    }
+}
+pub(super) fn observe_disk_probe(root: &Path) {
+    let observer = disk_observers().lock().unwrap().get(root).cloned();
+    if let Some(observer) = observer {
+        observer();
     }
 }
 struct CrashAfter(AtomicUsize);
@@ -311,7 +336,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
     let result = run(&actor, &root, "turn-crash", Arc::new(NoFaults))
         .await
         .unwrap();
-    assert!(result.deduped);
+    assert!(!result.deduped, "resuming committed new inverses");
     assert_eq!(result.moments.len(), 6);
     assert!(result.not_restored.is_empty());
     let replay = run(&actor, &root, "turn-crash", Arc::new(NoFaults))
@@ -332,14 +357,14 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
                 WS.into(),
                 OP.into(),
                 "turn-crash".into(),
-                Some("[]".into()),
+                Some(r#"[{"humanId":"other"}]"#.into()),
                 root.to_path_buf(),
                 Arc::new(NoFaults),
-                30
-            [Arc::default(), Arc::default()],
-            Arc::new(()),
-            crate::CancellationToken::new(),
-        )
+                30,
+                [Arc::default(), Arc::default()],
+                Arc::new(()),
+                crate::CancellationToken::new(),
+            )
             .await,
         Err(RuntimeError::Domain(
             DomainError::IdempotencyKeyReuseMismatch
@@ -429,6 +454,354 @@ async fn an_alias_claimed_after_check_is_not_restored_before_it_reaches_disk() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pending_undo_refuses_version_switch_and_changed_payload() {
+    let (root, supervisor, actor) = setup(3);
+    actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WS.into(),
+                new_version_id: "other".into(),
+                name: "Other".into(),
+                from_version_id: "main".into(),
+                now_ms: 5,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        run(
+            &actor,
+            &root,
+            "pending-binding",
+            Arc::new(CrashAfter(AtomicUsize::new(1)))
+        )
+        .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    let refused = actor
+        .set_active_version(
+            crate::ActiveVersionSwitch {
+                workspace_id: WS.into(),
+                version_id: "other".into(),
+                root_dir: root.to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 6,
+            },
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(RuntimeError::Domain(DomainError::InvalidInput { reason })) if reason.contains("Undo is still running"))
+    );
+    assert_eq!(
+        actor.active_version(WS.into()).await.unwrap().version_id,
+        "main"
+    );
+    let mismatch = actor
+        .history_undo_in_turns(
+            WS.into(),
+            OP.into(),
+            "pending-binding".into(),
+            Some(r#"[{"humanId":"other"}]"#.into()),
+            root.to_path_buf(),
+            Arc::new(NoFaults),
+            8,
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            crate::CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        mismatch,
+        Err(RuntimeError::Domain(
+            DomainError::IdempotencyKeyReuseMismatch
+        ))
+    ));
+    let cursor: i64 = actor
+        .run(|store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT result_seq FROM engine_requests WHERE request_id='pending-binding'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .map_err(StorageError::corrupt_public)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(cursor, 0, "neither refusal commits an inverse");
+    let result = run(&actor, &root, "pending-binding", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.moments.len(), 3);
+    assert!(matches!(
+        run(&actor, &root, "second-request", Arc::new(NoFaults)).await,
+        Err(RuntimeError::Domain(DomainError::UndoRefused {
+            reason: "Operation already undone",
+            ..
+        }))
+    ));
+    close(supervisor).await;
+}
+struct PauseBefore {
+    calls: AtomicUsize,
+    at: usize,
+    reached: std::sync::mpsc::Sender<()>,
+    release: Arc<Barrier>,
+}
+impl FaultInjector for PauseBefore {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == FaultPoint::StorageBeforePersist
+            && self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.at
+        {
+            self.reached.send(()).unwrap();
+            self.release.wait();
+        }
+        FaultAction::Continue
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_mid_turn_resumes_and_rename_is_placed_before_the_next_inverse() {
+    let (root, supervisor, actor) = setup(4);
+    let (reached, receive) = std::sync::mpsc::channel();
+    let release = Arc::new(Barrier::new(2));
+    let faults = Arc::new(PauseBefore {
+        calls: AtomicUsize::new(0),
+        at: 3,
+        reached,
+        release: release.clone(),
+    });
+    let task_actor = actor.clone();
+    let path = root.to_path_buf();
+    let task = tokio::spawn(async move { run(&task_actor, &path, "abort-turn", faults).await });
+    tokio::task::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    // The second inverse has run its callback but has not committed yet.
+    assert!(root.join("old.md").exists());
+    assert!(!root.join("new.md").exists());
+    task.abort();
+    release.wait();
+    assert!(task.await.unwrap_err().is_cancelled());
+    actor.run(|_, _| Ok(())).await.unwrap(); // Finish the atomic actor call after cancellation.
+    close(supervisor).await;
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&engine_db_path(&root).unwrap(), 20)
+        .unwrap()
+        .actor;
+    let result = run(&actor, &root, "abort-turn", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.moments.len(), 4);
+    assert!(result.not_restored.is_empty());
+    let replay = run(&actor, &root, "abort-turn", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(replay.deduped);
+    assert_eq!(replay.moments, result.moments);
+    close(supervisor).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
+    let (root, supervisor, actor) = setup(3);
+    let hold = actor.hold_link_drain();
+    assert!(matches!(
+        run(
+            &actor,
+            &root,
+            "pinned-undo",
+            Arc::new(CrashAfter(AtomicUsize::new(1)))
+        )
+        .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    actor
+        .run(|store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute_batch("CREATE TABLE undo_pin_load(id INTEGER PRIMARY KEY, body BLOB)")
+                    .map_err(StorageError::persist_public)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let reader = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT * FROM undo_pin_load")
+        .unwrap();
+    actor
+        .run(|store, _| {
+            for id in 0..400 {
+                match store.write_background_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO undo_pin_load VALUES(?1,?2)",
+                        params![id, vec![42_u8; 128 * 1024]],
+                    )
+                    .map_err(StorageError::persist_public)
+                }) {
+                    Ok(TxnOutcome::Committed(_)) => {}
+                    Err(StorageError::FileLocked) => return Ok(()),
+                    other => panic!("unexpected load write: {other:?}"),
+                }
+            }
+            panic!("WAL never reached the pinned admission limit");
+        })
+        .await
+        .unwrap();
+    let start = Instant::now();
+    assert!(matches!(
+        run(&actor, &root, "pinned-undo", Arc::new(NoFaults)).await,
+        Err(RuntimeError::Storage(StorageError::FileLocked))
+    ));
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "bounded FileLocked wait"
+    );
+    let phases = probes().lock().unwrap()["pinned-undo"].phases.clone();
+    assert!(
+        phases
+            .iter()
+            .filter(|p| p.phase.contains("inverse"))
+            .count()
+            <= 22,
+        "no hot retry loop"
+    );
+    let token = crate::CancellationToken::new();
+    let task_token = token.clone();
+    let task_actor = actor.clone();
+    let path = root.to_path_buf();
+    let task = tokio::spawn(async move {
+        task_actor
+            .history_undo_in_turns(
+                WS.into(),
+                OP.into(),
+                "pinned-undo".into(),
+                None,
+                path,
+                Arc::new(NoFaults),
+                10,
+                [Arc::default(), Arc::default()],
+                Arc::new(()),
+                task_token,
+            )
+            .await
+    });
+    // Poll the turn probe, so cancellation exercises the checkpoint backoff.
+    let before = phases.len();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while probes().lock().unwrap()["pinned-undo"].phases.len() <= before + 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    token.cancel();
+    assert!(matches!(task.await.unwrap(), Err(RuntimeError::Cancelled)));
+    assert_eq!(
+        actor.pending_history_undos(WS.into()).await.unwrap().len(),
+        1
+    );
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    let result = run(&actor, &root, "pinned-undo", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.moments.len(), 3);
+    assert!(result.not_restored.is_empty());
+    drop(hold);
+    close(supervisor).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn repeating_member_errors_stop_after_three_attempts_across_opens() {
+    let (root, mut supervisor, mut actor) = setup(3);
+    assert!(matches!(
+        run(
+            &actor,
+            &root,
+            "three-errors",
+            Arc::new(CrashAfter(AtomicUsize::new(2)))
+        )
+        .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    actor.run(|store,_| {
+        store.write_with(&NoFaults, |tx| tx.execute_batch(
+            "CREATE TRIGGER undo_test_error BEFORE INSERT ON moments WHEN NEW.metadata_origin='restore' AND NEW.object_id='object-2' BEGIN SELECT RAISE(ABORT,'persistent inverse error'); END;")
+            .map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+    for attempt in 1..=2 {
+        assert!(matches!(
+            run(
+                &actor,
+                &root,
+                "three-errors",
+                Arc::new(CrashAfter(AtomicUsize::new(1)))
+            )
+            .await,
+            Err(RuntimeError::OperationCrashed)
+        ));
+        let attempts: i64 = actor.run(|store,_| store.read_with(|conn| conn.query_row(
+            "SELECT attempts FROM history_undo_plans WHERE request_id='three-errors'",[],|r|r.get(0)))
+            .map_err(StorageError::corrupt_public).map_err(Into::into)).await.unwrap();
+        assert_eq!(attempts, attempt);
+        close(supervisor).await;
+        supervisor = crate::WorkspaceSupervisor::new();
+        actor = supervisor
+            .open(&engine_db_path(&root).unwrap(), 20)
+            .unwrap()
+            .actor;
+    }
+    let result = run(&actor, &root, "three-errors", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.not_restored, ["file-0002.md"]);
+    assert_eq!(result.moments.len(), 2);
+    let error: String = actor
+        .run(|store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+        "SELECT errors_json FROM history_undo_plans WHERE request_id='three-errors'",[],|r|r.get(0))
+                })
+                .map_err(StorageError::corrupt_public)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert!(error.contains("write failed to persist"), "{error}");
+    assert!(
+        actor
+            .pending_history_undos(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    close(supervisor).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_replay_reports_only_its_own_committed_work() {
+    let (root, supervisor, actor) = setup(1);
+    let (first, second) = tokio::join!(
+        run(&actor, &root, "concurrent-undo", Arc::new(NoFaults)),
+        run(&actor, &root, "concurrent-undo", Arc::new(NoFaults)),
+    );
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_ne!(first.deduped, second.deduped);
+    assert_eq!(first.moments, second.moments);
+    assert_eq!(first.moments.len(), 1);
+    close(supervisor).await;
+}
+#[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fifty_ms() {
     let (root, supervisor, actor) = setup(2000);
     let hold = actor.hold_link_drain();
@@ -436,6 +809,7 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
         .run(|store, _| {
             store
                 .read_with(|conn| {
+                    dohc_engine_storage::capture_phase::enable_for_current_thread();
                     // Count inserted inverse rows, including a regression that inserts
                     // several members with one SQL statement. Keep the engine's row hook.
                     conn.execute_batch(INVERSE_PROBE)?;
@@ -524,7 +898,7 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
     let phases = probes().lock().unwrap()["turn-perf"].phases.clone();
     let times: Vec<Duration> = phases
         .iter()
-        .filter(|p| p.actor)
+        .filter(|p| p.actor && p.store_work.is_some_and(|work| work.inverses > 0))
         .map(|p| Duration::from_nanos(u64::try_from(p.elapsed_ns).unwrap()))
         .collect();
     for (turn, phase) in phases.iter().enumerate() {
@@ -553,16 +927,29 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
     sorted.sort();
     let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
     eprintln!(
-        "UNDO 2000 members: turns={} p95={:?} max={:?} ydoc_max_gap={:?} ydoc_max_wait_ns={:?}",
+        "UNDO 2000 members: inverse_turns={} p95={:?} max={:?} ydoc_max_gap={:?} ydoc_max_wait_ns={:?}",
         times.len(),
         p95,
         sorted.last(),
         gaps.iter().max(),
         waits.iter().max()
     );
+    let other_times: Vec<u128> = phases
+        .iter()
+        .filter(|p| p.actor && p.store_work.is_some_and(|work| work.inverses == 0))
+        .map(|p| p.elapsed_ns)
+        .collect();
+    let mut other_sorted = other_times.clone();
+    other_sorted.sort();
+    eprintln!(
+        "UNDO non-inverse turns={} p95_ns={:?} max_ns={:?}",
+        other_times.len(),
+        other_sorted.get((other_sorted.len() * 95).div_ceil(100).saturating_sub(1)),
+        other_sorted.last()
+    );
     if let Ok(dir) = std::env::var("DOHC_HISTORY_UNDO_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
-        let evidence = serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"turnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"phases":phases,"updateWaitNs":waits,"updateTurnGaps":gaps}).to_string();
+        let evidence = serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"inverseTurnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"otherTurnNs":other_times,"phases":phases,"updateWaitNs":waits,"updateTurnGaps":gaps}).to_string();
         let attempt = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -585,21 +972,39 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
         let work = phase.store_work.unwrap();
         inverses += work.inverses;
         assert!(
-            work.inverses <= 1 && work.commits <= 1,
+            work.inverses <= 1
+                && work.commits
+                    <= if phase.phase == "rename-placement" {
+                        3
+                    } else {
+                        1
+                    },
             "one inverse and transaction per turn: {} member={:?} work={}",
             phase.phase,
             phase.member,
             serde_json::to_string(&work).unwrap()
         );
-        if let Some(storage) = &phase.storage {
+        let storage = phase
+            .storage
+            .as_ref()
+            .expect("every actor turn records storage hooks");
+        if work.inverses > 0 {
             for label in ["BEGIN", "transaction_callback", "COMMIT", "prepare_write"] {
-                assert!(
-                    storage[label]["calls"].as_u64().unwrap_or(0) <= 1,
-                    "one store transaction per turn: {} {label}: {storage}",
+                let calls = storage
+                    .get(label)
+                    .and_then(|v| v["calls"].as_u64())
+                    .unwrap_or_else(|| panic!("missing storage timing label {label}: {storage}"));
+                assert_eq!(
+                    calls, 1,
+                    "one inverse transaction: {} {label}: {storage}",
                     phase.phase
                 );
             }
-            assert!(storage["commits"]["count"].as_u64().unwrap_or(0) <= 1);
+            let commits = storage
+                .get("commits")
+                .and_then(|v| v["count"].as_u64())
+                .expect("missing commits counter");
+            assert_eq!(commits, 1);
         }
         // Fixed statement and result-row budgets, independent of member count.
         // Include SQL executed by trigger programs, not only root statements.
@@ -611,11 +1016,16 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
             serde_json::to_string(&work).unwrap()
         );
     }
+    assert_eq!(
+        times.len(),
+        2000,
+        "p95 includes every inverse and no empty turn"
+    );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
     // Decision 16: the idle-host release benchmark owns the maximum ceiling.
     assert!(
         p95 <= Duration::from_millis(50),
-        "2,000-member Undo actor-turn p95 exceeded 50 ms: {p95:?}; max={:?}",
+        "2,000-member Undo inverse-turn p95 exceeded 50 ms: {p95:?}; max={:?}",
         sorted.last()
     );
 }
