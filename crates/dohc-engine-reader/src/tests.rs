@@ -32,13 +32,20 @@ fn runtime() -> (PathBuf, Value) {
         assert!(output.status.success());
         let mut v: Value = serde_json::from_slice(&output.stdout).unwrap();
         let node = PathBuf::from(v.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
+        // A Node under a linked or shared-writable directory, such as Homebrew's Cellar, is refused.
+        let checked = platform::open_asset(&node).map(|_| ());
+        assert!(checked.is_ok(), "test Node {} fails the reader's asset checks: {checked:?}", node.display());
         v["sha256"] = wire::sha(&fs::read(&node).unwrap()).into();
         (node, v)
     }).clone()
 }
 fn fixture(mode: &str) -> (tempfile::TempDir, Config) {
     let parent = std::env::current_dir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let root = std::env::temp_dir();
+    // macOS links /var to /private/var, and the reader refuses linked ancestors.
+    #[cfg(target_os = "macos")]
+    let root = root.canonicalize().unwrap();
+    let dir = tempfile::tempdir_in(root).unwrap();
     let (node, runtime) = runtime();
     let identity = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":parent});
     let script = include_str!("fake.cjs")
