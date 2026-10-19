@@ -276,9 +276,7 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                     return Err(());
                 }
                 let start_line = text[..i].rfind(['\n', '\r']).map_or(0, |n| n + 1);
-                let line_end = text[i..]
-                    .find(['\n', '\r'])
-                    .map_or(text.len(), |n| i + n);
+                let line_end = text[i..].find(['\n', '\r']).map_or(text.len(), |n| i + n);
                 let line = &text[start_line..line_end];
                 let trimmed = line.trim_start();
                 let trim_bytes = line.len() - trimmed.len();
@@ -292,7 +290,9 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                         .char_indices()
                         .rev()
                         .nth(context - 1)
-                        .map_or(start_line + trim_bytes, |(n, _)| start_line + trim_bytes + n)
+                        .map_or(start_line + trim_bytes, |(n, _)| {
+                            start_line + trim_bytes + n
+                        })
                 };
                 let window_end = text[window_start..line_end]
                     .char_indices()

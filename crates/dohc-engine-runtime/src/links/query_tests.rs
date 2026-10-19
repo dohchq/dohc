@@ -533,7 +533,10 @@ async fn incoming_windows_snippets_around_each_link() {
         let units: Vec<u16> = row["snippet"].as_str().unwrap().encode_utf16().collect();
         let start = row["highlightStart"].as_u64().unwrap() as usize;
         let end = row["highlightEnd"].as_u64().unwrap() as usize;
-        assert_eq!(String::from_utf16(&units[start..end]).unwrap(), "[[target]]");
+        assert_eq!(
+            String::from_utf16(&units[start..end]).unwrap(),
+            "[[target]]"
+        );
     }
 }
 

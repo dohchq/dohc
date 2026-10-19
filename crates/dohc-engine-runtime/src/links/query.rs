@@ -172,12 +172,10 @@ impl ActorHandle {
                                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                             )
                             .map_err(sql)?;
-                        let paths = stmt
-                            .query_map(params![ws, version, object], |r| r.get::<_, String>(0))
+                        stmt.query_map(params![ws, version, object], |r| r.get::<_, String>(0))
                             .map_err(sql)?
                             .collect::<Result<std::collections::HashSet<_>, _>>()
-                            .map_err(sql)?;
-                        paths
+                            .map_err(sql)?
                     };
                     let mut sources: Vec<_> = candidates
                         .sources
@@ -325,7 +323,8 @@ mod tests {
 
     #[test]
     fn cursor_decryption_is_bound_to_the_workspace() {
-        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3, true, false)).unwrap();
+        let cursor =
+            encode_cursor("ws", "main", "target", &("a.md".into(), 3, true, false)).unwrap();
         assert!(decode_cursor("other", "main", "target", Some(cursor)).is_err());
     }
 }

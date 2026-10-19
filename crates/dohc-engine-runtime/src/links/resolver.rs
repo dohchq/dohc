@@ -256,17 +256,26 @@ mod tests {
 
     #[test]
     fn creation_rejects_decoded_wikilink_drive() {
-        assert_eq!(creation_path("source.md", "C%3A/Windows/x", "wikilink"), None);
+        assert_eq!(
+            creation_path("source.md", "C%3A/Windows/x", "wikilink"),
+            None
+        );
     }
 
     #[test]
     fn creation_rejects_decoded_markdown_drive() {
-        assert_eq!(creation_path("source.md", "/C%3A/Windows/run.bat", "markdown"), None);
+        assert_eq!(
+            creation_path("source.md", "/C%3A/Windows/run.bat", "markdown"),
+            None
+        );
     }
 
     #[test]
     fn creation_rejects_decoded_unc_backslashes() {
-        assert_eq!(creation_path("source.md", "%5C%5Chost%5Cshare%5Cx.bat", "markdown"), None);
+        assert_eq!(
+            creation_path("source.md", "%5C%5Chost%5Cshare%5Cx.bat", "markdown"),
+            None
+        );
     }
 
     #[test]
@@ -286,17 +295,26 @@ mod tests {
 
     #[test]
     fn creation_rejects_decoded_unc_slashes() {
-        assert_eq!(creation_path("source.md", "%2F%2Fhost/share/x", "wikilink"), None);
+        assert_eq!(
+            creation_path("source.md", "%2F%2Fhost/share/x", "wikilink"),
+            None
+        );
     }
 
     #[test]
     fn creation_rejects_reserved_directory() {
-        assert_eq!(creation_path("source.md", ".dohc/engine/x", "wikilink"), None);
+        assert_eq!(
+            creation_path("source.md", ".dohc/engine/x", "wikilink"),
+            None
+        );
     }
 
     #[test]
     fn creation_rejects_decoded_reserved_segment() {
-        assert_eq!(creation_path("source.md", "notes/%2Edohc/engine/x", "markdown"), None);
+        assert_eq!(
+            creation_path("source.md", "notes/%2Edohc/engine/x", "markdown"),
+            None
+        );
     }
 
     #[test]
@@ -306,7 +324,10 @@ mod tests {
 
     #[test]
     fn creation_rejects_decoded_secret_segment() {
-        assert_eq!(creation_path("source.md", "notes/%2Eenv/x", "markdown"), None);
+        assert_eq!(
+            creation_path("source.md", "notes/%2Eenv/x", "markdown"),
+            None
+        );
     }
 
     #[test]
