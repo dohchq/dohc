@@ -2,6 +2,7 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
+import { flushSync } from "react-dom";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { bridge } from "./bridge";
@@ -117,11 +118,13 @@ function imported(workspaceId: string, result: ImportToDatabaseResult, hooks: Im
 }
 
 // Undo on an import's notice. It closes every tab showing the database first,
-// so no view reads it while it goes. Main moves it to the trash only while it
-// is unchanged; a refusal says why, and its row offers Try again.
+// and the views unmount before main is asked, so none holds the file open or
+// reads it while it goes. Main moves it to the trash only while it is
+// unchanged; a refusal says why, and its row offers Try again. Undo and Try
+// again run from a click, never while React renders.
 function undoImport(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks): () => void {
   const run = async () => {
-    hooks.onClosePath?.(result.path);
+    flushSync(() => hooks.onClosePath?.(result.path));
     try {
       await bridge().undoDatabaseImport({ workspaceId, operationId: result.operationId });
     } catch (cause) {

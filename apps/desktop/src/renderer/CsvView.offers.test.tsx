@@ -44,12 +44,13 @@ function csvFile(path: string, body: string) {
 
 // The shell's notices, as it shows them: toasts and Notices rows, with a
 // notice's action (Undo) and Try again.
-function Shell(props: { children: (shell: ReturnType<typeof useShellError>) => ReactNode }) {
-  const shell = useShellError("ws-1");
+function Shell(props: { workspaceId?: string; children: (shell: ReturnType<typeof useShellError>) => ReactNode }) {
+  const workspaceId = props.workspaceId ?? "ws-1";
+  const shell = useShellError(workspaceId);
   return (
     <>
       <NoticeCenter
-        workspaceId="ws-1" host="corner" syncStatus={null} agentActive={false} conflictSummaries={[]}
+        workspaceId={workspaceId} host="corner" syncStatus={null} agentActive={false} conflictSummaries={[]}
         onOpenHistory={noop} onOpenConflicts={noop} onRefreshShareView={noop} onOpenSettings={noop} onRebuildEngineStore={noop}
         workspaceErrors={shell.shellErrors.map((error) => ({
           id: error.id,
@@ -233,5 +234,31 @@ describe("the CSV offer on the preview's bound", () => {
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
     expect(within(await screen.findByTestId("workspace-shell-notice")).getByRole("button", { name: "Undo" })).toBeTruthy();
+  });
+
+  // Why main's refusal after a switch offers no retry: the shell remounts for
+  // each workspace (DesktopRoot keys it), and its Notices go with it.
+  it("loses the import's Undo row when the window switches workspaces", async () => {
+    const user = userEvent.setup();
+    importToDatabase.mockResolvedValue(IMPORTED);
+    const file = csvFile("data.csv", OVER_CAP);
+    const shell = (workspaceId: string) => (
+      <Shell key={workspaceId} workspaceId={workspaceId}>
+        {(hooks) => workspaceId === "ws-1" ? (
+          <CsvView {...file} onOpenPath={vi.fn()} onClosePath={vi.fn()} onError={hooks.reportButtonError} onNotice={hooks.showSuccessNotice} />
+        ) : null}
+      </Shell>
+    );
+    const view = render(shell("ws-1"));
+    await user.click(boundImport()!);
+    expect(within(await screen.findByTestId("workspace-shell-notice")).getByRole("button", { name: "Undo" })).toBeTruthy();
+
+    view.rerender(shell("ws-2"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByRole("dialog", { name: "Notices" });
+    expect(within(notices).queryByText(/Imported 501 rows/)).toBeNull();
+    expect(within(notices).queryByRole("button", { name: "Undo" })).toBeNull();
+    expect(undoDatabaseImport).not.toHaveBeenCalled();
   });
 });

@@ -1252,6 +1252,52 @@ describe("editor groups", () => {
     expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
   });
 
+  it("closes an imported database in every group before its Undo reaches main", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["data.csv"], "data.csv")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "data.csv", kind: "file" as const }],
+      folders: [] as string[],
+    }));
+    // Past the preview's 500 rows, so the bound offers Import to SQLite.
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "name\n" + Array.from({ length: 501 }, (_, row) => `row ${row}`).join("\n"),
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    const undone = deferred<{ trashed: boolean }>();
+    // The database tabs still showing when Undo reaches main.
+    const shownAtUndo: number[] = [];
+    const undoDatabaseImport = vi.fn(() => {
+      shownAtUndo.push(screen.queryAllByTestId("tab-data.sqlite").length);
+      return undone.promise;
+    });
+    Object.assign(bridge, {
+      importToDatabase: vi.fn(async () => ({ operationId: "dohc-operation:import-1", path: "data.sqlite", tableName: "data", rowCount: 501 })),
+      undoDatabaseImport,
+      // The database views stay loading; this test is about their tabs.
+      readWorkspaceDatabase: vi.fn(() => new Promise(() => {})),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("csv-bound-import"));
+    await screen.findByTestId("tab-data.sqlite");
+    await user.click(screen.getByTestId("create-editor-group-right"));
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(within(right).getByTestId("tab-data.sqlite")).toBeTruthy());
+    expect(within(left).getByTestId("tab-data.sqlite")).toBeTruthy();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
+
+    // Both tabs are gone before Undo reaches main, so no view holds the file.
+    await waitFor(() => expect(undoDatabaseImport).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId, operationId: "dohc-operation:import-1" }));
+    expect(shownAtUndo).toEqual([0]);
+    expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
+    await act(async () => undone.resolve({ trashed: true }));
+  });
+
   it("does not keep save-first state after a dirty editor unmounts", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),

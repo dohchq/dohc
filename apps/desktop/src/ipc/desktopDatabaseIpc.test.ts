@@ -343,9 +343,15 @@ describe("database import Undo", () => {
   });
 
   // A switch clears the Notices row that held Undo, so the refusal offers no retry.
-  it("refuses Undo from a window that changed workspaces, keeps the file, and offers no retry", async () => {
+  it("refuses Undo after the importing window switched workspaces, keeps the file, and offers no retry", async () => {
     const h = await harness(), result = await seed(h);
-    await expect(h.invoke(undoChannel, { workspaceId: "workspace-a", operationId: result.operationId }, new Sender(8)))
+    h.registry.register({ workspaceId: "workspace-b", rootPath: realpathSync(await createTestScratch("undo-switch-")), kind: "personal", mode: "local-first" });
+    const lease = h.authority.acquire("workspace-b");
+    try {
+      await h.renderers.open(h.sender, { ...h.registry.find("workspace-b")!, attachmentId: lease.binding.attachmentId }, "document-1");
+    } finally { lease.release(); }
+    // The old row's Undo still names the workspace it imported in.
+    await expect(undo(h, result.operationId))
       .rejects.toThrow("Cannot undo this import. This window changed workspaces. Delete the database yourself if you don't want it.");
     expect(h.remove).not.toHaveBeenCalled();
     expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(true);
