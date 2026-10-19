@@ -1582,13 +1582,7 @@ describe("shared view chats surface", () => {
     );
   });
 
-  // The ordering interaction #626 found, on this surface. A shared view's
-  // status also says no recorder, so once one lands the status clause alone
-  // would produce the same result and the share clause would survive
-  // deletion. Holding the status pending is what isolates it: `isShareView`
-  // is a synchronous registry fact, and it is the only thing that can answer
-  // in this window.
-  it("states the shared-view fact for a persisted Chats tab before any status arrives", async () => {
+  it("waits for admission before restoring a shared view's persisted Chats tab", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
@@ -1597,8 +1591,15 @@ describe("shared view chats surface", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge, SHARE_VIEW);
 
-    const placeholder = await screen.findByTestId("chats-page-share-view");
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chats-page-share-view")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve(SHARE_STATUS));
+    const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(placeholder.textContent).toContain("A shared view lists no chats.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
@@ -1728,10 +1729,11 @@ describe("chats surface after a failed capture build", () => {
     await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    // Both sidebars are mounted and state nothing: neither read the shell has
-    // done proves anything about what main decided.
-    expect(screen.getByTestId("about-rail")).toBeTruthy();
-    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
+    // The saved sidebars wait for admission, even when the earlier status
+    // read says capture is available.
+    expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
     expect(screen.queryByTestId("chats-off")).toBeNull();
     expect(screen.queryByTestId("about-rail-off")).toBeNull();
 
