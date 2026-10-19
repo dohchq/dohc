@@ -4420,6 +4420,10 @@ export function createWorkspaceEngineCapture(
           // this, a still-later transient close failure for the same
           // session, over edits made after this recovery, would read as
           // belonging to the deleted incarnation and get wrongly cancelled.
+          // The proof holds because the engine refuses a settle when the
+          // file this session opened over, or last settled, is missing
+          // (rpc_ydoc.rs, `a_settle_after_an_external_delete_refuses…` and
+          // `a_new_files_settle_after_an_external_delete…`).
           //
           // Only a tombstone that predates this settle's own start (codex
           // P1 follow-up on the synchronous recording): this callback

@@ -2647,15 +2647,20 @@ pub(super) fn ydoc_settle_on_store(
     // expectation, so every later settle refuses the same way. Capture mints
     // such a head from the 0-byte artifact the desktop's New File leaves on
     // disk. A head with content still refuses.
+    let empty_sha = dohc_engine_storage::hex_sha256(b"");
     let expected_head_sha = match head_probe.as_ref() {
-        Some(snapshot)
-            if expected_head_sha.is_none()
-                && snapshot.blob_sha256 == dohc_engine_storage::hex_sha256(b"") =>
-        {
+        Some(snapshot) if expected_head_sha.is_none() && snapshot.blob_sha256 == empty_sha => {
             probe_sha.clone()
         }
         _ => expected_head_sha,
     };
+    // What the disk must hold for this settle to write. A session that
+    // opened over New File's empty artifact before capture recorded it
+    // expects that artifact and no head, so only the disk check holds it:
+    // once the artifact is deleted, the settle must not write it back.
+    let expected_disk_sha = expected_head_sha.clone();
+    let expected_head_sha =
+        expected_head_sha.filter(|sha| head_probe.is_some() || *sha != empty_sha);
     if probe_sha != expected_head_sha {
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
@@ -2788,7 +2793,7 @@ pub(super) fn ydoc_settle_on_store(
     let disk_preimage = if bootstrap_absent {
         Some(Preimage::Absent)
     } else {
-        ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?
+        ydoc_settle_disk_preimage(root_dir, path, expected_disk_sha.as_deref(), &projected_sha)?
     };
     // A live settlement names its own moment unless the head already is its
     // latest audited settlement.

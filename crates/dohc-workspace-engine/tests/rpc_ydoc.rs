@@ -3978,6 +3978,196 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
+/// Settle `session_id` and require the engine to refuse it without writing
+/// `path`, which was deleted outside dohc.
+async fn assert_settle_refuses_over_deleted_file(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    scratch: &ScratchDir,
+    id: u64,
+    path: &str,
+    session_id: &str,
+) {
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "type" }),
+            ),
+        )
+        .await
+        .expect_err("a settle over a file deleted outside dohc must refuse");
+    assert_eq!(refused.message, "conflict-stale-target", "{path}");
+    assert!(
+        !scratch.path().join(path).exists(),
+        "the refused settle must not write {path} back"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_after_an_external_delete_refuses_and_the_file_stays_deleted() {
+    // dohc#2301. The desktop records a delete made outside dohc, and forgets
+    // it when a later settle of a document that was open before the delete
+    // answers `materialized: true`. It reads that answer as proof the file
+    // is back, which holds only if the engine never writes a deleted file
+    // back. One document here settled before the delete and one did not, so
+    // each settle expects a different head. Capture sees both deletes but
+    // keeps both heads while the sessions hold them, so each settle finds
+    // the head it expects and no file.
+    let scratch = ScratchDir::new().expect("scratch");
+    let files = [
+        ("notes/settled.md", "settled before the delete\n"),
+        ("notes/unsettled.md", "opened before the delete\n"),
+    ];
+    for (path, text) in files {
+        write_file(scratch.path(), path, text.as_bytes());
+    }
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-external-delete", 1).await;
+
+    let mut sessions = Vec::new();
+    for (id, (path, _)) in (10..).step_by(10).zip(files) {
+        let opened = call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+        )
+        .await;
+        assert_eq!(opened["head"], json!("present"), "{path}");
+        let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+        call(
+            &transport,
+            &handle,
+            id + 1,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": session_id,
+                "updateBase64": plaintext_update("typed before the delete ")
+            }),
+        )
+        .await;
+        sessions.push((path, session_id));
+    }
+    let settled = call(
+        &transport,
+        &handle,
+        30,
+        "ydoc.settle",
+        json!({ "sessionId": sessions[0].1, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+
+    for (path, _) in files {
+        std::fs::remove_file(scratch.path().join(path)).expect("delete outside dohc");
+    }
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    for (id, (path, text)) in (200..).zip(files) {
+        let head = call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        let expected = if path == sessions[0].0 {
+            settled["content"].clone()
+        } else {
+            json!(text)
+        };
+        assert_eq!(
+            head["text"], expected,
+            "the live session must keep {path}'s head"
+        );
+    }
+
+    for (id, (path, session_id)) in (300..).step_by(10).zip(&sessions) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": session_id,
+                "updateBase64": plaintext_update("typed after the delete ")
+            }),
+        )
+        .await;
+        assert_settle_refuses_over_deleted_file(
+            &transport,
+            &handle,
+            &scratch,
+            id + 1,
+            path,
+            session_id,
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            id + 2,
+            "ydoc.evict",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 400, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_files_settle_after_an_external_delete_does_not_recreate_it() {
+    // dohc#2301, for a document the test above cannot reach. New File
+    // leaves an empty file and opens a session on it before capture records
+    // a head, so the session has no head to expect. When the empty file was
+    // deleted outside dohc before the first settle, that settle found no
+    // head and no file, took the pair for a document being created, and
+    // wrote the deleted file back with `materialized: true`.
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-new-file-deleted", 1).await;
+
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "deleted")
+            .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("typed into the new file")
+        }),
+    )
+    .await;
+
+    std::fs::remove_file(scratch.path().join(&path)).expect("delete outside dohc");
+    assert_settle_refuses_over_deleted_file(&transport, &handle, &scratch, 3, &path, session_id)
+        .await;
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");

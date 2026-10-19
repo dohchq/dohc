@@ -84,7 +84,8 @@ pub(crate) struct YdocSession {
     author_settlement: AuthorSettlementQueue,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
-    /// until the session's first settle replaces it.
+    /// until the session's first settle replaces it. With no head, the sha of
+    /// the empty artifact New File leaves, when the open found one.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -1069,6 +1070,22 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
+        // With no head, the empty artifact New File leaves is what this
+        // session opens over. Its settles may replace that artifact, but not
+        // write it back after someone deletes it.
+        let open_head_sha = match state.head_blob_sha256.clone() {
+            Some(head) => Some(head),
+            None => {
+                let artifact_path = open.root.join(&params.path);
+                tokio::task::spawn_blocking(move || {
+                    std::fs::symlink_metadata(artifact_path)
+                        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
+                })
+                .await
+                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?
+                .then(|| dohc_engine_storage::hex_sha256(b""))
+            }
+        };
         // The read committed the document's pulled edits, so the open runs to
         // its answer, its blob included. If the blob cannot have its egress
         // budget by the deadline, the open answers OVERLOADED without a
@@ -1205,7 +1222,7 @@ impl EngineService {
                 first_update_pending: !state.lineage_existing,
                 author_settlement: AuthorSettlementQueue::default(),
                 last_settled_sha: None,
-                open_head_sha: state.head_blob_sha256,
+                open_head_sha,
                 owner_seed_source: state.owner_seed_source,
                 _lease: lease,
             },
