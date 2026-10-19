@@ -73,6 +73,11 @@ async function pastRetryRungs(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, total + cap + 50));
 }
 
+// A clock that never moves: a session's open, a delete and a settle's start
+// all land in one millisecond, as they often do on a fast machine. Only the
+// order the capture saw them in can say which came first.
+const frozenClock = (): number => 1_000_000;
+
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
 ) {
@@ -4296,7 +4301,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 async function lockedRebindCapture(
   prefix: string,
   options?: {
-    now?: () => number;
+    monotonic?: () => number;
     teardownRetryMs?: WorkspaceEngineCaptureOptions["teardownRetryMs"];
     // Wraps the base provider open for one test's own generation, so it
     // can override a single method (e.g. `settleNow`'s timing) while
@@ -4572,7 +4577,7 @@ async function lockedRebindCapture(
         error instanceof Error ? error.message : String(error),
       );
     },
-    ...(options?.now ? { now: options.now } : {}),
+    ...(options?.monotonic ? { monotonic: options.monotonic } : {}),
     ...(options?.teardownRetryMs ? { teardownRetryMs: options.teardownRetryMs } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
@@ -5307,6 +5312,7 @@ it("an external delete observed before a debt registers cancels it at the door i
   // order once that order stopped matching what the fix actually checks.
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-late-registration-",
+    { monotonic: frozenClock },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5491,7 +5497,7 @@ it("expires an expected removal and honors its cancellation", async () => {
   let nowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-expected-expiry-",
-    { now: () => nowMs },
+    { monotonic: () => nowMs },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5538,6 +5544,46 @@ it("a cancelled expected removal reads as an external delete again", async () =>
     "ignore the cancel -> this cancellation names dohc's own removal for a registration the caller withdrew.",
   ).toBe(true);
   state.locked = false;
+  await capture.stop();
+});
+
+it("a forward jump of the wall clock expires no delete record, so a stale session still stands down", async () => {
+  // Delete records and expected removals expire on the monotonic clock. A
+  // wall clock that steps forward, as when the system clock is corrected,
+  // must not expire either early: the stale session's late debt would arm
+  // and write the deleted file back, under an external delete's name.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-wall-clock-jump-",
+    { monotonic: frozenClock },
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+  const realDateNow = Date.now.bind(Date);
+  let wallClockJumpMs = 0;
+  const wallClock = vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + wallClockJumpMs);
+  onTestFinished(() => wallClock.mockRestore());
+  const hourMs = 60 * 60_000;
+
+  capture.registerExpectedEngineEvents([{ path: "note.md" }]);
+  wallClockJumpMs += hourMs;
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  wallClockJumpMs += hourMs;
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+    "expire on the wall clock -> the delete record is gone and the debt arms.",
+  ).toBe(true);
+  await pastRetryRungs();
+  expect(state.generation).toBe(1);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 });
 
@@ -5654,8 +5700,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
 });
 
 it("delete then immediate quit drains suppression before retrying a failing close", async () => {
-  let clock = 1_000_000;
-  const { capture, state } = await lockedRebindCapture("dohc-file-feed-quit-", { now: () => ++clock });
+  const { capture, state } = await lockedRebindCapture("dohc-file-feed-quit-");
   const { session } = await openWithOneEdit(capture, "must stay deleted");
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
@@ -5667,8 +5712,7 @@ it("delete then immediate quit drains suppression before retrying a failing clos
 });
 
 it.each(["quit", "close"] as const)("a failed observation drain probes deletion before %s settles live sessions", async mode => {
-  let clock = 1_000_000;
-  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-", { now: () => ++clock });
+  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-");
   await writeFile(join(rootPath, "note.md"), "Original.");
   const activityState = new WorkspaceActivityState();
   const workspace = { workspaceId, rootPath, attachmentId: Symbol("failed-drain"), kind: "personal" as const, mode: "local-first" as const };
@@ -5841,7 +5885,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   let virtualNowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-close-retry-ttl-boundary-",
-    { now: () => virtualNowMs },
+    { monotonic: () => virtualNowMs },
   );
   const { session } = await openWithOneEdit(
     capture,
@@ -5850,12 +5894,6 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
-
-  // Virtual time must actually move past the session's own open time
-  // before the delete lands — the age discrimination (recreation vs. the
-  // stale incarnation a delete orphaned) reads an equal timestamp as "not
-  // before the delete", same as the map-based door does.
-  virtualNowMs += 500;
 
   // The delete lands — `armRemovalSuppression` sees it immediately, at
   // this virtual time. Only afterward does virtual time jump past the
@@ -5895,13 +5933,10 @@ it("a delete landing after a settle's write but before its late onSettled callba
   const settleGate = new Promise<void>((resolve) => {
     releaseSettled = resolve;
   });
-  // A clock that moves on every read, so the delete below lands strictly
-  // after the session opened even when both fall in one real millisecond.
-  let clockMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-settle-clear-race-",
     {
-      now: () => ++clockMs,
+      monotonic: frozenClock,
       wrapProvider: (base) => async (openOptions) => {
         const inner = await base(openOptions);
         let token = 0;
