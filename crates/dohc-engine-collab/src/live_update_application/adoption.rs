@@ -38,6 +38,7 @@ mod tests {
     include!("owner_activations_tests.rs");
     include!("retirement_tests.rs");
     include!("successor_tests.rs");
+    include!("inherited_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1823,7 +1824,8 @@ struct Succession {
     /// The lineage's immutable origin, which the successor keeps.
     root: String,
     prefix: RetainedPrefix,
-    carried: Vec<CarriedDelivery>,
+    /// The chain's Carried deliveries, each at its original entry.
+    carried: Vec<retirement::InheritedEntry>,
 }
 
 /// A successor follows exactly its namespace's released chain tail, at the
@@ -1850,7 +1852,7 @@ fn require_succession(
     {
         return Err(ApplicationError::Conflict);
     }
-    let (boundary, carried) = retirement::released_tail(tx, &held.namespace, predecessor)?;
+    let (boundary, _) = retirement::released_tail(tx, &held.namespace, predecessor)?;
     if boundary.as_ref() != Some(&prefix.body())
         || retirement::accepted_endpoint(tx, &held.namespace, key, lineage)? != prefix.body()
     {
@@ -1859,7 +1861,13 @@ fn require_succession(
     Ok(Succession {
         root,
         prefix: prefix.clone(),
-        carried,
+        carried: retirement::inherited_entries(
+            tx,
+            &held.namespace,
+            key,
+            lineage,
+            Some(predecessor),
+        )?,
     })
 }
 

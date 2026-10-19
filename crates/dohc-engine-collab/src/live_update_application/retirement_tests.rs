@@ -1041,6 +1041,16 @@ fn retirement_settle(
     through: i64,
     terminal: Option<LiveUpdateReceipt>,
 ) -> Result<LiveSettlementResult, ApplicationError> {
+    retirement_settle_as(f, through, terminal, "retired")
+}
+
+/// [`retirement_settle`], recording its moment as `moment`.
+fn retirement_settle_as(
+    f: &mut Fixture,
+    through: i64,
+    terminal: Option<LiveUpdateReceipt>,
+    moment: &str,
+) -> Result<LiveSettlementResult, ApplicationError> {
     let key = retirement_key(f, through);
     let doc_key = f.key.clone();
     with_retirement_settlement(
@@ -1076,7 +1086,7 @@ fn retirement_settle(
                         object_id: "object",
                         path: std::borrow::Cow::Borrowed("owner.md"),
                         text: std::borrow::Cow::Borrowed(&text),
-                        moment_id: "retired",
+                        moment_id: moment,
                         metadata_origin: "ydoc",
                         metadata_summary: None,
                         metadata_correlation_id: None,
@@ -1091,8 +1101,8 @@ fn retirement_settle(
                     [&written.snapshot.blob_sha256],
                 )
                 .map_err(write_sql)?;
-                let id = audit.record_in_tx(tx, "retired", &written.snapshot.blob_sha256, &vector, 30)?;
-                Ok(audit.result(id, "retired".into(), written.snapshot.blob_sha256, false))
+                let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, &vector, 30)?;
+                Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
             })?;
             let TxnOutcome::Committed(result) = result else {
                 return Err(ApplicationError::Interrupted);

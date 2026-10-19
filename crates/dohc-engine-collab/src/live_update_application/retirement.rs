@@ -415,38 +415,30 @@ pub(crate) struct RetainedEntry {
 /// A native source names one binding and its origin. A larger one is corrupt.
 const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 
-/// The activation's retained native entries. With `unproven_through`, only
-/// those that still need proof: pending ones, ones without a receipt that no
-/// host refused, and ones whose receipt passes F.
-fn retained_entries(
+/// The native outbox entries of the document's lineage that `filter` selects,
+/// with `e` and `o` naming each entry and its outbox.
+fn native_entries(
     conn: &Connection,
-    retiring: &Retiring,
-    unproven_through: Option<i64>,
+    doc: &DocKey,
+    lineage: &str,
+    filter: &str,
+    params: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<RetainedEntry>, ApplicationError> {
-    let doc = &retiring.doc;
     let mut query = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
                 e.accepted_receipt_json,e.pending,e.terminal_reason,e.update_blob_digest,e.terminal_blob_digest,
                 length(CAST(e.native_source_json AS BLOB)),o.state='quarantined'
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
-               AND e.native_source_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?5
-               AND (?6 IS NULL OR e.pending=1 OR json_extract(e.accepted_receipt_json,'$.journalCursor')>?6
-                 OR (e.accepted_receipt_json IS NULL AND (e.terminal_reason IS NULL OR e.terminal_reason=?7)))
-             ORDER BY e.outbox_id,e.sequence",
-        )
+               AND e.native_source_json IS NOT NULL AND {filter}
+             ORDER BY e.outbox_id,e.sequence"
+        ))
         .map_err(read_sql)?;
+    let document: [&dyn rusqlite::ToSql; 4] =
+        [&doc.workspace_id, &doc.version_id, &doc.object_id, &lineage];
     let mut rows = query
-        .query(params![
-            doc.workspace_id,
-            doc.version_id,
-            doc.object_id,
-            retiring.lineage_claim_id,
-            retiring.activation_id,
-            unproven_through,
-            ACTIVATION_RELEASED
-        ])
+        .query(&*[&document[..], params].concat())
         .map_err(read_sql)?;
     let mut entries = Vec::new();
     while let Some(row) = rows.next().map_err(read_sql)? {
@@ -456,7 +448,7 @@ fn retained_entries(
             row.get(11).map_err(read_sql)?,
             &row.get::<_, String>(2).map_err(read_sql)?,
             doc,
-            &retiring.lineage_claim_id,
+            lineage,
             &update_digest,
         )?;
         entries.push(RetainedEntry {
@@ -474,6 +466,132 @@ fn retained_entries(
         });
     }
     Ok(entries)
+}
+
+/// The activation's retained native entries. With `unproven_through`, only
+/// those that still need proof: pending ones, ones without a receipt that no
+/// host refused, and ones whose receipt passes F.
+fn retained_entries(
+    conn: &Connection,
+    retiring: &Retiring,
+    unproven_through: Option<i64>,
+) -> Result<Vec<RetainedEntry>, ApplicationError> {
+    native_entries(
+        conn,
+        &retiring.doc,
+        &retiring.lineage_claim_id,
+        "json_extract(e.native_source_json,'$.adoptionId')=?5
+           AND (?6 IS NULL OR e.pending=1 OR json_extract(e.accepted_receipt_json,'$.journalCursor')>?6
+             OR (e.accepted_receipt_json IS NULL AND (e.terminal_reason IS NULL OR e.terminal_reason=?7)))",
+        params![
+            retiring.activation_id,
+            unproven_through,
+            ACTIVATION_RELEASED
+        ],
+    )
+}
+
+/// The receipt an entry saved, as the relay's journal names it.
+fn saved_receipt(json: &str) -> Result<LiveUpdateReceipt, ApplicationError> {
+    let saved: OwnerDeliveryReceipt =
+        serde_json::from_str(json).map_err(|_| ApplicationError::Corrupt)?;
+    Ok(LiveUpdateReceipt {
+        delivery_id: saved.delivery_id,
+        update_digest: saved.update_digest,
+        journal_cursor: saved.journal_cursor,
+        accepting_host_epoch: saved.accepting_host_epoch,
+    })
+}
+
+/// A Carried delivery the released chain left the activation that follows
+/// it, resolved to its original outbox entry. The entry keeps its outbox
+/// identity, source activation, receipt and native sequence; nothing moves
+/// it or submits it again.
+pub(crate) struct InheritedEntry {
+    pub entry: RetainedEntry,
+    pub receipt: LiveUpdateReceipt,
+}
+
+/// The one resolution of the Carried deliveries the released chain ending at
+/// `tail` left its successor, as the tail's stored manifest lists them. Each
+/// resolves to its original native outbox entry of the document's lineage,
+/// which saved exactly the listed receipt for its own delivery and bytes,
+/// keeps the listed native sequence and that sequence's provenance, holds no
+/// pending or terminal evidence, and was queued by an activation of the
+/// chain. Anything else, or a delivery listed twice, refuses. Whether each
+/// was applied since, its caller judges.
+pub(crate) fn inherited_entries(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: Option<&str>,
+) -> Result<Vec<InheritedEntry>, ApplicationError> {
+    let Some(tail) = tail else {
+        return Ok(Vec::new());
+    };
+    let (_, manifest) = released_tail(conn, namespace, tail)?;
+    let mut listed = BTreeSet::new();
+    let mut inherited = Vec::with_capacity(manifest.len());
+    for carried in manifest {
+        carried
+            .receipt
+            .validate()
+            .map_err(|_| ApplicationError::Corrupt)?;
+        if !listed.insert(carried.receipt.delivery_id.clone()) {
+            return Err(ApplicationError::Conflict);
+        }
+        let entry = native_entries(
+            conn,
+            doc,
+            lineage,
+            "e.delivery_id=?5",
+            params![carried.receipt.delivery_id],
+        )?
+        .pop()
+        .ok_or(ApplicationError::Conflict)?;
+        let saved = entry.receipt.as_deref().map(saved_receipt).transpose()?;
+        if saved.as_ref() != Some(&carried.receipt)
+            || entry.update_digest != carried.receipt.update_digest
+            || entry.source.native_sequence != carried.native_sequence
+            || entry.pending
+            || entry.update_blob.is_some()
+            || entry.terminal_reason.is_some()
+            || entry.terminal_blob.is_some()
+        {
+            return Err(ApplicationError::Conflict);
+        }
+        let provenance = match entry.source.origin {
+            OwnerOutboxNativeOrigin::AdoptionSeed => {
+                captured_seed(conn, namespace, doc, lineage, &entry.source)?
+            }
+            OwnerOutboxNativeOrigin::NativeUpdate { .. } => {
+                entry
+                    .source
+                    .verify_retained_row(conn)
+                    .map_err(outbox_error)?;
+                true
+            }
+        };
+        if !provenance
+            || chained_retiring(
+                conn,
+                namespace,
+                doc,
+                lineage,
+                tail,
+                &entry.source.adoption_id,
+            )?
+            .is_none()
+        {
+            return Err(ApplicationError::Conflict);
+        }
+        inherited.push(InheritedEntry {
+            entry,
+            receipt: carried.receipt,
+        });
+    }
+    Ok(inherited)
 }
 
 /// An entry's retained native source, valid for that entry: within its
@@ -1515,12 +1633,14 @@ pub(super) fn accepted_endpoint(
     })
 }
 
-/// Classify each of the activation's retained native entries against B and
-/// F. Covered: accepted history at or below B keeps its exact receipt.
-/// Carried: a saved receipt in (B, F] for its own delivery, never applied.
-/// Abandoned: the strict seed representation. Refused: the strict refusal
-/// representation, which needs no acceptance. Anything else, including an
-/// entry with both terminal and acceptance evidence, refuses the release.
+/// Classify the activation's retained native entries, and the Carried
+/// deliveries it inherited from its released chain, against B and F.
+/// Covered: accepted history at or below B keeps its exact receipt.
+/// Carried: a saved receipt in (B, F] for its own delivery, never applied,
+/// listed under its original identity and cursor order. Abandoned: the strict
+/// seed representation. Refused: the strict refusal representation, which
+/// needs no acceptance. Anything else, including an entry with both terminal
+/// and acceptance evidence, refuses the release.
 fn classify(
     conn: &Connection,
     namespace: &str,
@@ -1532,8 +1652,25 @@ fn classify(
         .terminal_receipt
         .as_ref()
         .map_or(0, |receipt| receipt.journal_cursor);
+    let predecessor = retiring
+        .activation
+        .as_ref()
+        .and_then(|activation| activation.predecessor_activation_id.as_deref());
+    // An inherited entry names a released activation, so never the retiring one.
+    let inherited = inherited_entries(
+        conn,
+        namespace,
+        &retiring.doc,
+        &retiring.lineage_claim_id,
+        predecessor,
+    )?
+    .into_iter()
+    .map(|inherited| inherited.entry);
     let mut carried = Vec::new();
-    for entry in retained_entries(conn, retiring, None)? {
+    for entry in retained_entries(conn, retiring, None)?
+        .into_iter()
+        .chain(inherited)
+    {
         let Some(saved) = &entry.receipt else {
             let refused = || {
                 refused_entry(
@@ -1553,14 +1690,7 @@ fn classify(
         if entry.terminal_reason.is_some() || entry.terminal_blob.is_some() {
             return Err(ApplicationError::Conflict);
         }
-        let saved: OwnerDeliveryReceipt =
-            serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
-        let receipt = LiveUpdateReceipt {
-            delivery_id: saved.delivery_id,
-            update_digest: saved.update_digest,
-            journal_cursor: saved.journal_cursor,
-            accepting_host_epoch: saved.accepting_host_epoch,
-        };
+        let receipt = saved_receipt(saved)?;
         receipt.validate().map_err(|_| ApplicationError::Corrupt)?;
         if entry.pending
             || receipt.delivery_id != entry.delivery_id
@@ -1593,6 +1723,7 @@ fn classify(
             native_sequence: entry.source.native_sequence,
         });
     }
+    carried.sort_by_key(|delivery| delivery.receipt.journal_cursor);
     Ok(carried)
 }
 
@@ -1678,11 +1809,12 @@ pub(super) enum Disposition {
 }
 
 /// A successor's coverage of the outbox its released chain left: each entry
-/// Covered by accepted history at or below the prefix, Carried under the
-/// chain's manifest, a seed its activation strictly abandoned, or a delivery
-/// a host strictly refused. Native sources of the last two belong to the
-/// chain. Anything else refuses the succession, and so does a carried
-/// delivery it lacks. Each entry names its sequence and disposition.
+/// Covered by accepted history at or below the prefix, Carried as the
+/// chain's resolved manifest lists it, a seed its activation strictly
+/// abandoned, or a delivery a host strictly refused. Native sources of the
+/// last two belong to the chain. Anything else refuses the succession, and so
+/// does a carried delivery it lacks. Each entry names its sequence and
+/// disposition.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retained_coverage(
     conn: &Connection,
@@ -1691,7 +1823,7 @@ pub(super) fn retained_coverage(
     lineage: &str,
     outbox_id: &str,
     prefix: &RetainedPrefix,
-    carried: &[CarriedDelivery],
+    carried: &[InheritedEntry],
     max_events: usize,
 ) -> Result<Vec<(i64, Disposition)>, ApplicationError> {
     let through = prefix
@@ -1741,16 +1873,8 @@ pub(super) fn retained_coverage(
         let saved = row
             .get::<_, Option<String>>(5)
             .map_err(read_sql)?
-            .map(|json| {
-                let saved: OwnerDeliveryReceipt =
-                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-                Ok::<_, ApplicationError>(LiveUpdateReceipt {
-                    delivery_id: saved.delivery_id,
-                    update_digest: saved.update_digest,
-                    journal_cursor: saved.journal_cursor,
-                    accepting_host_epoch: saved.accepting_host_epoch,
-                })
-            })
+            .as_deref()
+            .map(saved_receipt)
             .transpose()?;
         // Acceptance evidence beside terminal evidence contradicts itself.
         let terminal = terminal_reason.is_some() || terminal_blob.is_some();
@@ -1765,9 +1889,11 @@ pub(super) fn retained_coverage(
             coverage.push((sequence, Disposition::Receipt { receipt }));
             continue;
         }
-        if let (Some(saved), Some(source)) = (&saved, &source) {
-            let listed = carried.iter().any(|delivery| {
-                delivery.receipt == *saved && delivery.native_sequence == source.native_sequence
+        if let (Some(saved), Some(_)) = (&saved, &source) {
+            let listed = carried.iter().any(|inherited| {
+                inherited.entry.outbox_id == outbox_id
+                    && inherited.entry.sequence == sequence
+                    && inherited.receipt == *saved
             });
             let applied: bool = conn
                 .query_row(
