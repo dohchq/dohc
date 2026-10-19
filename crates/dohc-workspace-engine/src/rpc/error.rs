@@ -100,6 +100,9 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
+        return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = &error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
@@ -576,6 +579,13 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changed_edge_source_has_a_restartable_wire_reason() {
+        let error = map_runtime(RuntimeError::LinksEdgesSourceChanged);
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.message, "links-edges-source-changed");
+    }
+
     #[test]
     fn checked_delete_replication_dependents_have_a_known_reason() {
         let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(

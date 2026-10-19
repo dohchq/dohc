@@ -25,7 +25,7 @@ pub(super) fn cursor_key() -> Result<&'static SecretDataKey, RuntimeError> {
         .map_err(|_| invalid())
 }
 
-fn encode_cursor(
+pub(super) fn encode_cursor(
     ws: &str,
     version: &str,
     subject: &str,
@@ -67,7 +67,12 @@ pub(super) fn decode_cursor(
     Ok((path, ordinal, complete, building))
 }
 
-fn resolve<'a>(resolver: &'a Resolver, source: &str, literal: &str, kind: &str) -> Option<&'a str> {
+pub(super) fn resolve<'a>(
+    resolver: &'a Resolver,
+    source: &str,
+    literal: &str,
+    kind: &str,
+) -> Option<&'a str> {
     if kind == "markdown" {
         resolver.resolve_markdown(source, literal)
     } else {

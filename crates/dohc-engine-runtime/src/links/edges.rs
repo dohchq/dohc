@@ -1,6 +1,6 @@
 use super::{
     PARSER_GENERATION, cache,
-    query::{cursor_key, invalid},
+    query::{cursor_key, invalid, resolve},
     sql,
 };
 use crate::{ActorHandle, RuntimeError};
@@ -100,7 +100,7 @@ impl ActorHandle {
             if actor_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             let version = VersionedTextStore::new(store).get_active_version(&ws)?.version_id;
             let after = decode(&ws, &version, cursor)?;
-            store.read_with(|c| {
+            store.read_with(|c| -> Result<_, RuntimeError> {
                 let snapshot = c.unchecked_transaction().map_err(sql)?;
                 let ready: bool = c.query_row(
                     "SELECT coalesce((SELECT seed_phase='ready' AND parser_generation=?3 FROM link_index_state WHERE workspace_id=?1 AND version_id=?2),0) AND NOT EXISTS(SELECT 1 FROM link_pending WHERE workspace_id=?1 AND version_id=?2)",
@@ -125,7 +125,7 @@ impl ActorHandle {
                     let mut stmt = c.prepare_cached(&format!("{columns}a.path=?3")).map_err(sql)?;
                     aliases = stmt.query_map(params![ws,version,after.path],read_source).map_err(sql)?
                         .collect::<Result<Vec<_>,_>>().map_err(sql)?;
-                    if aliases.first().is_none_or(|s| s.object != after.object || s.key != after.key) { return Err(corrupt()); }
+                    if aliases.first().is_none_or(|s| s.object != after.object || s.key != after.key) { return Err(RuntimeError::LinksEdgesSourceChanged); }
                 }
                 let mut stmt = c.prepare_cached(&format!("{columns}a.path>?3 ORDER BY a.path LIMIT ?4")).map_err(sql)?;
                 aliases.extend(stmt.query_map(params![ws,version,after.path,(101-aliases.len()) as i64],read_source).map_err(sql)?
@@ -134,8 +134,8 @@ impl ActorHandle {
                 let mut sources = Vec::new();
                 let mut remaining = OCCURRENCES + 1;
                 for mut source in aliases.into_iter().take(RECORDS) {
-                    if actor_token.is_cancelled() { return Err(corrupt()); }
-                    if source.path.len() > 4096 || source.object.len() > 500 || source.title.encode_utf16().count() > 640 { return Err(corrupt()); }
+                    if actor_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                    if source.path.len() > 4096 || source.object.len() > 500 || source.title.encode_utf16().count() > 640 { return Err(corrupt().into()); }
                     if markdown(&source.path) && let Some(key) = &source.key {
                         let ordinal = if source.path == after.path && !after.finished { after.ordinal } else { -1 };
                         let mut stmt = c.prepare_cached("SELECT ordinal,literal,kind FROM links WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 AND ordinal>?5 ORDER BY ordinal LIMIT ?6").map_err(sql)?;
@@ -151,7 +151,7 @@ impl ActorHandle {
                 let paths = cache::prepare(c, &cache, &ws, &version)?;
                 snapshot.commit().map_err(sql)?;
                 Ok((version.clone(), after.clone(), sources, more, !ready || after.building, paths))
-            }).map_err(RuntimeError::from)
+            })
         }).await?;
         tokio::task::spawn_blocking(move || {
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
@@ -161,11 +161,17 @@ impl ActorHandle {
             last.incomplete |= building;
             let mut page = json!({"versionId":version,"files":[],"entries":[],"unchecked":[],
                 "complete":!last.incomplete,"indexBuilding":building,"mountsCovered":true,"nextCursor":null});
-            let reserve = sources.iter().map(|s| Position { path:s.path.clone(),object:s.object.clone(),key:s.key.clone(),
-                emitted:true,ordinal:i64::MAX,finished:false,incomplete:false,building:false })
-                .chain(std::iter::once(after.clone()))
-                .map(|p| encode(&workspace,&version,&p).map(|c| json!(c).to_string().len()))
-                .collect::<Result<Vec<_>,_>>()?.into_iter().max().unwrap_or(0) + 8;
+            // Reserve independent field maxima, including JSON escaping, with one seal.
+            let longest = |field: fn(&Source) -> &String, previous: &String| {
+                sources.iter().map(field).chain(std::iter::once(previous))
+                    .max_by_key(|s| json!(s).to_string().len()).expect("cursor field").clone()
+            };
+            let key = sources.iter().filter_map(|s| s.key.as_ref()).chain(after.key.iter())
+                .max_by_key(|s| json!(s).to_string().len()).cloned();
+            let reserve = json!(encode(&workspace, &version, &Position {
+                path:longest(|s| &s.path, &after.path), object:longest(|s| &s.object, &after.object), key,
+                emitted:false, ordinal:i64::MAX, finished:false, incomplete:false, building:false,
+            })?).to_string().len() + 8;
             let mut bytes = page.to_string().len() + reserve;
             let mut records = 0;
             let mut examined = 0;
@@ -200,7 +206,7 @@ impl ActorHandle {
                     if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                     if examined == OCCURRENCES { stopped=true; break 'sources; }
                     examined += 1;
-                    let target = if kind == "markdown" { resolver.resolve_markdown(&source.path,&literal) } else { resolver.resolve(&source.path,&literal) };
+                    let target = resolve(&resolver, &source.path, &literal, &kind);
                     if let Some(target) = target.filter(|t| *t != source.path)
                         && !add(&mut page,"entries",json!({"source":source.path,"target":target,"kind":kind,"ordinal":ordinal})) {
                             stopped=true; break 'sources;
@@ -231,5 +237,13 @@ mod tests {
             super::super::query::decode_cursor("ws", "main", "", Some(cursor.clone())).is_err()
         );
         assert!(decode("ws", "main", Some(cursor)).is_ok());
+        let incoming = super::super::query::encode_cursor(
+            "ws",
+            "main",
+            "target",
+            &("a.md".into(), 1, true, false),
+        )
+        .unwrap();
+        assert!(decode("ws", "main", Some(incoming)).is_err());
     }
 }

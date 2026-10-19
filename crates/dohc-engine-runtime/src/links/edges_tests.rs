@@ -191,12 +191,12 @@ async fn occurrence_work_and_bytes_are_bounded_and_partial_source_changes_reject
         })
         .await
         .unwrap();
-    assert!(
+    assert!(matches!(
         actor
             .link_edges("ws".into(), Some(cursor), CancellationToken::new())
-            .await
-            .is_err()
-    );
+            .await,
+        Err(crate::RuntimeError::LinksEdgesSourceChanged)
+    ));
 }
 
 #[tokio::test]
@@ -281,4 +281,33 @@ async fn edges_resume_a_source_after_the_shared_record_budget_without_repeating_
         actor.link_edges("ws".into(), None, cancelled).await,
         Err(crate::RuntimeError::Cancelled)
     ));
+}
+
+#[tokio::test]
+async fn edges_exclude_self_ambiguous_and_unresolved_literals() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(
+        &mut store,
+        "source",
+        "source.md",
+        "[[source]] [self](source.md) [[shared]] [[absent]] [missing](missing.md) [[target]]",
+        1,
+    );
+    write(&mut store, "a", "a/shared.md", "", 2);
+    write(&mut store, "b", "b/shared.md", "", 3);
+    write(&mut store, "target", "target.md", "", 4);
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let _hold = actor.hold_link_drain();
+    let page = edges(&actor, None).await;
+    bounded(&page);
+    assert_eq!(
+        page["entries"],
+        json!([{"source":"source.md","target":"target.md","kind":"wikilink","ordinal":5}])
+    );
+    assert_eq!(page["nextCursor"], Value::Null);
 }
