@@ -412,14 +412,27 @@ function momentRowPlace(moment: EngineMomentRecord, title: string): string {
   return title.includes(basenameOf(moment.path)) ? dirnameOf(moment.path) : moment.path;
 }
 
+// One author in words: an agent and an automation say what they are, so
+// they never read as a person.
+function authorWords(kind: "agent" | "automation" | undefined, label: string): string {
+  if (kind === "agent") return label === "Agent" ? label : `Agent ${label}`;
+  return kind === "automation" ? `Automation ${label}` : label;
+}
+
+function agentOrAutomation(kind: string | undefined): "agent" | "automation" | undefined {
+  return kind === "agent" || kind === "automation" ? kind : undefined;
+}
+
 // What a screen reader hears after a change's name: what it did, who made
-// it, and when. An agent and an automation say what they are, so they never
-// read as a person.
+// it, and when. Several authors are each named by their own kind, in the
+// order the change recorded them.
 export function momentDescription(moment: EngineMomentRecord): string {
-  const label = engineMomentSourceLabel(moment);
-  const who = moment.agentAuthorName !== undefined
-    ? label === "Agent" ? label : `Agent ${label}`
-    : moment.automationAuthor ? `Automation ${label}` : label;
+  const who = moment.authorLabels
+    ? moment.authorLabels.map((label, index) => authorWords(agentOrAutomation(moment.authors?.[index]?.kind), label)).join(", ")
+    : authorWords(
+      moment.agentAuthorName !== undefined ? "agent" : moment.automationAuthor ? "automation" : undefined,
+      engineMomentSourceLabel(moment),
+    );
   return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
 }
 

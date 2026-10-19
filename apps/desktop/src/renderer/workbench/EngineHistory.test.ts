@@ -4,6 +4,7 @@ import {
   engineMomentSourceLabel,
   engineMomentSummary,
   engineOriginLabel,
+  momentDescription,
   fileMomentSteps,
   groupAgentAuthorName,
   groupTimeline,
@@ -68,6 +69,31 @@ describe("engineOriginLabel", () => {
 // Agent-authored moments display as "the agent name" — the
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
+describe("momentDescription", () => {
+  // A change several wrote lists each author; an agent or an automation
+  // among them says what it is, so it never reads as another person.
+  it("names each of several authors by their own kind", () => {
+    const description = momentDescription(moment({ id: "mixed",
+      authors: [
+        { kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 },
+        { kind: "agent", agentId: "nova" },
+        { kind: "automation", automationId: "collection:Tasks#stamp", depth: 1 },
+      ],
+      authorLabels: ["Sam Rivera", "Nova", "Stamp in Tasks"] }));
+    expect(description).toMatch(/^Edited plan\.md, Sam Rivera, Agent Nova, Automation Stamp in Tasks, /);
+  });
+
+  it("names a single agent or automation by its kind, and a person or origin by name", () => {
+    expect(momentDescription(moment({ id: "agent", agentAuthorName: "Nova", authors: [{ kind: "agent", agentId: "nova" }] })))
+      .toMatch(/^Edited plan\.md, Agent Nova, /);
+    expect(momentDescription(moment({ id: "unnamed", agentAuthorName: "Agent", authors: [{ kind: "agent", agentId: "a" }] })))
+      .toMatch(/^Edited plan\.md, Agent, /);
+    expect(momentDescription(moment({ id: "person", namedAuthor: { userId: "sam", label: "Sam Rivera" } })))
+      .toMatch(/^Edited plan\.md, Sam Rivera, /);
+    expect(momentDescription(moment({ id: "local" }))).toMatch(/^Edited plan\.md, Local file edit, /);
+  });
+});
+
 describe("engineMomentSourceLabel", () => {
   it("names a person the owner shared with, not the sync that carried their change", () => {
     expect(engineMomentSourceLabel(moment({ id: "named", origin: "sync", namedAuthor: { userId: "user_ana", label: "ana@example.com (Edit)" } })))
