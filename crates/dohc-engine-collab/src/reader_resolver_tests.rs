@@ -1,0 +1,427 @@
+use super::*;
+use crate::ContentKind;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde_json::Value;
+
+fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
+    let data: Value = serde_json::from_str(include_str!("../tests/reader-resolver.json")).unwrap();
+    let source = data["source"].as_str().unwrap().to_owned();
+    let doc = Ydoc::wire();
+    doc.apply(
+        &STANDARD
+            .decode(data["checkpoint"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE ydoc_docs (
+      workspace_id TEXT,version_id TEXT,object_id TEXT,content_kind TEXT DEFAULT 'richdoc',
+      regime TEXT DEFAULT 'local-only',head_update_seq INTEGER DEFAULT 1,head_snapshot_seq INTEGER DEFAULT 0,
+      lineage_claim_status TEXT DEFAULT 'exact',lineage_claim_id TEXT DEFAULT 'l',lineage_parent_claim_id TEXT,
+      lineage_epoch_tag TEXT DEFAULT 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',path TEXT DEFAULT 'note.md',base_origin_id TEXT,base_origin_seq INTEGER,
+      base_relay_seq INTEGER,base_relay_confirmed_absent INTEGER DEFAULT 0,file_export_lane INTEGER DEFAULT 0,last_settled_sha TEXT);
+      INSERT INTO ydoc_docs(workspace_id,version_id,object_id) VALUES('w','main','fixture');
+      CREATE TABLE snapshots(workspace_id TEXT,version_id TEXT,object_id TEXT,content_kind TEXT,
+        blob_sha256 TEXT,latest_moment_id TEXT,path TEXT);
+      CREATE TABLE blobs(sha256 TEXT,text TEXT,byte_length INTEGER);
+      CREATE TABLE live_restore_fences(workspace_id TEXT,main_version_id TEXT,object_id TEXT,
+        new_generation INTEGER,resume_receipt_json TEXT);").unwrap();
+    let sha = crate::hex_sha256(source.as_bytes());
+    conn.execute(
+        "INSERT INTO blobs VALUES(?1,?2,?3)",
+        params![sha, source, source.len() as i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO snapshots VALUES('w','main','fixture','text',?1,'moment','note.md')",
+        [&sha],
+    )
+    .unwrap();
+    (
+        conn,
+        DocKey::new("w", "main", "fixture").unwrap(),
+        doc,
+        source,
+        ReaderResolver::new(Arc::new(Reader::new(None))),
+    )
+}
+fn lookup(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &Ydoc,
+    resolver: &ReaderResolver,
+) -> Result<Option<String>, CollabError> {
+    resolve(conn, key, doc, None, Some(resolver))
+}
+fn pending(result: Result<Option<String>, CollabError>) -> Arc<PendingProof> {
+    match result {
+        Err(CollabError::MarkdownReaderPending(p)) => p,
+        other => panic!("{other:?}"),
+    }
+}
+fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver) {
+    // This cache test supplies the receipt; the real-reader test below obtains it from the child.
+    pending(lookup(conn, key, doc, resolver))
+        .result
+        .set(Ok(true))
+        .unwrap();
+}
+
+#[test]
+fn exact_output_needs_a_snapshot_and_never_anchors_itself() {
+    let (conn, key, doc, _, resolver) = fixture();
+    conn.execute("DELETE FROM snapshots", []).unwrap();
+    assert!(matches!(
+        resolve(
+            &conn,
+            &key,
+            &doc,
+            Some("native shortcut".into()),
+            Some(&resolver)
+        ),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert!(resolver.entries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn partial_witnesses_hold_before_dispatch() {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+    for field in [
+        "dohcMarkdownSource",
+        "dohcMarkdownSourceSha256",
+        "dohcMarkdownSourceProjectionSha256",
+    ] {
+        let (conn, key, doc, _, resolver) = fixture();
+        let scratch = yrs::Doc::new();
+        scratch
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap())
+            .unwrap();
+        scratch
+            .get_or_insert_map("meta")
+            .remove(&mut scratch.transact_mut(), field);
+        let partial = Ydoc::wire();
+        partial
+            .apply(
+                &scratch
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default()),
+            )
+            .unwrap();
+        assert!(matches!(
+            lookup(&conn, &key, &partial, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+        assert!(resolver.entries.lock().unwrap().is_empty());
+    }
+}
+#[test]
+fn snapshot_digest_and_length_are_checked_before_dispatch() {
+    for sql in [
+        "UPDATE blobs SET text='forged'",
+        "UPDATE blobs SET byte_length=0",
+        "UPDATE snapshots SET blob_sha256='forged'",
+    ] {
+        let (conn, key, doc, _, resolver) = fixture();
+        conn.execute(sql, []).unwrap();
+        assert!(
+            matches!(
+                lookup(&conn, &key, &doc, &resolver),
+                Err(CollabError::MarkdownReaderUnavailable)
+            ),
+            "{sql}"
+        );
+        assert!(resolver.entries.lock().unwrap().is_empty());
+    }
+}
+#[test]
+fn expired_source_continuation_requires_the_current_settlement_digest() {
+    let (conn, key, doc, _, resolver) = fixture();
+    let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+    let sha = crate::hex_sha256(canonical.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, canonical, canonical.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert!(resolver.entries.lock().unwrap().is_empty());
+    conn.execute("UPDATE ydoc_docs SET last_settled_sha=?1", [&sha])
+        .unwrap();
+    pending(lookup(&conn, &key, &doc, &resolver))
+        .result
+        .set(Ok(false))
+        .unwrap();
+    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
+    doc.richdoc_append_paragraph("A later edit");
+    pending(lookup(&conn, &key, &doc, &resolver))
+        .result
+        .set(Ok(false))
+        .unwrap();
+    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
+    conn.execute("UPDATE ydoc_docs SET last_settled_sha=NULL", [])
+        .unwrap();
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+}
+#[test]
+fn cache_hit_rechecks_snapshot_claim_path_and_restore_fences() {
+    for sql in [
+        "DELETE FROM snapshots",
+        "UPDATE snapshots SET path='other.md'",
+        "UPDATE ydoc_docs SET lineage_claim_id='new-claim'",
+        "UPDATE ydoc_docs SET lineage_epoch_tag='other-epoch'",
+        "UPDATE snapshots SET latest_moment_id='new-moment'",
+        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,'{}')",
+        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,NULL)",
+    ] {
+        let (conn, key, doc, source, resolver) = fixture();
+        prime(&conn, &key, &doc, &resolver);
+        assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), Some(source));
+        conn.execute(sql, []).unwrap();
+        assert!(lookup(&conn, &key, &doc, &resolver).is_err(), "{sql}");
+    }
+}
+#[test]
+fn checkpoint_changes_and_foreign_objects_cannot_reuse_a_proof() {
+    let (conn, key, doc, _, resolver) = fixture();
+    prime(&conn, &key, &doc, &resolver);
+    doc.frontmatter_set("title", "changed").unwrap();
+    pending(lookup(&conn, &key, &doc, &resolver));
+    let foreign = DocKey::new("foreign", "main", "fixture").unwrap();
+    assert!(lookup(&conn, &foreign, &doc, &resolver).is_err());
+}
+
+#[test]
+fn reloading_maps_keeps_the_proof_but_changed_attributes_at_the_same_clocks_do_not() {
+    let (conn, key, doc, source, resolver) = fixture();
+    prime(&conn, &key, &doc, &resolver);
+    let checkpoint = doc.encode_full_state();
+    for _ in 0..32 {
+        let reloaded = Ydoc::wire();
+        reloaded.apply(&checkpoint).unwrap();
+        assert_eq!(
+            lookup(&conn, &key, &reloaded, &resolver).unwrap(),
+            Some(source.clone())
+        );
+    }
+    let mut forged = checkpoint;
+    let needle = b"\"href\":\"https://example.com\"";
+    let offset = forged
+        .windows(needle.len())
+        .position(|bytes| bytes == needle)
+        .unwrap();
+    forged[offset + needle.len() - 4..offset + needle.len() - 1].copy_from_slice(b"net");
+    let changed = Ydoc::wire();
+    changed.apply(&forged).unwrap();
+    assert_eq!(changed.encode_state_vector(), doc.encode_state_vector());
+    pending(lookup(&conn, &key, &changed, &resolver));
+}
+#[test]
+fn pending_entries_are_bounded_and_restart_has_no_proofs() {
+    let (conn, key, doc, _, resolver) = fixture();
+    let mut held = Vec::new();
+    for index in 0..MAX_ENTRIES {
+        conn.execute(
+            "UPDATE snapshots SET latest_moment_id=?1",
+            [index.to_string()],
+        )
+        .unwrap();
+        held.push(pending(lookup(&conn, &key, &doc, &resolver)));
+    }
+    conn.execute("UPDATE snapshots SET latest_moment_id='overflow'", [])
+        .unwrap();
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert_eq!(resolver.entries.lock().unwrap().len(), MAX_ENTRIES);
+    for proof in &held {
+        proof.result.set(Ok(true)).unwrap();
+    }
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    drop(held);
+    pending(lookup(&conn, &key, &doc, &resolver));
+    let restarted = ReaderResolver::new(Arc::new(Reader::new(None)));
+    pending(lookup(&conn, &key, &doc, &restarted));
+}
+
+#[test]
+fn transient_failures_retry_once_then_hold_and_allow_a_later_action() {
+    for failure in [
+        Failure::Crashed,
+        Failure::TimedOut,
+        Failure::Overloaded,
+        Failure::Superseded,
+    ] {
+        let (conn, key, doc, _, resolver) = fixture();
+        let first = pending(lookup(&conn, &key, &doc, &resolver));
+        first.result.set(Err(failure)).unwrap();
+        drop(first);
+        let second = pending(lookup(&conn, &key, &doc, &resolver));
+        second.result.set(Err(failure)).unwrap();
+        drop(second);
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+        pending(lookup(&conn, &key, &doc, &resolver));
+    }
+}
+
+#[test]
+fn externally_held_failed_proofs_stay_in_the_cache_budget() {
+    let (conn, key, doc, _, resolver) = fixture();
+    let first = pending(lookup(&conn, &key, &doc, &resolver));
+    first.result.set(Err(Failure::Crashed)).unwrap();
+    for _ in 0..MAX_ENTRIES * 2 {
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+        let entries = resolver.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(Arc::ptr_eq(&entries[0].pending, &first));
+    }
+    drop(first);
+    pending(lookup(&conn, &key, &doc, &resolver));
+}
+
+#[test]
+fn native_stale_witnesses_keep_the_existing_canonical_path() {
+    let native = Ydoc::wire();
+    native
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Original paragraph\n")
+        .unwrap();
+    native.richdoc_append_paragraph("Edit");
+    assert!(!needs_reader(&native));
+}
+
+#[test]
+fn retained_capacity_cannot_bypass_the_cache_byte_bound() {
+    let (conn, key, doc, _, resolver) = fixture();
+    let pending = pending(lookup(&conn, &key, &doc, &resolver));
+    let entry = resolver.entries.lock().unwrap().pop_front().unwrap();
+    let mut request = pending.request.clone();
+    request.checkpoint.reserve_exact(MAX_BYTES);
+    assert!(matches!(
+        resolver.lookup(entry.key, request),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert!(resolver.entries.lock().unwrap().is_empty());
+}
+
+fn run(future: impl std::future::Future<Output = ()>) {
+    struct Wake(std::thread::Thread);
+    impl std::task::Wake for Wake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Wake(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    while future.as_mut().poll(&mut context).is_pending() {
+        std::thread::park();
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn real_reader_checks_the_current_witness_and_holds_without_a_runtime() {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let (conn, key, doc, source, _) = fixture();
+    let resolver = ReaderResolver::new(Arc::new(Reader::new(Some(config))));
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(
+        lookup(&conn, &key, &doc, &resolver).unwrap(),
+        Some(source.clone())
+    );
+    let data: Value = serde_json::from_str(include_str!("../tests/reader-resolver.json")).unwrap();
+    let stale = Ydoc::wire();
+    stale
+        .apply(&STANDARD.decode(data["stale"].as_str().unwrap()).unwrap())
+        .unwrap();
+    run(pending(lookup(&conn, &key, &stale, &resolver)).resolve());
+    assert!(matches!(
+        lookup(&conn, &key, &stale, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    let canonical = data["canonicalSource"].as_str().unwrap();
+    let sha = crate::hex_sha256(canonical.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, canonical, canonical.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    let stale = Ydoc::wire();
+    stale
+        .apply(
+            &STANDARD
+                .decode(data["canonicalStale"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    run(pending(lookup(&conn, &key, &stale, &resolver)).resolve());
+    assert!(matches!(
+        lookup(&conn, &key, &stale, &resolver),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    let sha = crate::hex_sha256(source.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, source, source.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    let absent = ReaderResolver::new(Arc::new(Reader::new(None)));
+    run(pending(lookup(&conn, &key, &doc, &absent)).resolve());
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &absent),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    doc.richdoc_append_paragraph("A body edit expires the retained source");
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
+    let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+    let sha = crate::hex_sha256(canonical.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, canonical, canonical.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    conn.execute("UPDATE ydoc_docs SET last_settled_sha=?1", [&sha])
+        .unwrap();
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
+    doc.richdoc_append_paragraph("A second edit after canonical settlement");
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
+    let unavailable = ReaderResolver::new(Arc::new(Reader::new(None)));
+    run(pending(lookup(&conn, &key, &doc, &unavailable)).resolve());
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &unavailable),
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+}

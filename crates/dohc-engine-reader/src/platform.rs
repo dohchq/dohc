@@ -95,6 +95,44 @@ mod os {
         reaped: bool,
     }
     pub type Pipes = (Process, ChildStdout, ChildStdin, ChildStderr);
+    #[cfg(target_os = "linux")]
+    fn descriptor_fallback(limit: i32) -> io::Result<()> {
+        if limit > 65_536 {
+            return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        for fd in 3..limit {
+            // SAFETY: fcntl changes only the inherited descriptor's close-on-exec flag.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EBADF) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn descriptor_fallback_refuses_unbounded_scans() {
+        assert_eq!(
+            descriptor_fallback(65_537).unwrap_err().raw_os_error(),
+            Some(libc::ENOTSUP)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "release measurement; run alone with pinned affinity"]
+    fn descriptor_fallback_measurement() {
+        for round in 0..31 {
+            let start = std::time::Instant::now();
+            descriptor_fallback(65_536).unwrap();
+            println!(
+                "fallback {round} {}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
     pub fn spawn(command: &mut Command) -> io::Result<Pipes> {
         #[cfg(target_os = "linux")]
         // SAFETY: getrlimit writes a correctly sized local struct.
@@ -159,15 +197,20 @@ mod os {
                         return Ok(());
                     }
                 }
-                for fd in 3..limit {
-                    if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
-                        let error = io::Error::last_os_error();
-                        if error.raw_os_error() != Some(libc::EBADF) {
-                            return Err(error);
+                #[cfg(target_os = "linux")]
+                return descriptor_fallback(limit);
+                #[cfg(target_os = "macos")]
+                {
+                    for fd in 3..limit {
+                        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                            let error = io::Error::last_os_error();
+                            if error.raw_os_error() != Some(libc::EBADF) {
+                                return Err(error);
+                            }
                         }
                     }
+                    Ok(())
                 }
-                Ok(())
             });
         }
         let mut child = command.spawn()?;

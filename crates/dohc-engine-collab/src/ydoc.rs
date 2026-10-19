@@ -564,6 +564,12 @@ impl Ydoc {
         })
     }
 
+    pub fn has_reader_source(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        meta.get(&txn, "dohcMarkdownSourceReader").is_some()
+    }
+
     /// Resolve exact Markdown only after its lightweight projection witness
     /// matches. This avoids cloning and hashing stale source after a document
     /// edit, and never returns bytes the versioned text store cannot hold.
@@ -1855,6 +1861,7 @@ impl Ydoc {
         let source_sha256 = crate::hex_sha256(markdown.as_bytes());
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
+        meta.remove(&mut txn, "dohcMarkdownSourceReader");
         meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, markdown);
         meta.insert(
             &mut txn,

@@ -173,6 +173,7 @@ fn inband_settled_content(content: String) -> Option<String> {
     (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
+#[derive(Clone)]
 struct YdocCloseMaterialization {
     root_dir: PathBuf,
     self_writes: Arc<dyn SelfWriteRecorder>,
@@ -715,7 +716,7 @@ impl ActorHandle {
         seed_from_artifact: bool,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_open_state_on_store(
                 store,
                 cache,
@@ -861,7 +862,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -871,7 +872,7 @@ impl ActorHandle {
                 content_kind,
                 true,
                 expected_lineage_claim_id.as_deref(),
-                expected_head_sha,
+                expected_head_sha.clone(),
                 None,
                 &session_id,
                 self_writes.as_ref(),
@@ -882,6 +883,7 @@ impl ActorHandle {
                 None,
                 restore_generation,
                 SettlementKind::Document,
+                true,
             )
         })
         .await
@@ -903,7 +905,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -913,7 +915,7 @@ impl ActorHandle {
                 content_kind,
                 false,
                 expected_lineage_claim_id.as_deref(),
-                expected_head_sha,
+                expected_head_sha.clone(),
                 None,
                 &session_id,
                 self_writes.as_ref(),
@@ -924,6 +926,7 @@ impl ActorHandle {
                 None,
                 restore_generation,
                 SettlementKind::Document,
+                true,
             )
         })
         .await
@@ -936,7 +939,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocResyncState, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_resync_on_store(
                 store,
                 cache,
@@ -1076,7 +1079,7 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_close_session_on_store(
                 store,
                 cache,
@@ -1445,6 +1448,19 @@ fn project_ydoc_on_store(
 ) -> Result<Projection, RuntimeError> {
     store.read_with(|conn| {
         dohc_engine_sync::project_ydoc_with_store(conn, key, doc, content_kind)
+            .map_err(RuntimeError::from)
+    })
+}
+
+fn project_ydoc_on_store_with_reader(
+    store: &EngineStore,
+    key: &DocKey,
+    doc: &Ydoc,
+    content_kind: ContentKind,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+) -> Result<Projection, RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_sync::project_ydoc_with_reader(conn, key, doc, content_kind, resolver)
             .map_err(RuntimeError::from)
     })
 }
@@ -2486,6 +2502,7 @@ pub(super) fn ydoc_settle_on_store(
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     restore_generation: Option<i64>,
     kind: SettlementKind,
+    use_reader: bool,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2575,6 +2592,11 @@ pub(super) fn ydoc_settle_on_store(
         }
     }
     reconcile_author_coverage(store, key, now_ms, faults)?;
+    let reader_resolver = if use_reader {
+        doc_cache.reader_resolver.clone()
+    } else {
+        None
+    };
     let cold_doc;
     let doc = match store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))? {
         Some(cached) => cached,
@@ -2600,7 +2622,11 @@ pub(super) fn ydoc_settle_on_store(
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
     let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
-    let projection = project_ydoc_on_store(store, key, doc, content_kind)?;
+    let projection = if use_reader {
+        project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
+    } else {
+        project_ydoc_on_store(store, key, doc, content_kind)
+    }?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc
@@ -3292,13 +3318,20 @@ fn close_projection(
     key: &DocKey,
     marker: &dohc_engine_collab::Marker,
     root_dir: Option<&std::path::Path>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<Option<dohc_engine_collab::CloseProjection>, RuntimeError> {
     if marker.head_update_seq == 0 {
         return Ok(None);
     }
     let persisted = dohc_engine_collab::load_persisted(store, key)?
         .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
-    let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
+    let projection = project_ydoc_on_store_with_reader(
+        store,
+        key,
+        &persisted.doc,
+        marker.content_kind,
+        resolver,
+    )?;
     // A reopened seed can import an engine-written head whose earlier
     // close cleared last_settled_sha. Prove these source bytes still
     // belong to this object and are on disk before allowing its prune.
@@ -3352,7 +3385,7 @@ pub(super) fn ydoc_unload_pending(
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
-    let projection = close_projection(store, key, &marker, Some(root_dir))?;
+    let projection = close_projection(store, key, &marker, Some(root_dir), None)?;
     let covered =
         dohc_engine_collab::local_close_is_covered(store, key, &marker, projection.as_ref())?;
     Ok((!covered).then_some(UnloadPending::Settlement))
@@ -3407,6 +3440,7 @@ fn ydoc_close_session_on_store(
             key,
             &marker,
             materialization.map(|materialization| materialization.root_dir.as_path()),
+            doc_cache.reader_resolver.as_deref(),
         )?
     } else {
         None

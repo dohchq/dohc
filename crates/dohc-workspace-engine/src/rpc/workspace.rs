@@ -993,6 +993,12 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
+        if let Some(reader) = self.reader_resolver.get() {
+            actor
+                .configure_reader_resolver(reader.clone())
+                .await
+                .map_err(map_runtime)?;
+        }
         // Chat writes and relay passes announce the Group automation claims
         // they commit through the actor, whichever request or pass made them.
         let claim_events = self.events.clone();

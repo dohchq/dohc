@@ -524,6 +524,9 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
+        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
+            ErrorCode::Internal
+        }
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -567,6 +570,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
+        SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged

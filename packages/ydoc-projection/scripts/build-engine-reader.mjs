@@ -76,7 +76,7 @@ export async function buildEngineReader(destination = join(packageRoot, 'dist/en
   const output = result.outputFiles[0];
   checkReaderBundle(output.text);
   const sources = [];
-  for (const name of Object.keys(result.metafile.inputs).sort()) {
+  for (const name of [...Object.keys(result.metafile.inputs), relative(repoRoot, fileURLToPath(import.meta.url))].sort()) {
     sources.push({path: name.replaceAll('\\', '/'), sha256: hash(await readFile(resolve(repoRoot, name)))});
   }
   const sourceHash = name => sources.find(source => source.path === `packages/ydoc-projection/src/${name}`)?.sha256;
