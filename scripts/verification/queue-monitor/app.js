@@ -463,8 +463,8 @@ async function refreshTerminalsOnce() {
     const file = consoleFile(view);
     const pre = $(".term-body", el);
     if (!file) { writeTerminal(pre, waitingWords(view), `${view.source}:none`, true); renderConsoleStatus(el, view); return; }
-    const url = view.inline ? `api/log?slot=${view.n}&file=${encodeURIComponent(file)}`
-      : `api/log?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
+    const url = view.inline ? `api/output?slot=${view.n}&file=${encodeURIComponent(file)}`
+      : `api/output?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
     const key = `${view.source}:${file}`;
     try {
       const log = await getJson(url);
@@ -817,7 +817,7 @@ async function loadDrawerLog() {
   const pre = $("#drawer-log");
   if (!pre) return;
   try {
-    const log = await getJson(`api/log?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
+    const log = await getJson(`api/output?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
     if (ui.drawer === drawer && drawer.file === file) writeTerminal(pre, log?.text || "This log is empty.", `${drawer.id}/${drawer.attempt}:${file}`);
   } catch { /* The next refresh tries again. */ }
 }
