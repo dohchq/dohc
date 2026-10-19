@@ -65,22 +65,25 @@ export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
  * cannot remove, such as the Markdown reader's folder from a commit before #2243. All of it is a build's own
  * output, so after a failed clean, what remains becomes writable and the clean runs again.
  */
-export async function cleanCheckout(laneGit, root) {
-  const caches = ["--exclude=node_modules", "--exclude=target"];
-  const clean = ["clean", "-ffdx", ...caches];
-  try { return await laneGit(clean); } catch { /* Cleaned again below. */ }
+export async function cleanCheckout(gitOutput, root) {
+  const caches = ["node_modules", "target"];
+  const excludes = caches.map(name => `--exclude=${name}`);
+  const clean = ["clean", "-ffdx", ...excludes];
+  try { return await gitOutput(clean); } catch { /* Cleaned again below. */ }
   // What the clean left, as raw paths: -z neither quotes nor translates them.
-  for (const path of (await laneGit(["ls-files", "-z", "--others", "--directory", ...caches])).split("\0")) {
-    if (path) await makeWritable(join(root, path));
+  for (const path of (await gitOutput(["ls-files", "-z", "--others", "--directory", ...excludes])).split("\0")) {
+    if (path) await makeWritable(join(root, path), caches);
   }
-  return laneGit(clean);
+  return gitOutput(clean);
 }
 
-async function makeWritable(path) {
+/** Adds the owner's write permission throughout `path`, leaving symbolic links and the caches the clean keeps. */
+async function makeWritable(path, caches) {
   const info = await lstat(path).catch(() => null);
   if (!info || info.isSymbolicLink()) return;
   await chmod(path, (info.mode & 0o7777) | 0o200);
-  if (info.isDirectory()) for (const name of await readdir(path)) await makeWritable(join(path, name));
+  if (!info.isDirectory()) return;
+  for (const name of await readdir(path)) if (!caches.includes(name)) await makeWritable(join(path, name), caches);
 }
 
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
@@ -90,7 +93,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
-  const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
+  const gitOutput = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout;
+  const laneGit = async (args, cwd = lane) => (await gitOutput(args, cwd)).trim();
   if (!existsSync(join(lane, ".git"))) {
     await laneGit(["worktree", "add", "--detach", "--force", lane, head], repo);
     // Workspace cleanup keeps locked worktrees, so the lane keeps its warm caches.
@@ -100,7 +104,7 @@ export async function prepareLane({ lane, repo, head, signal }) {
   // No worker runs while the lane is prepared, so any Git lock or operation state is stale.
   for (const name of ["index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) rmSync(join(gitDir, name), { force: true });
   await laneGit(["checkout", "--force", "--detach", head]);
-  await cleanCheckout(laneGit, lane);
+  await cleanCheckout(gitOutput, lane);
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.

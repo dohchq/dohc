@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { freemem, tmpdir, uptime, userInfo } from "node:os";
 import { basename, join } from "node:path";
@@ -640,28 +640,30 @@ test("each lane has its own temp folder under the queue root", () => {
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
 });
 
-test("a lane's clean removes read-only build output that git clean alone cannot", async () => {
+test("a lane's clean removes read-only build output that git clean alone cannot, and keeps the caches", async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-lane-clean-"));
+  // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
+  // The other two have names Git would quote, and a name that trimmed output would lose.
+  const generations = [join(root, "resources", "engine-reader", "generation"), join(root, "généré"), join(root, " generated")];
+  const cached = join(root, "scratch", "node_modules", "package", "index.js");
   try {
-    const git = async args => (await run("git", args, { cwd: root, quietStdout: true })).stdout.trim();
+    const git = async args => (await run("git", args, { cwd: root, quietStdout: true })).stdout;
     await git(["init", "-q"]);
     writeFileSync(join(root, ".gitignore"), "resources/\n");
-    // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
-    // The second one has a name Git would quote in its usual output.
-    const generations = [join(root, "resources", "engine-reader", "generation"), join(root, "généré")];
     for (const generation of generations) {
       mkdirSync(generation, { recursive: true });
       writeFileSync(join(generation, "reader.cjs"), "");
       chmodSync(join(generation, "reader.cjs"), 0o444);
       chmodSync(generation, 0o555);
     }
+    mkdirSync(join(cached, ".."), { recursive: true });
+    writeFileSync(cached, "");
+    chmodSync(cached, 0o444);
     await cleanCheckout(git, root);
-    assert.equal(existsSync(join(root, "resources")), false);
-    assert.equal(existsSync(join(root, "généré")), false);
+    for (const generation of generations) assert.equal(existsSync(generation), false, generation);
+    assert.equal(statSync(cached).mode & 0o200, 0, "the clean keeps a cache below an untracked folder as it was");
   } finally {
-    for (const generation of [join(root, "resources", "engine-reader", "generation"), join(root, "généré")]) {
-      try { chmodSync(generation, 0o755); } catch { /* Removed. */ }
-    }
+    for (const path of [...generations, cached]) try { chmodSync(path, 0o755); } catch { /* Removed. */ }
     rmSync(root, { recursive: true, force: true });
   }
 });
