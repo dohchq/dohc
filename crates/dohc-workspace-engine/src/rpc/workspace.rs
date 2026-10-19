@@ -1283,7 +1283,7 @@ impl EngineService {
                         .map_err(map_runtime)?;
                     for (operation_id, request_id, author_json) in pending {
                         let cancellation = OperationCancellation::new(&RequestContext::unbounded());
-                        fence
+                        if let Err(error) = fence
                             .fence_version_snapshot(
                                 &cancellation,
                                 recovery.clone(),
@@ -1296,7 +1296,10 @@ impl EngineService {
                                     author_json,
                                 },
                             )
-                            .await?;
+                            .await
+                        {
+                            eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                        }
                     }
                     Ok::<_, WireError>(())
                 }

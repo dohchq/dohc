@@ -23,6 +23,17 @@ async fn open_undo_fixture() -> (
     WorkspaceHandle,
     Arc<OpenWorkspace>,
 ) {
+    open_undo_fixture_with_operations(1).await
+}
+
+async fn open_undo_fixture_with_operations(
+    operation_count: usize,
+) -> (
+    ScratchDir,
+    Arc<EngineService>,
+    WorkspaceHandle,
+    Arc<OpenWorkspace>,
+) {
     let scratch = ScratchDir::new().unwrap();
     let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
@@ -33,8 +44,13 @@ async fn open_undo_fixture() -> (
     domain
         .ensure_main_version("resume-undo", "main", 1, &NoFaults)
         .unwrap();
-    for index in 0..6 {
+    for index in 0..6 * operation_count {
         let path = format!("{index}.md");
+        let operation = if index < 6 {
+            "dohc-operation:resume".to_owned()
+        } else {
+            format!("dohc-operation:resume-{}", index / 6)
+        };
         domain
             .write_text(
                 &WriteText {
@@ -66,7 +82,7 @@ async fn open_undo_fixture() -> (
                         request_id: None,
                         metadata_origin: "api".into(),
                         metadata_summary: None,
-                        metadata_correlation_id: Some("dohc-operation:resume".into()),
+                        metadata_correlation_id: Some(operation),
                         author_json: None,
                         now_ms: 3,
                     },
@@ -84,7 +100,7 @@ async fn open_undo_fixture() -> (
                         request_id: None,
                         metadata_origin: "api".into(),
                         metadata_summary: None,
-                        metadata_correlation_id: Some("dohc-operation:resume".into()),
+                        metadata_correlation_id: Some(operation),
                         author_json: None,
                         now_ms: 3,
                     },
@@ -194,6 +210,138 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
         );
     }
     assert!(!scratch.path().join("moved.md").exists());
+    service.workspace_close(Some(handle)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_open_continues_after_one_pending_undo_fails_once() {
+    let (scratch, service, handle, open) = open_undo_fixture_with_operations(2).await;
+    for (operation, request) in [
+        ("dohc-operation:resume", "a-failing-undo"),
+        ("dohc-operation:resume-1", "b-later-undo"),
+    ] {
+        assert!(matches!(
+            open.actor
+                .history_undo_in_turns(
+                    "resume-undo".into(),
+                    operation.into(),
+                    request.into(),
+                    None,
+                    open.root.clone(),
+                    Arc::new(CrashAfter(AtomicUsize::new(1))),
+                    10,
+                    [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                    Arc::new(()),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await,
+            Err(dohc_engine_runtime::RuntimeError::OperationCrashed)
+        ));
+    }
+    let pending = open
+        .actor
+        .pending_history_undos("resume-undo".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+        ["a-failing-undo", "b-later-undo"]
+    );
+    open.actor
+        .run(|store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute_batch(
+                    "CREATE TRIGGER first_undo_fails_once BEFORE INSERT ON moments
+             WHEN NEW.metadata_origin='restore' AND NEW.object_id='object-0'
+             AND (SELECT attempts FROM history_undo_plans WHERE request_id='a-failing-undo')=0
+             BEGIN SELECT RAISE(ABORT,'one transient Undo failure'); END;",
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    service.workspace_close(Some(handle)).await.unwrap();
+    drop(open);
+    drop(service);
+
+    let service = EngineService::new();
+    let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
+    let opened = service
+        .workspace_open(&RequestContext::unbounded(), params.clone())
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let open = service.open(Some(&handle)).unwrap();
+    let recovery = lock(&open.undo_recovery).take().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    let pending = open
+        .actor
+        .pending_history_undos("resume-undo".into())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, "dohc-operation:resume");
+    assert_eq!(pending[0].1, "a-failing-undo");
+    assert_eq!(pending[0].2, None);
+    let attempts: i64 = open
+        .actor
+        .run(|store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT attempts FROM history_undo_plans WHERE request_id=?1",
+                        ["a-failing-undo"],
+                        |row| row.get(0),
+                    )
+                })
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+    let later = open
+        .actor
+        .preflight_history_undo(
+            "resume-undo".into(),
+            "dohc-operation:resume-1".into(),
+            "b-later-undo".into(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(later.moments.len(), 6);
+    assert!(later.not_restored.is_empty());
+    service.workspace_close(Some(handle)).await.unwrap();
+    drop(open);
+    drop(service);
+
+    // The first request gets its next attempt on the next open, not in a tight loop.
+    let service = EngineService::new();
+    let opened = service
+        .workspace_open(&RequestContext::unbounded(), params)
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let open = service.open(Some(&handle)).unwrap();
+    let recovery = lock(&open.undo_recovery).take().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        open.actor
+            .pending_history_undos("resume-undo".into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     service.workspace_close(Some(handle)).await.unwrap();
 }
 
