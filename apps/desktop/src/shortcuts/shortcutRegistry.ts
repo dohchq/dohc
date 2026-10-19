@@ -8,7 +8,7 @@ type EditorShortcutId = "editor-mac-backspace" | "editor-mac-delete" | "editor-m
 type OwnedShortcutId = "command-palette" | "close-window" | "history-restore-undo"
   | EditorShortcutId
   | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-again-next" | "find-again-previous" | "find-close" | "dev-panel";
-export type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "find" | "dev";
+export type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "find" | "find-field" | "dev";
 interface ShortcutKeys {
   accelerators: readonly string[];
   // Shown instead of the text derived from the first accelerator.
@@ -80,14 +80,16 @@ export const SHORTCUTS = {
   "editor-find": { owner: "editor", accelerators: ["CommandOrControl+F"] },
   // macOS keeps ⌘H for Hide, so Replace takes ⌥⌘F there, as in Xcode and Pages.
   "editor-replace": { owner: "editor", accelerators: ["CommandOrControl+H"], mac: { accelerators: ["CommandOrControl+Alt+F"] } },
-  "find-next": { owner: "find", accelerators: ["Enter"] },
-  "find-previous": { owner: "find", accelerators: ["Shift+Enter"] },
   // While the find bar has a query, from the bar or the document: ⌘G on
   // macOS, as in Safari and TextEdit, and F3 elsewhere, as in VS Code. The
   // find feature answers them itself; no editor keymap mounts them.
   "find-again-next": { owner: "find", accelerators: ["F3"], mac: { accelerators: ["CommandOrControl+G"] } },
   "find-again-previous": { owner: "find", accelerators: ["Shift+F3"], mac: { accelerators: ["CommandOrControl+Shift+G"] } },
-  "find-close": { owner: "find", accelerators: ["Escape"] },
+  // The find field answers these itself; Escape also closes from the replace
+  // field. There Enter replaces the match, and in the document it edits text.
+  "find-next": { owner: "find-field", accelerators: ["Enter"] },
+  "find-previous": { owner: "find-field", accelerators: ["Shift+Enter"] },
+  "find-close": { owner: "find-field", accelerators: ["Escape"] },
   "palette-move": { owner: "palette", accelerators: ["Up", "Down"], keys: ["↑↓"] },
   "palette-accept": { owner: "palette", accelerators: ["Enter"], keys: ["↵"], mac: { keys: ["↩"] } },
   "palette-dismiss": { owner: "palette", accelerators: ["Escape"], keys: ["esc"] },

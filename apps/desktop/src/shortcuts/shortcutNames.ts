@@ -1,9 +1,10 @@
 import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
-import { SHORTCUTS, type ShortcutId } from "./shortcutRegistry";
+import { SHORTCUTS, type ShortcutId, type ShortcutOwner } from "./shortcutRegistry";
 
 // A shortcut that runs a command row takes the row's label; these name the
 // rest. Shortcuts under one heading in Settings > Keyboard that share a name
-// show as one row with all their keys, such as Find next's Enter and F3.
+// show as one row with all their keys, such as Delete backward's ⌘⌫ and ⌃H
+// on macOS, so they share an owner too: it decides where the keys work.
 const NAMES = {
   "command-palette": "Command palette",
   "close-window": "Close window",
@@ -40,8 +41,8 @@ const NAMES = {
   "editor-mac-line-end": "Move to paragraph end",
   "editor-find": "Find",
   "editor-replace": "Find and replace",
-  "find-next": "Find next",
-  "find-previous": "Find previous",
+  "find-next": "Next match",
+  "find-previous": "Previous match",
   "find-again-next": "Find next",
   "find-again-previous": "Find previous",
   "find-close": "Close find",
@@ -54,5 +55,15 @@ export function shortcutName(id: ShortcutId): string {
   return isStaticCommandId(id) ? COMMAND_ROWS[id].label : NAMES[id];
 }
 
-// Every name, once, for Settings search.
-export const SHORTCUT_NAMES: readonly string[] = [...new Set((Object.keys(SHORTCUTS) as ShortcutId[]).map(shortcutName))];
+// Whether Settings > Keyboard lists the shortcut: only on its platform, and
+// Dev tools' key only where the dev tools show.
+export function shortcutShown(id: ShortcutId, platform: string | undefined, devTools: boolean): boolean {
+  const shortcut: { owner: ShortcutOwner; platform?: string } = SHORTCUTS[id];
+  return (!shortcut.platform || shortcut.platform === platform) && (shortcut.owner !== "dev" || devTools);
+}
+
+// The names Settings > Keyboard lists, once each, for Settings search.
+export function shownShortcutNames(platform: string | undefined, devTools: boolean): string[] {
+  const ids = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => shortcutShown(id, platform, devTools));
+  return [...new Set(ids.map(shortcutName))];
+}

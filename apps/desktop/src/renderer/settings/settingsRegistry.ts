@@ -10,7 +10,11 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { SHORTCUT_NAMES } from "../../shortcuts/shortcutNames";
+import { shownShortcutNames } from "../../shortcuts/shortcutNames";
+
+// The preload sets the bridge before the renderer loads, so search knows the
+// shortcuts the Keyboard page lists here.
+const desktop = globalThis.window?.dohcDesktop;
 
 type SettingsScope = "User" | "Workspace" | "Mixed";
 
@@ -49,8 +53,8 @@ export const SETTINGS_SECTIONS = [
     label: "Keyboard",
     scope: "User",
     group: "you",
-    // A search for a shortcut's name, such as "bold", finds the page.
-    keywords: ["keyboard", "shortcut", "shortcuts", "keys", ...SHORTCUT_NAMES],
+    // A search for the name of a shortcut the page lists, such as "bold", finds it.
+    keywords: ["keyboard", "shortcut", "shortcuts", "keys", ...shownShortcutNames(desktop?.platform, desktop?.devTools ?? false)],
     Icon: Keyboard,
   },
   {

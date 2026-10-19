@@ -625,7 +625,20 @@ describe("SettingsDialog", () => {
     await user.clear(search);
     await user.type(search, "keys");
     expect(within(page()).getAllByRole("heading").map((heading) => heading.textContent))
-      .toEqual(["Workbench", "Document", "Find", "Command palette and Go to"]);
+      .toEqual(["Workbench", "Document", "Find field", "Command palette and Go to"]);
+  });
+
+  it("finds no Keyboard page for a shortcut this computer does not list", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    // The test renderer loaded with no macOS platform and no dev tools.
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    for (const query of ["paragraph", "dev tools"]) {
+      await user.clear(search);
+      await user.type(search, query);
+      expect(screen.getByTestId(desktopPins.settingsEmptySearch).textContent).toBe(`No settings match "${query}".`);
+    }
   });
 
   it("shows the window zoom as a percentage and steps it through settings", async () => {

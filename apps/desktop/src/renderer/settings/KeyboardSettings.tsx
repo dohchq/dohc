@@ -1,15 +1,17 @@
 import { useMemo } from "react";
-import { shortcutName } from "../../shortcuts/shortcutNames";
+import { shortcutName, shortcutShown } from "../../shortcuts/shortcutNames";
 import { SHORTCUTS, shortcutChords, type ShortcutId, type ShortcutOwner } from "../../shortcuts/shortcutRegistry";
 import { SectionLabel } from "../ui/controls";
 import { SettingRow } from "./SettingRow";
 
 // A heading says where its keys work, so a chord with two meanings, such as
-// Ctrl+B for Toggle sidebar and Bold, reads once under each.
-const HEADINGS = ["Workbench", "Document", "Find", "Command palette and Go to"] as const;
+// Ctrl+B for Toggle sidebar and Bold, or Enter for Next match and Open,
+// reads once under each.
+const HEADINGS = ["Workbench", "Document", "Find field", "Command palette and Go to"] as const;
 type Heading = (typeof HEADINGS)[number];
 
-// Who answers a key decides where it works.
+// Who answers a key decides where it works. Find next's F3 works from the
+// document while finding, and Next match's Enter only in the find field.
 const OWNER_HEADINGS = {
   shell: "Workbench",
   main: "Workbench",
@@ -18,26 +20,29 @@ const OWNER_HEADINGS = {
   dev: "Workbench",
   document: "Document",
   editor: "Document",
-  find: "Find",
+  find: "Document",
+  "find-field": "Find field",
   palette: "Command palette and Go to",
 } as const satisfies Record<ShortcutOwner, Heading>;
 
-type KeyboardRow = { name: string; chords: (readonly string[])[] };
+type KeyboardRow = { name: string; ids: ShortcutId[]; chords: (readonly string[])[] };
 
-// The shortcuts this platform answers, under their headings in registry
-// order. Shortcuts that share a name under a heading share a row. Dev tools'
-// key shows only where the dev tools do.
+// The shortcuts Settings lists on this platform, under their headings in
+// registry order. Shortcuts that share a name under a heading share a row.
 export function keyboardGroups(platform: string | undefined, devTools: boolean): { heading: Heading; rows: KeyboardRow[] }[] {
   const groups = HEADINGS.map((heading) => ({ heading, rows: [] as KeyboardRow[] }));
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
-    const shortcut: { owner: ShortcutOwner; platform?: string } = SHORTCUTS[id];
-    if ((shortcut.platform && shortcut.platform !== platform) || (shortcut.owner === "dev" && !devTools)) continue;
-    const { rows } = groups.find((group) => group.heading === OWNER_HEADINGS[shortcut.owner])!;
+    if (!shortcutShown(id, platform, devTools)) continue;
+    const { rows } = groups.find((group) => group.heading === OWNER_HEADINGS[SHORTCUTS[id].owner])!;
     const name = shortcutName(id);
     const chords = shortcutChords(id, platform);
     const row = rows.find((existing) => existing.name === name);
-    if (row) row.chords.push(...chords);
-    else rows.push({ name, chords: [...chords] });
+    if (row) {
+      row.ids.push(id);
+      row.chords.push(...chords);
+    } else {
+      rows.push({ name, ids: [id], chords: [...chords] });
+    }
   }
   return groups;
 }
