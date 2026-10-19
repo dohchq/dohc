@@ -17,14 +17,16 @@ pub const RETAINED_ACTIVATIONS: &str = "(SELECT * FROM live_owner_activations v
       AND NOT EXISTS(SELECT 1 FROM live_owner_activations s
         WHERE s.relay_database_namespace=v.relay_database_namespace AND s.predecessor_activation_id=v.activation_id)))";
 
-/// Makes the adoption `(?1, ?2)` its lineage's first current activation.
+/// Makes the adoption `(?1, ?2)` its lineage's first current activation,
+/// following the released capture `?3` its own capture named, if any.
 pub const ACTIVATE_ADOPTION: &str = "INSERT INTO live_owner_activations (relay_database_namespace,
-    activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,binding_json,
+    activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,
+    predecessor_activation_id,binding_json,
     source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
     terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
   SELECT relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,adoption_id,
-    binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
+    ?3,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
     baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,
     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms
   FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2";
@@ -267,9 +269,9 @@ pub fn capture_predecessor(
 
 /// The activation a registration serves. A named one is the lineage's current
 /// activation, or a retained source no activation recorded yet while nothing
-/// holds the lineage, which its adoption will activate. On a lineage this
-/// relay adopted, that source must follow the released chain tail, as only
-/// its successor may adopt. Without a name, the
+/// holds the lineage, which its adoption will activate. That source must
+/// follow the released chain tail, or none when there is none, as only such
+/// a capture may adopt. Without a name, the
 /// registration serves the current activation, if any. A lineage this relay
 /// adopted whose activation is released takes no unnamed registration: only
 /// an activation gives it live authority again. Neither serves an activation
@@ -327,17 +329,6 @@ fn resolve_registration(
                 .map_err(read_sql)?;
             match descriptor {
                 None => false,
-                Some(_)
-                    if lineage_origin_id(
-                        conn,
-                        Some(namespace),
-                        &key,
-                        &binding.lineage_claim_id,
-                    )?
-                    .is_none() =>
-                {
-                    true
-                }
                 Some(descriptor) => {
                     let source: super::activation::ImportedOwnerSource =
                         serde_json::from_str(&descriptor).map_err(|_| ApplicationError::Corrupt)?;

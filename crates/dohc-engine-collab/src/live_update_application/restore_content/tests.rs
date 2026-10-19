@@ -2538,7 +2538,7 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
             )?;
             conn.execute(
                 crate::live_update_application::owner_activations::ACTIVATE_ADOPTION,
-                params!["namespace", "adoption"],
+                params!["namespace", "adoption", None::<String>],
             )?;
             conn.execute_batch("PRAGMA foreign_keys=ON")
         })

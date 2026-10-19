@@ -345,6 +345,9 @@ pub struct OwnerOutboxRefuseInput {
     pub reason: String,
 }
 
+/// The longest reason a terminal entry keeps.
+pub(crate) const MAX_TERMINAL_REASON_BYTES: usize = 256;
+
 /// A terminal host refusal retires an entry and its causal dependents,
 /// preserving their bytes and provenance. Independent pending writes survive.
 pub fn refuse_entry_in_tx(
@@ -356,7 +359,7 @@ pub fn refuse_entry_in_tx(
     validate_identifier(&input.outbox_id, "invalid outbox id")?;
     validate_identifier(&input.delivery_id, "invalid delivery id")?;
     validate_identifier(&input.reason, "invalid refusal reason")?;
-    if input.reason.len() > 256 {
+    if input.reason.len() > MAX_TERMINAL_REASON_BYTES {
         return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
     }
     if !(0..=9_007_199_254_740_991).contains(&now_ms) {

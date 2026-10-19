@@ -297,17 +297,7 @@ fn an_activation_registration_adopts_only_the_source_it_named() {
 #[test]
 fn a_registration_for_one_activation_refuses_to_adopt_another() {
     let mut f = Fixture::new();
-    let digest = f.cut.source_digest.clone();
-    f.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO ydoc_owner_activation_sources VALUES ('pending','namespace','workspace','main','object',?1,'original',?2,?1,'{}')",
-                params![f.binding.lineage_claim_id, digest],
-            )
-            .map_err(write_sql)?;
-            Ok::<_, ApplicationError>(())
-        })
-        .unwrap();
+    retain_captured(&mut f);
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     f.handle = f
         ._owner
@@ -316,12 +306,12 @@ fn a_registration_for_one_activation_refuses_to_adopt_another() {
             "namespace".into(),
             coordinate,
             f.binding.clone(),
-            "pending".into(),
+            "captured".into(),
         )
         .unwrap();
     assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
     assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
-    assert_eq!(binding_activation(&f), (Some("pending".into()), 1));
+    assert_eq!(binding_activation(&f), (Some("captured".into()), 1));
 }
 
 #[test]

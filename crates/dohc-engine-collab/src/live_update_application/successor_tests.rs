@@ -1,3 +1,5 @@
+use crate::live_update_application::retirement::Disposition;
+
 /// Everything a refused succession could write.
 const SUCCESSION_WRITES: [&str; 10] = [
     "live_owner_activations",
@@ -142,6 +144,11 @@ fn succession_row(f: &Fixture, id: &str) -> (Option<String>, Option<String>, Opt
             )
         })
         .unwrap()
+}
+
+/// The coverage digest a successor's row keeps for these dispositions.
+fn coverage_digest(coverage: &[(i64, Disposition)]) -> String {
+    hex_sha256(&serde_json::to_vec(coverage).unwrap())
 }
 
 /// Each adoption seed: its activation and outbox sequence.
@@ -493,9 +500,12 @@ fn a_successor_covers_its_chains_retained_entries() {
             continue;
         }
         adopted.unwrap();
-        let coverage = vec![(1, Some(covered.clone())), (2, Some(carried.clone()))];
+        let coverage = vec![
+            (1, Disposition::Receipt { receipt: covered.clone() }),
+            (2, Disposition::Receipt { receipt: carried.clone() }),
+        ];
         let (_, _, _, _, digest) = succession_row(&f, &id);
-        assert_eq!(digest, hex_sha256(&serde_json::to_vec(&coverage).unwrap()));
+        assert_eq!(digest, coverage_digest(&coverage));
         let covered_sequence: i64 = f
             .store
             .read_with(|conn| {
@@ -507,7 +517,7 @@ fn a_successor_covers_its_chains_retained_entries() {
     }
 }
 
-/// An abandoned seed is covered with no receipt, and only in its strict
+/// An abandoned seed is covered as Abandoned, and only in its strict
 /// representation. The successor's own seed holds application; the
 /// predecessor's abandoned one never does.
 #[test]
@@ -532,8 +542,7 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
         }
         f.adopt().unwrap();
         let (_, _, _, _, digest) = succession_row(&f, &id);
-        let coverage: Vec<(i64, Option<LiveUpdateReceipt>)> = vec![(1, None)];
-        assert_eq!(digest, hex_sha256(&serde_json::to_vec(&coverage).unwrap()));
+        assert_eq!(digest, coverage_digest(&[(1, Disposition::Abandoned)]));
         assert_eq!(seeds(&f), vec![(predecessor, 1), (id.clone(), 2)]);
         let hold = f
             .store
@@ -556,17 +565,22 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
     }
 }
 
-/// Opus, round 3b delta: two never-adopted captures. While the first one's
-/// retirement settles the document, the second can't adopt; once the first
-/// releases, the second adopts first, with no prefix, and follows it in the
-/// chain. A lineage never adopted keeps its first adoption after released
-/// captures, and its seed lands although released rows exist.
+/// Opus, round 3b delta, and Sol's round 4a ruling: two never-adopted
+/// captures. While the first one's retirement settles the document, the
+/// second can't adopt. Once the first releases, the second is stale: it
+/// follows nothing while the first is the tail, so neither its registration
+/// nor its adoption proceeds. A recapture follows the first and adopts first,
+/// with no prefix. Its descriptor and row name the same predecessor, so an
+/// unchanged recapture keeps its ID and resumes. A lineage never adopted
+/// keeps its first adoption after released captures, and its seed lands
+/// although released rows exist.
 #[test]
 fn adoption_waits_while_the_document_retires() {
     let mut f = imported_fixture();
     let first = capture_imported(&mut f, 1_000_000).unwrap().activation_id;
     offline_edit(&mut f, "Edited before the second capture", "second");
     let second = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(second.source.predecessor_activation_id, None);
     f.cut.adoption_id = first.clone();
     begin(&mut f, 10).unwrap();
     let before = rows(&f, &SUCCESSION_WRITES);
@@ -583,15 +597,38 @@ fn adoption_waits_while_the_document_retires() {
     host_document(&mut f, true, false);
     f.cut.adoption_id = first.clone();
     assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { boundary: None, .. }));
+    returned(&mut f);
+    // The adoption checks the predecessor itself: this handle names none.
     f.cut.adoption_id = second.activation_id.clone();
+    let before = rows(&f, &SUCCESSION_WRITES);
+    assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)), "the stale capture never adopts");
+    assert!(matches!(
+        f._owner.register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), second.activation_id.clone()),
+        Err(ApplicationError::Conflict)
+    ), "nor registers");
+    assert_eq!(rows(&f, &SUCCESSION_WRITES), before);
+    let recaptured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_ne!(recaptured.activation_id, second.activation_id, "the same state follows the first now");
+    assert_eq!(recaptured.source.predecessor_activation_id.as_deref(), Some(first.as_str()));
+    f.handle = f
+        ._owner
+        .register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), recaptured.activation_id.clone())
+        .unwrap();
+    f.cut.adoption_id = recaptured.activation_id.clone();
     assert!(!f.adopt().unwrap().adoption_replayed);
     assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1);
-    let (origin, predecessor, boundary, current, _) = succession_row(&f, &second.activation_id);
-    assert_eq!(origin.as_deref(), Some(second.activation_id.as_str()), "its own origin");
-    assert_eq!(predecessor.as_deref(), Some(first.as_str()), "after the capture released before it");
+    let (origin, predecessor, boundary, current, _) = succession_row(&f, &recaptured.activation_id);
+    assert_eq!(origin.as_deref(), Some(recaptured.activation_id.as_str()), "its own origin");
+    assert_eq!(predecessor, recaptured.source.predecessor_activation_id, "the row names its descriptor's predecessor");
     assert_eq!((boundary, current), (None, true));
-    assert_eq!(seeds(&f), vec![(second.activation_id.clone(), 1)]);
+    assert_eq!(seeds(&f), vec![(recaptured.activation_id.clone(), 1)]);
     assert_eq!(chain_tail(&f, "namespace").unwrap(), None);
+    assert_eq!(
+        capture_imported(&mut f, 1_000_000).unwrap().activation_id,
+        recaptured.activation_id,
+        "an unchanged recapture keeps its ID"
+    );
+    resume_imported(&mut f, &recaptured.activation_id, 1_000_000).expect("it resumes");
 }
 
 /// Round 3b's freeze holds: an ordinary owner delivery on a released lineage
@@ -624,4 +661,443 @@ fn only_the_successor_adoption_appends_to_a_released_lineage() {
     f.adopt().unwrap();
     assert_eq!(seeds(&f), vec![(id, 1)]);
     append(&mut f).expect("the successor holds the lineage");
+}
+
+/// What enrollment recovery writes over each pending entry of the outbox it
+/// recovers, with its totals.
+const RECOVERY_TERMINAL: &str =
+    "UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,
+       terminal_reason='stale-binding' WHERE pending=1;
+     UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL";
+
+/// Write a state the schema's checks refuse, as a damaged store could hold it.
+fn write_unchecked(f: &mut Fixture, sql: &str) {
+    let raw = rusqlite::Connection::open(f._scratch.join("engine.db")).unwrap();
+    raw.pragma_update(None, "ignore_check_constraints", true).unwrap();
+    raw.execute_batch(sql).unwrap();
+}
+
+/// Each row `sql` selects, so a step can be shown to leave them as they were.
+fn query_rows(f: &Fixture, sql: &str) -> Vec<String> {
+    f.store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(sql)?;
+            let columns = statement.column_count();
+            let mut query = statement.query([])?;
+            let mut rows = Vec::new();
+            while let Some(row) = query.next()? {
+                let values = (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows.push(format!("{values:?}"));
+            }
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap()
+}
+
+/// Every terminal entry with the bytes it keeps.
+fn terminal_entries(f: &Fixture) -> Vec<String> {
+    query_rows(
+        f,
+        "SELECT e.*,b.byte_length,b.bytes FROM owner_ydoc_outbox_entries e
+         LEFT JOIN binary_blobs b ON b.sha256=e.terminal_blob_digest
+         WHERE e.terminal_reason IS NOT NULL ORDER BY e.sequence",
+    )
+}
+
+/// The Refused disposition of each terminal entry, as coverage records it.
+fn refusals(f: &Fixture) -> Vec<(i64, Disposition)> {
+    f.store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT sequence,delivery_id,update_digest,terminal_reason FROM owner_ydoc_outbox_entries
+                 WHERE terminal_reason IS NOT NULL ORDER BY sequence",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    Disposition::Refused { delivery_id: r.get(1)?, update_digest: r.get(2)?, terminal_reason: r.get(3)? },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+}
+
+/// A host's terminal refusal of `delivery`, through the refusal path.
+fn refuse(f: &mut Fixture, delivery: &str, reason: &str) {
+    let (outbox_id, update_digest): (String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,update_digest FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [delivery],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    let input = owner_outbox::OwnerOutboxRefuseInput {
+        outbox_id,
+        delivery_id: delivery.into(),
+        update_digest,
+        reason: reason.into(),
+    };
+    let refused = f
+        .store
+        .write_with(&NoFaults, |tx| owner_outbox::refuse_entry_in_tx(tx, "workspace", &input, 40).map(|_| ()))
+        .unwrap();
+    assert!(matches!(refused, TxnOutcome::Committed(())));
+}
+
+/// Quarantine the document's one outbox.
+fn quarantine(f: &mut Fixture, reason: &str) {
+    let outbox_id: String = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+        .unwrap();
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput { outbox_id, reason: reason.into(), observed_binding: None },
+        5,
+    )
+    .unwrap();
+}
+
+/// A current root activation whose native update a host refused. With
+/// `dependent`, an owner write that built on that update follows it, and the
+/// refusal ends it too.
+fn refused_root(dependent: bool) -> Fixture {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    let refused = native_tail_edit(&mut f, "# Refused\n", 11);
+    if dependent {
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Refused, then built on\n")
+            .unwrap();
+        owner_outbox::append(
+            &mut f.store,
+            "workspace",
+            owner_outbox::OwnerOutboxAppendInput {
+                binding: f.binding.clone(),
+                base_update: f.cut.baseline_bytes.clone(),
+                append_key: "dependent".into(),
+                update,
+                limits: f.cut.outbox_limits.clone(),
+                created_at_ms: 12,
+            },
+        )
+        .unwrap();
+    }
+    refuse(&mut f, &refused.delivery_id, "terminal-source-refused");
+    f
+}
+
+/// Release the root once parked, and bring its document back with its file
+/// at the local state.
+fn release_and_return(f: &mut Fixture) {
+    release_parked(f);
+    returned(f);
+    file_matches_local(f, "returned");
+}
+
+/// Sol's round 4a ruling: a refusal belongs to its delivery, never to the
+/// document's lineage. A native update and the owner write that built on it,
+/// refused through the host's refusal path; an adoption seed refused the same
+/// way; and an update enrollment recovery ended: each releases, and a
+/// successor then adopts. Coverage records each as Refused, and the entry
+/// keeps its terminal bytes, provenance and reason.
+#[test]
+fn a_refusal_ends_its_delivery_and_never_its_lineage() {
+    for case in ["native update", "adoption seed", "enrollment recovery"] {
+        let mut f = match case {
+            "native update" => refused_root(true),
+            "adoption seed" => {
+                let (mut f, seed, _) = seeded();
+                refuse(&mut f, &seed, "terminal-source-refused");
+                f
+            }
+            _ => {
+                let mut f = imported_fixture();
+                adopt_root(&mut f);
+                native_tail_edit(&mut f, "# Recovered\n", 11);
+                write(&mut f, RECOVERY_TERMINAL);
+                f
+            }
+        };
+        release_and_return(&mut f);
+        let refused = refusals(&f);
+        let reasons: Vec<&str> = refused
+            .iter()
+            .map(|(_, refusal)| match refusal {
+                Disposition::Refused { terminal_reason, .. } => terminal_reason.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            match case {
+                "native update" => vec!["terminal-source-refused", "An earlier write was not accepted."],
+                "adoption seed" => vec!["terminal-source-refused"],
+                _ => vec!["stale-binding"],
+            },
+            "{case}"
+        );
+        let kept = terminal_entries(&f);
+        let id = successor(&mut f);
+        f.adopt().unwrap();
+        let (_, _, _, current, digest) = succession_row(&f, &id);
+        assert!(current, "{case}");
+        assert_eq!(digest, coverage_digest(&refused), "{case}");
+        assert_eq!(terminal_entries(&f), kept, "{case}: terminal bytes, provenance and reasons stay");
+        assert_eq!(seeds(&f).last(), Some(&(id, refused.len() as i64 + 1)), "{case}");
+    }
+}
+
+/// Rewrite the one entry's native update source, keyed as its append key
+/// would be.
+fn rewrite_source(f: &mut Fixture, change: impl FnOnce(&mut owner_outbox::OwnerOutboxNativeSource)) {
+    let (key, json): (String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT append_key,native_source_json FROM owner_ydoc_outbox_entries", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+        })
+        .unwrap();
+    assert!(key.starts_with("adopted-local:"), "{key}");
+    let mut source: owner_outbox::OwnerOutboxNativeSource = serde_json::from_str(&json).unwrap();
+    change(&mut source);
+    let key = format!("adopted-local:{}", hex_sha256(&serde_json::to_vec(&source).unwrap()));
+    let json = serde_json::to_string(&source).unwrap();
+    write(f, &format!("UPDATE owner_ydoc_outbox_entries SET append_key='{key}',native_source_json='{json}'"));
+}
+
+/// A damage to a refused entry, whether the shared predicate itself must
+/// refuse it, and whether release must.
+type RefusalDamage = (&'static str, bool, bool, fn(&mut Fixture));
+
+/// Each condition of the strict Refused representation, failing alone, keeps
+/// an entry from being Refused. Release refuses it, the shared predicate
+/// refuses it, and succession refuses it with no writes. Coverage also
+/// refuses a native source outside the released chain.
+#[test]
+fn only_the_strict_representation_is_refused() {
+    const ENTRY: &str = "UPDATE owner_ydoc_outbox_entries SET";
+    let damages: [RefusalDamage; 16] = [
+        ("pending", true, true, |f| write_unchecked(f, &format!("{ENTRY} pending=1"))),
+        ("saved receipt", true, true, |f| write_unchecked(f, &format!(
+            "{ENTRY} accepted_receipt_json=json_object('deliveryId',delivery_id,'updateDigest',update_digest,
+               'journalCursor',5,'acceptingHostEpoch',1)"
+        ))),
+        ("accepted history", true, true, |f| write(f, &format!(
+            "INSERT INTO live_accepted_updates SELECT 'namespace','workspace','main','object',o.lineage_claim_id,9,9,
+               e.delivery_id,'{{}}',e.update_digest,1,1,'{}'
+             FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id)",
+            "e".repeat(64)
+        ))),
+        ("application", true, true, |f| write(f,
+            "INSERT INTO live_device_update_applications(relay_database_namespace,workspace_id,delivery_id,main_version_id,
+               object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,
+               update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,received_at_ms,
+               first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,
+               applied_connection_id)
+             SELECT 'namespace','workspace',e.delivery_id,'main','object',o.lineage_claim_id,'owner.md','[\"owner.md\"]',0,
+               e.update_digest,e.byte_length,9,1,'owner','owner',9,0,1,'host',1,'instance','connection'
+             FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id)",
+        )),
+        ("no terminal blob", true, true, |f| write(f, &format!("{ENTRY} terminal_blob_digest=NULL"))),
+        ("another terminal blob", true, true, |f| {
+            // Other bytes of the same length.
+            let mut bytes: Vec<u8> = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT b.bytes FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.terminal_blob_digest",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    let digest = dohc_engine_storage::put_binary_blob(tx, &bytes)?;
+                    tx.execute("UPDATE owner_ydoc_outbox_entries SET terminal_blob_digest=?1", [digest])
+                        .map_err(write_sql)?;
+                    Ok::<_, ApplicationError>(())
+                })
+                .unwrap();
+        }),
+        ("terminal length", true, true, |f| write(f, &format!("{ENTRY} byte_length=byte_length+1"))),
+        ("surviving update blob", true, true, |f| write_unchecked(f, &format!("{ENTRY} update_blob_digest=update_digest"))),
+        ("invalid reason", true, true, |f| write(f, &format!("{ENTRY} terminal_reason='refused'||char(10)"))),
+        ("oversized reason", true, true, |f| write_unchecked(f, &format!("{ENTRY} terminal_reason=printf('%.257c','r')"))),
+        ("release reason", true, true, |f| write(f, &format!("{ENTRY} terminal_reason='activation-released'"))),
+        ("native sequence", true, true, |f| write(f, &format!(
+            "{ENTRY} native_source_json=json_set(native_source_json,'$.nativeSequence',99)"
+        ))),
+        ("append key", true, true, |f| write(f, &format!("{ENTRY} append_key='adopted-local:'||printf('%.64c','f')"))),
+        ("source lineage", true, true, |f| {
+            rewrite_source(f, |source| source.binding.lineage_claim_id = "f".repeat(64))
+        }),
+        ("native provenance", true, true, |f| write(f,
+            "UPDATE ydoc_updates SET recorded_at_ms=recorded_at_ms+1 WHERE seq=(SELECT
+               json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries)",
+        )),
+        ("outside the chain", false, false, |f| {
+            // Released activations of the lineage that follow each other, so
+            // the root stays the chain's one tail.
+            release_unadopted(f, "namespace", "object", "stray", None);
+            release_unadopted(f, "namespace", "object", "stray-back", Some("stray"));
+            write(f, "UPDATE live_owner_activations SET predecessor_activation_id='stray-back' WHERE activation_id='stray'");
+            rewrite_source(f, |source| source.adoption_id = "stray".into());
+        }),
+    ];
+    for (case, predicate, release, damage) in damages {
+        if release {
+            let mut f = refused_root(false);
+            damage(&mut f);
+            host_document(&mut f, true, true);
+            let before = rows(&f, &RELEASE_WRITES);
+            let released = release_through(&mut f, 10);
+            assert!(!matches!(released, Ok(Release::Released { .. })), "{case}: {released:?}");
+            assert_eq!(rows(&f, &RELEASE_WRITES), before, "{case}");
+        }
+        let mut f = refused_root(false);
+        release_and_return(&mut f);
+        successor(&mut f);
+        damage(&mut f);
+        if predicate {
+            let outbox: String = f
+                .store
+                .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+                .unwrap();
+            let refused = f.store.read_with(|conn| {
+                retirement::refused_entry(conn, "namespace", &f.key, &f.binding.lineage_claim_id, &outbox, 1)
+            });
+            assert!(!matches!(refused, Ok(Some(_))), "{case}: {refused:?}");
+        }
+        let before = rows(&f, &SUCCESSION_WRITES);
+        let adopted = f.adopt();
+        assert!(adopted.is_err(), "{case}: {adopted:?}");
+        assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
+    }
+}
+
+/// Neither class follows from a reason string. The journal's absence ends
+/// only a seed, and a native update shaped as an abandoned seed, reason and
+/// all, still refuses its release.
+#[test]
+fn a_reason_alone_abandons_nothing() {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    let entry = native_tail_edit(&mut f, "# Absent\n", 11);
+    let absent = JournalEvidence { receipts: vec![], absent: vec![entry.delivery_id] };
+    let before = rows(&f, &RELEASE_WRITES);
+    assert!(matches!(reconcile(&mut f, 10, None, Some(&absent)), Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &RELEASE_WRITES), before);
+    write(
+        &mut f,
+        "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL,terminal_blob_digest=NULL,
+           terminal_reason='activation-released';
+         UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+    );
+    host_document(&mut f, true, true);
+    let before = rows(&f, &RELEASE_WRITES);
+    assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &RELEASE_WRITES), before);
+}
+
+/// A root whose seed the relay refused on provenance, quarantining its
+/// outbox. The journal proved the seed absent, so reconciliation abandoned
+/// it, and Stop released the root. Returns the root.
+fn quarantined_seed_released() -> (Fixture, String) {
+    let (mut f, seed, _) = seeded();
+    let root = f.cut.adoption_id.clone();
+    quarantine(&mut f, "provenance-refused");
+    let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
+    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
+    release_and_return(&mut f);
+    (f, root)
+}
+
+/// Sol's B1: the successor reopens the outbox its predecessor's refused seed
+/// quarantined, in its adoption: active again, with its entries and sequence
+/// kept and the successor's seed next. A failure before commit rolls the
+/// reopening back with the adoption, and a replay after a lost reply writes
+/// nothing.
+#[test]
+fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
+    let (mut f, root) = quarantined_seed_released();
+    let id = successor(&mut f);
+    let abandoned = query_rows(&f, "SELECT * FROM owner_ydoc_outbox_entries");
+    let before = rows(&f, &SUCCESSION_WRITES);
+    let failed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, |tx, _, _, _| {
+        let state: String = tx
+            .query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))
+            .map_err(read_sql)?;
+        assert_eq!(state, "active", "reopened before the commit");
+        Err(ApplicationError::Conflict)
+    });
+    assert!(matches!(failed, Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "the reopening rolls back with the adoption");
+    f.adopt().unwrap();
+    assert_eq!(
+        query_rows(&f, "SELECT state,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes"),
+        query_rows(&f, "SELECT 'active',NULL,NULL"),
+        "the same outbox, open again"
+    );
+    let (_, _, _, _, digest) = succession_row(&f, &id);
+    assert_eq!(digest, coverage_digest(&[(1, Disposition::Abandoned)]));
+    assert_eq!(seeds(&f), vec![(root, 1), (id, 2)]);
+    assert_eq!(query_rows(&f, "SELECT * FROM owner_ydoc_outbox_entries WHERE sequence=1"), abandoned);
+    let written = rows(&f, &SUCCESSION_WRITES);
+    assert!(f.adopt().unwrap().adoption_replayed);
+    assert_eq!(rows(&f, &SUCCESSION_WRITES), written, "a replay adds no activation and no seed");
+}
+
+/// Sol's B1, its limits: a successor reopens only a provenance refusal's
+/// quarantine, at its exact binding, with nothing pending and a seed
+/// strictly abandoned. Every other quarantine refuses the succession with no
+/// writes.
+#[test]
+fn a_successor_reopens_no_other_quarantine() {
+    let cases: [(&str, &str); 8] = [
+        ("delivery conflict", "UPDATE owner_ydoc_outboxes SET quarantine_reason='delivery-conflict'"),
+        ("selectors", "UPDATE owner_ydoc_outboxes SET selector_paths_json='[\"owner.md\",\"other.md\"]'"),
+        ("restore", "UPDATE owner_ydoc_outboxes SET quarantine_reason='restore-fenced'"),
+        ("binding", "UPDATE owner_ydoc_outboxes SET quarantine_reason='stale-binding'"),
+        (
+            "conflicting observed binding",
+            "UPDATE owner_ydoc_outboxes SET observed_binding_json=json_object('workspaceId','workspace',
+               'mainVersionId','main','objectId','object','lineageClaimId',lineage_claim_id,'currentPath','other.md',
+               'selectorPaths',json_array('other.md'),'restoreFenceGeneration',0)",
+        ),
+        ("pending totals", "UPDATE owner_ydoc_outboxes SET pending_bytes=5,oldest_entry_at_ms=1"),
+        ("pending entry", "UPDATE owner_ydoc_outbox_entries SET pending=1,terminal_reason=NULL,update_blob_digest=update_digest"),
+        ("no abandoned seed", ""),
+    ];
+    for (case, damage) in cases {
+        let mut f = if damage.is_empty() {
+            // A provenance quarantine over a refused update, with no seed.
+            let mut f = refused_root(false);
+            quarantine(&mut f, "provenance-refused");
+            release_and_return(&mut f);
+            f
+        } else {
+            quarantined_seed_released().0
+        };
+        successor(&mut f);
+        if !damage.is_empty() {
+            write(&mut f, damage);
+        }
+        let before = rows(&f, &SUCCESSION_WRITES);
+        let adopted = f.adopt();
+        assert!(matches!(adopted, Err(ApplicationError::Conflict)), "{case}: {adopted:?}");
+        assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
+    }
 }

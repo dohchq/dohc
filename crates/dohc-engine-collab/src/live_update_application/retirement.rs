@@ -8,7 +8,7 @@ use super::owner_activations::{
 use super::*;
 use crate::owner_outbox::{
     OwnerDeliveryReceipt, OwnerOutboxError, OwnerOutboxNativeOrigin, OwnerOutboxNativeSource,
-    ACTIVATION_RELEASED,
+    ACTIVATION_RELEASED, MAX_TERMINAL_REASON_BYTES,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -450,22 +450,20 @@ fn retained_entries(
         .map_err(read_sql)?;
     let mut entries = Vec::new();
     while let Some(row) = rows.next().map_err(read_sql)? {
-        let length: i64 = row.get(11).map_err(read_sql)?;
-        if !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
-            return Err(ApplicationError::Corrupt);
-        }
-        let append_key: String = row.get(2).map_err(read_sql)?;
-        let json: String = row.get(5).map_err(read_sql)?;
-        let source: OwnerOutboxNativeSource =
-            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-        source
-            .validate(&append_key)
-            .map_err(|_| ApplicationError::Corrupt)?;
-        let entry = RetainedEntry {
+        let update_digest: String = row.get(4).map_err(read_sql)?;
+        let source = native_source(
+            &row.get::<_, String>(5).map_err(read_sql)?,
+            row.get(11).map_err(read_sql)?,
+            &row.get::<_, String>(2).map_err(read_sql)?,
+            doc,
+            &retiring.lineage_claim_id,
+            &update_digest,
+        )?;
+        entries.push(RetainedEntry {
             outbox_id: row.get(0).map_err(read_sql)?,
             sequence: row.get(1).map_err(read_sql)?,
             delivery_id: row.get(3).map_err(read_sql)?,
-            update_digest: row.get(4).map_err(read_sql)?,
+            update_digest,
             source,
             receipt: row.get(6).map_err(read_sql)?,
             pending: row.get(7).map_err(read_sql)?,
@@ -473,19 +471,119 @@ fn retained_entries(
             update_blob: row.get(9).map_err(read_sql)?,
             terminal_blob: row.get(10).map_err(read_sql)?,
             quarantined: row.get(12).map_err(read_sql)?,
-        };
-        let b = &entry.source.binding;
-        if b.workspace_id != doc.workspace_id
-            || b.main_version_id != doc.version_id
-            || b.object_id != doc.object_id
-            || b.lineage_claim_id != retiring.lineage_claim_id
-            || entry.source.update_digest != entry.update_digest
-        {
-            return Err(ApplicationError::Corrupt);
-        }
-        entries.push(entry);
+        });
     }
     Ok(entries)
+}
+
+/// An entry's retained native source, valid for that entry: within its
+/// bound, keyed by its append key, naming the document's lineage and the
+/// entry's own bytes. Anything else is corrupt.
+fn native_source(
+    json: &str,
+    length: i64,
+    append_key: &str,
+    doc: &DocKey,
+    lineage: &str,
+    update_digest: &str,
+) -> Result<OwnerOutboxNativeSource, ApplicationError> {
+    if !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
+        return Err(ApplicationError::Corrupt);
+    }
+    let source: OwnerOutboxNativeSource =
+        serde_json::from_str(json).map_err(|_| ApplicationError::Corrupt)?;
+    source
+        .validate(append_key)
+        .map_err(|_| ApplicationError::Corrupt)?;
+    let b = &source.binding;
+    if b.workspace_id != doc.workspace_id
+        || b.main_version_id != doc.version_id
+        || b.object_id != doc.object_id
+        || b.lineage_claim_id != lineage
+        || source.update_digest != update_digest
+    {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(source)
+}
+
+/// A delivery a host refused, as its refusal left it.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub delivery_id: String,
+    pub update_digest: String,
+    pub terminal_reason: String,
+    /// The native update or seed it queued; none for an owner draft.
+    pub source: Option<OwnerOutboxNativeSource>,
+}
+
+/// The one representation of a delivery a host refused, for release and
+/// succession alike: terminal with a valid reason, never acknowledged,
+/// accepted or applied in `namespace`, and keeping exactly its own bytes. Its
+/// reason alone proves nothing, and an abandoned seed's is never a refusal.
+/// A refusal stays terminal: whoever reads it records it, and grants nothing.
+pub(super) fn refused_entry(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<Option<Refusal>, ApplicationError> {
+    type Row = (String, String, String, String, Option<String>, Option<i64>);
+    let row: Option<Row> = conn
+        .query_row(
+            "SELECT e.delivery_id,e.update_digest,e.terminal_reason,e.append_key,e.native_source_json,
+                length(CAST(e.native_source_json AS BLOB))
+             FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.terminal_blob_digest
+             WHERE e.outbox_id=?1 AND e.sequence=?2 AND e.pending=0 AND e.accepted_receipt_json IS NULL
+               AND e.update_blob_digest IS NULL AND e.terminal_blob_digest=e.update_digest
+               AND e.terminal_reason<>?3 AND b.byte_length=e.byte_length AND length(b.bytes)=e.byte_length
+               AND NOT EXISTS(SELECT 1 FROM live_accepted_updates
+                 WHERE relay_database_namespace=?4 AND delivery_id=e.delivery_id)
+               AND NOT EXISTS(SELECT 1 FROM live_device_update_applications
+                 WHERE relay_database_namespace=?4 AND delivery_id=e.delivery_id)",
+            params![outbox_id, sequence, ACTIVATION_RELEASED, namespace],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((delivery_id, update_digest, terminal_reason, append_key, json, length)) = row else {
+        return Ok(None);
+    };
+    if identifier(&terminal_reason, MAX_TERMINAL_REASON_BYTES).is_err() {
+        return Ok(None);
+    }
+    let source = match json {
+        None => None,
+        Some(json) => {
+            let source = native_source(
+                &json,
+                length.unwrap_or(0),
+                &append_key,
+                doc,
+                lineage,
+                &update_digest,
+            )?;
+            source.verify_retained_row(conn).map_err(outbox_error)?;
+            Some(source)
+        }
+    };
+    Ok(Some(Refusal {
+        delivery_id,
+        update_digest,
+        terminal_reason,
+        source,
+    }))
 }
 
 /// Whether `entry` is the retiring activation's adoption seed, never
@@ -1389,8 +1487,9 @@ pub(super) fn accepted_endpoint(
 /// Classify each of the activation's retained native entries against B and
 /// F. Covered: accepted history at or below B keeps its exact receipt.
 /// Carried: a saved receipt in (B, F] for its own delivery, never applied.
-/// Abandoned: the strict seed representation. An entry a host refused was
-/// never accepted and needs none. Anything else refuses the release.
+/// Abandoned: the strict seed representation. Refused: the strict refusal
+/// representation, which needs no acceptance. Anything else, including an
+/// entry with both terminal and acceptance evidence, refuses the release.
 fn classify(
     conn: &Connection,
     namespace: &str,
@@ -1405,16 +1504,24 @@ fn classify(
     let mut carried = Vec::new();
     for entry in retained_entries(conn, retiring, None)? {
         let Some(saved) = &entry.receipt else {
-            match entry.terminal_reason.as_deref() {
-                Some(ACTIVATION_RELEASED)
-                    if is_abandoned_seed(conn, namespace, retiring, &entry)? =>
-                {
-                    continue
-                }
-                Some(reason) if reason != ACTIVATION_RELEASED && !entry.pending => continue,
-                _ => return Err(ApplicationError::Conflict),
+            let refused = || {
+                refused_entry(
+                    conn,
+                    namespace,
+                    &retiring.doc,
+                    &retiring.lineage_claim_id,
+                    &entry.outbox_id,
+                    entry.sequence,
+                )
+            };
+            if is_abandoned_seed(conn, namespace, retiring, &entry)? || refused()?.is_some() {
+                continue;
             }
+            return Err(ApplicationError::Conflict);
         };
+        if entry.terminal_reason.is_some() || entry.terminal_blob.is_some() {
+            return Err(ApplicationError::Conflict);
+        }
         let saved: OwnerDeliveryReceipt =
             serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
         let receipt = LiveUpdateReceipt {
@@ -1479,18 +1586,30 @@ pub(super) fn released_tail(
     ))
 }
 
-/// A released activation of the lineage as its release left it, to judge a
-/// seed it abandoned.
-fn released_retiring(
+/// An activation of the released chain ending at `tail`, as its release left
+/// it, to judge an entry it queued. None for any other activation.
+fn chained_retiring(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
+    tail: &str,
     activation_id: &str,
 ) -> Result<Option<Retiring>, ApplicationError> {
-    let Some(activation) = activation_by_id(conn, namespace, activation_id)?
-        .filter(|found| found.released && found.key == *doc && found.lineage_claim_id == lineage)
-    else {
+    let chained: bool = conn
+        .query_row(
+            "WITH RECURSIVE chain(activation_id) AS (SELECT ?2 UNION
+               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
+                 ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
+               WHERE v.predecessor_activation_id IS NOT NULL)
+             SELECT EXISTS(SELECT 1 FROM chain WHERE activation_id=?3)",
+            params![namespace, tail, activation_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    let Some(activation) = activation_by_id(conn, namespace, activation_id)?.filter(|found| {
+        chained && found.released && found.key == *doc && found.lineage_claim_id == lineage
+    }) else {
         return Ok(None);
     };
     let through: i64 = conn
@@ -1510,11 +1629,29 @@ fn released_retiring(
     }))
 }
 
+/// How a successor's coverage accounts for one retained entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(super) enum Disposition {
+    /// Covered or Carried, each under its own proof.
+    Receipt { receipt: LiveUpdateReceipt },
+    /// A seed its activation strictly abandoned.
+    Abandoned,
+    /// A delivery a host refused, which stays terminal.
+    #[serde(rename_all = "camelCase")]
+    Refused {
+        delivery_id: String,
+        update_digest: String,
+        terminal_reason: String,
+    },
+}
+
 /// A successor's coverage of the outbox its released chain left: each entry
 /// Covered by accepted history at or below the prefix, Carried under the
-/// chain's manifest, or a seed its activation strictly abandoned. Anything
-/// else refuses the succession, and so does a carried delivery it lacks.
-/// Each entry names its sequence and receipt; an abandoned seed has none.
+/// chain's manifest, a seed its activation strictly abandoned, or a delivery
+/// a host strictly refused. Native sources of the last two belong to the
+/// chain. Anything else refuses the succession, and so does a carried
+/// delivery it lacks. Each entry names its sequence and disposition.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retained_coverage(
     conn: &Connection,
@@ -1522,10 +1659,10 @@ pub(super) fn retained_coverage(
     doc: &DocKey,
     lineage: &str,
     outbox_id: &str,
-    prefix: &RetainedPrefixBody,
+    prefix: &RetainedPrefix,
     carried: &[CarriedDelivery],
     max_events: usize,
-) -> Result<Vec<(i64, Option<LiveUpdateReceipt>)>, ApplicationError> {
+) -> Result<Vec<(i64, Disposition)>, ApplicationError> {
     let through = prefix
         .terminal_receipt
         .as_ref()
@@ -1559,28 +1696,17 @@ pub(super) fn retained_coverage(
         let digest: String = row.get(3).map_err(read_sql)?;
         let source = match row.get::<_, Option<String>>(4).map_err(read_sql)? {
             None => None,
-            Some(json) => {
-                let length: i64 = row.get(10).map_err(read_sql)?;
-                if !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
-                    return Err(ApplicationError::Corrupt);
-                }
-                let source: OwnerOutboxNativeSource =
-                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-                source
-                    .validate(&append_key)
-                    .map_err(|_| ApplicationError::Corrupt)?;
-                let b = &source.binding;
-                if b.workspace_id != doc.workspace_id
-                    || b.main_version_id != doc.version_id
-                    || b.object_id != doc.object_id
-                    || b.lineage_claim_id != lineage
-                    || source.update_digest != digest
-                {
-                    return Err(ApplicationError::Corrupt);
-                }
-                Some(source)
-            }
+            Some(json) => Some(native_source(
+                &json,
+                row.get(10).map_err(read_sql)?,
+                &append_key,
+                doc,
+                lineage,
+                &digest,
+            )?),
         };
+        let terminal_reason: Option<String> = row.get(7).map_err(read_sql)?;
+        let terminal_blob: Option<String> = row.get(9).map_err(read_sql)?;
         let saved = row
             .get::<_, Option<String>>(5)
             .map_err(read_sql)?
@@ -1595,14 +1721,17 @@ pub(super) fn retained_coverage(
                 })
             })
             .transpose()?;
+        // Acceptance evidence beside terminal evidence contradicts itself.
+        let terminal = terminal_reason.is_some() || terminal_blob.is_some();
         if let Some(receipt) = accepted_receipt(conn, namespace, doc, lineage, &delivery, &digest)?
         {
-            if receipt.journal_cursor > through
+            if terminal
+                || receipt.journal_cursor > through
                 || saved.as_ref().is_some_and(|saved| *saved != receipt)
             {
                 return Err(ApplicationError::Conflict);
             }
-            coverage.push((sequence, Some(receipt)));
+            coverage.push((sequence, Disposition::Receipt { receipt }));
             continue;
         }
         if let (Some(saved), Some(source)) = (&saved, &source) {
@@ -1617,7 +1746,8 @@ pub(super) fn retained_coverage(
                     |row| row.get(0),
                 )
                 .map_err(read_sql)?;
-            if !listed
+            if terminal
+                || !listed
                 || saved.delivery_id != delivery
                 || saved.update_digest != digest
                 || saved.journal_cursor <= through
@@ -1626,35 +1756,63 @@ pub(super) fn retained_coverage(
                 return Err(ApplicationError::Conflict);
             }
             found.insert(delivery);
-            coverage.push((sequence, Some(saved.clone())));
+            coverage.push((
+                sequence,
+                Disposition::Receipt {
+                    receipt: saved.clone(),
+                },
+            ));
             continue;
         }
-        let abandoned = match (source, saved) {
-            (Some(source), None) => {
-                let entry = RetainedEntry {
-                    outbox_id: outbox_id.to_owned(),
-                    sequence,
-                    delivery_id: delivery,
-                    update_digest: digest,
-                    receipt: None,
-                    pending: false,
-                    terminal_reason: row.get(7).map_err(read_sql)?,
-                    update_blob: row.get(8).map_err(read_sql)?,
-                    terminal_blob: row.get(9).map_err(read_sql)?,
-                    quarantined: false,
-                    source,
-                };
-                match released_retiring(conn, namespace, doc, lineage, &entry.source.adoption_id)? {
-                    Some(retiring) => is_abandoned_seed(conn, namespace, &retiring, &entry)?,
-                    None => false,
-                }
-            }
-            _ => false,
-        };
-        if !abandoned {
+        if saved.is_some() {
             return Err(ApplicationError::Conflict);
         }
-        coverage.push((sequence, None));
+        let chained = |activation_id: &str| {
+            chained_retiring(
+                conn,
+                namespace,
+                doc,
+                lineage,
+                &prefix.predecessor_activation_id,
+                activation_id,
+            )
+        };
+        if let Some(source) = &source {
+            let entry = RetainedEntry {
+                outbox_id: outbox_id.to_owned(),
+                sequence,
+                delivery_id: delivery.clone(),
+                update_digest: digest.clone(),
+                receipt: None,
+                pending: false,
+                terminal_reason: terminal_reason.clone(),
+                update_blob: row.get(8).map_err(read_sql)?,
+                terminal_blob: terminal_blob.clone(),
+                quarantined: false,
+                source: source.clone(),
+            };
+            if let Some(retiring) = chained(&source.adoption_id)? {
+                if is_abandoned_seed(conn, namespace, &retiring, &entry)? {
+                    coverage.push((sequence, Disposition::Abandoned));
+                    continue;
+                }
+            }
+        }
+        let refusal = refused_entry(conn, namespace, doc, lineage, outbox_id, sequence)?
+            .ok_or(ApplicationError::Conflict)?;
+        if let Some(source) = &refusal.source {
+            if chained(&source.adoption_id)?.is_none() {
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        coverage.push((
+            sequence,
+            Disposition::Refused {
+                delivery_id: refusal.delivery_id,
+                update_digest: refusal.update_digest,
+                terminal_reason: refusal.terminal_reason,
+            },
+        ));
     }
     if carried
         .iter()

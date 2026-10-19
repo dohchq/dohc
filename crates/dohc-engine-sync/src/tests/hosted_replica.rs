@@ -5057,7 +5057,7 @@ fn adopt_activation(store: &mut EngineStore, object_id: &str, lineage: &str, nam
                 params![namespace, object_id, lineage, text_sha("hosted b")],
             )
             .map_err(SyncError::persist)?;
-            tx.execute(ACTIVATE_ADOPTION, params![namespace, "activation"])
+            tx.execute(ACTIVATE_ADOPTION, params![namespace, "activation", None::<String>])
                 .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
@@ -5235,7 +5235,7 @@ fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
                 params![lineage, serde_json::to_string(&binding).unwrap(), text_sha("hosted b")],
             )
             .map_err(SyncError::persist)?;
-            tx.execute(ACTIVATE_ADOPTION, params!["relay", "activation"])
+            tx.execute(ACTIVATE_ADOPTION, params!["relay", "activation", None::<String>])
                 .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO live_device_application_bindings VALUES \

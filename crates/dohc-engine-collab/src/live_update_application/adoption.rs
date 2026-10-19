@@ -1508,10 +1508,18 @@ pub fn adopt_owner_committed(
             return Err(ApplicationError::Conflict);
         }
         // A lineage adopts once. After that only the exact successor of its
-        // released chain tail activates it, under the same origin.
+        // released chain tail activates it, under the same origin. A first
+        // adoption follows exactly the released tail its capture named, and
+        // one without a capture only a lineage that released nothing.
+        let captured_predecessor = imported_source.as_ref().and_then(|source| source.predecessor_activation_id.clone());
         let succession = match &cut.retained_prefix {
             None if owner_activations::lineage_origin_id(tx,None,&key,&b.lineage_claim_id)?.is_some() => return Err(ApplicationError::Conflict),
-            None => None,
+            None => {
+                if owner_activations::released_chain_tail(tx,&held.namespace,&key,&b.lineage_claim_id)? != captured_predecessor {
+                    return Err(ApplicationError::Conflict);
+                }
+                None
+            }
             Some(prefix) => Some(require_succession(tx, &held, &key, prefix, imported_source.as_ref())?),
         };
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
@@ -1532,7 +1540,7 @@ pub fn adopt_owner_committed(
         if local.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
-        let (coverage,covered_sequence,seed) = match &succession {
+        let (coverage,covered_sequence,seed,reopen) = match &succession {
             None => {
                 let journal = Ydoc::wire();
                 journal.apply(&cut.baseline_bytes)?;
@@ -1551,7 +1559,7 @@ pub fn adopt_owner_committed(
                         return Err(invalid("owner adoption journal does not account for durable state"));
                     }
                 }
-                (coverage,covered_sequence,seed)
+                (coverage,covered_sequence,seed,None)
             }
             Some(succession) => {
                 // The accepted state at B, which local state must contain:
@@ -1567,8 +1575,8 @@ pub fn adopt_owner_committed(
                     || !crate::replay_parity::structurally_equal_v2(&merged, &local)? {
                     return Err(ApplicationError::Conflict);
                 }
-                let (coverage,covered_sequence) = retained_outbox_coverage(tx, &held, &key, succession, max_events)?;
-                (coverage,covered_sequence,!crate::replay_parity::structurally_equal_v2(&local, &accepted)?)
+                let (coverage,covered_sequence,reopen) = retained_outbox_coverage(tx, &held, &key, succession, max_events)?;
+                (coverage,covered_sequence,!crate::replay_parity::structurally_equal_v2(&local, &accepted)?,reopen)
             }
         };
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
@@ -1584,16 +1592,10 @@ pub fn adopt_owner_committed(
         let host_json = serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?;
         match &succession {
             None => {
-                // Captures released before it keep their place in its chain.
-                let tail = owner_activations::released_chain_tail(tx,&held.namespace,&key,&b.lineage_claim_id)?;
                 tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
                     params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,terminal_json,host_json,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
-                tx.execute(owner_activations::ACTIVATE_ADOPTION,params![held.namespace,cut.adoption_id]).map_err(write_sql)?;
-                if let Some(tail) = tail {
-                    tx.execute("UPDATE live_owner_activations SET predecessor_activation_id=?3 WHERE relay_database_namespace=?1 AND activation_id=?2",
-                        params![held.namespace,cut.adoption_id,tail]).map_err(write_sql)?;
-                }
+                tx.execute(owner_activations::ACTIVATE_ADOPTION,params![held.namespace,cut.adoption_id,captured_predecessor]).map_err(write_sql)?;
             }
             Some(succession) => {
                 tx.execute("INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,boundary_json)
@@ -1604,6 +1606,9 @@ pub fn adopt_owner_committed(
         }
         tx.execute("UPDATE live_device_application_bindings SET activation_id=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,cut.adoption_id]).map_err(write_sql)?;
+        if let Some(outbox) = &reopen {
+            reopen_outbox(tx, outbox)?;
+        }
         // The activation row exists first, so the seed is this activation's
         // own delivery, under its limits, and no released lineage's.
         if seed {
@@ -1815,43 +1820,100 @@ fn require_succession(
     })
 }
 
+/// The quarantine a successor may end: its predecessor's seed failed
+/// provenance and was strictly abandoned.
+const PROVENANCE_REFUSED: &str = "provenance-refused";
+
 /// A successor's coverage of the outbox at its binding, in the coverage
-/// digest's representation.
+/// digest's representation, and that outbox when the successor reopens it.
+/// It reopens only an outbox at its exact binding and base that a seed's
+/// provenance refusal quarantined, with nothing pending and the seed strictly
+/// abandoned. Every other quarantine refuses the succession.
 fn retained_outbox_coverage(
     tx: &Transaction<'_>,
     held: &Registration,
     key: &DocKey,
     succession: &Succession,
     max_events: usize,
-) -> Result<(String, i64), ApplicationError> {
+) -> Result<(String, i64, Option<String>), ApplicationError> {
     let b = &held.binding;
-    let parent: Option<(String,String,String)> = tx.query_row(
-        "SELECT outbox_id,state,base_update_digest FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND restore_fence_generation=?6",
+    type Parent = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let parent: Option<Parent> = tx.query_row(
+        "SELECT outbox_id,state,base_update_digest,selector_paths_json,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND restore_fence_generation=?6",
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,b.restore_fence_generation],
-        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?;
-    let coverage = match parent {
-        Some((id, state, base)) => {
-            if (state != "active" && state != "sealed") || base != b.lineage_claim_id {
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+    let (coverage, reopen) = match parent {
+        Some((id, state, base, selectors, reason, observed)) => {
+            let reopen = match state.as_str() {
+                "active" | "sealed" => false,
+                "quarantined" => {
+                    let observed = observed
+                        .map(|json| serde_json::from_str::<LiveObjectBinding>(&json))
+                        .transpose()
+                        .map_err(|_| ApplicationError::Corrupt)?;
+                    if reason.as_deref() != Some(PROVENANCE_REFUSED)
+                        || observed.is_some_and(|observed| observed != *b)
+                        || selectors
+                            != serde_json::to_string(&b.selector_paths)
+                                .map_err(|_| ApplicationError::Corrupt)?
+                    {
+                        return Err(ApplicationError::Conflict);
+                    }
+                    true
+                }
+                _ => return Err(ApplicationError::Conflict),
+            };
+            if base != b.lineage_claim_id {
                 return Err(ApplicationError::Conflict);
             }
-            retirement::retained_coverage(
+            let coverage = retirement::retained_coverage(
                 tx,
                 &held.namespace,
                 key,
                 &b.lineage_claim_id,
                 &id,
-                &succession.prefix.body(),
+                &succession.prefix,
                 &succession.carried,
                 max_events,
-            )?
+            )?;
+            if reopen
+                && !coverage
+                    .iter()
+                    .any(|(_, disposition)| *disposition == retirement::Disposition::Abandoned)
+            {
+                return Err(ApplicationError::Conflict);
+            }
+            (coverage, reopen.then_some(id))
         }
-        None if succession.carried.is_empty() => Vec::new(),
+        None if succession.carried.is_empty() => (Vec::new(), None),
         None => return Err(ApplicationError::Conflict),
     };
     Ok((
         hex_sha256(&serde_json::to_vec(&coverage).map_err(|_| ApplicationError::Corrupt)?),
         coverage.len() as i64,
+        reopen,
     ))
+}
+
+/// Reopen the outbox a successor's coverage proved, keeping its entries,
+/// sequence, receipts and refusals. Its totals must still be zero.
+fn reopen_outbox(tx: &Transaction<'_>, outbox_id: &str) -> Result<(), ApplicationError> {
+    let reopened = tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL
+         WHERE outbox_id=?1 AND state='quarantined' AND pending_bytes=0 AND oldest_entry_at_ms IS NULL",
+        [outbox_id],
+    ).map_err(write_sql)?;
+    if reopened != 1 {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
 }
 
 pub(super) struct AdoptedOrigin {
