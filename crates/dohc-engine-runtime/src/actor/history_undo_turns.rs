@@ -234,6 +234,7 @@ impl ActorHandle {
         recorder: Arc<dyn SelfWriteRecorder>,
         token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
+        let _stop = self.stop_link_rewrites();
         let _rewrite = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             guard = Arc::clone(&self.link_rewrite_gate).lock_owned() => guard,

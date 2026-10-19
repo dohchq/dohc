@@ -1066,3 +1066,38 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     }
     f.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
+    let f = Fixture::new(20, 20);
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let (sent, wait) = (reached.clone(), release.clone());
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
+        if object == "source-0016" {
+            sent.notify_one();
+            wait.wait();
+        }
+    }));
+    let (forward, undone) = tokio::join!(f.pass("stop-for-undo", Arc::new(NoFaults)), async {
+        reached.notified().await;
+        let undo = f.undo();
+        tokio::pin!(undo);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.wait();
+        undo.await
+    });
+    let forward = forward.unwrap();
+    let documents = forward["documents"].as_u64().unwrap() as usize;
+    assert!((1..=16).contains(&documents));
+    assert_eq!(forward["uncheckedCount"], 20 - documents);
+    assert_eq!(undone.unwrap().moments.len(), documents + 1);
+    for i in 0..20 {
+        assert_eq!(f.text(&format!("source-{i:04}.md")).await, BODY);
+    }
+    f.close().await;
+}

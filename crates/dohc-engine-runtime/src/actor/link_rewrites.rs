@@ -19,12 +19,23 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
+pub(super) struct RewriteStop(Arc<AtomicU64>);
+impl Drop for RewriteStop {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct Plan {
+    stops: Arc<AtomicU64>,
     version: String,
     operation: String,
     rename: OperationMoment,
@@ -34,6 +45,9 @@ struct Plan {
 }
 
 fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError> {
+    if plan.stops.load(Ordering::SeqCst) > 0 {
+        return Ok(false);
+    }
     let revision: i64 = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,plan.version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
     let undo: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",params![ws,plan.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
     Ok(!undo && revision == plan.revision && conn.query_row(
@@ -97,6 +111,11 @@ fn save(
 }
 
 impl ActorHandle {
+    pub(super) fn stop_link_rewrites(&self) -> RewriteStop {
+        self.link_rewrite_stops.fetch_add(1, Ordering::SeqCst);
+        RewriteStop(self.link_rewrite_stops.clone())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn history_rewrite_links(
         &self,
@@ -119,13 +138,12 @@ impl ActorHandle {
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
         });
         let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
+        #[cfg(test)]
         let admission_ws = workspace.clone();
         let db = self
             .run(move |store, _| {
                 #[cfg(test)]
                 let _turn = tests::Turn::start(&admission_ws, "admission");
-                #[cfg(not(test))]
-                let _ = admission_ws;
                 if store.is_passive() {
                     return Err(DomainError::InvalidInput {
                         reason: "link rewrites need the owner",
@@ -135,7 +153,8 @@ impl ActorHandle {
                 Ok(store.database_path().to_path_buf())
             })
             .await?;
-        let (plan, mut result) = tokio::task::spawn_blocking(move || {
+        let stops = self.link_rewrite_stops.clone();
+        let (plan, mut result) = tokio::task::spawn_blocking(move || -> Result<_, RuntimeError> {
                 let mut store = EngineStore::open_read_only(&db)?;
                 store.read_with(|conn| conn.execute_batch("BEGIN")).map_err(StorageError::corrupt_public)?;
                 #[cfg(test)]
@@ -180,7 +199,7 @@ impl ActorHandle {
                     });
                     let revision = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                     let plan = Plan {
-                        version, operation: op.clone(), revision,
+                        version, operation: op.clone(), revision, stops,
                         rename: (*rename).clone(),
                         paths,
                         candidates,
@@ -198,12 +217,11 @@ impl ActorHandle {
             return Ok(result);
         };
         let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
+        #[cfg(test)]
         let reserve_ws = workspace.clone();
         self.run(move |store, _| {
             #[cfg(test)]
             let _turn = tests::Turn::start(&reserve_ws, "reserve");
-            #[cfg(not(test))]
-            let _ = reserve_ws;
             save(store, &r, false, &initial, f.as_ref())
         })
         .await?;

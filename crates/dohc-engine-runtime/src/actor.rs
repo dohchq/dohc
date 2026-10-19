@@ -207,6 +207,7 @@ pub struct WorkspaceActor {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
+    link_rewrite_stops: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
@@ -371,6 +372,7 @@ impl WorkspaceActor {
                     link_metrics,
                     link_drain_holds,
                     link_rewrite_gate: Arc::default(),
+                    link_rewrite_stops: Arc::default(),
                     current_views: Arc::default(),
                     link_resolvers: Arc::default(),
                 };
@@ -406,6 +408,7 @@ impl WorkspaceActor {
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             link_rewrite_gate: Arc::clone(&self.link_rewrite_gate),
+            link_rewrite_stops: Arc::clone(&self.link_rewrite_stops),
             current_views: Arc::clone(&self.current_views),
             link_resolvers: Arc::clone(&self.link_resolvers),
         }
@@ -501,6 +504,7 @@ pub struct ActorHandle {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
+    link_rewrite_stops: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
@@ -1101,6 +1105,7 @@ mod saturation_tests {
             current_views: Arc::default(),
             link_resolvers: Arc::default(),
             link_rewrite_gate: Arc::default(),
+            link_rewrite_stops: Arc::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
