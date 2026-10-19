@@ -1,7 +1,7 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent} from "react";
 import {renderSafeMarkdown} from "./markdown";
 import {accountUser, namedRequest} from "./namedRecipient";
-import {NamedSignIn, SIGN_IN_FAILED} from "./NamedSignIn";
+import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
 import {CHAT_FOLLOW_HOLD_MS, chatBodyTooLong, followNamedChat, mergeChatMessages, NamedChatError, normalizeChatBody, openNamedChannel,
   postNamedChatMessage, readNamedChatHistory, type NamedChatChannel, type NamedChatMessage} from "./namedChat";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
@@ -293,7 +293,7 @@ export default function NamedChatApp({grantId}: {grantId: string | null}) {
     const controller = start("sign-in");
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
       () => load(controller).then(() => finish(controller, null), failed(controller)),
-      () => finish(controller, SIGN_IN_FAILED));
+      (reason: unknown) => finish(controller, signInErrorMessage(reason)));
   };
   const signOut = () => {
     const controller = start("sign-out");
