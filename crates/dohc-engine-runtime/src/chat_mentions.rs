@@ -363,7 +363,13 @@ mod tests {
             Err(RuntimeError::ChatMentionVersionChanged)
         ));
         assert!(matches!(
-            decode("ws", "main", &json!({"path":"other.md"}), "grant-1", Some(cursor)),
+            decode(
+                "ws",
+                "main",
+                &json!({"path":"other.md"}),
+                "grant-1",
+                Some(cursor)
+            ),
             Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
         ));
     }

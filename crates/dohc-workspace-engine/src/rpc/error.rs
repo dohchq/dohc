@@ -124,7 +124,10 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
-    if matches!(error, RuntimeError::ChatMentionAccessChanged | RuntimeError::ChatMentionVersionChanged) {
+    if matches!(
+        error,
+        RuntimeError::ChatMentionAccessChanged | RuntimeError::ChatMentionVersionChanged
+    ) {
         return WireError::new(ErrorCode::Conflict, error.code());
     }
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
@@ -639,7 +642,8 @@ mod tests {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
         assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
         assert_eq!(error.message, "chat-mention-access-changed");
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionVersionChanged);
+        let error =
+            super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionVersionChanged);
         assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
         assert_eq!(error.message, "chat-mention-version-changed");
     }
