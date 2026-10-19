@@ -3318,6 +3318,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE agent_run_records RENAME COLUMN failure_note_posted TO failure_handled;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 61,
+        id: "v2-history-undo-plans",
+        sql: "CREATE INDEX idx_engine_requests_kind ON engine_requests(kind,request_id); \
+              CREATE TABLE history_undo_plans (request_id TEXT PRIMARY KEY REFERENCES engine_requests(request_id), workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, operation_id TEXT NOT NULL, author_json TEXT, plan_json TEXT NOT NULL CHECK(json_valid(plan_json)), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, UNIQUE(workspace_id,operation_id)) STRICT;",
+        sets_user_version: None,
+    },
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.

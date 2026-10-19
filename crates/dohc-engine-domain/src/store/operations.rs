@@ -287,7 +287,7 @@ pub fn replayed_undo_operation_in(
         return Ok(None);
     }
     if kind == "history-undo-complete" {
-        let version: String = conn.query_row("SELECT json_extract(payload_hash,'$.version') FROM engine_requests WHERE request_id=?1 AND kind='history-undo-plan'", [undo_progress_key(request)], |r| r.get(0)).map_err(DomainError::sql_corrupt)?;
+        let version: String = conn.query_row("SELECT version_id FROM history_undo_plans WHERE request_id=?1", [request], |r| r.get(0)).map_err(DomainError::sql_corrupt)?;
         return Ok(Some((
             version.clone(),
             undo_compensation_moments_in(conn, ws, &version, operation, request)?,

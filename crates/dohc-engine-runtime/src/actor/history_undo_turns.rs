@@ -6,53 +6,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::time::Instant;
 
-type StoredMember = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    i64,
-    String,
-    Option<String>,
-);
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(from = "StoredMember", into = "StoredMember")]
 struct Member {
     effect: OperationMoment,
     head: String,
     sha: Option<String>,
-}
-impl From<Member> for StoredMember {
-    fn from(member: Member) -> Self {
-        let effect = member.effect;
-        (
-            effect.moment_id,
-            effect.object_id,
-            effect.operation,
-            effect.path,
-            effect.before_path,
-            effect.moment_order,
-            member.head,
-            member.sha,
-        )
-    }
-}
-impl From<StoredMember> for Member {
-    fn from(value: StoredMember) -> Self {
-        Self {
-            effect: OperationMoment {
-                moment_id: value.0,
-                object_id: value.1,
-                operation: value.2,
-                path: value.3,
-                before_path: value.4,
-                moment_order: value.5,
-            },
-            head: value.6,
-            sha: value.7,
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -107,7 +65,7 @@ fn load(
     ) {
         return Ok(None);
     }
-    let body: String = conn.query_row("SELECT payload_hash FROM engine_requests WHERE request_id=?1 AND kind='history-undo-plan'", [undo_progress_key(request)], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+    let body: String = conn.query_row("SELECT plan_json FROM history_undo_plans WHERE request_id=?1", [request], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
     let plan: Plan = serde_json::from_str(&body).map_err(|_| corrupt())?;
     let cursor = usize::try_from(cursor).map_err(|_| corrupt())?;
     if plan.workspace != ws
@@ -124,8 +82,8 @@ pub(super) fn not_restored(
     conn: &rusqlite::Connection,
     request: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    let mut stmt = conn.prepare_cached("SELECT payload_hash FROM engine_requests WHERE kind='history-undo-skipped' AND substr(request_id,1,length(?1))=?1 ORDER BY result_seq").map_err(StorageError::corrupt_public)?;
-    stmt.query_map([format!("{}:", undo_progress_key(request))], |r| r.get(0))
+    let mut stmt = conn.prepare_cached("SELECT payload_hash FROM engine_requests WHERE kind='history-undo-skipped' AND request_id>=?1 AND request_id<?2 ORDER BY result_seq").map_err(StorageError::corrupt_public)?;
+    stmt.query_map([format!("{}:", undo_progress_key(request)), format!("{};", undo_progress_key(request))], |r| r.get(0))
         .map_err(StorageError::corrupt_public)?
         .collect::<Result<_, _>>()
         .map_err(StorageError::corrupt_public)
@@ -195,7 +153,7 @@ impl ActorHandle {
         self.run(move |store,_| {
             if store.is_passive() { return Ok(Vec::new()); }
             store.read_with(|conn| {
-                let mut stmt = conn.prepare_cached("SELECT json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation'),json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request'),json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.author') FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1").map_err(StorageError::corrupt_public)?;
+                let mut stmt = conn.prepare_cached("SELECT p.operation_id,r.request_id,p.author_json FROM engine_requests r INDEXED BY idx_engine_requests_kind JOIN history_undo_plans p ON p.request_id=r.request_id WHERE r.kind='history-undo-pending' AND p.workspace_id=?1").map_err(StorageError::corrupt_public)?;
                 stmt.query_map([ws],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(StorageError::corrupt_public)?.collect::<Result<_,_>>().map_err(StorageError::corrupt_public).map_err(Into::into)
             })
         }).await
@@ -344,10 +302,10 @@ impl ActorHandle {
                 tests::begin_turn(&p.request);
                 if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(Arc::new(plan)); }
                 let outcome = store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
-                    let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1 AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation')=?2)",params![p.workspace,p.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-                    if busy { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"Undo in progress"}.into()); }
+                    let prior: Option<String> = tx.query_row("SELECT r.kind FROM history_undo_plans p JOIN engine_requests r ON r.request_id=p.request_id WHERE p.workspace_id=?1 AND p.operation_id=?2",params![p.workspace,p.operation],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
+                    if let Some(kind) = prior { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:if kind=="history-undo-complete" {"Operation already undone"} else {"Undo in progress"}}.into()); }
                     tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()),now]).map_err(StorageError::persist_public)?;
-                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-plan')",params![undo_progress_key(&p.request),body.as_str(),now]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO history_undo_plans(request_id,workspace_id,version_id,operation_id,author_json,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",params![p.request,p.workspace,p.version,p.operation,p.author,body.as_str()]).map_err(StorageError::persist_public)?;
                     Ok(())
                 });
                 #[cfg(test)]
