@@ -143,6 +143,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
             resetPasswordPage({
               token: url.searchParams.get("token") ?? undefined,
               next: samePath(url.searchParams.get("next")) ?? undefined,
+              setup: url.searchParams.get("setup") === "1",
             }),
           );
         case "/account/verify-email": {
