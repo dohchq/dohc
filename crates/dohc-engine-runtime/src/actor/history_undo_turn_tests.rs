@@ -1368,8 +1368,8 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     }
     assert_eq!(
         times.len(),
-        2000usize.div_ceil(16),
-        "a fixed budget must fill every 16-member batch"
+        1 + 1999usize.div_ceil(16),
+        "the rename runs alone; a fixed budget fills every remaining batch"
     );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }
