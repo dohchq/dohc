@@ -1,6 +1,6 @@
 use super::*;
 use dohc_engine_domain::{
-    CreateNamedVersion, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    CreateNamedVersion, DomainError, RollbackTextFileMutation, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{FaultPoint, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -88,36 +88,13 @@ fn write_fixture(
         now_ms: n,
         request_id: None,
     };
-    let deadline = Instant::now() + client_busy_budget();
-    let mut backoff = Duration::from_millis(5);
-    loop {
-        let result = (|| {
-            VersionedTextStore::new(s).ensure_main_version("ws", "main", 1, &NoFaults)?;
-            if seed_empty {
-                while seed_step(s)? {}
-            }
-            VersionedTextStore::new(s).write_text(&input, &NoFaults)
-        })();
-        match result {
-            Ok(_) => return,
-            Err(dohc_engine_domain::DomainError::Storage(
-                dohc_engine_storage::StorageError::FileLocked,
-            )) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                assert!(
-                    !remaining.is_zero(),
-                    "link fixture write stayed locked until its deadline"
-                );
-                std::thread::sleep(backoff.min(remaining));
-                assert!(
-                    Instant::now() < deadline,
-                    "link fixture write stayed locked until its deadline"
-                );
-                backoff = (backoff * 2).min(Duration::from_millis(200));
-            }
-            Err(error) => panic!("link fixture write failed: {error:?}"),
+    retry_file_locked("link fixture write", || {
+        VersionedTextStore::new(s).ensure_main_version("ws", "main", 1, &NoFaults)?;
+        if seed_empty {
+            while seed_step(s)? {}
         }
-    }
+        VersionedTextStore::new(s).write_text(&input, &NoFaults)
+    });
 }
 
 fn count(s: &EngineStore, table: &str) -> i64 {
@@ -128,13 +105,16 @@ fn parsed(s: &EngineStore) -> Staged {
     let (w, h) = prepare(s).unwrap().unwrap();
     Staged::new(parser::parse(w, h).unwrap())
 }
-fn retry_file_locked<T>(label: &str, mut operation: impl FnMut() -> Result<T, StorageError>) -> T {
+fn retry_file_locked<T, E: Into<DomainError>>(
+    label: &str,
+    mut operation: impl FnMut() -> Result<T, E>,
+) -> T {
     let deadline = Instant::now() + client_busy_budget();
     let mut backoff = Duration::from_millis(5);
     loop {
-        match operation() {
+        match operation().map_err(Into::into) {
             Ok(value) => return value,
-            Err(StorageError::FileLocked) => {
+            Err(DomainError::Storage(StorageError::FileLocked)) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 assert!(
                     !remaining.is_zero(),
@@ -196,8 +176,18 @@ fn staging_retries_a_locked_writer_without_losing_progress() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
-    write(&mut store, "a", "a.md", "[[target]]", 2);
+    let links = ROW_SLICE * 3;
+    write(&mut store, "a", "a.md", &"[[target]] ".repeat(links), 2);
     let mut staged = std::collections::VecDeque::from([parsed(&store)]);
+    retry_file_locked("link batch staging", || {
+        stage_batch(&mut staged, &mut store, &NoFaults)
+    });
+    assert_eq!(staged.len(), 1);
+    let committed_progress = (staged[0].offset, staged[0].target_offset);
+    assert!(committed_progress.0 > 0 && committed_progress.0 < links);
+    let committed_rows = count(&store, "links");
+    assert_eq!(committed_rows, committed_progress.0 as i64);
+    assert_eq!(count(&store, "link_sources"), 0);
     store.read_with(|c| c.busy_timeout(Duration::ZERO)).unwrap();
     let writer = rusqlite::Connection::open(&db).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -209,8 +199,11 @@ fn staging_retries_a_locked_writer_without_losing_progress() {
                 assert_eq!(refusals, 0);
                 refusals += 1;
                 assert_eq!(staged.len(), 1);
-                assert_eq!(staged[0].offset, 0);
-                assert_eq!(staged[0].target_offset, 0);
+                assert_eq!(
+                    (staged[0].offset, staged[0].target_offset),
+                    committed_progress
+                );
+                assert_eq!(count(&store, "links"), committed_rows);
                 writer.execute_batch("ROLLBACK").unwrap();
             }
             result
@@ -218,7 +211,7 @@ fn staging_retries_a_locked_writer_without_losing_progress() {
     }
     assert_eq!(refusals, 1);
     assert_eq!(count(&store, "link_pending"), 0);
-    assert_eq!(certified_literals(&store), vec!["target"]);
+    assert_eq!(certified_literals(&store), vec!["target"; links]);
 }
 #[test]
 fn persisted_queue_zero_links_and_metadata_only_updates() {
@@ -735,7 +728,7 @@ fn five_hundred_links_publish_atomically_in_bounded_actor_slices() {
     loop {
         begin_tick_measurement();
         let start = Instant::now();
-        let done = retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults));
+        let done = staged.step(&mut s, &NoFaults).unwrap();
         let duration = start.elapsed();
         report_slow_tick(duration, if done { "certify" } else { "stage" });
         durations.push(duration);
@@ -857,7 +850,7 @@ fn one_slice_certifies_without_an_extra_transaction() {
     let mut staged = parsed(&s);
     // Isolate the final occurrence slice from target-key timing on a busy host.
     staged.targets.clear();
-    assert!(retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)));
+    assert!(staged.step(&mut s, &NoFaults).unwrap());
     assert_eq!(certified_literals(&s), vec!["b"]);
 }
 #[test]
@@ -1322,9 +1315,7 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
                 .collect();
             while !staged.is_empty() {
                 handoff(&mut store, "before_link_batch", budget);
-                retry_file_locked("link batch staging", || {
-                    stage_batch(&mut staged, &mut store, &NoFaults)
-                });
+                stage_batch(&mut staged, &mut store, &NoFaults).unwrap();
                 maximum = maximum.max(handoff(&mut store, "link_batch", budget));
             }
         }
@@ -1358,9 +1349,7 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             .collect();
         while !staged.is_empty() {
             handoff(&mut store, "before_long_literal_batch", budget);
-            retry_file_locked("link batch staging", || {
-                stage_batch(&mut staged, &mut store, &NoFaults)
-            });
+            stage_batch(&mut staged, &mut store, &NoFaults).unwrap();
             maximum = maximum.max(handoff(&mut store, "long_literal_batch", budget));
         }
     }
