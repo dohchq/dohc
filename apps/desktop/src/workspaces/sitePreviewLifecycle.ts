@@ -1,4 +1,5 @@
 import {
+  AppCommandStillRunningError,
   MAX_LOG_ENTRIES,
   type SiteLogEntry,
   type SiteProcessHandle,
@@ -75,6 +76,9 @@ type PendingStart = {
   controller: AbortController;
   settled: Promise<void>;
   settle: () => void;
+  // The start was cancelled and its stop left processes running. Their
+  // handle is kept as a stopping preview, to stop again.
+  leftRunning: AppCommandStillRunningError | null;
 };
 
 export type SitePreviewStatus = {
@@ -197,6 +201,7 @@ export function createSitePreviewLifecycle<
       controller: new AbortController(),
       settled,
       settle,
+      leftRunning: null,
     };
     nextStartSequence += 1;
     pendingStarts.add(pending);
@@ -260,7 +265,12 @@ export function createSitePreviewLifecycle<
     if (record.stopAttempt) return record.stopAttempt;
     const attempt = Promise.resolve()
       .then(() => record.handle.stop())
-      .then(() => {
+      .then(async () => {
+        // A stop counts once the command's processes are gone. Until then the
+        // record stays, so nothing starts over them and the next stop retries.
+        const { handle } = record;
+        const left = "stillRunning" in handle ? await handle.stillRunning?.() : undefined;
+        if ("stillRunning" in handle && left && left.length > 0) throw new AppCommandStillRunningError(handle, left);
         if (activePreviews.get(key) === record) activePreviews.delete(key);
       })
       .finally(() => {
@@ -304,6 +314,27 @@ export function createSitePreviewLifecycle<
     } finally {
       await stopRetained(key, stopping);
     }
+  };
+
+  // A cancelled start's processes that outlived their stop, as a stopping
+  // preview, so a later stop retries them and no start runs over them.
+  const keepLeftRunning = (
+    key: string,
+    workspaceId: string,
+    siteRoot: string,
+    handle: SiteProcessHandle,
+  ): void => {
+    if (activePreviews.has(key)) return;
+    activePreviews.set(key, {
+      state: "stopping",
+      lastKnownState: "running",
+      workspaceId,
+      siteRoot,
+      handle,
+      releaseOrigin: null,
+      logs: handle.logs(),
+      stopAttempt: null,
+    });
   };
 
   const retainAndStop = async (
@@ -431,7 +462,16 @@ export function createSitePreviewLifecycle<
         await stopCurrent(key);
         requireCurrent();
 
-        const execution = await execute(pending.controller.signal);
+        let execution: SitePreviewExecution<T>;
+        try {
+          execution = await execute(pending.controller.signal);
+        } catch (error) {
+          if (error instanceof AppCommandStillRunningError) {
+            pending.leftRunning = error;
+            keepLeftRunning(key, startInput.workspaceId, startInput.siteRoot, error.handle);
+          }
+          throw error;
+        }
         if (!isCurrent()) {
           await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
             retainAndStop(
@@ -783,7 +823,10 @@ export function createSitePreviewLifecycle<
           },
         ),
       ),
-      ...draining.map((start) => start.settled),
+      ...draining.map(async (start) => {
+        await start.settled;
+        if (start.leftRunning) failures.push(start.leftRunning);
+      }),
     ]);
     if (!options.rejectOnFailure || failures.length === 0) return;
     throw failures.length === 1

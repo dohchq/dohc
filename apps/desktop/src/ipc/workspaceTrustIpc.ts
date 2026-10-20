@@ -2,10 +2,12 @@ import type { workspaceTrustOperations } from "./bridgeContract";
 import type { OperationHandlers } from "./operationTable";
 import type { TrustedFolder, WorkspaceTrust } from "../workspaces/workspaceTrust";
 
-export const STOP_FAILED_MESSAGE =
-  "dohc could not stop every app command in this workspace. The workspace stays in Restricted Mode.";
+// The running app leads, because it is the fact that matters for safety.
+export const STOP_FAILED_MESSAGE = "An app in this workspace is still running. dohc could not stop it.";
 export const SAVE_FAILED_MESSAGE =
-  "dohc could not save Restricted Mode for this workspace. It stays restricted until dohc quits.";
+  "dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.";
+export const STOP_AND_SAVE_FAILED_MESSAGE =
+  "An app in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.";
 
 // Main's side of workspace trust. The renderer can read it, ask for main's
 // dialog, and give trust up; only the person's answer in the dialog grants it.
@@ -14,6 +16,8 @@ export function workspaceTrustHandlers<
   Operation extends { readonly workspace: TrustedFolder; assertCurrent(): void },
 >(dependencies: {
   trust: Pick<WorkspaceTrust, "isTrusted" | "trust" | "revoke" | "persistRevocation">;
+  // The folder now at a path, by identity.
+  identify(rootPath: string): Promise<string | null>;
   isSharedView(workspaceId: string): boolean;
   // Main's dialog, over the window that asked. True only on Trust workspace.
   confirm(event: Event, workspace: TrustedFolder): Promise<boolean>;
@@ -28,10 +32,14 @@ export function workspaceTrustHandlers<
 
   async function askAndTrust(event: Event, operation: Operation): Promise<void> {
     const { workspace } = operation;
+    // The grant names the folder the person was asked about. A folder put at
+    // the path while the dialog was open does not match it.
+    const folder = await dependencies.identify(workspace.rootPath);
     if (!(await dependencies.confirm(event, workspace))) return;
     // The dialog can outlast the window's workspace.
     operation.assertCurrent();
-    if (await trust.trust(workspace)) dependencies.notifyChanged(workspace.workspaceId, true);
+    if (!(await trust.trust(workspace, { folder }))) return;
+    if (await trust.isTrusted(workspace)) dependencies.notifyChanged(workspace.workspaceId, true);
   }
 
   return {
@@ -71,13 +79,16 @@ export function workspaceTrustHandlers<
         // Windows start their static previews again.
         dependencies.notifyChanged(workspaceId, false);
       }
+      let saveFailed = false;
       try {
         await trust.persistRevocation(workspaceId);
       } catch (error) {
         console.warn("[desktop] could not save Restricted Mode", error);
-        throw new Error(SAVE_FAILED_MESSAGE);
+        saveFailed = true;
       }
+      if (stopFailed && saveFailed) throw new Error(STOP_AND_SAVE_FAILED_MESSAGE);
       if (stopFailed) throw new Error(STOP_FAILED_MESSAGE);
+      if (saveFailed) throw new Error(SAVE_FAILED_MESSAGE);
       return { workspaceId, trusted: false };
     },
   };

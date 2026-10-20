@@ -545,7 +545,7 @@ import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
-import { confirmWorkspaceTrust, createWorkspaceTrust } from "./workspaces/workspaceTrust";
+import { confirmWorkspaceTrust, createWorkspaceTrust, folderIdentity } from "./workspaces/workspaceTrust";
 import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
@@ -6947,6 +6947,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     trust: workspaceTrust,
+    identify: folderIdentity,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
     confirm: (event, workspace) => {
       const window = BrowserWindow.fromWebContents(event.sender);

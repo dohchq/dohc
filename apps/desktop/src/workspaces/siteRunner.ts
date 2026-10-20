@@ -5,6 +5,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { killProcessTreePosix, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
@@ -36,6 +37,18 @@ export interface SiteProcessHandle {
   logs(): SiteLogEntry[];
   onExit(listener: () => void): void;
   stop(): Promise<void>;
+  // The command's processes still alive after a stop, as pids. Empty when
+  // everything stopped.
+  stillRunning?(): Promise<number[]>;
+}
+
+// A stop that left some of an app command's processes running. `handle`
+// stops them again, so whoever holds it can keep it and try again.
+export class AppCommandStillRunningError extends Error {
+  override name = "AppCommandStillRunningError";
+  constructor(readonly handle: SiteProcessHandle, readonly pids: readonly number[]) {
+    super(`An app command is still running (process ${pids.join(", ")}).`);
+  }
 }
 
 export interface StaticSitePreview {
@@ -902,6 +915,63 @@ export function siteCommandEnvironment(
   return env;
 }
 
+// How long a stop waits for an exit the system has not reported yet before
+// it counts a process as still running.
+const STOP_CONFIRM_MS = 1_000;
+
+// The command's processes alive after a stop: the wrapper, while the system
+// has not seen it exit, and every descendant captured while it ran.
+async function survivingProcesses(
+  child: ChildProcess,
+  captured: () => readonly number[],
+): Promise<number[]> {
+  const deadline = Date.now() + STOP_CONFIRM_MS;
+  for (;;) {
+    const wrapperAlive = child.pid !== undefined && child.exitCode === null &&
+      child.signalCode === null && isPidAlive(child.pid);
+    const left = [...(wrapperAlive ? [child.pid!] : []), ...captured().filter(isPidAlive)];
+    if (left.length === 0 || Date.now() >= deadline) return left;
+    await delay(50);
+  }
+}
+
+// What a start that was cancelled before it finished, and left processes
+// running, hands back so they can be stopped again.
+function leftoverHandle(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+): SiteProcessHandle {
+  return {
+    url: "",
+    command: command.command,
+    args: command.args,
+    cwd: command.cwd,
+    logs: () => [...command.logs],
+    onExit: (listener) => {
+      if (child.exitCode !== null || child.signalCode !== null) queueMicrotask(listener);
+      else child.once("exit", listener);
+    },
+    stop: () => stopChild(child, descendants.captured, undefined, descendants.awaitAll),
+    stillRunning: () => survivingProcesses(child, descendants.captured),
+  };
+}
+
+// A cancelled start's answer: cancelled, or still running when the stop left
+// processes behind.
+async function cancelledStart(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+  cancelled: string,
+): Promise<Error> {
+  await stopChild(child, descendants.captured, undefined, descendants.awaitAll).catch(() => undefined);
+  const left = await survivingProcesses(child, descendants.captured);
+  return left.length > 0
+    ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left)
+    : new Error(cancelled);
+}
+
 // The last check before an app's own command starts. Nothing awaits between
 // it and spawn, so a cancel or a revoked trust that landed during the awaits
 // before it stops the command here.
@@ -967,9 +1037,8 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
-        reject(new Error("App dev server start was cancelled."));
-      });
+      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, "App dev server start was cancelled.")
+        .then(reject);
     }
 
     const failTimer = setTimeout(() => {
@@ -1034,6 +1103,7 @@ export async function startSiteDevServer(input: {
             },
             descendants.awaitAll,
           ),
+        stillRunning: () => survivingProcesses(child, descendants.captured),
       });
     }
 
@@ -1233,9 +1303,11 @@ export async function buildSite(input: {
     reader: input.descendantsReader,
   });
 
-  const exitCode = await new Promise<number | null>((resolve) => {
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
     let settled = false;
     let timedOut = false;
+    // A cancelled build answers once its stop is confirmed, not at the exit.
+    let aborting = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     function finish(code: number | null) {
       if (settled) return;
@@ -1246,9 +1318,19 @@ export async function buildSite(input: {
     }
 
     function abortBuild() {
-      if (settled) return;
+      if (settled || aborting) return;
+      aborting = true;
       pushLog(logs, "system", "Build cancelled.");
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
+      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, "Build cancelled.").then((error) => {
+        if (settled) return;
+        if (!(error instanceof AppCommandStillRunningError)) {
+          finish(null);
+          return;
+        }
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(error);
+      });
     }
 
     timer = setTimeout(() => {
@@ -1273,9 +1355,9 @@ export async function buildSite(input: {
       // (and its awaiting every in-flight capture) makes this a no-op
       // unless a descendant was actually captured while the wrapper was
       // alive.
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() =>
-        finish(timedOut ? null : code),
-      );
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => {
+        if (!aborting) finish(timedOut ? null : code);
+      });
     });
   });
 

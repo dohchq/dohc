@@ -171,6 +171,63 @@ describe("trust against races and failed files", () => {
     expect(await trust.isTrusted(workspace)).toBe(false);
   });
 
+  it("keeps a revoke that lands while the grant is being written, in memory and then in the file", async () => {
+    const { file, workspace } = await setup();
+    const writing = deferred<void>();
+    const release = deferred<void>();
+    let hold = true;
+    const trust = createWorkspaceTrust({
+      file,
+      writeText: async (path, text) => {
+        if (hold) {
+          hold = false;
+          writing.resolve();
+          await release.promise;
+        }
+        await mkdir(join(path, ".."), { recursive: true });
+        await writeFile(path, text);
+      },
+    });
+    const granting = trust.trust(workspace);
+    await writing.promise;
+    const restricting = trust.restrict("trip");
+    release.resolve();
+    expect(await granting).toBe(false);
+    // Between the grant's write and the revoke's, nothing may run.
+    expect(await trust.isTrusted(workspace)).toBe(false);
+    await restricting;
+    expect(await trust.isTrusted(workspace)).toBe(false);
+    expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
+  });
+
+  it("stays restricted in memory when a revoke during the grant's write cannot be saved", async () => {
+    const { file, workspace } = await setup();
+    const writing = deferred<void>();
+    const release = deferred<void>();
+    let writes = 0;
+    const trust = createWorkspaceTrust({
+      file,
+      writeText: async (path, text) => {
+        writes += 1;
+        if (writes === 1) {
+          writing.resolve();
+          await release.promise;
+        } else {
+          throw new Error("disk full");
+        }
+        await mkdir(join(path, ".."), { recursive: true });
+        await writeFile(path, text);
+      },
+    });
+    const granting = trust.trust(workspace);
+    await writing.promise;
+    const restricting = trust.restrict("trip");
+    release.resolve();
+    expect(await granting).toBe(false);
+    await expect(restricting).rejects.toThrow("disk full");
+    expect(await trust.isTrusted(workspace)).toBe(false);
+  });
+
   it("reads the file again after a failed read, and writes no grant over the others", async () => {
     const { scratch, file, workspace } = await setup();
     const otherRoot = join(scratch, "other");

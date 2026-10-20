@@ -185,12 +185,17 @@ export function createWorkspaceTrust(dependencies: {
      */
     trust(workspace: TrustedFolder, known?: { folder: string | null }): Promise<boolean> {
       const revocationsAtStart = revocations.get(workspace.workspaceId) ?? 0;
+      const revokedMeanwhile = () => (revocations.get(workspace.workspaceId) ?? 0) !== revocationsAtStart;
       return serial(async () => {
         const folder = known ? known.folder : await identify(workspace.rootPath);
         const records = await load();
-        if ((revocations.get(workspace.workspaceId) ?? 0) !== revocationsAtStart) return false;
+        if (revokedMeanwhile()) return false;
         const kept = records.filter((each) => each.workspaceId !== workspace.workspaceId);
         await save([...kept, { workspaceId: workspace.workspaceId, rootPath: spelling(workspace.rootPath), folder, trustedAtMs: now() }]);
+        // A revoke during the write wins. It stays restricted here, and its
+        // persistRevocation, queued behind this write, takes the grant out
+        // of the file.
+        if (revokedMeanwhile()) return false;
         restricted.delete(workspace.workspaceId);
         return true;
       });

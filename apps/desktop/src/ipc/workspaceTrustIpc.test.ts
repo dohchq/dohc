@@ -1,13 +1,13 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it, vi } from "vitest";
 import { workspaceTrustOperations } from "./bridgeContract";
-import { SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, workspaceTrustHandlers } from "./workspaceTrustIpc";
+import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, workspaceTrustHandlers } from "./workspaceTrustIpc";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SiteProcessHandle } from "../workspaces/siteRunner";
 import { createTestScratch } from "../workspaces/testTemp";
-import { createWorkspaceTrust } from "../workspaces/workspaceTrust";
+import { createWorkspaceTrust, folderIdentity } from "../workspaces/workspaceTrust";
 import { deferred } from "../testing/deferred";
 
 type Event = { windowId: number };
@@ -37,6 +37,7 @@ async function harness(input: { answer?: boolean; sharedView?: boolean; failWrit
   const notified: Array<[string, boolean]> = [];
   const handlers = workspaceTrustHandlers<Event, typeof operation>({
     trust,
+    identify: folderIdentity,
     isSharedView: () => input.sharedView ?? false,
     confirm,
     stopAppCommands: (held) => held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
@@ -45,7 +46,7 @@ async function harness(input: { answer?: boolean; sharedView?: boolean; failWrit
   const context = { event: { windowId: 1 }, operation };
   const payload = { workspaceId: "trip" };
   return {
-    trust, file, workspace, lifecycle, confirm, notified, context,
+    trust, file, scratch, workspace, lifecycle, confirm, notified, context,
     leave: () => { current = false; },
     read: () => handlers.readWorkspaceTrust(payload, context),
     request: () => handlers.requestWorkspaceTrust(payload, context),
@@ -78,6 +79,30 @@ describe("main's workspace trust operations", () => {
     await expect(second).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(h.confirm).toHaveBeenCalledTimes(1);
     expect(h.notified).toEqual([["trip", true]]);
+  });
+
+  it("trusts only the folder the person was asked about, not one put at its path while the dialog was open", async () => {
+    const h = await harness();
+    h.confirm.mockImplementation(async () => {
+      await rename(h.workspace.rootPath, join(h.scratch, "asked-about"));
+      await mkdir(h.workspace.rootPath);
+      return true;
+    });
+    await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+    expect(h.notified).toEqual([]);
+  });
+
+  it("leads with the running app when both its stop and the save fail", async () => {
+    const failWrites = { value: false };
+    const h = await harness({ answer: true, failWrites });
+    await h.request();
+    const stop = vi.fn(async () => { throw new Error("access denied"); });
+    await devServer(h, stop);
+    failWrites.value = true;
+    await expect(h.restrict()).rejects.toThrow(STOP_AND_SAVE_FAILED_MESSAGE);
+    expect(STOP_AND_SAVE_FAILED_MESSAGE.startsWith("An app in this workspace is still running")).toBe(true);
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
   });
 
   it("reports a stop that failed, keeps the workspace restricted, and stops it on Try again", async () => {
