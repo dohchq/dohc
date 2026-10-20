@@ -823,13 +823,11 @@ async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled(
             })
             .await
             .unwrap();
-        assert_eq!(usable, relevant);
-        assert_eq!(recorder.0.load(Ordering::SeqCst) > 0, relevant);
-        assert_eq!(
-            f.text("source-0000.md").await,
-            if relevant { body } else { BODY }
-        );
+        let text = f.text("source-0000.md").await;
         drop(lease);
         f.close().await;
+        assert_eq!(usable, relevant);
+        assert_eq!(recorder.0.load(Ordering::SeqCst) > 0, relevant);
+        assert_eq!(text, if relevant { body } else { BODY });
     }
 }
