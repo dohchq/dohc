@@ -9,6 +9,9 @@ use dohc_engine_domain::{DomainError, WriteText, write_text_in_tx};
 use dohc_engine_storage::{Preimage, TxnOutcome};
 use rusqlite::params;
 
+#[cfg(test)]
+thread_local! { pub(super) static CRASH_AFTER_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 pub type DocumentResync = Arc<dyn Fn(&DocKey) + Send + Sync>;
 
 pub(super) struct Edit {
@@ -231,6 +234,8 @@ pub(super) fn write(
             input.author_json.as_deref(),
             input.now_ms,
         )?;
+        #[cfg(test)]
+        if CRASH_AFTER_APPEND.replace(false) { return Err(RuntimeError::OperationCrashed); }
         let result = write_text_in_tx(tx, input)?;
         dohc_engine_domain::enqueue_write(tx, &result, Preimage::Present(expected.into()), "ydoc")?;
         crate::search::upsert_file_search_index(

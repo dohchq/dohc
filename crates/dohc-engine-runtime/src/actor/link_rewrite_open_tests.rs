@@ -296,16 +296,14 @@ async fn adopted_open_source_stays_untouched_and_adoption_before_undo_refuses() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_update_and_history_moment_commit_or_roll_back_together() {
-    for point in [
-        FaultPoint::StorageBeforePersist,
-        FaultPoint::StorageAfterCommitBeforeAck,
-    ] {
+    for crash in 0..3 {
+        let point = if crash == 1 { FaultPoint::StorageBeforePersist } else { FaultPoint::StorageAfterCommitBeforeAck };
         let mut f = Fixture::new(1, 1);
         let (lease, _) = f.open_document("source-0000").await;
         let ws = f.ws.clone();
         let root = f.root.to_path_buf();
         let before = f.document("source-0000").await.encode_state_vector();
-        let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+        let committed = crash == 2;
         f.actor
             .run(move |store, cache| {
                 let key = DocKey::new(&ws, "main", "source-0000")?;
@@ -320,6 +318,7 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
                 let mut input = write(&ws, "source-0000", "source-0000.md", &after, "atomic-open");
                 input.metadata_correlation_id = Some(OP.into());
                 let fault = dohc_engine_testkit::ScriptedFaults::crash_at(point);
+            if crash == 0 { super::super::super::link_documents::CRASH_AFTER_APPEND.set(true); }
                 let outcome = super::super::super::versioned::with_local_file_mutation_cache_reset(
                     cache,
                     || {
@@ -336,7 +335,7 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
                     },
                 );
                 assert!(matches!(outcome, Err(RuntimeError::OperationCrashed)));
-                assert!(fault.fired());
+                assert_eq!(fault.fired(), crash != 0);
                 Ok(())
             })
             .await
