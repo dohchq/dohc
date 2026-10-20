@@ -3343,6 +3343,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_YDOC_FILES_SEEN_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 65,
+        id: "v2-chat-conversation-file-links",
+        sql: include_str!("conversation_file_links.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4404,6 +4410,10 @@ mod tests {
                 "v2-ydoc-files-seen",
                 "85a36c7e1b7e392360e0caf3136b589cfcf0e052d4a26c53118e1ce045b32b5d",
             ),
+            (
+                "v2-chat-conversation-file-links",
+                "a976e7546ecf2efacaa0e885b966bfaac96f4c2b1c3ca24f417fbf3b645bdd22",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4414,6 +4424,202 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "scheduled migration 65 alias-index measurement"]
+    fn conversation_links_measure_migration_alias_index_on_large_store() {
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run with --release"
+        );
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; BEGIN;
+            INSERT INTO versioned_workspaces VALUES('ws','v-0');",
+        )
+        .unwrap();
+        for i in 0..10 {
+            conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws',?1,'named','Measured',1)",[format!("v-{i}")]).unwrap();
+        }
+        {
+            let mut object = conn
+                .prepare_cached("INSERT INTO file_objects VALUES('ws',?1,1)")
+                .unwrap();
+            for i in 0..50_000 {
+                object.execute([format!("f-{i:06}")]).unwrap();
+            }
+            let mut alias = conn
+                .prepare_cached("INSERT INTO path_aliases VALUES('ws',?1,?2,?3)")
+                .unwrap();
+            for version in 0..10 {
+                for i in 0..50_000 {
+                    alias
+                        .execute(rusqlite::params![
+                            format!("v-{version}"),
+                            format!("notes/{}/file-{i:06}.md", "long-label/".repeat(8)),
+                            format!("f-{i:06}")
+                        ])
+                        .unwrap();
+                }
+            }
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_before = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let migration_us = start.elapsed().as_micros();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_after = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        // Measure just the alias-index DDL too, on the same populated store.
+        conn.execute_batch(
+            "DROP INDEX conversation_file_link_alias; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        conn.execute_batch("CREATE INDEX conversation_file_link_alias ON path_aliases(workspace_id,version_id,object_id,path);").unwrap();
+        let index_us = start.elapsed().as_micros();
+        println!(
+            "CONVERSATION_LINKS_MIGRATION_MEASUREMENT {{\"aliases\":500000,\"objects\":50000,\"versions\":10,\"migrationUs\":{migration_us},\"aliasIndexUs\":{index_us},\"databaseBytesBefore\":{bytes_before},\"databaseBytesAfter\":{bytes_after}}}"
+        );
+    }
+
+    #[test]
+    fn conversation_links_migrations_64_and_65_apply_in_order_from_fresh_and_main_64() {
+        for resume_at_main_64 in [false, true] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut conn = open_bare(&path);
+            let ctx = MigrationContext::current(1);
+            let before = migration_index("v2-chat-conversation-file-links");
+            let predecessor = &BASELINE_MIGRATIONS[before - 1];
+            assert_eq!(
+                (predecessor.ordinal, predecessor.id),
+                (64, "v2-ydoc-files-seen")
+            );
+            assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
+            let prior = if resume_at_main_64 {
+                run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+                let row: (String, String) = conn.query_row(
+                    "SELECT id,checksum FROM engine_migrations WHERE ordinal=64 AND completed_at IS NOT NULL",
+                    [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                assert_eq!(
+                    row,
+                    (predecessor.id.into(), migration_checksum(predecessor.sql))
+                );
+                conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main');
+                    INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','named','Main',1);
+                    INSERT INTO ydoc_files_seen VALUES('ws','main','seen-before-links');").unwrap();
+                drop(conn);
+                conn = open_bare(&path);
+                Some(row)
+            } else {
+                None
+            };
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let rows: Vec<(i64, String, String)> = conn.prepare(
+                "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal>=64 AND completed_at IS NOT NULL ORDER BY ordinal"
+            ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+                .collect::<Result<_,_>>().unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        64,
+                        predecessor.id.into(),
+                        migration_checksum(predecessor.sql)
+                    ),
+                    (
+                        65,
+                        "v2-chat-conversation-file-links".into(),
+                        migration_checksum(BASELINE_MIGRATIONS[before].sql)
+                    ),
+                ]
+            );
+            if let Some(prior) = prior {
+                assert_eq!((rows[0].1.clone(), rows[0].2.clone()), prior);
+                assert_eq!(
+                    conn.query_row("SELECT object_id FROM ydoc_files_seen", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "seen-before-links"
+                );
+            }
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM chat_conversation_file_link_state",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_links_upgrade_preserves_mentions_without_startup_backfill() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 64);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws','old','t','m','file','f',1);").unwrap();
+        assert!(
+            conn.prepare("SELECT * FROM chat_conversation_file_links")
+                .is_err()
+        );
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        for table in [
+            "chat_conversation_file_links",
+            "chat_conversation_file_link_state",
+            "chat_conversation_file_link_work",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_attachments WHERE attachment_id='old'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

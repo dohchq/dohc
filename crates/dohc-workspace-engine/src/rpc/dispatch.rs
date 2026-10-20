@@ -804,6 +804,10 @@ impl EngineService {
                 self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.conversations.listLinks" => {
+                self.chats_conversations_list_links(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.attachments.listFileMentions" => {
                 self.chats_attachments_list_file_mentions(&ctx, request.workspace, request.params)
                     .await?
@@ -1474,6 +1478,7 @@ mod tests {
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
+            "chats.conversations.listLinks",
             "chats.attachments.listForThread",
             "chats.bookmarks.archive",
             "chats.bookmarks.find",

@@ -25,6 +25,10 @@ pub(crate) struct Checkpoints {
     writer_max: std::sync::atomic::AtomicI64,
     #[cfg(test)]
     writer_calls: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    startup_max: std::sync::atomic::AtomicI64,
+    #[cfg(test)]
+    startup_calls: std::sync::atomic::AtomicU64,
 }
 
 fn frames(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
@@ -107,6 +111,10 @@ impl Checkpoints {
             writer_max: std::sync::atomic::AtomicI64::new(0),
             #[cfg(test)]
             writer_calls: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            startup_max: std::sync::atomic::AtomicI64::new(0),
+            #[cfg(test)]
+            startup_calls: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -215,6 +223,8 @@ impl Checkpoints {
             conn,
             WRITER_CHECKPOINT_FRAMES,
             MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(test)]
+            false,
             #[cfg(feature = "fault-injection")]
             None,
         );
@@ -230,6 +240,8 @@ impl Checkpoints {
             conn,
             0,
             i64::MAX,
+            #[cfg(test)]
+            true,
             #[cfg(feature = "fault-injection")]
             Some(&mut phase),
         );
@@ -245,6 +257,8 @@ impl Checkpoints {
             conn,
             0,
             MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(test)]
+            true,
             #[cfg(feature = "fault-injection")]
             Some(&mut phase),
         );
@@ -255,6 +269,7 @@ impl Checkpoints {
         conn: &Connection,
         minimum_log_frames: i64,
         maximum_tail: i64,
+        #[cfg(test)] startup: bool,
         #[cfg(feature = "fault-injection")] mut phase: Option<&mut crate::capture_phase::Phase>,
     ) {
         let Ok((log, backfilled)) = frames(conn) else {
@@ -303,11 +318,15 @@ impl Checkpoints {
             }
             #[cfg(test)]
             {
-                self.writer_calls.fetch_add(1, Ordering::Relaxed);
-                self.writer_max
-                    .fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
+                let (calls, maximum) = if startup {
+                    (&self.startup_calls, &self.startup_max)
+                } else {
+                    (&self.writer_calls, &self.writer_max)
+                };
+                calls.fetch_add(1, Ordering::Relaxed);
+                maximum.fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
                 assert!(latest < 0 || finished - backfilled <= maximum_tail);
-                if minimum_log_frames == 0 {
+                if startup {
                     eprintln!(
                         "STARTUP_PASSIVE fresh={} elapsed_us={} starting_log={log} starting_backfilled={backfilled} finished={finished}",
                         maximum_tail == i64::MAX,
@@ -364,6 +383,14 @@ impl Checkpoints {
         (
             self.writer_calls.load(Ordering::Relaxed),
             self.writer_max.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_work_for_test(&self) -> (u64, i64) {
+        (
+            self.startup_calls.load(Ordering::Relaxed),
+            self.startup_max.load(Ordering::Relaxed),
         )
     }
 
@@ -607,7 +634,7 @@ mod tests {
                 Ok::<_, rusqlite::Error>(())
             })
             .unwrap();
-            assert_eq!(checkpoints.writer_work_for_test().0, 0);
+            assert_eq!(checkpoints.startup_work_for_test().0, 0);
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -679,7 +706,13 @@ mod tests {
             s.read_with(|conn| {
                 let mut phase =
                     crate::capture_phase::Phase::new("pinned_reader_PASSIVE", None, 0, true);
-                checkpoints.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES, Some(&mut phase));
+                checkpoints.checkpoint_tail(
+                    conn,
+                    0,
+                    MAX_WRITER_BACKFILL_FRAMES,
+                    true,
+                    Some(&mut phase),
+                );
                 let (log, backfilled) = frames(conn)?;
                 assert!(log > backfilled);
                 Ok::<_, rusqlite::Error>(())
@@ -697,6 +730,7 @@ mod tests {
                         conn,
                         0,
                         MAX_WRITER_BACKFILL_FRAMES,
+                        true,
                         Some(&mut phase),
                     );
                 }
@@ -763,7 +797,7 @@ mod tests {
             }
             let s = EngineStore::open_passive(&path, 2, None, None).unwrap();
             assert!(s.is_passive());
-            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert_eq!(s.startup_checkpoint_work_for_test(), (0, 0));
             assert!(!s.checkpoint_worker_running_for_test());
             assert_eq!(s.table_row_count("link_pending").unwrap(), 0);
             assert_eq!(s.table_row_count("link_aliases").unwrap(), 0);
@@ -773,7 +807,7 @@ mod tests {
             }
             drop(s);
             let s = EngineStore::open_passive(&path, 3, None, None).unwrap();
-            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert_eq!(s.startup_checkpoint_work_for_test(), (0, 0));
             assert!(!s.checkpoint_worker_running_for_test());
             assert_eq!(s.table_row_count("link_index_state").unwrap(), 0);
         }
@@ -789,9 +823,10 @@ mod tests {
             log, backfilled,
             "fresh schema must finish its whole metadata tail before publication"
         );
-        let (calls, maximum) = s.checkpoint_work_for_test();
+        let (calls, maximum) = s.startup_checkpoint_work_for_test();
         assert_eq!(calls, 1);
         assert!(maximum > 0);
+        assert_eq!(s.checkpoint_work_for_test(), (0, 0));
     }
 
     #[test]
@@ -814,7 +849,8 @@ mod tests {
         let checkpoints = Checkpoints::start(&path).unwrap();
         checkpoints.checkpoint_fresh_schema(&conn);
         assert_eq!(frames(&conn).unwrap(), (log, log));
-        assert_eq!(checkpoints.writer_work_for_test(), (1, log - backfilled));
+        assert_eq!(checkpoints.startup_work_for_test(), (1, log - backfilled));
+        assert_eq!(checkpoints.writer_work_for_test(), (0, 0));
     }
 
     fn store_before_link_migration(path: &Path) -> Connection {
@@ -853,7 +889,7 @@ mod tests {
         assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 1);
         let (log, backfilled) = s.read_with(frames).unwrap();
         assert_eq!(log, backfilled);
-        let (calls, maximum) = s.checkpoint_work_for_test();
+        let (calls, maximum) = s.startup_checkpoint_work_for_test();
         assert_eq!(calls, 1);
         assert!((1..=MAX_WRITER_BACKFILL_FRAMES).contains(&maximum));
     }
@@ -879,7 +915,7 @@ mod tests {
             s.stop_checkpoint_worker_for_test();
             assert!(!s.was_freshly_created());
             assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
-            let (calls, maximum) = s.checkpoint_work_for_test();
+            let (calls, maximum) = s.startup_checkpoint_work_for_test();
             assert_eq!(calls, u64::from(bytes == 4096));
             assert!(maximum <= MAX_WRITER_BACKFILL_FRAMES);
             let (log, backfilled) = s.read_with(frames).unwrap();
@@ -899,7 +935,7 @@ mod tests {
             drop(s);
             let s = EngineStore::open_for_actor(&path, 3, None, None).unwrap();
             assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
-            assert_eq!(s.checkpoint_work_for_test().0, 0);
+            assert_eq!(s.startup_checkpoint_work_for_test().0, 0);
         }
     }
 
@@ -1209,7 +1245,7 @@ mod tests {
         assert!(!s.was_freshly_created());
         assert!(s.checkpoint_worker_running_for_test());
         assert_eq!(
-            s.checkpoint_work_for_test().0,
+            s.startup_checkpoint_work_for_test().0,
             0,
             "an existing, fully migrated store must do no startup checkpoint"
         );
