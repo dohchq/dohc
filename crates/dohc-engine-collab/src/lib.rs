@@ -65,8 +65,8 @@ pub use owner_outbox::{
     OwnerOutboxReadPart, OwnerOutboxState,
 };
 pub use replay_parity::{
-    apply_replay_validated_batch, validate_replay_parity, validate_replay_parity_with_scratch,
-    ReplayBatch,
+    apply_replay_validated_batch, inspect_update, validate_replay_parity,
+    validate_replay_parity_with_scratch, ReplayBatch, StructuralHold, UpdateInspection,
 };
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection,

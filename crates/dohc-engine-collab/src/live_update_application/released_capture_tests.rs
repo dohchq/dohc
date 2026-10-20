@@ -211,10 +211,19 @@ fn a_lineage_finds_its_namespaces_by_its_document_index() {
             object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,
             host_coordinate_json,released_at_ms,released_restore_generation,released_accepted_cursor,
             released_boundary_json,carried_manifest_json)
-        SELECT 'relay-'||(i%4),'released-'||i,'workspace','main',iif(i%8=0,'object','document-'||(i%8)),'{lineage}',
+        SELECT 'relay-'||(i%4),'released-'||i,'workspace','main',iif((i/4)%8=0,'object','document-'||((i/4)%8)),'{lineage}',
             '{{}}','moment','source',0,'{{}}',i,0,0,'{{}}','[]' FROM n"));
     for analyze in ["", "ANALYZE"] {
         write_unchecked(&mut f, analyze);
+        let namespaces = f
+            .store
+            .read_with(|conn| {
+                conn.prepare(settled_base::LINEAGE_NAMESPACES_SQL)?
+                    .query_map(params!["workspace", "main", "object", lineage], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(namespaces, ["relay-0", "relay-1", "relay-2", "relay-3"], "{analyze}");
         let plan = f
             .store
             .read_with(|conn| {
