@@ -1404,8 +1404,13 @@ export function NoticeCenter(props: {
               <SenderMark kind={sentToast.notice.senderKind} />
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
+                {/* About four lines, then it scrolls, so a long reason never
+                    pushes the title and controls out of a short window. */}
                 {sentToastFails && sentToast.notice.body ? (
-                  <span data-testid="sent-notice-toast-body" className="mt-0.5 block text-[11px] text-muted">
+                  <span
+                    data-testid="sent-notice-toast-body"
+                    className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                  >
                     {sentToast.notice.body}
                   </span>
                 ) : null}

@@ -2011,8 +2011,11 @@ describe("notices sent to you", () => {
     it("copies the whole reason the row and toast show, even near the length limit in emoji", async () => {
       const long = agentRun("e", "Your agent's run failed to start", "🙂".repeat(NOTICE_BODY_MAX_CHARS - 1));
       renderNotices({ sentNotices: [long, finished], sentNoticeToast: long });
-      const shown = screen.getByTestId("sent-notice-toast-body").textContent;
+      const body = screen.getByTestId("sent-notice-toast-body");
+      const shown = body.textContent;
       expect(shown).toBe(long.notice.body);
+      // About four lines, then it scrolls, so the title and controls stay in view.
+      expect(body.className.split(" ")).toEqual(expect.arrayContaining(["max-h-[5.5em]", "overflow-y-auto"]));
       await userEvent.click(screen.getByTestId("sent-notice-toast-copy"));
       expect(await copiedDetails()).toBe(`Details: ${shown}`);
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
