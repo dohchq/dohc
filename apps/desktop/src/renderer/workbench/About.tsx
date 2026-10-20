@@ -20,7 +20,7 @@ import {
   Share2,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { ChatFileMentionRecord, ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
 import { isChatMentionPageChanged, isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
@@ -143,6 +143,8 @@ export function AboutSection(props: {
   count?: string;
   expanded: boolean;
   onToggle: () => void;
+  // For a section that hands focus to its own head.
+  toggleRef?: RefObject<HTMLButtonElement | null>;
   children: ReactNode;
 }) {
   const bodyId = useId();
@@ -151,6 +153,7 @@ export function AboutSection(props: {
     <section data-testid={`about-${props.id}`} aria-label={props.label}>
       <h3 className="m-0">
         <button
+          ref={props.toggleRef}
           type="button"
           data-testid={`about-${props.id}-toggle`}
           aria-expanded={props.expanded}
@@ -202,14 +205,21 @@ export function AboutNote(props: {
   );
 }
 
-// The row that reads a list's next page. With `onSeen`, the row coming into
-// view reads it too, so a caller keys the row by the cursor it continues
-// from: a page that leaves it in view mounts a new row, which reads the next.
-export function AboutMore(props: { testId: string; onMore: () => void; onSeen?: () => void }) {
+// The row that reads a list's next page, the same control while pages arrive,
+// so focus on it stays. `onMore` hears whether the row had focus when it was
+// pressed. With `onSeen`, the row coming into view reads the page too, and
+// each new answer named by `watch` checks again whether it is still in view.
+export function AboutMore(props: {
+  testId: string;
+  onMore: (focused: boolean) => void;
+  onSeen?: () => void;
+  watch?: unknown;
+}) {
   const node = useRef<HTMLButtonElement>(null);
   const onSeen = useRef(props.onSeen);
   onSeen.current = props.onSeen;
   const watches = props.onSeen !== undefined;
+  const { watch } = props;
   useEffect(() => {
     const button = node.current;
     if (!watches || !button || typeof IntersectionObserver === "undefined") return;
@@ -218,13 +228,13 @@ export function AboutMore(props: { testId: string; onMore: () => void; onSeen?: 
     });
     observer.observe(button);
     return () => observer.disconnect();
-  }, [watches]);
+  }, [watch, watches]);
   return (
     <button
       ref={node}
       type="button"
       data-testid={props.testId}
-      onClick={props.onMore}
+      onClick={() => props.onMore(node.current === document.activeElement)}
       className={`${ABOUT_ROW_BUTTON} h-7 text-[12px]`}
     >
       Show more
@@ -320,6 +330,30 @@ const gatherDelay = (reads: number) => Math.min(GATHER_FIRST_MS * 2 ** (reads - 
 // rows it would replace and gathers on.
 const gatheringOn = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> =>
   ({ status: "ready", rows: kept?.rows ?? [], next: kept?.next ?? null, gathering: (kept?.gathering ?? 0) + 1 });
+// A read that failed keeps the rows it would replace and stops gathering.
+// With no rows to keep, only Try again shows, so nothing claims the list is
+// empty.
+const failedOver = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> | { status: "failed" } =>
+  kept && kept.rows.length > 0 ? { ...kept, gathering: 0 } : { status: "failed" };
+
+// One read at a time for one list. A read from the start replaces one in
+// flight, since it answers for newer rows. Show more pressed while a read
+// from the start runs waits for it, then reads the page after it, so a page
+// never lands on rows that read replaced. Pressed again while the next page
+// is read, it asks for nothing. Show more coming into view during any read
+// is checked again once the read lands.
+type ReadGuard = { reading: "start" | "more" | null; moreAfter: boolean };
+function asksMore(guard: ReadGuard, seen: boolean | undefined): boolean {
+  if (guard.reading === "start" && !seen) guard.moreAfter = true;
+  return guard.reading === null;
+}
+// The read that ends, if it is still the newest: whether Show more waits on it.
+function readEnds(guard: ReadGuard): boolean {
+  const more = guard.moreAfter;
+  guard.reading = null;
+  guard.moreAfter = false;
+  return more;
+}
 
 const LINKS_FAILED = "dohc could not load the links to this file.";
 const CHAT_LINKS_FAILED = "dohc could not load the chats that link to this file.";
@@ -349,24 +383,24 @@ export function AboutLinks(props: {
   const chats = useSectionRead<ChatLinksView>(key, `about-chat-links:${path}`, notices);
   const { begin: beginLinks, cancel: cancelLinks } = links;
   const { begin: beginChats, cancel: cancelChats } = chats;
-  // What each list shows now, for a read that keeps or extends it, and
-  // whether a read of it runs, when a Show more row in view waits.
+  // What each list shows now, for a read that keeps or extends it.
   const shownLinks = useRef<ReadyLinks | null>(null);
   shownLinks.current = links.view.status === "ready" ? links.view : null;
   const shownChats = useRef<ReadyChatLinks | null>(null);
   shownChats.current = chats.view.status === "ready" ? chats.view : null;
-  const linksReading = useRef(false);
-  const chatsReading = useRef(false);
+  const linksGuard = useRef<ReadGuard>({ reading: null, moreAfter: false });
+  const chatsGuard = useRef<ReadGuard>({ reading: null, moreAfter: false });
 
   // A read from the start, until it holds as many rows as `again` showed, or
   // the page after `after`. A read that fails keeps the rows it would replace.
   const loadLinks = useCallback(async (from: { after?: ReadyLinks; again?: ReadyLinks }) => {
     const request = beginLinks();
-    linksReading.current = true;
+    linksGuard.current.reading = from.after ? "more" : "start";
     const kept = from.after ?? from.again;
     let rows = from.after?.rows ?? [];
     let cursor = from.after?.next ?? undefined;
     let building = false;
+    let landed: ReadyLinks | null = null;
     try {
       do {
         const page = await bridge().linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
@@ -375,29 +409,31 @@ export function AboutLinks(props: {
         building ||= page?.indexBuilding ?? false;
         cursor = page?.nextCursor ?? undefined;
       } while (cursor && rows.length < (from.again?.rows.length ?? 0));
-      request.settle({
+      landed = {
         status: "ready",
         rows,
         next: cursor ?? null,
         // Rows read while the index built are read again, even when the
         // index finished before the page after them.
         gathering: building ? (kept?.gathering ?? 0) + 1 : (from.after?.gathering ?? 0),
-      });
+      };
+      request.settle(landed);
     } catch (error) {
       if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
-      else request.fail(kept ? { ...kept, gathering: 0 } : { status: "failed" }, ipcErrorMessage(error, LINKS_FAILED), error,
+      else request.fail(failedOver(kept), ipcErrorMessage(error, LINKS_FAILED), error,
         () => void loadLinks({ again: shownLinks.current ?? undefined }));
     } finally {
-      if (request.current()) linksReading.current = false;
+      if (request.current() && readEnds(linksGuard.current) && landed?.next) void loadLinks({ after: landed });
     }
   }, [beginLinks, path, workspaceId]);
 
   const loadChats = useCallback(async (from: { after?: ReadyChatLinks; again?: ReadyChatLinks; restarted?: boolean }) => {
     const request = beginChats();
-    chatsReading.current = true;
+    chatsGuard.current.reading = from.after ? "more" : "start";
     // A row repeated across pages shows once.
     const rows = new Map((from.after?.rows ?? []).map((row) => [row.attachment.attachmentId, row]));
     let cursor = from.after?.next ?? undefined;
+    let landed: ReadyChatLinks | null = null;
     try {
       do {
         const page = await bridge().chatFileMentionsPage({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
@@ -405,7 +441,8 @@ export function AboutLinks(props: {
         for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
         cursor = page?.nextCursor ?? undefined;
       } while (cursor && rows.size < (from.again?.rows.length ?? 0));
-      request.settle({ status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 });
+      landed = { status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 };
+      request.settle(landed);
     } catch (error) {
       if (!request.current()) return;
       // A cursor that lost the access or version its rows were read under
@@ -417,10 +454,10 @@ export function AboutLinks(props: {
       }
       const kept = from.after ?? from.again;
       if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
-      else request.fail(kept ?? { status: "failed" }, ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
+      else request.fail(failedOver(kept), ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
         () => void loadChats({ again: shownChats.current ?? undefined }));
     } finally {
-      if (request.current()) chatsReading.current = false;
+      if (request.current() && readEnds(chatsGuard.current) && landed?.next) void loadChats({ after: landed });
     }
   }, [beginChats, path, workspaceId]);
 
@@ -433,6 +470,13 @@ export function AboutLinks(props: {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [reads]);
+
+  // Another file, or the section closing, ends every read and what waited on
+  // one. Declared before the reads, so it ends them before the next begins.
+  useEffect(() => () => {
+    linksGuard.current = { reading: null, moreAfter: false };
+    chatsGuard.current = { reading: null, moreAfter: false };
+  }, [key, reads]);
 
   useEffect(() => {
     if (!reads) return;
@@ -459,19 +503,31 @@ export function AboutLinks(props: {
     return () => clearTimeout(timer);
   }, [chatsView, loadChats, readsChats]);
 
+  // As Search keeps focus in its own panel after a jump, a link that opens
+  // another file keeps it in About: on this section's head, which stays as
+  // About turns to that file, where the row pressed goes.
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const { onOpenLink } = props;
+  const openLink = useCallback((source: string, line: number) => {
+    const toggle = toggleRef.current;
+    if (source !== path && toggle?.closest("section")?.contains(document.activeElement)) toggle.focus();
+    onOpenLink(source, line);
+  }, [onOpenLink, path]);
+
   return (
     <AboutLinksView
       links={shared ? null : linksView}
       chats={shared || props.onOpenChat === undefined ? null : chatsView}
       expanded={props.expanded}
       onToggle={props.onToggle}
-      onOpenLink={props.onOpenLink}
+      toggleRef={toggleRef}
+      onOpenLink={openLink}
       onOpenChat={props.onOpenChat ?? OPENS_NO_CHAT}
       onMoreLinks={(shown, seen) => {
-        if (!(seen && linksReading.current)) void loadLinks({ after: shown });
+        if (asksMore(linksGuard.current, seen)) void loadLinks({ after: shown });
       }}
       onMoreChats={(shown, seen) => {
-        if (!(seen && chatsReading.current)) void loadChats({ after: shown });
+        if (asksMore(chatsGuard.current, seen)) void loadChats({ after: shown });
       }}
       onRetryLinks={() => void loadLinks({})}
       onRetryChats={() => void loadChats({})}
@@ -623,6 +679,37 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
   );
 }
 
+// Show more pressed with focus on it hands focus to the first row the page
+// adds, so a keyboard reader goes on from there, and keeps a place when the
+// last page takes Show more away. Only while focus is still on Show more, or
+// was lost with it: a person who moved on keeps their place.
+function useFocusAddedRow(rows: readonly unknown[] | null, toggle: RefObject<HTMLButtonElement | null>, selector: string) {
+  const pressedFrom = useRef<Element | null | undefined>(undefined);
+  const shown = useRef(rows);
+  useEffect(() => {
+    const before = shown.current;
+    shown.current = rows;
+    const from = pressedFrom.current;
+    if (from === undefined) return;
+    if (rows === null) {
+      pressedFrom.current = undefined;
+      return;
+    }
+    // A page adds rows after the ones shown. A read from the start that
+    // lands first replaces them instead, and the press waits on its page.
+    const added = before !== null && rows.length > before.length && before.every((row, index) => rows[index] === row);
+    if (!added) return;
+    pressedFrom.current = undefined;
+    const section = toggle.current?.closest("section");
+    const active = document.activeElement;
+    const lost = active === null || active === document.body || (section != null && active.contains(section));
+    if (active === from || lost) section?.querySelectorAll<HTMLElement>(selector)[before.length]?.focus();
+  }, [rows, selector, toggle]);
+  return useCallback(() => {
+    pressedFrom.current = document.activeElement;
+  }, []);
+}
+
 // The Links section for answers already in hand. The states page draws it.
 export function AboutLinksView(props: {
   // Null for a file under shared-with-me/, whose links dohc does not list yet.
@@ -631,6 +718,7 @@ export function AboutLinksView(props: {
   chats: ChatLinksView | null;
   expanded: boolean;
   onToggle: () => void;
+  toggleRef?: RefObject<HTMLButtonElement | null>;
   onOpenLink: (path: string, line: number) => void;
   onOpenChat: (mention: ChatFileMentionRecord) => void;
   // `seen` when a Show more row came into view rather than being pressed.
@@ -643,8 +731,13 @@ export function AboutLinksView(props: {
   const linkRows = links?.status === "ready" ? links : null;
   const chatRows = chats?.status === "ready" ? chats : null;
   const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
+  const ownToggle = useRef<HTMLButtonElement>(null);
+  const toggleRef = props.toggleRef ?? ownToggle;
+  const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, toggleRef, '[data-testid="about-link"]');
+  const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, toggleRef, '[data-testid="chat-file-mention"]');
   return (
-    <AboutSection id="links" icon={Link} label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}>
+    <AboutSection id="links" icon={Link} label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}
+      toggleRef={toggleRef}>
       {links === null ? (
         <AboutNote testId="about-links-shared" icon={Link2Off}>
           dohc does not list links into files shared with you yet.
@@ -663,8 +756,12 @@ export function AboutLinksView(props: {
           ) : null}
           {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
           {links.next !== null ? (
-            <AboutMore key={links.next} testId="about-links-more"
-              onMore={() => props.onMoreLinks(links)} onSeen={() => props.onMoreLinks(links, true)} />
+            <AboutMore testId="about-links-more" watch={links}
+              onMore={(focused) => {
+                if (focused) focusAddedLink();
+                props.onMoreLinks(links);
+              }}
+              onSeen={() => props.onMoreLinks(links, true)} />
           ) : null}
         </>
       )}
@@ -680,8 +777,12 @@ export function AboutLinksView(props: {
         <>
           {chats.rows.length > 0 ? <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} /> : null}
           {chats.next !== null ? (
-            <AboutMore key={chats.next} testId="about-chat-links-more"
-              onMore={() => props.onMoreChats(chats)} onSeen={() => props.onMoreChats(chats, true)} />
+            <AboutMore testId="about-chat-links-more" watch={chats}
+              onMore={(focused) => {
+                if (focused) focusAddedChat();
+                props.onMoreChats(chats);
+              }}
+              onSeen={() => props.onMoreChats(chats, true)} />
           ) : null}
         </>
       )}

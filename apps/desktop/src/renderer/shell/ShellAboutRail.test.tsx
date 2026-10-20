@@ -237,9 +237,16 @@ describe("About rail (right side)", () => {
     const links = await screen.findByTestId("about-links");
     const row = await within(links).findByTestId("about-link");
     expect(row.dataset.line).toBe("3");
-    await user.click(row);
+    const toggle = within(links).getByTestId("about-links-toggle");
+    row.focus();
+    await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true"));
     expect(bridge.linksIn).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, subject: { path: "b.md" } });
+    // About turns to a.md, and focus stays on the same Links head, as Search
+    // keeps focus in its own panel.
+    await waitFor(() => expect(within(screen.getByTestId("about-rail")).getByTestId("about-header").textContent).toBe("a.md"));
+    expect(screen.getByTestId("about-links-toggle")).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
   });
 
   it("opens a chat search hit on another file in About once", async () => {
