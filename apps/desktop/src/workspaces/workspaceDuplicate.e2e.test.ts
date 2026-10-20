@@ -54,8 +54,8 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
     }
     samples.sort((a,b)=>a-b);
     console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:20,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
-    expect(samples[9]).toBeLessThanOrEqual(500);
-    expect(samples[18]).toBeLessThanOrEqual(1000);
+    expect.soft(samples[9]).toBeLessThanOrEqual(500);
+    expect.soft(samples[18]).toBeLessThanOrEqual(1000);
     const interrupted = await withinDeadline("duplicate before Undo", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
     const receiptPath = join(rootPath,".dohc/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
     await writeFile(receiptPath,JSON.stringify({workspaceId,source:"source.md",path:interrupted.path,operationId:interrupted.operationId}));
