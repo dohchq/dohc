@@ -220,9 +220,7 @@ fn matching<T: PartialEq>(
         ranges.push((0..prefix, 0));
     }
     let (left, right) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
-    if !left.is_empty()
-        && !right.is_empty()
-    {
+    if !left.is_empty() && !right.is_empty() {
         let (x, y) = bisect(left, right, remaining)?;
         if (x, y) != (0, 0) && (x, y) != (left.len(), right.len()) {
             for (r, start) in matching(&left[..x], &right[..y], remaining)? {
@@ -503,7 +501,10 @@ mod tests {
         let head = format!("{}[[new]]{}", "c".repeat(8192), "d".repeat(8192));
         for _ in 0..2 {
             let mut remaining = DIFF_STEPS;
-            assert_eq!(inverse_with_steps(&before, &after, &head, &mut remaining), Err(()));
+            assert_eq!(
+                inverse_with_steps(&before, &after, &head, &mut remaining),
+                Err(())
+            );
             assert_eq!(remaining, 0, "the search must spend the real budget");
         }
     }
@@ -548,9 +549,7 @@ mod tests {
         for a in inputs {
             for b in inputs {
                 let mut remaining = DIFF_STEPS;
-                for (range, start) in
-                    unchanged_ranges(a, b, &mut remaining).unwrap()
-                {
+                for (range, start) in unchanged_ranges(a, b, &mut remaining).unwrap() {
                     assert_eq!(
                         &a[range.clone()],
                         &b[start..start + range.len()],

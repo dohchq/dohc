@@ -1454,20 +1454,34 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
 async fn concurrent_replays_rejoin_the_durable_cursor_without_reusing_other_member_inputs() {
     let f = Fixture::new(20, 20);
     let ws = f.ws.clone();
-    f.actor.run(move |store,_| {
-        store.write_with(&NoFaults, |tx| -> Result<(),DomainError> {
-            for i in 0..20 {
-                let body = format!("document {i}: {BODY} distinct tail {i}");
-                write_text_in_tx(tx,&write(&ws,&format!("source-{i:04}"),
-                    &format!("source-{i:04}.md"),&body,&format!("distinct-{i}")))?;
-            }
+    f.actor
+        .run(move |store, _| {
+            store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
+                for i in 0..20 {
+                    let body = format!("document {i}: {BODY} distinct tail {i}");
+                    write_text_in_tx(
+                        tx,
+                        &write(
+                            &ws,
+                            &format!("source-{i:04}"),
+                            &format!("source-{i:04}.md"),
+                            &body,
+                            &format!("distinct-{i}"),
+                        ),
+                    )?;
+                }
+                Ok(())
+            })?;
             Ok(())
-        })?;
-        Ok(())
-    }).await.unwrap();
+        })
+        .await
+        .unwrap();
     for i in 0..20 {
-        std::fs::write(f.root.join(format!("source-{i:04}.md")),
-            format!("document {i}: {BODY} distinct tail {i}")).unwrap();
+        std::fs::write(
+            f.root.join(format!("source-{i:04}.md")),
+            format!("document {i}: {BODY} distinct tail {i}"),
+        )
+        .unwrap();
     }
     f.pass("concurrent-forward", Arc::new(NoFaults))
         .await
@@ -1478,28 +1492,39 @@ async fn concurrent_replays_rejoin_the_durable_cursor_without_reusing_other_memb
     assert_eq!(first.moments.len(), 21);
     assert!(first.not_restored.is_empty() && second.not_restored.is_empty());
     for i in 0..20 {
-        assert_eq!(f.text(&format!("source-{i:04}.md")).await, format!("document {i}: {BODY} distinct tail {i}"));
+        assert_eq!(
+            f.text(&format!("source-{i:04}.md")).await,
+            format!("document {i}: {BODY} distinct tail {i}")
+        );
     }
     f.close().await;
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_edit_chain_cancels_together_without_false_conflicts() {
-    let f = Fixture::new(1,1);
-    f.pass("chain-forward",Arc::new(NoFaults)).await.unwrap();
+    let f = Fixture::new(1, 1);
+    f.pass("chain-forward", Arc::new(NoFaults)).await.unwrap();
     let edited = format!("{} typed after rename", f.text("source-0000.md").await);
-    let (ws,body) = (f.ws.clone(),edited.clone());
-    f.actor.run(move |store,_| {
-        let mut input = write(&ws,"source-0000","source-0000.md",&body,"later-edit");
-        input.now_ms = crate::links::now_ms() + 1;
-        VersionedTextStore::new(store).write_text(&input,&NoFaults)?;
-        Ok(())
-    }).await.unwrap();
-    assert_eq!(std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),BODY);
+    let (ws, body) = (f.ws.clone(), edited.clone());
+    f.actor
+        .run(move |store, _| {
+            let mut input = write(&ws, "source-0000", "source-0000.md", &body, "later-edit");
+            input.now_ms = crate::links::now_ms() + 1;
+            VersionedTextStore::new(store).write_text(&input, &NoFaults)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        BODY
+    );
     let result = f.undo().await.unwrap();
     assert!(result.not_restored.is_empty());
-    assert_eq!(f.text("source-0000.md").await, format!("{BODY} typed after rename"));
+    assert_eq!(
+        f.text("source-0000.md").await,
+        format!("{BODY} typed after rename")
+    );
     f.actor.run(|store,_| {
         store.read_with(|conn| {
             let statuses: Vec<String> = conn.prepare(
@@ -1513,29 +1538,39 @@ async fn pending_edit_chain_cancels_together_without_false_conflicts() {
     f.close().await;
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
-    let f = Fixture::new(1,1);
-    let original = format!("{}{BODY}{}", "a".repeat(8192),"b".repeat(8192));
-    let (ws,body) = (f.ws.clone(),original.clone());
-    f.actor.run(move |store,_| {
-        store.write_with(&NoFaults,|tx| write_text_in_tx(tx,
-            &write(&ws,"source-0000","source-0000.md",&body,"large-seed")))?;
-        Ok(())
-    }).await.unwrap();
-    std::fs::write(f.root.join("source-0000.md"),&original).unwrap();
-    f.pass("budget-forward",Arc::new(NoFaults)).await.unwrap();
+    let f = Fixture::new(1, 1);
+    let original = format!("{}{BODY}{}", "a".repeat(8192), "b".repeat(8192));
+    let (ws, body) = (f.ws.clone(), original.clone());
+    f.actor
+        .run(move |store, _| {
+            store.write_with(&NoFaults, |tx| {
+                write_text_in_tx(
+                    tx,
+                    &write(&ws, "source-0000", "source-0000.md", &body, "large-seed"),
+                )
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    std::fs::write(f.root.join("source-0000.md"), &original).unwrap();
+    f.pass("budget-forward", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
     let rewritten = f.text("source-0000.md").await;
-    let head = rewritten.replace(&"a".repeat(8192),&"c".repeat(8192))
-        .replace(&"b".repeat(8192),&"d".repeat(8192));
-    f.edit("source-0000","source-0000.md",&head).await;
+    let head = rewritten
+        .replace(&"a".repeat(8192), &"c".repeat(8192))
+        .replace(&"b".repeat(8192), &"d".repeat(8192));
+    f.edit("source-0000", "source-0000.md", &head).await;
     let result = f.undo().await.unwrap();
-    assert_eq!(result.not_restored,vec!["source-0000.md"]);
-    assert_eq!(result.moments.len(),1,"the target rename still restores");
-    assert_eq!(f.text("source-0000.md").await,head);
-    assert_eq!(f.undo().await.unwrap().not_restored,result.not_restored,
-        "replay keeps the durable refusal");
+    assert_eq!(result.not_restored, vec!["source-0000.md"]);
+    assert_eq!(result.moments.len(), 1, "the target rename still restores");
+    assert_eq!(f.text("source-0000.md").await, head);
+    assert_eq!(
+        f.undo().await.unwrap().not_restored,
+        result.not_restored,
+        "replay keeps the durable refusal"
+    );
     f.close().await;
 }

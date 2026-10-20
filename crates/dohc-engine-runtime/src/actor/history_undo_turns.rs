@@ -179,12 +179,18 @@ fn result(
         })
     })
 }
-type PendingPublication = (std::collections::HashMap<String, Option<String>>, Vec<String>);
+type PendingPublication = (
+    std::collections::HashMap<String, Option<String>>,
+    Vec<String>,
+);
 fn pending_publication(
-    conn: &rusqlite::Connection, ws: &str, operation: &str, root: &Path,
+    conn: &rusqlite::Connection,
+    ws: &str,
+    operation: &str,
+    root: &Path,
     token: &CancellationToken,
 ) -> Result<PendingPublication, RuntimeError> {
-    let version = dohc_engine_domain::get_active_version_in(conn,ws)?.version_id;
+    let version = dohc_engine_domain::get_active_version_in(conn, ws)?.version_id;
     let mut stmt = conn.prepare_cached("WITH paths(path) AS (
         SELECT path FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND version_id=?3
         UNION SELECT payload_before_path FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND version_id=?3
@@ -195,48 +201,72 @@ fn pending_publication(
         FROM materialization_jobs j WHERE j.workspace_id=?1 AND j.status='pending'
           AND j.target_path IN (SELECT path FROM paths)
         ORDER BY j.created_at_ms,j.job_id").map_err(StorageError::corrupt_public)?;
-    let jobs = stmt.query_map(params![ws,operation,version], |r| Ok((
-        r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,
-        r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?
-    ))).map_err(StorageError::corrupt_public)?
-      .collect::<Result<Vec<_>,_>>().map_err(StorageError::corrupt_public)?;
-    let probe = dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
+    let jobs = stmt
+        .query_map(params![ws, operation, version], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(StorageError::corrupt_public)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt_public)?;
+    let probe =
+        dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
     let mut paths = std::collections::HashMap::new();
     let mut unpublished = std::collections::HashMap::new();
     // The oldest preimage describes disk before the entire pending chain.
-    for (_,path,kind,present,sha) in &jobs {
-        if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+    for (_, path, kind, present, sha) in &jobs {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
         if let std::collections::hash_map::Entry::Vacant(entry) = paths.entry(path.clone()) {
-            let unchanged = match probe_undo_source(&probe,path) {
-                dohc_engine_files::ProjectionTargetState::Text {sha256}
-                | dohc_engine_files::ProjectionTargetState::Binary {sha256} =>
-                    *present && sha.as_deref()==Some(&sha256),
+            let unchanged = match probe_undo_source(&probe, path) {
+                dohc_engine_files::ProjectionTargetState::Text { sha256 }
+                | dohc_engine_files::ProjectionTargetState::Binary { sha256 } => {
+                    *present && sha.as_deref() == Some(&sha256)
+                }
                 dohc_engine_files::ProjectionTargetState::Absent => !present,
                 _ => false,
             };
             entry.insert(unchanged);
-            if unchanged { unpublished.insert(path.clone(),sha.clone()); }
+            if unchanged {
+                unpublished.insert(path.clone(), sha.clone());
+            }
         }
-        if kind!="write" {
-            paths.insert(path.clone(),false);
+        if kind != "write" {
+            paths.insert(path.clone(), false);
             unpublished.remove(path);
         }
     }
-    let replay = jobs.into_iter().filter_map(|(job,path,_,_,_)|
-        (!paths[&path]).then_some(job)).collect();
-    Ok((unpublished,replay))
+    let replay = jobs
+        .into_iter()
+        .filter_map(|(job, path, _, _, _)| (!paths[&path]).then_some(job))
+        .collect();
+    Ok((unpublished, replay))
 }
 
 impl ActorHandle {
     /// Partition whole pending path chains before the Undo fence reconciles disk.
     pub async fn history_undo_pending_publication(
-        &self, ws: String, operation: String, root: PathBuf, token: CancellationToken,
+        &self,
+        ws: String,
+        operation: String,
+        root: PathBuf,
+        token: CancellationToken,
     ) -> Result<PendingPublication, RuntimeError> {
-        let db = self.run(|store,_| Ok(store.database_path().to_path_buf())).await?;
+        let db = self
+            .run(|store, _| Ok(store.database_path().to_path_buf()))
+            .await?;
         tokio::task::spawn_blocking(move || {
             let store = EngineStore::open_read_only(&db)?;
-            store.read_with(|conn| pending_publication(conn,&ws,&operation,&root,&token))
-        }).await.map_err(|_| RuntimeError::ActorUnavailable)?
+            store.read_with(|conn| pending_publication(conn, &ws, &operation, &root, &token))
+        })
+        .await
+        .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     async fn run_undo_turn<R: Send + 'static>(
@@ -350,11 +380,11 @@ impl ActorHandle {
             let (prior, pending) = store.read_with(|conn| -> Result<_, RuntimeError> {
                 let prior = load(conn, &w, &o, &r, a.as_deref())?;
                 let jobs = if prior.is_none() {
-                    pending_publication(conn,&w,&o,&pending_root,&pending_token)?
+                    pending_publication(conn, &w, &o, &pending_root, &pending_token)?
                 } else {
                     Default::default()
                 };
-                Ok((prior,jobs))
+                Ok((prior, jobs))
             })?;
             Ok::<_, RuntimeError>((store, prior, pending))
         })
@@ -544,7 +574,9 @@ impl ActorHandle {
             })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)??;
-            if loaded.1 != 0 { inputs.clear(); }
+            if loaded.1 != 0 {
+                inputs.clear();
+            }
             loaded
         };
         // Completed replays leave any parked file jobs to the placement continuation.
