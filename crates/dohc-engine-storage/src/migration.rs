@@ -4401,6 +4401,45 @@ mod tests {
         }
     }
 
+
+    #[test]
+    #[ignore = "scheduled migration 64 alias-index measurement"]
+    fn conversation_links_measure_migration_alias_index_on_large_store() {
+        assert!(!cfg!(debug_assertions), "run with --release");
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON; BEGIN;
+            INSERT INTO versioned_workspaces VALUES('ws','v-0');").unwrap();
+        for i in 0..10 {
+            conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws',?1,'named','Measured',1)",[format!("v-{i}")]).unwrap();
+        }
+        {
+            let mut object=conn.prepare_cached("INSERT INTO file_objects VALUES('ws',?1,1)").unwrap();
+            for i in 0..50_000 {object.execute([format!("f-{i:06}")]).unwrap();}
+            let mut alias=conn.prepare_cached("INSERT INTO path_aliases VALUES('ws',?1,?2,?3)").unwrap();
+            for version in 0..10 {for i in 0..50_000 {
+                alias.execute(params![format!("v-{version}"),format!("notes/{}/file-{i:06}.md","long-label/".repeat(8)),format!("f-{i:06}")]).unwrap();
+            }}
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let bytes_before=std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        let start=std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let migration_us=start.elapsed().as_micros();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let bytes_after=std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        assert_eq!(conn.query_row("SELECT count(*) FROM chat_conversation_file_link_state",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        // Measure just the alias-index DDL too, on the same populated store.
+        conn.execute_batch("DROP INDEX conversation_file_link_alias; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let start=std::time::Instant::now();
+        conn.execute_batch("CREATE INDEX conversation_file_link_alias ON path_aliases(workspace_id,version_id,object_id,path);").unwrap();
+        let index_us=start.elapsed().as_micros();
+        println!("CONVERSATION_LINKS_MIGRATION_MEASUREMENT {{\"aliases\":500000,\"objects\":50000,\"versions\":10,\"migrationUs\":{migration_us},\"aliasIndexUs\":{index_us},\"databaseBytesBefore\":{bytes_before},\"databaseBytesAfter\":{bytes_after}}}");
+    }
+
     #[test]
     fn conversation_links_upgrade_preserves_mentions_without_startup_backfill() {
         let dir = tempdir();

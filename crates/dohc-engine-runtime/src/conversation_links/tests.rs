@@ -638,7 +638,7 @@ fn conversation_links_late_parent_preserves_reply_cursor_and_visible_links() {
         origin_seq: 0,
         op_kind: "chat.message.append".into(),
         payload: json!({"messageId":id,"threadId":"t","authorKind":"human","authorDisplayName":"Ada",
-            "body":"","createdAtMs":2,"parentMessageId":parent}),
+            "body":"reply","createdAtMs":2,"parentMessageId":parent}),
         recorded_at_ms: 2,
         relay_seq: Some(0),
     };
