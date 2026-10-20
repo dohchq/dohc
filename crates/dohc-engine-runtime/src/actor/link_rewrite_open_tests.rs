@@ -362,3 +362,52 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
         f.close().await;
     }
 }
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
+    let f=Fixture::new(64,64);let (lease,doc)=f.open_document("source-0000").await;
+    let key=DocKey::new(&f.ws,"main","source-0000").unwrap();
+    let update=doc.richdoc_append_paragraph("forward typing");
+    let committed=Arc::new(tokio::sync::Notify::new());
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().committed=Some(committed.clone());
+    let (actor,serial,ws,k)=(f.actor.clone(),f.serial.clone(),f.ws.clone(),key.clone());
+    let typing=tokio::spawn(async move {
+        committed.notified().await;
+        let before=undo_probe::turn_count(&ws);let start=Instant::now();
+        let _guard=serial.lock().await;
+        actor.ydoc_record_update(k,"source-0000.md".into(),ContentKind::Richdoc,Regime::LocalOnly,
+            update,None,None,None,false,None,Some("queued-forward-typing".into()),5,
+            Arc::new(NoFaults),CancellationToken::new(),None).await.unwrap();
+        (undo_probe::turn_count(&ws)-before,start.elapsed().as_nanos())
+    });
+    assert_eq!(f.pass("open-contention",Arc::new(NoFaults)).await.unwrap()["documents"],64);
+    let (forward_gap,forward_wait)=typing.await.unwrap();assert!(forward_gap<=1);
+    f.settle_document("source-0000").await;
+    let doc=f.document("source-0000").await;
+    let update=doc.richdoc_append_paragraph("undo typing");
+    let committed=Arc::new(tokio::sync::Notify::new());
+    let request=format!("{}-undo",f.ws);
+    undo_probe::notify_inverse(&request,committed.clone());
+    let (actor,serial,ws)=(f.actor.clone(),f.serial.clone(),request);
+    let typing=tokio::spawn(async move {
+        committed.notified().await;
+        let before=undo_probe::turn_count(&ws);let start=Instant::now();
+        let _guard=serial.lock().await;
+        actor.ydoc_record_update(key,"source-0000.md".into(),ContentKind::Richdoc,Regime::LocalOnly,
+            update,None,None,None,false,None,Some("queued-undo-typing".into()),11,
+            Arc::new(NoFaults),CancellationToken::new(),None).await.unwrap();
+        (undo_probe::turn_count(&ws)-before,start.elapsed().as_nanos())
+    });
+    let result=f.undo_open().await.unwrap();
+    let (undo_gap,undo_wait)=typing.await.unwrap();assert!(undo_gap<=1);
+    assert_eq!(result.not_restored,vec!["source-0000.md"]);
+    let text=f.document("source-0000").await.project(ContentKind::Richdoc).unwrap().content;
+    assert!(text.contains("[[new#part"));assert!(text.contains("forward typing"));assert!(text.contains("undo typing"));
+    if let Ok(dir)=std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("open-contention.json"),
+            json!({"forwardGap":forward_gap,"undoGap":undo_gap,
+                "forwardWaitNs":forward_wait,"undoWaitNs":undo_wait}).to_string()).unwrap();
+    }
+    drop(lease);f.close().await;
+}

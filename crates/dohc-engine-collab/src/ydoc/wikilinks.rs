@@ -1,6 +1,8 @@
 use super::*;
 use std::ops::Range;
 
+type WikilinkProjection = (String, Vec<(Range<usize>, usize)>);
+
 impl Ydoc {
     fn wikilink_elements(&self) -> Vec<yrs::XmlElementRef> {
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -22,7 +24,7 @@ impl Ydoc {
 
     /// Locate element targets in the projection without searching their literals.
     /// Each span carries its element's ordinal in the XML traversal.
-    pub fn wikilink_spans(&self) -> Result<(String, Vec<(Range<usize>, usize)>), CollabError> {
+    pub fn wikilink_spans(&self) -> Result<WikilinkProjection, CollabError> {
         let original = self.project_richdoc()?;
         let staged = Ydoc::wire();
         staged.apply(&self.encode_full_state())?;

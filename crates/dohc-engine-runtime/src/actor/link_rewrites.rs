@@ -377,7 +377,7 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let (ws, p, open, root, read_token) = (
+            let (ws, p, open, read_root, read_token) = (
                 workspace.clone(),
                 plan.clone(),
                 leases.clone(),
@@ -408,7 +408,7 @@ impl ActorHandle {
                             match super::link_documents::baseline(
                                 store,
                                 cache,
-                                &root,
+                                &read_root,
                                 &key,
                                 path,
                                 &read_token,
@@ -469,7 +469,7 @@ impl ActorHandle {
                 break;
             }
             cursor = next_cursor;
-            let (p, before, after) = (plan.clone(), before.clone(), after.clone());
+            let (p, parse_before, parse_after) = (plan.clone(), before.clone(), after.clone());
             let (mut prepared, skipped) = tokio::task::spawn_blocking(move || {
                 let mut prepared = VecDeque::new();
                 let mut skipped = Vec::new();
@@ -485,8 +485,8 @@ impl ActorHandle {
                             &path,
                             p.rename.before_path.as_deref().unwrap_or(""),
                             &p.rename.path,
-                            &before,
-                            &after,
+                            &parse_before,
+                            &parse_after,
                         )
                     };
                     match (parsed.head, edit) {

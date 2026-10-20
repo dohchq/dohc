@@ -591,7 +591,10 @@ impl VersionFence {
         let leases = self.leases.scoped(&open.root);
         let mut held = HashMap::new();
         for member in &result.moments {
-            if held.contains_key(&member.object_id) {
+            if held.contains_key(&member.object_id) || lock(&self.sessions).values().any(|session|
+                session.key.workspace_id == open.workspace_id &&
+                session.key.version_id == result.version_id &&
+                session.key.object_id == member.object_id) {
                 continue;
             }
             let Ok(key) = DocKey::new(&open.workspace_id, &result.version_id, &member.object_id)

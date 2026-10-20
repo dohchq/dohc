@@ -2765,8 +2765,13 @@ pub(super) fn ydoc_settle_on_store(
         // skipping it here would leave the disk pre-resolution while every
         // marker reports the choice as settled.
         let mut pending_job = None;
-        for prefix in ["ydoc-mat_", "resolve-mat_"] {
-            let candidate = format!("{prefix}{}", current.latest_moment_id);
+        let candidates = [
+            format!("ydoc-mat_{}", current.latest_moment_id),
+            format!("resolve-mat_{}", current.latest_moment_id),
+            dohc_engine_domain::binary_rollback_job_identity(
+                &key.workspace_id, &key.version_id, &current.latest_moment_id),
+        ];
+        for candidate in candidates {
             if let Some(job) = store
                 .load_materialization_job(&candidate)?
                 .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
