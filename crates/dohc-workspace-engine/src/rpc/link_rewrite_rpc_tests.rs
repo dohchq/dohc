@@ -49,7 +49,7 @@ async fn rpc(
             },
         )
         .await
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
         .result
 }
 
@@ -107,6 +107,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         .unwrap();
     let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
     let open = service.open(Some(&handle)).unwrap();
+    let _links_hold = open.actor.hold_link_drain();
     lock(&open.capture).as_ref().unwrap().request_shutdown();
     // Wait for the in-flight apply to leave before creating pending jobs.
     drop(open.capture_apply_gate.lock().await);
