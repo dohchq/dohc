@@ -1139,6 +1139,49 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
 
+// dohc#2366. History holds all of the document, so a close over its deleted
+// file has nothing to save. A settle would be refused and read as a failed save.
+it.each(["local-only", "synced"] as const)(
+  "releases a %s document with nothing new over a file deleted outside dohc, without a save",
+  async (regime) => {
+    claimedLineage = regime === "synced";
+    const states: string[] = [];
+    const session = await capture.openYDocSession({
+      path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+    });
+    if (regime === "synced") ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+    states.length = 0;
+    await rm(join(root, PATH));
+    settleRefusal = wireRefusal("conflict-stale-target");
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(states).toEqual([]);
+    expect(captureErrors).toEqual([]);
+    expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+    expect(requests.filter(request => request.method === YDOC_METHOD.close).map(request => request.params)).toEqual([
+      expect.objectContaining({ settle: false }),
+    ]);
+    expect(daemon.leases.size).toBe(0);
+  },
+);
+
+// The engine refuses that release while it holds text History lacks. Then the
+// ordinary close runs, and its refused settle is the failed save it reports.
+it("closes as before when the engine refuses to release a deleted file's document without a save", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  beforeClose = async () => { throw wireRefusal("ydoc-unsettled-close"); };
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(2);
+  expect(daemon.leases.size).toBe(0);
+});
+
 // The narrowness guard for the downgrade above. Any other refusal means the
 // user's edits did not reach the engine, which is what the thrown settle
 // failure and the retryable `error` state exist to say.

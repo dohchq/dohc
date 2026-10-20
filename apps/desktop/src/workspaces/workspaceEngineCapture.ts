@@ -5324,6 +5324,21 @@ export function createWorkspaceEngineCapture(
           });
           return closing;
         };
+        // History holds all of this document: it opened from a recorded
+        // version, or a settle committed, and a committed settle carried every
+        // later update. When its file was deleted outside dohc, the close's
+        // settle can only be refused, which reports a failed save and sets a
+        // draft aside with nothing unsaved (dohc#2366). So the close releases
+        // without a settle. If the engine refuses that release, the ordinary
+        // close runs.
+        const releasedRecordedDeletedDocument = async (
+          opts?: WorkspaceEngineYDocCloseOptions,
+        ): Promise<boolean> => {
+          const recorded = updatesSeen === updatesSettled &&
+            (lastSettledSha !== null || (!unsettled && (head === "present" || lineage === "absent")));
+          if (opts?.settle === false || !recorded || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return false;
+          return session.close({ ...opts, settle: false, settleOnRefusal: false }).then(() => true, () => false);
+        };
         const attemptCloseEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
@@ -5350,7 +5365,7 @@ export function createWorkspaceEngineCapture(
               : opts;
           try {
             if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
-            await session.close(effective);
+            if (!(await releasedRecordedDeletedDocument(effective))) await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A transient settle failure under a succeeded release is the
