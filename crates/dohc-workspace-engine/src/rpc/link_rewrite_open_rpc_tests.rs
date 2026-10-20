@@ -362,7 +362,9 @@ async fn duplicate_open_copy_proof(edited: bool) {
             while f.service.leases.scoped(&f.open.root).is_held(&key) {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("Duplicate Undo placement did not release its lease");
+        })
+        .await
+        .expect("Duplicate Undo placement did not release its lease");
     }
     let exists = f.root.join("copy.md").exists();
     let moments: Vec<String> = reader
