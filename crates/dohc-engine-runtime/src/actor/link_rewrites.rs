@@ -90,7 +90,7 @@ fn track_alias_changes(conn: &Connection, ws: &str, operation: &str) -> Result<(
     conn.execute_batch("DELETE FROM rewrite_alias_watch; DELETE FROM rewrite_alias_changes;")
         .map_err(StorageError::corrupt_public)?;
     conn.execute("INSERT OR IGNORE INTO rewrite_alias_watch SELECT workspace_id,version_id,link_rewrite_stem(path) FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND operation='rename'
-        UNION SELECT workspace_id,version_id,link_rewrite_stem(before_path) FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND operation='rename'", params![ws,operation]).map_err(StorageError::corrupt_public)?;
+        UNION SELECT workspace_id,version_id,link_rewrite_stem(payload_before_path) FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND operation='rename' AND payload_before_path IS NOT NULL", params![ws,operation]).map_err(StorageError::corrupt_public)?;
     Ok(())
 }
 
