@@ -46,6 +46,11 @@ export const DOHC_AGENT_RUNS_GUARD: DohcPathGuard = {
   lead: "dohc could not open this workspace's agent run history.",
 };
 
+export const DOHC_SYNC_HISTORY_GUARD: DohcPathGuard = {
+  path: ".dohc/sync-history",
+  lead: "dohc could not record this workspace's sync history.",
+};
+
 export const DOHC_ENGINE_GUARD: DohcPathGuard = {
   path: ".dohc/engine",
   lead: "dohc could not start the engine for this workspace.",

@@ -6400,9 +6400,19 @@ const ScheduleHostComputer = z.object({
 export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
 export const ScheduleHostResult = z.discriminatedUnion("kind", [
   // A workspace that never synced runs its schedules on one computer: this
-  // one, or the one named, which is null when dohc cannot read its record.
+  // one, or the one named. `sameName` says it has this computer's name, so
+  // it may be an earlier installation here. `hasSchedules` says this
+  // computer found schedules that the other one runs.
   z.object({ kind: z.literal("this-computer") }),
-  z.object({ kind: z.literal("another-computer"), label: z.string().min(1).max(64).nullable() }),
+  z.object({
+    kind: z.literal("another-computer"),
+    label: z.string().min(1).max(64),
+    sameName: z.boolean(),
+    hasSchedules: z.boolean(),
+  }),
+  // dohc cannot read which computer runs a workspace that never synced, so
+  // none does until one takes over. `cause` is the error, for Copy.
+  z.object({ kind: z.literal("no-computer"), message: z.string().min(1).max(500), cause: z.string().min(1).max(2000).optional() }),
   // A shared view never runs schedules.
   z.object({ kind: z.literal("none") }),
   // dohc cannot ask the relay; `message` says what to do.
@@ -6477,7 +6487,9 @@ export const scheduleHostOperations = {
     scope: "workspace",
     handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:read-schedule-host",
-    payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
+    // `localOnly` answers "none" for a workspace that syncs, without asking
+    // its relay, for a reader that needs only a workspace that does not.
+    payload: ScheduleHostWorkspace.extend({ localOnly: z.boolean().optional() }), result: ScheduleHostResult, guard: "trusted-sender",
   },
   // Starts a handover to another of the owner's computers.
   chooseScheduleHost: {

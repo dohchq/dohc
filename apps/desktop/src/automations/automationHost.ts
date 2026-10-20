@@ -7,6 +7,7 @@ import {
   type RelayAutomationComputer,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
+import type { ScheduleHost } from "@dohc/automation-executor/automation-scheduler";
 import { scheduleComputer, type Computer } from "../workspaces/syncHistory";
 
 // Which of the owner's computers runs a synced workspace's schedules
@@ -218,16 +219,83 @@ export async function automationHostGeneration(
   if (workspace === null || workspace.shareView !== undefined) return null;
   if (workspace.remote !== undefined) return await relayGeneration();
   const host = await scheduleComputer(workspace.rootPath, here);
-  return host !== null && host !== "unreadable" && host.installId === here.installId ? 0 : null;
+  return host?.kind === "computer" && host.computer.installId === here.installId ? 0 : null;
 }
 
-/** Whether this computer is a workspace's automation host; see automationHostGeneration. */
-export async function isAutomationHost(
-  workspace: HostedWorkspace,
-  here: Computer,
-  relayNamesThis: () => boolean | Promise<boolean>,
-): Promise<boolean> {
-  return (await automationHostGeneration(workspace, here, async () => ((await relayNamesThis()) ? 0 : null))) !== null;
+export interface WorkspaceHostsDependencies {
+  here(): Computer;
+  workspace(workspaceId: string): HostedWorkspace;
+  relay: Pick<AutomationHosts, "runsHere" | "stillRuns" | "runsAt">;
+  /**
+   * Whether this computer runs a workspace that does not sync changed, as
+   * when another computer took over, or a step found schedules here that
+   * another computer runs, or stopped finding them.
+   */
+  changed(workspaceId: string): void;
+}
+
+/**
+ * Where each workspace's automations run, as the scheduler and Collection
+ * automations ask. A workspace that does not sync is read from its folder at
+ * every ask, and every 15 minutes while another computer runs its
+ * schedules, so this computer learns that it was chosen or that another
+ * one took over without waiting for anything else to happen here.
+ */
+export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
+  const runs = new Map<string, boolean>();
+  const elsewhere = new Set<string>();
+  const local = (workspace: HostedWorkspace) => workspace !== null && workspace.remote === undefined && workspace.shareView === undefined;
+
+  async function generation(
+    workspaceId: string,
+    relayGeneration: () => number | null | Promise<number | null>,
+  ): Promise<number | null> {
+    const workspace = dependencies.workspace(workspaceId);
+    const answer = await automationHostGeneration(workspace, dependencies.here(), relayGeneration);
+    if (local(workspace)) {
+      const before = runs.get(workspaceId);
+      runs.set(workspaceId, answer !== null);
+      if (before !== undefined && before !== (answer !== null)) dependencies.changed(workspaceId);
+    }
+    return answer;
+  }
+
+  return {
+    /** The host generation this computer runs Group triggers at, or null. */
+    groupHost: (workspaceId: string) => generation(workspaceId, () => dependencies.relay.runsAt(workspaceId)),
+
+    scheduleHost(workspaceId: string): ScheduleHost {
+      return {
+        runsHere: async () => {
+          const here = (await generation(workspaceId, async () => ((await dependencies.relay.runsHere(workspaceId)) ? 0 : null))) !== null;
+          const waits = !here && local(dependencies.workspace(workspaceId));
+          if (waits !== elsewhere.has(workspaceId)) {
+            if (waits) elsewhere.add(workspaceId);
+            else elsewhere.delete(workspaceId);
+            dependencies.changed(workspaceId);
+          }
+          return here;
+        },
+        // Turning sync on or opening a share records it in the registry in
+        // one synchronous call, and runsHere just read the folder or the
+        // relay. So this check, with nothing awaited before a claim, stops
+        // a step that started before either changed.
+        stillRuns: () => {
+          const workspace = dependencies.workspace(workspaceId);
+          if (workspace === null || workspace.shareView !== undefined) return false;
+          return workspace.remote === undefined ? runs.get(workspaceId) === true : dependencies.relay.stillRuns(workspaceId);
+        },
+        // The owner can choose this computer from another one at any time.
+        asksAgain: () => {
+          const workspace = dependencies.workspace(workspaceId);
+          return workspace !== null && workspace.shareView === undefined;
+        },
+      };
+    },
+
+    /** Whether the last step found schedules here that another computer runs. */
+    schedulesElsewhere: (workspaceId: string) => elsewhere.has(workspaceId),
+  };
 }
 
 export function createAutomationHosts(dependencies: AutomationHostsDependencies) {

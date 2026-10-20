@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
@@ -164,25 +164,25 @@ describe("the computer that runs a never-synced workspace's schedules", () => {
 
   it("is the computer that made it, on every computer the folder reaches", async () => {
     await recordNeverSynced(root, laptop);
-    expect(await scheduleComputer(root, laptop)).toEqual(laptop);
-    expect(await scheduleComputer(root, desk)).toEqual(laptop);
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: laptop });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
     expect(await readdir(join(root, ".dohc")), "reading writes nothing").toEqual(["sync-history.json"]);
   });
 
   it("moves to the computer chosen, and stays there for every reader", async () => {
     await recordNeverSynced(root, laptop);
     expect(await runSchedulesOn(root, desk)).toBe(true);
-    expect(await scheduleComputer(root, laptop)).toEqual(desk);
-    expect(await scheduleComputer(root, desk)).toEqual(desk);
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: desk });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: desk });
     expect(await runSchedulesOn(root, laptop)).toBe(true);
-    expect(await scheduleComputer(root, desk)).toEqual(laptop);
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
     expect(await readdir(join(root, ".dohc", "sync-history")), "nothing left beside it").toEqual(["schedules.json"]);
   });
 
   it("belongs to the first computer that reads a record from before dohc named one", async () => {
     await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
-    expect(await scheduleComputer(root, laptop)).toEqual(laptop);
-    expect(await scheduleComputer(root, desk)).toEqual(laptop);
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: laptop });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
     expect(await provedNeverShared(entry, none), "the record keeps what it said").toBe(true);
   });
 
@@ -204,9 +204,75 @@ describe("the computer that runs a never-synced workspace's schedules", () => {
     await mkdir(join(root, ".dohc", "sync-history"));
     for (const text of ["{", "{\"version\": 1, \"installId\": \"\", \"label\": \"Desk\"}", "{\"version\": 2, \"installId\": \"d\", \"label\": \"Desk\"}"]) {
       await writeFile(schedulesPath(), text);
-      expect(await scheduleComputer(root, laptop), text).toBe("unreadable");
+      expect(await scheduleComputer(root, laptop), text).toMatchObject({ kind: "unreadable" });
     }
     expect(await runSchedulesOn(root, laptop)).toBe(true);
-    expect(await scheduleComputer(root, desk)).toEqual(laptop);
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
+  });
+});
+
+describe("a workspace's history stays inside it", () => {
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+
+  it("refuses a link at .dohc/sync-history, and writes nothing where it leads", async () => {
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    await recordNeverSynced(root, laptop);
+    await symlink(outside, join(root, ".dohc", "sync-history"), linkType);
+    const refusal = "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.";
+    await expect(recordSynced(root)).rejects.toThrow(refusal);
+    await expect(recordReceivedShare(root)).rejects.toThrow(refusal);
+    // A link proves nothing, so no computer runs the schedules and none can take them.
+    expect(await readSyncHistory(root)).toBe("unknown");
+    expect(await scheduleComputer(root, laptop)).toBeNull();
+    expect(await runSchedulesOn(root, desk)).toBe(false);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("refuses a file at .dohc/sync-history, and a .dohc that is a link", async () => {
+    await writeFile(join(root, ".dohc", "sync-history"), "");
+    await expect(recordSynced(root)).rejects.toThrow("A file is at .dohc/sync-history, which must be a real folder.");
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    await rm(join(root, ".dohc"), { recursive: true });
+    await symlink(outside, join(root, ".dohc"), linkType);
+    await expect(recordSynced(root)).rejects.toThrow("A link is at .dohc, which must be a real folder.");
+    await expect(recordNeverSynced(root, laptop)).rejects.toThrow("A link is at .dohc, which must be a real folder.");
+    expect(await readSyncHistory(root)).toBe("unknown");
+    expect(await readdir(outside)).toEqual([]);
+  });
+});
+
+describe("a record from before the marks", () => {
+  it("keeps a sync it says, whatever a stale copy says after", async () => {
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": true}");
+    expect(await readSyncHistory(root)).toBe("synced");
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
+    expect(await readSyncHistory(root)).toBe("synced");
+  });
+
+  it("keeps a share it says, whatever a stale copy says after", async () => {
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": true}");
+    expect(await provedNeverShared(entry, none)).toBe(false);
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
+    expect(await provedNeverShared(entry, none)).toBe(false);
+    expect(await readSyncHistory(root), "a share does not make it sync").toBe("never-synced");
+  });
+});
+
+describe("a schedules record that names no computer", () => {
+  const legacy = "{\"version\": 1, \"synced\": false, \"receivedShare\": false}";
+
+  it("is unreadable whatever its words, and never loops", async () => {
+    await writeFile(recordPath(), legacy);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    await writeFile(join(root, ".dohc", "sync-history", "schedules.json"), "absent");
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+  });
+
+  it("is unreadable when a link that leads nowhere is there, and never loops", async () => {
+    await writeFile(recordPath(), legacy);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    await symlink(join(root, "nowhere.json"), join(root, ".dohc", "sync-history", "schedules.json"));
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+    await expect(readdir(join(root, "nowhere.json"))).rejects.toThrow();
   });
 });

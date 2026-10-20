@@ -109,7 +109,7 @@ describe("createWorkspaceFolder", () => {
     expect(await readdir(root)).toEqual([".dohc"]);
     expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
     // Its schedules run on the computer that made it, whichever computer reads the folder.
-    expect(await scheduleComputer(root, { installId: "install-desk", label: "Desk" })).toEqual(computer);
+    expect(await scheduleComputer(root, { installId: "install-desk", label: "Desk" })).toEqual({ kind: "computer", computer });
   });
 
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {

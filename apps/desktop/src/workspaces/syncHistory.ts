@@ -1,8 +1,10 @@
 import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, AUTOMATION_INSTALL_ID_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { DOHC_SYNC_HISTORY_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
+import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import type { RegistryEntry } from "./registryStore";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // Whether a workspace ever synced or opened as a share, kept in its own
 // .dohc folder. Forgetting the workspace removes its registry entry, and
@@ -31,8 +33,14 @@ import type { RegistryEntry } from "./registryStore";
 //
 // A received share or chat does not make the workspace sync, so schedules
 // still run, but the workspace is no longer one nobody else ever had a part
-// in. A record from before dohc kept received shares has no `receivedShare`,
-// and one from before these marks may say `synced` itself.
+// in. A record from before dohc kept received shares has no `receivedShare`.
+// One from before these marks may say `synced` or `receivedShare` itself:
+// the first read that sees it records the mark, so a stale copy cannot
+// take it back after.
+//
+// .dohc resolves through resolveWorkspaceMetadataDir, and .dohc/sync-history
+// must be a real folder, so a planted link cannot send a write outside the
+// workspace.
 
 // "absent" when the folder has no record, as one made before dohc kept it;
 // "unknown" when it has one dohc cannot read or parse, which may say synced.
@@ -44,6 +52,9 @@ export interface Computer {
   label: string;
 }
 
+/** Who runs a never-synced workspace's schedules, or why dohc cannot say. */
+export type ScheduleComputer = { kind: "computer"; computer: Computer } | { kind: "unreadable"; error: unknown };
+
 interface HistoryRecord {
   synced: boolean;
   // Null in a record from before dohc kept it.
@@ -52,17 +63,18 @@ interface HistoryRecord {
   host: Computer | null;
 }
 
-const historyPath = (rootPath: string) => join(rootPath, ".dohc", "sync-history.json");
-const marksPath = (rootPath: string) => join(rootPath, ".dohc", "sync-history");
-const schedulesPath = (rootPath: string) => join(marksPath(rootPath), "schedules.json");
+type Mark = "synced" | "received-share";
+type FileRead = { kind: "text"; text: string } | { kind: "absent" } | { kind: "failed"; error: unknown };
+
 const computerText = ({ installId, label }: Computer) => `${JSON.stringify({ version: 1, installId, label })}\n`;
 
 /**
  * A new workspace that has not synced, whose schedules run on `computer`.
  * Existing records stay.
  */
-export function recordNeverSynced(rootPath: string, computer: Computer): Promise<void> {
-  return createOnce(historyPath(rootPath), `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`);
+export async function recordNeverSynced(rootPath: string, computer: Computer): Promise<void> {
+  const metadata = await resolveWorkspaceMetadataDir(rootPath);
+  await createOnce(join(metadata, "sync-history.json"), `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`);
 }
 
 /** The workspace synced or opened as a share. Nothing undoes it. */
@@ -78,19 +90,25 @@ export function recordReceivedShare(rootPath: string): Promise<void> {
   return mark(rootPath, "received-share");
 }
 
-async function mark(rootPath: string, name: "synced" | "received-share"): Promise<void> {
-  await makeMarksFolder(rootPath);
-  await createOnce(join(marksPath(rootPath), name), "");
+async function mark(rootPath: string, name: Mark): Promise<void> {
+  await createOnce(join(await marksFolder(rootPath), name), "");
 }
 
-// Within .dohc only: a workspace folder that is gone stays gone.
-async function makeMarksFolder(rootPath: string): Promise<void> {
+// .dohc/sync-history, made when it is missing. A workspace folder that is
+// gone stays gone.
+async function marksFolder(rootPath: string): Promise<string> {
+  const folder = join(await resolveWorkspaceMetadataDir(rootPath), "sync-history");
   try {
-    await mkdir(marksPath(rootPath));
+    await mkdir(folder);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
+  // Something other than a real folder there could lead outside the workspace.
+  const stats = await lstat(folder);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, stats));
+  return folder;
 }
+
 
 async function createOnce(path: string, text: string): Promise<void> {
   try {
@@ -100,26 +118,23 @@ async function createOnce(path: string, text: string): Promise<void> {
   }
 }
 
+async function readAt(path: string): Promise<FileRead> {
+  try {
+    return { kind: "text", text: await readFile(path, "utf8") };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "absent" } : { kind: "failed", error };
+  }
+}
+
 // True when the mark is there, false when it is not, and null when dohc
 // cannot tell. Only a missing file is no mark: any other error may hide one.
-async function marked(rootPath: string, name: "synced" | "received-share"): Promise<boolean | null> {
+async function marked(marks: string, name: Mark): Promise<boolean | null> {
   try {
-    await stat(join(marksPath(rootPath), name));
+    await stat(join(marks, name));
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? false : null;
   }
-}
-
-function parseRecord(text: string): HistoryRecord | null {
-  const parsed = parseObject(text);
-  if (parsed === null) return null;
-  const { version, synced, receivedShare, host } = parsed;
-  if (version !== 1 || typeof synced !== "boolean") return null;
-  if (receivedShare !== undefined && typeof receivedShare !== "boolean") return null;
-  const computer = host === undefined ? null : computerOf(host);
-  if (host !== undefined && computer === null) return null;
-  return { synced, receivedShare: receivedShare ?? null, host: computer };
 }
 
 function parseObject(text: string): Record<string, unknown> | null {
@@ -140,14 +155,63 @@ function computerOf(value: unknown): Computer | null {
     : null;
 }
 
-// The file's text, "absent" when there is none, or null when dohc cannot
-// read it.
-async function readText(path: string): Promise<string | "absent" | null> {
+function parseRecord(text: string): HistoryRecord | null {
+  const parsed = parseObject(text);
+  if (parsed === null) return null;
+  const { version, synced, receivedShare, host } = parsed;
+  if (version !== 1 || typeof synced !== "boolean") return null;
+  if (receivedShare !== undefined && typeof receivedShare !== "boolean") return null;
+  const computer = host === undefined ? null : computerOf(host);
+  if (host !== undefined && computer === null) return null;
+  return { synced, receivedShare: receivedShare ?? null, host: computer };
+}
+
+interface History {
+  history: SyncHistory;
+  // The record, when the history says the workspace never synced.
+  record: HistoryRecord | null;
+  // Whether the received-share mark is there, or null when dohc cannot tell.
+  receivedShare: boolean | null;
+  // .dohc/sync-history, which may not exist yet.
+  marks: string | null;
+}
+
+async function readHistory(rootPath: string): Promise<History> {
+  let metadata: string | null;
   try {
-    return await readFile(path, "utf8");
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : null;
+    metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+  } catch {
+    // A .dohc that is not a real folder inside the workspace proves nothing.
+    return { history: "unknown", record: null, receivedShare: null, marks: null };
   }
+  if (metadata === null) return { history: "absent", record: null, receivedShare: false, marks: null };
+  const marks = join(metadata, "sync-history");
+  const stats = await lstat(marks).catch(() => null);
+  // Nor does a marks folder that is a link or a file.
+  if (stats !== null && (stats.isSymbolicLink() || !stats.isDirectory())) {
+    return { history: "unknown", record: null, receivedShare: null, marks: null };
+  }
+  const [file, synced, shared] = await Promise.all([
+    readAt(join(metadata, "sync-history.json")), marked(marks, "synced"), marked(marks, "received-share"),
+  ]);
+  const record = file.kind === "text" ? parseRecord(file.text) : null;
+  const receivedShare = shared === false && record?.receivedShare === true ? await keep(rootPath, "received-share") : shared;
+  const answer = (history: SyncHistory, never: HistoryRecord | null = null): History => ({ history, record: never, receivedShare, marks });
+  if (synced === null) return answer("unknown");
+  if (synced || record?.synced) {
+    if (!synced) await keep(rootPath, "synced");
+    return answer("synced");
+  }
+  if (file.kind === "absent") return answer("absent");
+  return record === null ? answer("unknown") : answer("never-synced", record);
+}
+
+// A record from before the marks says this: mark it, so a stale copy of
+// the record cannot take it back. The record says it either way, so a mark
+// that cannot be written is tried again at the next read.
+async function keep(rootPath: string, name: Mark): Promise<true> {
+  await mark(rootPath, name).catch(() => undefined);
+  return true;
 }
 
 /** What the workspace's history says. */
@@ -155,43 +219,38 @@ export async function readSyncHistory(rootPath: string): Promise<SyncHistory> {
   return (await readHistory(rootPath)).history;
 }
 
-// The history, with the record when it says the workspace never synced.
-async function readHistory(rootPath: string): Promise<{ history: SyncHistory; record: HistoryRecord | null }> {
-  const [text, synced] = await Promise.all([readText(historyPath(rootPath)), marked(rootPath, "synced")]);
-  if (synced !== false) return { history: synced ? "synced" : "unknown", record: null };
-  if (text === "absent") return { history: "absent", record: null };
-  const record = text === null ? null : parseRecord(text);
-  if (record === null) return { history: "unknown", record: null };
-  return record.synced ? { history: "synced", record: null } : { history: "never-synced", record };
-}
-
 /**
  * The computer that runs a workspace's schedules when it never synced, or
  * null when it synced or its history cannot say. "unreadable" when the
- * schedules record cannot be read: no computer runs them until one is
- * chosen. A record from before dohc named a host belongs to the first
+ * schedules record cannot be read: no computer runs them until one takes
+ * over. A record from before dohc named a host belongs to the first
  * computer that reads it, so its only computer keeps running its schedules.
  */
-export async function scheduleComputer(rootPath: string, here: Computer): Promise<Computer | "unreadable" | null> {
-  const { record } = await readHistory(rootPath);
-  if (record === null) return null;
-  for (;;) {
-    const text = await readText(schedulesPath(rootPath));
-    if (text === null) return "unreadable";
-    if (text !== "absent") {
-      const parsed = parseObject(text);
-      return (parsed?.version === 1 ? computerOf(parsed) : null) ?? "unreadable";
-    }
-    if (record.host !== null) return record.host;
-    await makeMarksFolder(rootPath);
-    try {
-      await writeFile(schedulesPath(rootPath), computerText(here), { flag: "wx" });
-      return here;
-    } catch (error) {
-      // Another reader recorded one first: read it.
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
+export async function scheduleComputer(rootPath: string, here: Computer): Promise<ScheduleComputer | null> {
+  const { record, marks } = await readHistory(rootPath);
+  if (record === null || marks === null) return null;
+  const path = join(marks, "schedules.json");
+  const read = await readAt(path);
+  if (read.kind !== "absent") return scheduleComputerOf(read);
+  if (record.host !== null) return { kind: "computer", computer: record.host };
+  try {
+    await writeFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), { flag: "wx" });
+    return { kind: "computer", computer: here };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { kind: "unreadable", error };
+    // Another reader recorded one first: read it, once.
+    const again = await readAt(path);
+    return again.kind === "absent" ? { kind: "unreadable", error } : scheduleComputerOf(again);
   }
+}
+
+function scheduleComputerOf(read: Exclude<FileRead, { kind: "absent" }>): ScheduleComputer {
+  if (read.kind === "failed") return { kind: "unreadable", error: read.error };
+  const parsed = parseObject(read.text);
+  const computer = parsed?.version === 1 ? computerOf(parsed) : null;
+  return computer === null
+    ? { kind: "unreadable", error: new Error("The file .dohc/sync-history/schedules.json does not name a computer.") }
+    : { kind: "computer", computer };
 }
 
 /**
@@ -201,8 +260,7 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
  */
 export async function runSchedulesOn(rootPath: string, here: Computer): Promise<boolean> {
   if ((await readHistory(rootPath)).record === null) return false;
-  await makeMarksFolder(rootPath);
-  await atomicWriteFile(schedulesPath(rootPath), computerText(here));
+  await atomicWriteFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here));
   return true;
 }
 
@@ -222,7 +280,7 @@ export async function provedNeverShared(
   remoteChangesApplied: () => Promise<number | null>,
 ): Promise<boolean> {
   if (entry.remote || entry.shareView || entry.sharedChannels?.length || entry.shareMounts?.length) return false;
-  const [{ record }, shared] = await Promise.all([readHistory(entry.rootPath), marked(entry.rootPath, "received-share")]);
-  if (record?.receivedShare !== false || shared !== false) return false;
+  const { record, receivedShare } = await readHistory(entry.rootPath);
+  if (record?.receivedShare !== false || receivedShare !== false) return false;
   return (await remoteChangesApplied()) === 0;
 }

@@ -18,6 +18,9 @@ import { SettingRow } from "./SettingRow";
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
+// Two computers can share a name, so dohc does not decide which this is.
+export const SAME_NAME = "Same name as this computer. It may be an earlier installation of dohc here.";
+
 type TakeOverFrom = Pick<ScheduleHostComputer, "kind" | "label" | "thisComputer">;
 type Loaded = { status: "loading" } | { status: "ready"; state: ScheduleHostResult } | { status: "failed" };
 
@@ -136,13 +139,17 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   }
   const { state } = loaded;
   if (state.kind === "none") return null;
-  if (state.kind === "another-computer") {
-    const from = { kind: "computer" as const, label: state.label ?? "another computer", thisComputer: false };
+  // A workspace that does not sync runs its schedules on the one computer
+  // its folder names. Moving them needs no answer from the other computer:
+  // it stops at its next read.
+  if (state.kind === "another-computer" || state.kind === "no-computer") {
+    const named = state.kind === "another-computer";
+    const from = { kind: "computer" as const, label: named ? state.label : "another computer", thisComputer: false };
     return (
       <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
-        <div data-testid="schedule-host-elsewhere" className="flex flex-col gap-2">
-          <span className="text-[12px] text-muted">{state.label ?? "Another computer"}</span>
-          {/* Moving them needs no answer from the other computer: it stops at its next read. */}
+        <div data-testid="schedule-host-elsewhere" className="flex max-w-sm flex-col gap-2">
+          <span className={`text-[12px] ${named ? "text-muted" : "text-ink"}`}>{named ? state.label : state.message}</span>
+          {named && state.sameName ? <span className="text-[12px] text-muted">{SAME_NAME}</span> : null}
           {takeOverControls(from, 0)}
         </div>
       </SettingRow>

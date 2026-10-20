@@ -14,7 +14,7 @@ import {
   hostOfAnswer,
   refusalOfAnswer,
   automationHostGeneration,
-  isAutomationHost,
+  createWorkspaceHosts,
   relayUnreachable,
   type HostAnswer,
   type HostRequest,
@@ -511,18 +511,17 @@ describe("the automation host", () => {
   it("is the synced workspace's host as read, or the computer that made a workspace that never synced", async () => {
     const root = await createTestScratch("dohc-automation-host-");
     await mkdir(join(root, ".dohc"), { recursive: true });
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, laptop, () => true)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, laptop, () => false)).toBe(false);
-    expect(await isAutomationHost({ rootPath: root }, laptop, () => true), "no record of whether it synced").toBe(false);
+    const at = (workspace: Parameters<typeof automationHostGeneration>[0], relay: number | null) =>
+      automationHostGeneration(workspace, laptop, () => relay);
+    expect(await at({ rootPath: root, remote: {} }, 7)).toBe(7);
+    expect(await at({ rootPath: root, remote: {} }, null)).toBeNull();
+    expect(await at({ rootPath: root }, 7), "no record of whether it synced").toBeNull();
     await recordNeverSynced(root, laptop);
-    expect(await isAutomationHost({ rootPath: root }, laptop, () => false)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, shareView: {} }, laptop, () => true), "shared with this person").toBe(false);
-    expect(await isAutomationHost(null, laptop, () => true)).toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, laptop, () => 7), "its one computer runs at 0").toBe(0);
-    expect(await automationHostGeneration({ rootPath: root, remote: {} }, laptop, () => 7)).toBe(7);
+    expect(await at({ rootPath: root }, null), "its one computer runs at 0").toBe(0);
+    expect(await at({ rootPath: root, shareView: {} }, 7), "shared with this person").toBeNull();
+    expect(await at(null, 7)).toBeNull();
     await recordSynced(root);
-    expect(await isAutomationHost({ rootPath: root }, laptop, () => true), "synced before, so another computer may be the host").toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, laptop, () => 7)).toBeNull();
+    expect(await at({ rootPath: root }, 7), "synced before, so another computer may be the host").toBeNull();
   });
 
   it("is one computer of two that read a copied folder that never synced, until the other takes over", async () => {
@@ -535,6 +534,51 @@ describe("the automation host", () => {
     expect(await runSchedulesOn(root, desk)).toBe(true);
     expect(await automationHostGeneration({ rootPath: root }, desk, () => null)).toBe(0);
     expect(await automationHostGeneration({ rootPath: root }, laptop, () => null), "the laptop stops at its next read").toBeNull();
+  });
+
+  describe("for a workspace that never synced", () => {
+    const relay = { runsHere: async () => false, stillRuns: () => false, runsAt: () => null };
+    async function copied() {
+      const root = await createTestScratch("dohc-automation-host-reads-");
+      await mkdir(join(root, ".dohc"), { recursive: true });
+      await recordNeverSynced(root, laptop);
+      const changes: string[] = [];
+      const workspace: { rootPath: string; remote?: unknown; shareView?: unknown } = { rootPath: root };
+      const hosts = createWorkspaceHosts({ here: () => laptop, workspace: () => workspace, relay, changed: (id) => changes.push(id) });
+      return { root, changes, workspace, hosts };
+    }
+
+    it("tells this computer's automations when another computer takes over, and when it is chosen again", async () => {
+      const { root, changes, hosts } = await copied();
+      const schedules = hosts.scheduleHost("ws");
+      expect(await schedules.runsHere()).toBe(true);
+      expect(await hosts.groupHost("ws")).toBe(0);
+      expect(changes).toEqual([]);
+      await runSchedulesOn(root, desk);
+      // A Group read finds it first, so the Group subscriptions go too.
+      expect(await hosts.groupHost("ws")).toBeNull();
+      expect(changes).toEqual(["ws"]);
+      expect(await schedules.runsHere()).toBe(false);
+      expect(schedules.stillRuns(), "a step that started before stops at its claim").toBe(false);
+      expect(hosts.schedulesElsewhere("ws"), "this computer has schedules the desk runs").toBe(true);
+      expect(changes).toEqual(["ws", "ws"]);
+      await runSchedulesOn(root, laptop);
+      expect(await schedules.runsHere()).toBe(true);
+      expect(schedules.stillRuns()).toBe(true);
+      expect(hosts.schedulesElsewhere("ws")).toBe(false);
+      // It runs here again, and no longer has schedules another computer runs.
+      expect(changes).toEqual(["ws", "ws", "ws", "ws"]);
+    });
+
+    it("asks again while another computer runs its schedules, as it does for a synced one", async () => {
+      const { workspace, hosts } = await copied();
+      const schedules = hosts.scheduleHost("ws");
+      expect(schedules.asksAgain(), "the folder can name this computer at any time").toBe(true);
+      workspace.remote = {};
+      expect(schedules.asksAgain()).toBe(true);
+      workspace.shareView = {};
+      expect(schedules.asksAgain(), "a shared view never runs schedules").toBe(false);
+    });
   });
 
   it("answers the generation it runs at only while it runs", async () => {
