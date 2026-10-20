@@ -395,6 +395,19 @@ describe("commandForSiteScript loopback defaults", () => {
 
     expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
   });
+
+  it.each(["react-scripts start;", "react-scripts start &", "react-scripts start # local", "react-scripts start --"])(
+    "still gives the package script %j HOST, which reaches the server wherever the script ends",
+    (start) => {
+      const site = packageSite({ configuredScripts: {}, scripts: { start } });
+
+      expect(commandForSiteScript(site, "start")).toEqual({
+        command: "npm",
+        args: ["run", "start"],
+        env: { HOST: "127.0.0.1" },
+      });
+    },
+  );
 });
 
 // Runs the real pnpm with fixture `next` and `react-scripts` bins that print

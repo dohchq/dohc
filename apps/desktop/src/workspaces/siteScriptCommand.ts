@@ -68,19 +68,22 @@ function loopbackDefault(server: {
 // trailing args as their own command.
 const TRAILING_SHELL_OPERATOR = /[;&|\\\r\n][ \t]*$/;
 
-// The package manager appends trailing args to the script's text, so they
-// reach the server only when the script is one statement that ends in the
-// server's own options: not after a separator, a comment, or its own `--`.
+// The package manager appends trailing args to the script's text, so a host
+// flag reaches the server only when the script ends in the server's own
+// options: not after a separator, a comment, or its own `--`. A HOST variable
+// reaches it wherever the script ends.
 function scriptLoopbackDefault(
   scriptBody: string,
   forwardedArgs: string[],
 ): ReturnType<typeof loopbackDefault> {
-  if (TRAILING_SHELL_OPERATOR.test(scriptBody)) return null;
   const statements = splitShellStatements(scriptBody);
   if (statements.length !== 1) return null;
   const { command, args } = splitCommandLine(statements[0]!);
+  const loopback = loopbackDefault({ command, args: [...args, ...forwardedArgs] });
+  if (!loopback || "env" in loopback) return loopback;
+  if (TRAILING_SHELL_OPERATOR.test(scriptBody)) return null;
   if (args.some((arg) => arg === "--" || arg.startsWith("#"))) return null;
-  return loopbackDefault({ command, args: [...args, ...forwardedArgs] });
+  return loopback;
 }
 
 const KNOWN_PACKAGE_MANAGER_COMMANDS: ReadonlySet<string> = new Set([
