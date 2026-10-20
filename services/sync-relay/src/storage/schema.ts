@@ -9,7 +9,7 @@ import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
 import { initializeServiceActivationSchema } from "./serviceActivationSchema";
 import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
-import { initializeServiceHostFeedIndex } from "./serviceHostFeed";
+import { initializeHostedDocumentIndex } from "./hostedDocumentIndex";
 import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
@@ -1294,7 +1294,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
     initializeLiveClaimIndex(db);
-    initializeServiceHostFeedIndex(db);
+    initializeHostedDocumentIndex(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

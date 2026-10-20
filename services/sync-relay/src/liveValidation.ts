@@ -5,6 +5,7 @@ import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-jour
 import type { FirstOpenBaseInput, FirstOpenBaseResult } from "./firstOpenBase.js";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import type { FirstOpenHistory, FirstOpenHistoryRead } from "./storage/firstOpenEligibility.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;
@@ -30,11 +31,13 @@ export type SettlementNormalizationResult =
         | "capacity-refused";
       source: "call" | "registration-input";
     };
-export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
-  | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
-  | { kind: "settlement"; input: SettlementNormalizationInput }
-  | { kind: "first-open"; input: FirstOpenBaseInput }
-);
+export type LiveValidationWork =
+  | ({ policy: OrderedLiveUpdateCutPolicy } & (
+      | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
+      | { kind: "settlement"; input: SettlementNormalizationInput }
+      | { kind: "first-open"; input: FirstOpenBaseInput }
+    ))
+  | { kind: "first-open-history"; input: FirstOpenHistoryRead };
 type CapacityRetry = {
   kind: "retry";
   reason: "admission-unavailable";
@@ -171,6 +174,22 @@ export function createLiveValidationExecutor() {
       );
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
+  /**
+   * Runs at most one first-open job at a time and never waits for a slot, so
+   * live admission keeps the other. A busy caller retries on its next pass.
+   */
+  async function firstOpen<Result extends { kind: string }>(
+    work: LiveValidationWork,
+    signal?: AbortSignal,
+  ): Promise<Result | { kind: "busy" }> {
+    if (firstOpenSlot?.busy && slots.has(firstOpenSlot)) return { kind: "busy" };
+    const result = await submit<Result>(work, signal, (slot) => {
+      firstOpenSlot = slot;
+    });
+    if (result.kind === "retry") return { kind: "busy" };
+    firstOpenSlot = undefined;
+    return result as Result;
+  }
   async function close() {
     closed = true;
     notify();
@@ -196,27 +215,16 @@ export function createLiveValidationExecutor() {
         signal,
       );
     },
-    /**
-     * Builds at most one first-open base at a time and never waits for a
-     * slot, so live admission keeps the other. A busy caller retries on its
-     * next pass.
-     */
-    async buildFirstOpenBase(
+    buildFirstOpenBase(
       policy: OrderedLiveUpdateCutPolicy,
       input: FirstOpenBaseInput,
       signal?: AbortSignal,
-    ): Promise<FirstOpenBaseResult | { kind: "busy" }> {
-      if (firstOpenSlot?.busy && slots.has(firstOpenSlot)) return { kind: "busy" };
-      const result = await submit<FirstOpenBaseResult>(
-        { kind: "first-open", policy, input },
-        signal,
-        (slot) => {
-          firstOpenSlot = slot;
-        },
-      );
-      if (result.kind === "retry") return { kind: "busy" };
-      firstOpenSlot = undefined;
-      return result;
+    ) {
+      return firstOpen<FirstOpenBaseResult>({ kind: "first-open", policy, input }, signal);
+    },
+    /** Reads first-open history on the worker's own read-only connection, in the first-open slot. */
+    readFirstOpenHistory(read: FirstOpenHistoryRead, signal?: AbortSignal) {
+      return firstOpen<FirstOpenHistory>({ kind: "first-open-history", input: read }, signal);
     },
     close,
   };

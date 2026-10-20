@@ -7,6 +7,8 @@ import type {
 
 export interface StorageContext extends SyncRelayStorage {
   readonly db: SqliteDb;
+  /** The database file, for connections that only read it. */
+  readonly databasePath: string;
   readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;
   readonly newDiscussionId: () => string;
   replicaViewTx<T>(run: () => T): T;

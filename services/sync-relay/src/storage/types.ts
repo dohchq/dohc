@@ -623,8 +623,14 @@ export interface SyncRelayStorage {
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
   /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
   latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
-  /** Whether durable history lets the relay give the document a first live base. Usable inside the relay writer. */
-  readFirstOpenEligibility(input: {workspaceId: string; objectId: string}): import("./firstOpenEligibility").FirstOpenEligibility;
+  /** Whether durable history lets the relay give the source's document a first live base, read off the relay writer. */
+  prepareFirstOpen(source: import("./firstOpenEligibility").FirstOpenSource, read: import("./firstOpenEligibility").FirstOpenHistoryReader,
+    signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
+  /** Extends a preparation over the workspace log rows committed after it. */
+  catchUpFirstOpen(proof: import("./firstOpenEligibility").FirstOpenProof, read: import("./firstOpenEligibility").FirstOpenHistoryReader,
+    signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
+  /** Runs `publish` in the relay writer only if the preparation still holds there. */
+  writeFirstOpen<T>(proof: import("./firstOpenEligibility").FirstOpenProof, publish: () => T): import("./firstOpenEligibility").FirstOpenWrite<T>;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;

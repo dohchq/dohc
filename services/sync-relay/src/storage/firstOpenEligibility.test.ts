@@ -1,17 +1,27 @@
 import {afterEach, expect, it, vi} from "vitest";
+import {existsSync} from "node:fs";
+import {join} from "node:path";
+import {DatabaseSync} from "node:sqlite";
 import {sha256Hex} from "@dohc/workspace-core/hash";
-import {closeTestStorages, inspectDatabase, storagePath, testStorage} from "../testing";
-import type {SyncRelayStorage} from "../storage";
+import {closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, storagePath, tempRoot, testStorage} from "../testing";
+import {createLiveValidationExecutor} from "../liveValidation";
 import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
 import {refuseOp} from "./relayAdmission";
+import {appendLogBatchInTransaction} from "./log";
+import {readFirstOpenHistory, readFirstOpenHistoryFile, type FirstOpenHistory, type FirstOpenHistoryRead, type FirstOpenHistoryReader,
+  type FirstOpenProof} from "./firstOpenEligibility";
 
-afterEach(closeTestStorages);
+const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
+afterEach(async () => {
+  await Promise.all(pools.splice(0).map(pool => pool.close()));
+  await closeTestStorages();
+});
 
 const WS = "workspace-1", OTHER_WS = "workspace-2", OBJECT = "object-1", OTHER = "object-2";
-const target = {workspaceId: WS, objectId: OBJECT};
 const LINEAGE = "a".repeat(64), OTHER_LINEAGE = "c".repeat(64);
 const TEXT = new TextEncoder().encode("ordinary text"), SHA = sha256Hex(TEXT);
+const SOURCE = {workspaceId: WS, objectId: OBJECT, path: "docs/a.md", sourceMomentId: `write-${OBJECT}-docs/a.md`, sourceDigest: SHA};
 
 const write = (objectId: string, path: string, versionId = "main") => ({momentId: `write-${objectId}-${path}`, objectId, versionId,
   operation: "write", path, payloadAfterPath: path, payloadAfterBlobSha256: SHA, payloadAfterByteLength: TEXT.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1});
@@ -40,11 +50,12 @@ async function fixture() {
   const raw = inspectDatabase(storagePath(storage));
   raw.exec("PRAGMA foreign_keys=OFF");
   const seqs = new Map<string, number>();
-  const append = (workspaceId: string, opKind: string, payload: object, options: {originId?: string; admit?: (op: SyncRelayLogInput) => void} = {}) => {
+  const append = (workspaceId: string, opKind: string, payload: object,
+    options: {originId?: string; recordedAtMs?: number; admit?: (op: SyncRelayLogInput) => void} = {}) => {
     const originId = options.originId ?? "owner-device", key = `${workspaceId}/${originId}`, originSeq = seqs.get(key) ?? 0;
     seqs.set(key, originSeq + 1);
     const admit = options.admit;
-    storage.appendLogBatch({workspaceId, originId, ops: [{originSeq, opKind, payloadJson: JSON.stringify(payload), recordedAtMs: 1}],
+    storage.appendLogBatch({workspaceId, originId, ops: [{originSeq, opKind, payloadJson: JSON.stringify(payload), recordedAtMs: options.recordedAtMs ?? 1}],
       ...(admit ? {admit: (ops: SyncRelayLogInput[]) => ops.forEach(admit)} : {})});
   };
   // A row as stored, for shapes append would check further: audits, settlement refusals and departed rows.
@@ -62,16 +73,20 @@ async function fixture() {
   const activation = (workspaceId: string, objectId: string) => raw.prepare(`INSERT INTO sync_relay_service_activations
     VALUES ('namespace',?,?,'main',?,?,'{}','{}',?,?,'owner-1','share-1',NULL,1)`).run(`activation-${workspaceId}-${objectId}`, workspaceId, objectId, LINEAGE,
     "d".repeat(64), new Uint8Array([0, 0]));
-  // Other objects' operations sit in an earlier namespace, so finding the target's must step past it.
+  // Other objects' operations sit in namespace-1, so finding the target's must step past it.
   const restore = (workspaceId: string, objectId: string, namespace = "namespace-2") => raw.prepare(`INSERT INTO sync_relay_live_restore_operations(
     operation_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,
     native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)
-    VALUES (?,?,?,'main',?,?,'{}','{}','{}','{}','{}','resumed',1,2,0,2,0,0,1)`).run(`restore-${workspaceId}-${objectId}`, namespace, workspaceId, objectId, LINEAGE);
+    VALUES (?,?,?,'main',?,?,'{}','{}','{}','{}','{}','resumed',1,2,0,2,0,0,1)`).run(`restore-${workspaceId}-${objectId}-${namespace}`, namespace, workspaceId, objectId, LINEAGE);
   const reenroll = (workspaceId: string, identity: {replicationEpoch: string; streamIdentity: string}) => {
     expect(storage.rotateWorkspaceIdentity({workspaceId, ownerUserId: "owner-1", ...identity, rotatedAtMs: 2})).toBe("rotated");
     append(workspaceId, "moment.append", write(OBJECT, "docs/a.md"));
     expect(storage.getEpochLogFloor(workspaceId)).toBeGreaterThan(0);
   };
+  // What a first-open publication would append, and how many such rows the log holds.
+  const publish = vi.fn(() => appendLogBatchInTransaction(storage as StorageContext, {workspaceId: WS, originId: "service-host:first-open:test",
+    ops: [{originSeq: 0, opKind: "ydoc.update", payloadJson: JSON.stringify(ydoc(OBJECT, {isBaseState: true})), recordedAtMs: 1}]}));
+  const published = () => Number(raw.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE origin_id='service-host:first-open:test'").get()!.n);
 
   for (const workspaceId of [WS, OTHER_WS]) {
     expect(storage.claimWorkspace({workspaceId, ownerUserId: "owner-1", createdAtMs: 0})).toBe("created");
@@ -91,16 +106,39 @@ async function fixture() {
     activation(workspaceId, objectId);
     restore(workspaceId, objectId, "namespace-1");
   }
-  return {storage, raw, append, stored, liveDocument, ordinaryBase, activation, restore, reenroll};
+  return {storage, raw, append, stored, liveDocument, ordinaryBase, activation, restore, reenroll, publish, published};
 }
 
-const read = (storage: SyncRelayStorage) => storage.readFirstOpenEligibility(target);
+/** Reads history on its own read-only connection, as the first-open worker does, but in this thread. */
+const local: FirstOpenHistoryReader = async read => readFirstOpenHistoryFile(read);
+const history = (f: Fixture, objectId = OBJECT) => readFirstOpenHistoryFile({...SOURCE, objectId, database: storagePath(f.storage), afterRelaySeq: 0});
+const read = (f: Fixture) => history(f).eligibility;
+
+async function prepare(f: Fixture, reader = local): Promise<FirstOpenProof> {
+  const result = await f.storage.prepareFirstOpen(SOURCE, reader);
+  if (result.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(result)}.`);
+  return result.proof;
+}
 
 it("lets a document with only ordinary text history open live, whatever other objects and workspaces hold", async () => {
-  expect(read((await fixture()).storage)).toBe("eligible");
+  const f = await fixture();
+  expect(read(f)).toBe("eligible");
+  expect(f.storage.writeFirstOpen(await prepare(f), f.publish)).toMatchObject({kind: "published"});
+  expect(f.published()).toBe(1);
 });
 
 const departed = (op: SyncRelayLogInput) => { op.relayAdmission = "departed"; };
+// Authority-table evidence moves no log head, so only the writer's own reads find it.
+const authorityTables: Array<[string, (f: Fixture) => void]> = [
+  ["a retired baseline registration", f => f.liveDocument(WS, OBJECT, {retired: true, path: "docs/old.md"})],
+  ["a retired successor baseline", f => f.liveDocument(WS, OBJECT, {lineage: OTHER_LINEAGE, replaces: LINEAGE, retired: true, path: "docs/old.md"})],
+  ["a current baseline at another path", f => f.liveDocument(WS, OBJECT, {path: "docs/old.md"})],
+  ["an ordinary activation basis from another identity", f => f.ordinaryBase(WS, OBJECT)],
+  ["a retained service activation", f => f.activation(WS, OBJECT)],
+  ["a completed Stop/restore operation", f => f.restore(WS, OBJECT)],
+  ["a Stop/restore operation in an earlier namespace", f => f.restore(WS, OBJECT, "namespace-0")],
+  ["a Stop/restore operation in a new namespace", f => f.restore(WS, OBJECT, "namespace-3")],
+];
 const priorAuthority: Array<[string, (f: Fixture) => void]> = [
   ["a historical base", f => f.append(WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}))],
   ["a delta", f => f.append(WS, "ydoc.update", ydoc(OBJECT))],
@@ -117,12 +155,8 @@ const priorAuthority: Array<[string, (f: Fixture) => void]> = [
   ["a delta in another version", f => f.append(WS, "ydoc.update", ydoc(OBJECT, {versionId: "version-2"}))],
   ["a delta of another lineage", f => f.append(WS, "ydoc.update", ydoc(OBJECT, {lineageClaimId: OTHER_LINEAGE}))],
   ["a delta from another replication origin", f => f.append(WS, "ydoc.update", ydoc(OBJECT), {originId: "service-host:native"})],
-  ["a retired baseline registration", f => f.liveDocument(WS, OBJECT, {retired: true, path: "docs/old.md"})],
-  ["a retired successor baseline", f => f.liveDocument(WS, OBJECT, {lineage: OTHER_LINEAGE, replaces: LINEAGE, retired: true, path: "docs/old.md"})],
-  ["a current baseline at another path", f => f.liveDocument(WS, OBJECT, {path: "docs/old.md"})],
-  ["an ordinary activation basis from another identity", f => f.ordinaryBase(WS, OBJECT)],
-  ["a retained service activation", f => f.activation(WS, OBJECT)],
-  ["a completed Stop/restore operation", f => f.restore(WS, OBJECT)],
+  ["an owner base from a device with an older clock", f => f.append(WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}), {originId: "owner-laptop", recordedAtMs: 0})],
+  ...authorityTables,
   ["a live document deleted and restored", f => {
     f.append(WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}));
     f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"));
@@ -139,7 +173,8 @@ const priorAuthority: Array<[string, (f: Fixture) => void]> = [
 it.each(priorAuthority)("refuses a first live base after %s", async (_, add) => {
   const f = await fixture();
   add(f);
-  expect(read(f.storage)).toBe("prior-authority");
+  expect(read(f)).toBe("prior-authority");
+  expect(await f.storage.prepareFirstOpen(SOURCE, local)).toEqual({kind: "refused", reason: "prior-authority"});
 });
 
 const deletion: Array<[string, (f: Fixture) => void]> = [
@@ -155,6 +190,7 @@ const deletion: Array<[string, (f: Fixture) => void]> = [
   ["a departed deletion", f => f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"), {originId: "service-host:native", admit: departed})],
   ["a deletion at another path", f => f.append(WS, "moment.append", remove(OBJECT, "private/old.md"))],
   ["a deletion in another version", f => f.append(WS, "moment.append", remove(OBJECT, "docs/a.md", "version-2"))],
+  ["a deletion from a device with an older clock", f => f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"), {originId: "owner-laptop", recordedAtMs: 0})],
   ["a replacement and the replaced document's return", f => {
     f.append(WS, "moment.append", replace(OBJECT, "object-3"));
     f.append(WS, "moment.append", write(OBJECT, "docs/a.md"));
@@ -170,7 +206,8 @@ const deletion: Array<[string, (f: Fixture) => void]> = [
 it.each(deletion)("refuses a first live base after %s", async (_, add) => {
   const f = await fixture();
   add(f);
-  expect(read(f.storage)).toBe("deletion");
+  expect(read(f)).toBe("deletion");
+  expect(await f.storage.prepareFirstOpen(SOURCE, local)).toEqual({kind: "refused", reason: "deletion"});
 });
 
 const notDeletion: Array<[string, (f: Fixture) => void]> = [
@@ -183,11 +220,11 @@ const notDeletion: Array<[string, (f: Fixture) => void]> = [
 it.each(notDeletion)("lets a document open live after %s", async (_, add) => {
   const f = await fixture();
   add(f);
-  expect(read(f.storage)).toBe("eligible");
+  expect(read(f)).toBe("eligible");
 });
 
 it("lets a document with no history open live", async () => {
-  expect((await fixture()).storage.readFirstOpenEligibility({workspaceId: WS, objectId: "object-new"})).toBe("eligible");
+  expect(history(await fixture(), "object-new").eligibility).toBe("eligible");
 });
 
 it("does not count relay refusals or refused settlements as history", async () => {
@@ -199,35 +236,236 @@ it("does not count relay refusals or refused settlements as history", async () =
     JSON.stringify({status: "refused", settlementId: "settlement-1", reason: "authorship-mismatch"}));
   expect(f.raw.prepare("SELECT op_kind FROM sync_relay_log WHERE workspace_id=? AND origin_id='service-host:native' ORDER BY origin_seq").all(WS)
     .map(row => row.op_kind)).toEqual(["relay.refused", "moment.append"]);
-  expect(read(f.storage)).toBe("eligible");
+  expect(read(f)).toBe("eligible");
 });
 
-it("sees evidence committed after a preflight read when read again inside the relay writer", async () => {
+// Evidence committed between preparation and the writer.
+it.each(priorAuthority)("never publishes when %s is committed after preparation", async (_, add) => {
+  const f = await fixture(), proof = await prepare(f);
+  add(f);
+  expect(f.storage.writeFirstOpen(proof, f.publish).kind).not.toBe("published");
+  expect(f.publish).not.toHaveBeenCalled();
+  expect(await f.storage.catchUpFirstOpen(proof, local)).toEqual({kind: "refused", reason: "prior-authority"});
+  expect(f.published()).toBe(0);
+});
+it.each(deletion)("never publishes when %s is committed after preparation", async (_, add) => {
+  const f = await fixture(), proof = await prepare(f);
+  add(f);
+  expect(f.storage.writeFirstOpen(proof, f.publish).kind).not.toBe("published");
+  expect(f.publish).not.toHaveBeenCalled();
+  expect(await f.storage.catchUpFirstOpen(proof, local)).toEqual({kind: "refused", reason: "deletion"});
+  expect(f.published()).toBe(0);
+});
+it.each(authorityTables)("refuses in the writer itself after %s", async (_, add) => {
+  const f = await fixture(), proof = await prepare(f);
+  add(f);
+  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "refused", reason: "prior-authority"});
+  expect(f.published()).toBe(0);
+});
+
+it("ignores everything another workspace commits after preparation", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  f.append(OTHER_WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}));
+  f.append(OTHER_WS, "moment.append", remove(OBJECT, "docs/a.md"));
+  f.append(OTHER_WS, "moment.append", replace(OBJECT, "object-4"));
+  for (const [opKind, payload] of audits(OBJECT)) f.stored(OTHER_WS, opKind, payload);
+  f.restore(OTHER_WS, OBJECT, "namespace-3");
+  expect(f.storage.writeFirstOpen(proof, f.publish)).toMatchObject({kind: "published"});
+  expect(f.published()).toBe(1);
+});
+
+it("catches up from the cutoff after unrelated rows, however often the log moves before the writer", async () => {
+  const f = await fixture(), reads: Array<[FirstOpenHistoryRead, FirstOpenHistory]> = [];
+  const recording: FirstOpenHistoryReader = async request => {
+    const result = readFirstOpenHistoryFile(request);
+    reads.push([request, result]);
+    return result;
+  };
+  let proof = await prepare(f, recording);
+  for (let round = 0; round < 2; round++) {
+    f.append(WS, "moment.append", write(OTHER, `docs/other-${round}.md`));
+    expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "retry"});
+    expect(f.published()).toBe(0);
+    const caught = await f.storage.catchUpFirstOpen(proof, recording);
+    if (caught.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(caught)}.`);
+    proof = caught.proof;
+  }
+  expect(reads.map(([request]) => request.afterRelaySeq)).toEqual([0, reads[0]![1].head, reads[1]![1].head]);
+  expect(reads[2]![1].head).toBeGreaterThan(reads[1]![1].head!);
+  expect(f.storage.writeFirstOpen(proof, f.publish)).toMatchObject({kind: "published"});
+  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(f.published()).toBe(1);
+});
+
+it("takes the head from the same snapshot as the history", async () => {
   const f = await fixture();
-  expect(read(f.storage)).toBe("eligible");
-  f.liveDocument(WS, OBJECT, {retired: true});
-  let admitted: string | undefined;
-  f.append(WS, "moment.append", write(OBJECT, "docs/a.md"), {admit: () => { admitted = read(f.storage); }});
-  expect(admitted).toBe("prior-authority");
+  // Evidence commits right after the reader's first statement finishes.
+  let commit: (() => void) | undefined = () => f.append(WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}));
+  const barrier: FirstOpenHistoryReader = async request => {
+    const db = new DatabaseSync(request.database, {readOnly: true});
+    try {
+      return readFirstOpenHistory({prepare: sql => {
+        const statement = db.prepare(sql);
+        return {get: (...parameters) => {
+          const row = statement.get(...parameters);
+          const next = commit;
+          commit = undefined;
+          next?.();
+          return row;
+        }};
+      }}, request);
+    } finally {
+      db.close();
+    }
+  };
+  const proof = await prepare(f, barrier);
+  expect(commit).toBeUndefined();
+  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "retry"});
+  expect(await f.storage.catchUpFirstOpen(proof, local)).toEqual({kind: "refused", reason: "prior-authority"});
+  expect(f.published()).toBe(0);
 });
 
-it("reads every table through an existing index", async () => {
-  const f = await fixture(), db = (f.storage as StorageContext).db;
-  const prepare = vi.spyOn(db, "prepare");
-  read(f.storage);
-  const query = prepare.mock.calls[0]![0]; prepare.mockRestore();
-  const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));
-  expect(plan.filter(detail => /^SCAN (?!t\b|n\b|h\b|CONSTANT ROW)/.test(detail))).toEqual([]);
-  // The object's own rows are read in one pass.
-  expect(plan.filter(detail => detail.includes("idx_sync_relay_log_hosted_documents"))).toHaveLength(1);
-  for (const table of ["sync_relay_log", "sync_relay_live_documents", "sync_relay_live_document_ordinary_bases", "sync_relay_service_activations",
-    "sync_relay_live_restore_operations"]) expect(plan.some(detail => detail.startsWith(`SEARCH ${table} USING`))).toBe(true);
-  for (const index of ["idx_sync_relay_log_hosted_documents", "idx_sync_relay_log_page"]) {
-    expect(plan.some(detail => detail.startsWith(`SEARCH sync_relay_log USING INDEX ${index} `))).toBe(true);
+it("refuses a source that is not the document's current state", async () => {
+  const f = await fixture();
+  for (const source of [{...SOURCE, sourceMomentId: "moment-other"}, {...SOURCE, sourceDigest: "e".repeat(64)}, {...SOURCE, path: "docs/b.md"},
+    {...SOURCE, objectId: "object-3"}]) {
+    expect(await f.storage.prepareFirstOpen(source, local)).toEqual({kind: "refused", reason: "stale-source"});
   }
 });
 
-it("refuses to answer for a workspace the relay holds no history for", async () => {
+const staleAfterPreparation: Array<[string, (f: Fixture) => void]> = [
+  ["its content changed", f => f.append(WS, "moment.append", {...write(OBJECT, "docs/a.md"), momentId: "write-again"})],
+  ["it moved", f => f.append(WS, "moment.append", write(OBJECT, "docs/b.md"))],
+  ["the workspace's identity rotated", f => expect(f.storage.rotateWorkspaceIdentity({workspaceId: WS, ownerUserId: "owner-1",
+    replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 2})).toBe("rotated")],
+];
+it.each(staleAfterPreparation)("discards a preparation once %s", async (_, change) => {
+  const f = await fixture(), proof = await prepare(f);
+  change(f);
+  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "refused", reason: "stale-source"});
+  expect(await f.storage.catchUpFirstOpen(proof, local)).toEqual({kind: "refused", reason: "stale-source"});
+  expect(f.published()).toBe(0);
+});
+
+it("does not carry a preparation past its storage's close or into a reopened database", async () => {
+  const f = await fixture(), proof = await prepare(f), path = storagePath(f.storage);
+  f.raw.close();
+  closeTestStorage(f.storage);
+  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow();
+  const reopened = reopenTestStorage(path);
+  expect(() => reopened.writeFirstOpen(proof, f.publish)).toThrow("another relay storage");
+  await expect(reopened.catchUpFirstOpen(proof, local)).rejects.toThrow("another relay storage");
+  expect(f.publish).not.toHaveBeenCalled();
+});
+
+it("does not publish after its storage is invalidated", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  f.storage.invalidate();
+  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("unavailable");
+  expect(f.publish).not.toHaveBeenCalled();
+});
+
+it("does not prepare when its storage closes during the read", async () => {
   const f = await fixture();
-  expect(() => f.storage.readFirstOpenEligibility({workspaceId: "workspace-unknown", objectId: OBJECT})).toThrow("no history");
+  let release!: () => void, started!: () => void;
+  const reading = new Promise<void>(resolve => { started = resolve; }), released = new Promise<void>(resolve => { release = resolve; });
+  const waiting: FirstOpenHistoryReader = async (request, signal) => {
+    started();
+    await released;
+    expect(signal.aborted).toBe(true);
+    return readFirstOpenHistoryFile(request);
+  };
+  const preparing = f.storage.prepareFirstOpen(SOURCE, waiting);
+  await reading;
+  f.raw.close();
+  closeTestStorage(f.storage);
+  release();
+  await expect(preparing).rejects.toThrow("unavailable");
+});
+
+it("never prepares from a failed read", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  const failing: FirstOpenHistoryReader = async () => { throw new Error("worker failed"); };
+  await expect(f.storage.prepareFirstOpen(SOURCE, failing)).rejects.toThrow("worker failed");
+  await expect(f.storage.catchUpFirstOpen(proof, failing)).rejects.toThrow("worker failed");
+  await expect(f.storage.prepareFirstOpen({...SOURCE, workspaceId: "workspace-unknown"}, local)).rejects.toThrow("no history");
+  expect(await f.storage.prepareFirstOpen(SOURCE, async () => ({kind: "busy"}))).toEqual({kind: "busy"});
+});
+
+it("refuses a workspace the relay no longer holds, and a proof storage did not make", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  expect(() => f.storage.writeFirstOpen({} as FirstOpenProof, f.publish)).toThrow("another relay storage");
+  f.raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id=?").run(WS);
+  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("no history");
+  expect(f.publish).not.toHaveBeenCalled();
+});
+
+it("leaves no first-open rows when publication fails in the writer", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  expect(() => f.storage.writeFirstOpen(proof, () => { f.publish(); throw new Error("publication failed"); })).toThrow("publication failed");
+  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(f.published()).toBe(0);
+});
+
+it("reads history through indexes, and only after the cutoff when catching up", async () => {
+  const f = await fixture(), queries: string[] = [];
+  const capture: FirstOpenHistoryReader = async request => {
+    const db = new DatabaseSync(request.database, {readOnly: true});
+    try {
+      return readFirstOpenHistory({prepare: sql => { queries.push(sql); return db.prepare(sql); }}, request);
+    } finally {
+      db.close();
+    }
+  };
+  const proof = await prepare(f, capture);
+  const db = (f.storage as StorageContext).db, spy = vi.spyOn(db, "prepare");
+  f.storage.writeFirstOpen(proof, () => undefined);
+  const guard = spy.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("WITH RECURSIVE"))!;
+  spy.mockRestore();
+  const plan = (query: string) => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));
+  const history = plan(queries[0]!), writer = plan(guard);
+  for (const detail of [...history, ...writer]) expect(detail).not.toMatch(/^SCAN (?!t\b|n\b|h\b|m\b|CONSTANT ROW)/);
+  for (const table of ["sync_relay_live_documents", "sync_relay_live_document_ordinary_bases", "sync_relay_service_activations",
+    "sync_relay_live_restore_operations", "sync_relay_object_moments"]) {
+    expect(history.some(detail => detail.startsWith(`SEARCH ${table} USING`))).toBe(true);
+    expect(writer.some(detail => detail.startsWith(`SEARCH ${table} USING`))).toBe(true);
+  }
+  // The object's own rows are read in one pass; both log searches start after the cutoff.
+  expect(history.filter(detail => detail.includes("idx_sync_relay_log_hosted_documents"))).toEqual([
+    expect.stringMatching(/^SEARCH sync_relay_log USING INDEX idx_sync_relay_log_hosted_documents \(.*relay_seq>\?\)$/)]);
+  expect(history).toContain("SEARCH sync_relay_log USING INDEX idx_sync_relay_log_page (workspace_id=? AND relay_seq>?)");
+  // The writer reads only the head of the log.
+  expect(writer.filter(detail => detail.includes("sync_relay_log"))).toEqual(["SEARCH sync_relay_log USING COVERING INDEX idx_sync_relay_log_page (workspace_id=?)"]);
+});
+
+it("reads history on the first-open worker's read-only connection, in its one slot", async () => {
+  const f = await fixture(), pool = createLiveValidationExecutor();
+  pools.push(pool);
+  const worker: FirstOpenHistoryReader = (request, signal) => pool.readFirstOpenHistory(request, signal);
+  const request = {...SOURCE, database: storagePath(f.storage), afterRelaySeq: 0};
+  expect(await pool.readFirstOpenHistory(request)).toEqual(history(f));
+  const reading = pool.readFirstOpenHistory(request);
+  expect(await pool.readFirstOpenHistory(request)).toEqual({kind: "busy"});
+  expect(await pool.buildFirstOpenBase({} as never, {} as never)).toEqual({kind: "busy"});
+  await reading;
+  const proof = (await f.storage.prepareFirstOpen(SOURCE, worker));
+  expect(proof.kind).toBe("prepared");
+  f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"));
+  expect(await f.storage.prepareFirstOpen(SOURCE, worker)).toEqual({kind: "refused", reason: "deletion"});
+});
+
+it("never prepares when the worker fails, is cancelled, or finds no database", async () => {
+  const f = await fixture(), pool = createLiveValidationExecutor(), abort = new AbortController();
+  pools.push(pool);
+  const worker: FirstOpenHistoryReader = (request, signal) => pool.readFirstOpenHistory(request, signal);
+  const cancelled = f.storage.prepareFirstOpen(SOURCE, worker, abort.signal);
+  abort.abort(new Error("cancelled"));
+  await expect(cancelled).rejects.toThrow("cancelled");
+  const settled = async () => expect(await pool.readFirstOpenHistory({...SOURCE, database: storagePath(f.storage), afterRelaySeq: 0})).not.toEqual({kind: "busy"});
+  await vi.waitFor(settled, {timeout: 10_000});
+  await expect(f.storage.prepareFirstOpen({...SOURCE, workspaceId: "workspace-unknown"}, worker)).rejects.toThrow("no history");
+  await vi.waitFor(settled, {timeout: 10_000});
+  const missing = join(await tempRoot("first-open"), "missing.sqlite");
+  await expect(pool.readFirstOpenHistory({...SOURCE, database: missing, afterRelaySeq: 0})).rejects.toThrow();
+  expect(existsSync(missing)).toBe(false);
 });

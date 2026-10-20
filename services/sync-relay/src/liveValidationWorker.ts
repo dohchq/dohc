@@ -4,8 +4,13 @@ import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-j
 import { buildFirstOpenBase } from "./firstOpenBase.js";
 import type {LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
+import { readFirstOpenHistoryFile } from "./storage/firstOpenEligibility.js";
 if (!parentPort) throw new Error("Live validation requires a worker.");
 parentPort.on("message", (work:LiveValidationWork) => {
+  if (work.kind === "first-open-history") {
+    parentPort!.postMessage(readFirstOpenHistoryFile(work.input));
+    return;
+  }
   if (work.kind === "first-open") {
     parentPort!.postMessage(buildFirstOpenBase(work.policy, work.input));
     return;

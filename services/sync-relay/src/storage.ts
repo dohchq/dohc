@@ -13,7 +13,7 @@ import type { ServiceActivationAccess } from "./storage/serviceActivationAccess"
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
-import {readFirstOpenEligibility} from "./storage/firstOpenEligibility";
+import * as firstOpenStorage from "./storage/firstOpenEligibility";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
@@ -329,6 +329,7 @@ export function openSyncRelayStorage(
     owner.write(() => initializeSyncRelaySchema(db));
     const storage = new SqliteSyncRelayStorage(
       db,
+      resolved,
       {
         workspaceQuotaBytes,
         blobGraceMs,
@@ -358,6 +359,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   constructor(
     readonly db: SqliteDb,
+    readonly databasePath: string,
     readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
     private readonly owner: RelayWriteOwner,
@@ -412,8 +414,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
   }
-  readFirstOpenEligibility(input: {workspaceId: string; objectId: string}) {
-    return readFirstOpenEligibility(this, input);
+  prepareFirstOpen(source: firstOpenStorage.FirstOpenSource, read: firstOpenStorage.FirstOpenHistoryReader, signal?: AbortSignal) {
+    return firstOpenStorage.prepareFirstOpen(this, source, read, signal);
+  }
+  catchUpFirstOpen(proof: firstOpenStorage.FirstOpenProof, read: firstOpenStorage.FirstOpenHistoryReader, signal?: AbortSignal) {
+    return firstOpenStorage.catchUpFirstOpen(this, proof, read, signal);
+  }
+  writeFirstOpen<T>(proof: firstOpenStorage.FirstOpenProof, publish: () => T): firstOpenStorage.FirstOpenWrite<T> {
+    return firstOpenStorage.writeFirstOpen(this, proof, publish);
   }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);
