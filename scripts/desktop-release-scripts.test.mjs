@@ -1847,10 +1847,12 @@ test("the nightly LaunchAgent runs at 04:00 in the login session from a clean ch
   assert.match(definition, new RegExp(`<key>Label</key><string>${RegExp.escape(NIGHTLY_AGENT_LABEL)}</string>`));
   assert.match(definition, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
   assert.match(definition, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>0<\/integer>/);
-  assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec node scripts\/release-nightly\.mjs report "The nightly job could not check out main/);
-  assert.match(definition, /exec node scripts\/release-nightly\.mjs report "The nightly job could not fetch main/);
-  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><string>git@github\.com:dohchq\/dohc\.git<\/string><\/array>/);
-  assert.match(definition, /git fetch --quiet "\$1" main/, "it fetches from the repository install checked, not the clone's origin");
+  // A failure is reported through gh, so no code from the checkout runs before main is in it.
+  assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec gh issue comment 2281 -R dohchq\/dohc --body "\$3"/);
+  assert.match(definition, /if \[ "\$attempt" = 3 \]; then exec gh issue comment 2281 -R dohchq\/dohc --body "\$2"; fi/);
+  assert.doesNotMatch(definition, /release-nightly\.mjs report/);
+  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><string>git@github\.com:dohchq\/dohc\.git<\/string><string>&gt; \[!NOTE\]\n&gt; Posted by the nightly release job.+could not fetch main in \/Users\/maker\/dohc-release\/driver, so nothing ran tonight\. See \/Users\/maker\/dohc-release\/nightly\.log\.<\/string><string>.+could not check out main in .+<\/string><\/array>/s);
+  assert.match(definition, /git fetch --quiet "\$1" refs\/heads\/main/, "it fetches the main branch from the repository install checked, not the clone's origin");
   assert.match(definition, /<key>DOHC_VERIFICATION_QUEUE_ROOT<\/key><string>\/Users\/maker\/dev\/worktrees\/_verification<\/string>/);
   assert.match(definition, /<key>StandardOutPath<\/key><string>\/Users\/maker\/dohc-release\/nightly\.log<\/string>/);
 });

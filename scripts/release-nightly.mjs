@@ -9,7 +9,7 @@
 // nightlies on a schedule", describes it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { RELEASE_LOCK, RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
@@ -234,16 +234,20 @@ async function publishTonight({ dryRun, github, run, repo, wait, now, log, verif
  * login keychain is open. Each night starts from main's reviewed code: the
  * launcher fetches main from the repository install checked, whatever the
  * clone's origin says, into a checkout nothing else uses, and discards
- * anything else in it. When that fails, the previous night's code reports it.
+ * anything else in it. When that fails, gh reports it, so no code from the
+ * checkout runs.
  */
 export function nightlyAgentDefinition({ checkout = DRIVER_CHECKOUT, source, queue, logPath = NIGHTLY_LOG, path = launchPath() }) {
+  const report = message => `${NOTE}The nightly job could not ${message} in ${checkout}, so nothing ran tonight. See ${logPath}.`;
+  const post = `exec gh issue comment ${TRACKER_ISSUE} -R ${RELEASE_REPOSITORY} --body`;
   const script = [
     'cd "$0" || exit 1',
-    'for attempt in 1 2 3; do git fetch --quiet "$1" main && break; if [ "$attempt" = 3 ]; then exec node scripts/release-nightly.mjs report "The nightly job could not fetch main into $0, so nothing ran tonight."; fi; sleep 300; done',
-    'git checkout --quiet --force --detach FETCH_HEAD && git clean -ffdxq || exec node scripts/release-nightly.mjs report "The nightly job could not check out main in $0, so nothing ran tonight."',
+    `for attempt in 1 2 3; do git fetch --quiet "$1" refs/heads/main && break; if [ "$attempt" = 3 ]; then ${post} "$2"; fi; sleep 300; done`,
+    `git checkout --quiet --force --detach FETCH_HEAD && git clean -ffdxq || ${post} "$3"`,
     "exec node scripts/release-nightly.mjs run",
   ].join("\n");
-  return plist(NIGHTLY_AGENT_LABEL, { PATH: path, DOHC_VERIFICATION_QUEUE_ROOT: queue }, `  <key>ProgramArguments</key><array>${["/bin/sh", "-c", script, checkout, source].map(plistText).join("")}</array>
+  const args = ["/bin/sh", "-c", script, checkout, source, report("fetch main"), report("check out main")];
+  return plist(NIGHTLY_AGENT_LABEL, { PATH: path, DOHC_VERIFICATION_QUEUE_ROOT: queue }, `  <key>ProgramArguments</key><array>${args.map(plistText).join("")}</array>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key>${plistText(logPath)}
@@ -260,10 +264,10 @@ async function install({ run = capture } = {}) {
   if (!new RegExp(`^(git@github\\.com:|https://github\\.com/|ssh://git@github\\.com/)${RELEASE_REPOSITORY}(\\.git)?$`).test(source)) {
     throw new Error(`Install from a checkout whose origin is ${RELEASE_REPOSITORY} on GitHub, not ${source}.`);
   }
-  if (!existsSync(join(DRIVER_CHECKOUT, ".git"))) {
-    mkdirSync(WORK_ROOT, { recursive: true });
-    read(run, "git", ["clone", "--quiet", source, DRIVER_CHECKOUT]);
-  }
+  // A fresh clone, so nothing left in an earlier one, such as its config or hooks, comes along.
+  rmSync(DRIVER_CHECKOUT, { recursive: true, force: true });
+  mkdirSync(WORK_ROOT, { recursive: true });
+  read(run, "git", ["clone", "--quiet", source, DRIVER_CHECKOUT]);
   const file = join(launchAgentsDir(), `${NIGHTLY_AGENT_LABEL}.plist`);
   mkdirSync(launchAgentsDir(), { recursive: true });
   writeFileSync(file, nightlyAgentDefinition({ source, queue }));
@@ -287,7 +291,6 @@ function post(report) {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  if (command === "report" && rest.length === 1) return post(rest[0]);
   const valid = ["install", "uninstall"].includes(command) ? rest.length === 0 : command === "run" && rest.every(arg => arg === "--dry-run");
   if (!valid) throw new Error(USAGE);
   // A run holds the release lock throughout, including the macOS command it starts.

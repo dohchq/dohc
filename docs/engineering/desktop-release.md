@@ -162,6 +162,7 @@ Every rule above still applies.
 
 At 04:00 local time, launchd fetches `main` into its own clone in `~/dohc-release/driver`.
 It fetches from the `dohchq/dohc` URL that `install` checked, whatever the clone's own origin says.
+`install` makes that clone afresh each time. When the fetch or checkout fails, `gh` reports it, so no code from the clone runs.
 It discards anything else in that clone, then runs `node scripts/release-nightly.mjs run` from it.
 The job stops unless the clone is clean and on `main`. The job:
 
