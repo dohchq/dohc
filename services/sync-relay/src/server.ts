@@ -554,6 +554,7 @@ export function createSyncRelayHandler({
     const capabilityToken = match[1]!;
     const capability = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
@@ -566,7 +567,6 @@ export function createSyncRelayHandler({
     rateLimiter: collectionWriteRateLimiter,
     admission: linkCollectionWriteAdmission,
     linkKey,
-    publicEditRelease,
     requireLinkCapability,
     nowMs,
     newId,
@@ -595,6 +595,7 @@ export function createSyncRelayHandler({
     if (!linkKey) throw invalidLinkCapability();
     const fresh = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
@@ -655,7 +656,6 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
-    publicEditRelease,
   );
 
   const {

@@ -2,7 +2,7 @@ mod common;
 
 use common::*;
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
@@ -22,13 +22,13 @@ async fn source_capture_pins_selected_text_and_binary_and_rejects_read_only_atta
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let open_params =
         json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-source"});
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(1, "workspace.open", None, open_params.clone()),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(1, "workspace.open", None, open_params.clone()),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     reconcile_until_settled(&transport, &handle, 100).await;
@@ -82,13 +82,13 @@ async fn source_capture_pins_selected_text_and_binary_and_rejects_read_only_atta
     .await;
     let mut attach_params = open_params;
     attach_params["skipStartupMaintenance"] = json!(true);
-    let attached = transport
-        .call(
-            RequestContext::unbounded(),
-            request(6, "workspace.open", None, attach_params),
-        )
-        .await
-        .expect("attach");
+    let attached = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(6, "workspace.open", None, attach_params),
+    )
+    .await
+    .expect("attach");
     let attached_handle: WorkspaceHandle =
         serde_json::from_value(attached.result["workspace"].clone()).expect("attached handle");
     let error = call_error(

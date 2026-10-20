@@ -145,7 +145,18 @@ async fn history_object_page_includes_the_latest_external_save() {
     let transport = InProcessTransport::new(Arc::new(
         EngineService::with_capture_apply_probe_for_harness(probe.clone()),
     ));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": "history-object"}))).await.expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": "history-object"}),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let initial = call(

@@ -53,6 +53,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "history.page"
                 | "history.operations"
                 | "history.undo"
+                | "history.rewriteLinks"
         )
 }
 
@@ -645,6 +646,7 @@ impl EngineService {
                     .await?
             }
             "history.undo" => self.history_undo(&ctx, request).await?,
+            "history.rewriteLinks" => self.history_rewrite_links(&ctx, request).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?

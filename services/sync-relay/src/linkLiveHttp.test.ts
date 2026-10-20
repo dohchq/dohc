@@ -21,7 +21,7 @@ async function fixture(sessionHostBlocked?: (document: {workspaceId: string; obj
   const context = {kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)};
   const tickets = createLiveTickets({storage: f.storage, audience, key, hostReports: {currentBinding: async () => report}});
-  const handle = createLinkLiveHttp({storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits, sessionHostBlocked});
+  const handle = createLinkLiveHttp({publicEditRelease:{version:1},storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits, sessionHostBlocked});
   return {...f, context, tickets, handle};
 }
 function request(body: unknown = {discriminator, path: binding.currentPath}, path = "/sync/live/link-document", headers: Record<string, string> = {}) {

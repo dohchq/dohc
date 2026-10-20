@@ -1,5 +1,5 @@
 import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
-import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
+import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult, HistoryLinkRewriteResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -1198,6 +1198,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryUndoResult> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
+  }
+
+  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryLinkRewriteResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
   }
 
   async getMoment(input: {

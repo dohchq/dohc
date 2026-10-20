@@ -427,14 +427,52 @@ fn check_undo_ownership(
     conn: &rusqlite::Connection,
     ws: &str,
     version: &str,
+    operation: &str,
     m: &OperationMoment,
 ) -> Result<(), RuntimeError> {
+    let duplicate = dohc_engine_domain::is_duplicate_in(conn, ws, operation, m.moment_order)?;
+    let mut m = m.clone();
+    if m.operation == "write" && !duplicate {
+        m.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![ws,version,m.object_id], |r| r.get(0)).optional().map_err(StorageError::corrupt_public)?
+            .ok_or(DomainError::UndoRefused {path:m.path,reason:"linking document removed"})?;
+        m.before_path = None;
+    }
     for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
+        if let Err(error) = check_path_ownership(conn, ws, version, &m.object_id, path) {
+            if duplicate
+                && matches!(
+                    error,
+                    RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)
+                )
+            {
+                return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+pub(super) fn check_path_ownership(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    object: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    if path == "shared-with-me" || path.starts_with("shared-with-me/") {
+        return Err(DomainError::UndoRefused {
+            path: path.into(),
+            reason: "received share path",
+        }
+        .into());
+    }
+    {
         let held: Option<String> = conn
             .query_row(
                 "SELECT path FROM capture_file_holds
              WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",
-                params![ws, path, m.object_id],
+                params![ws, path, object],
                 |r| r.get(0),
             )
             .optional()
@@ -446,20 +484,38 @@ fn check_undo_ownership(
             }
             .into());
         }
-        if let Err(error) =
-            dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)
-        {
-            if matches!(
-                error,
-                dohc_engine_sync::SyncError::LiveDocumentBindingActive
-            ) && m.operation == "write"
-            {
-                return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
-            }
-            return Err(error.into());
-        }
+        dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
     }
     Ok(())
+}
+
+fn link_inverse_input(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    m: &OperationMoment,
+) -> Result<String, RuntimeError> {
+    let (before,after,head,path): (String,String,String,String) = conn.query_row(
+        "SELECT m.payload_before_blob_sha256,m.payload_after_blob_sha256,s.blob_sha256,s.path FROM moments m
+         JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=?2 AND s.object_id=m.object_id
+         WHERE m.workspace_id=?1 AND m.moment_id=?3",params![ws,version,m.moment_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(StorageError::corrupt_public)?
+        .ok_or(DomainError::UndoRefused {path:m.path.clone(),reason:"linking document removed"})?;
+    let load = |sha: &str| {
+        dohc_engine_storage::text::read(conn, sha).map_err(StorageError::corrupt_public)
+    };
+    crate::links::rewrite::inverse_budgeted(&load(&before)?, &load(&after)?, &load(&head)?)
+        .map_err(|()| DomainError::UndoRefused {
+            path: path.clone(),
+            reason: "link diff budget exceeded",
+        })?
+        .ok_or(
+            DomainError::UndoRefused {
+                path,
+                reason: "link changed after rename",
+            }
+            .into(),
+        )
 }
 
 fn rename_head_sha(
@@ -1628,7 +1684,13 @@ fn publish_undo_member(
         workspace_id: ws.into(),
         target_path: path,
         content_sha256: sha.clone(),
-        preimage: Preimage::Absent,
+        preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
+            m.before_blob_sha256
+                .clone()
+                .map_or(Preimage::Absent, Preimage::Present)
+        } else {
+            Preimage::Absent
+        },
         target_generation: m.moment_order,
         now_ms: now,
     };
@@ -1657,7 +1719,7 @@ fn publish_undo_member(
 }
 
 #[path = "history_undo_turns.rs"]
-mod turns;
+pub(super) mod turns;
 
 #[cfg(test)]
 #[path = "duplicate_tests.rs"]

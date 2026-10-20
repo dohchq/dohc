@@ -66,7 +66,7 @@ export async function startDocumentSocketProbe(options, storage, native, pool, p
         bounds: profile.namedLive.host,
         captureNative,
         tickets,
-        sessions: kind === 'named' ? browser : createLinkLiveBrowserResolver({ storage, linkKey: credentials.key }),
+        sessions: kind === 'named' ? browser : createLinkLiveBrowserResolver({ storage, linkKey: credentials.key, publicEditRelease: { version: 1 } }),
         validate: async (input) => (await pool.submit({ kind: 'journal', policy: profile.validation, input })).result,
       }),
     ]),

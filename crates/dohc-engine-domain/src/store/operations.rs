@@ -154,7 +154,7 @@ fn preflight_originals_in(
             &effect.path
         };
         validate_plaintext_storable_path(old)?;
-        if alias_object_id(conn, ws, version, old)?.is_some() {
+        if effect.operation != "write" && alias_object_id(conn, ws, version, old)?.is_some() {
             return Err(DomainError::UndoRefused {
                 path: old.into(),
                 reason: "old path occupied",
@@ -217,6 +217,19 @@ fn preflight_originals_in(
                     return Err(DomainError::UndoRefused {
                         path: effect.path.clone(),
                         reason: "object changed after delete",
+                    });
+                }
+            }
+            "write"
+                if originals.iter().filter(|m| m.operation == "rename").count() == 1
+                    && originals
+                        .iter()
+                        .any(|m| m.operation == "rename" && m.object_id != effect.object_id) =>
+            {
+                if current.is_none() {
+                    return Err(DomainError::UndoRefused {
+                        path: effect.path.clone(),
+                        reason: "linking document removed",
                     });
                 }
             }
@@ -331,6 +344,7 @@ pub fn undo_member_in_tx<F>(
     author: Option<&str>,
     now: i64,
     effect: OperationMoment,
+    write_inverse: Option<&str>,
     mut after: F,
 ) -> Result<MomentRecord, DomainError>
 where
@@ -391,6 +405,34 @@ where
                 now_ms: now,
             },
             |_, _| Ok(()),
+        )?
+        .moment
+    } else if effect.operation == "write" {
+        let head =
+            get_snapshot(tx, ws, version, &effect.object_id)?.ok_or(DomainError::UndoRefused {
+                path: effect.path.clone(),
+                reason: "linking document removed",
+            })?;
+        super::write_text_in_tx(
+            tx,
+            &WriteText {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                object_id: effect.object_id,
+                path: head.path,
+                text: write_inverse
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "missing link inverse",
+                    })?
+                    .into(),
+                moment_id: id,
+                request_id: None,
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Undo".into()),
+                metadata_correlation_id: Some(correlation.into()),
+                author_json: author.map(str::to_owned),
+                now_ms: now,
+            },
         )?
         .moment
     } else {

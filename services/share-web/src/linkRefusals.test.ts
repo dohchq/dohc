@@ -25,7 +25,7 @@ it.each(["missing", "bad", "expired", "revoked", "outside", "absent", "view", "c
     if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
     if (mode === "view" || mode === "comment") f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(mode);
     if (mode === "offline") vi.spyOn(f.storage, "resolveLiveObjectHostBinding").mockReturnValue({kind: "refused", reason: "host-unavailable"});
-    const relay = createLinkLiveHttp({storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits: transport});
+    const relay = createLinkLiveHttp({publicEditRelease:{version:1},storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits: transport});
     const client = createLinkLiveClient({relayUrl: "https://relay.test", publicOrigin: audience, exchangeKey, browserLimits: editor,
       limits: {maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 1000},
       resolveMaterial: async () => mode === "missing" ? {ok: false, status: 404} : {

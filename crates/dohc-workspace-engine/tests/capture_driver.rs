@@ -58,13 +58,13 @@ async fn wait_until_capture_ready(
 ) {
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         id += 1;
         if status.result["phase"] == json!("ready") {
             return;
@@ -84,17 +84,17 @@ async fn read_text(
     id: u64,
     path: &str,
 ) -> Option<String> {
-    let response = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "versionedText.read",
-                Some(handle.clone()),
-                json!({ "versionId": "main", "path": path }),
-            ),
-        )
-        .await;
+    let response = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "versionedText.read",
+            Some(handle.clone()),
+            json!({ "versionId": "main", "path": path }),
+        ),
+    )
+    .await;
     // Before the first capture lands, the main version does not exist yet and
     // the read errors — that is simply "not captured yet" for the poll.
     let Ok(response) = response else {
@@ -119,17 +119,17 @@ async fn wait_for_text(
     let mut id = 10_000;
     loop {
         id += 1;
-        let current = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    id,
-                    "versionedText.read",
-                    Some(handle.clone()),
-                    json!({ "versionId": "main", "path": path }),
-                ),
-            )
-            .await;
+        let current = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(
+                id,
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await;
         let matches = current.as_ref().is_ok_and(|response| match expected {
             Some(text) => response.result["text"].as_str() == Some(text),
             None => response.result.is_null(),
@@ -161,23 +161,23 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "recoverRunningDispatches": false,
-                    "skipStartupMaintenance": true,
-                }),
-            ),
-        )
-        .await
-        .expect("maintenance-free workspace open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": true,
+            }),
+        ),
+    )
+    .await
+    .expect("maintenance-free workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -456,22 +456,22 @@ async fn open_capture_author_stamps_the_startup_baseline() {
     });
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "captureAuthor": author,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "captureAuthor": author,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     wait_until_capture_ready(&transport, &handle, 2).await;
@@ -542,13 +542,13 @@ async fn capture_authors_are_declared_agents_never_a_person() {
     let mut params = json!({"captureAuthor": person});
     params["rootDir"] = json!(scratch.path().to_string_lossy());
     params["workspaceId"] = json!(WORKSPACE_ID);
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            request(8, "workspace.open", None, params),
-        )
-        .await
-        .expect_err("an open never makes a person its capture author");
+    let refused = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(8, "workspace.open", None, params),
+    )
+    .await
+    .expect_err("an open never makes a person its capture author");
     assert_eq!(refused.message, "person-author-refused");
     transport
         .call(
@@ -1415,20 +1415,20 @@ async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
     let opening_transport = Arc::clone(&transport);
     let root = scratch.path().to_path_buf();
     let opening = tokio::spawn(async move {
-        opening_transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": root.to_string_lossy(),
-                        "workspaceId": WORKSPACE_ID
-                    }),
-                ),
-            )
-            .await
+        call_with_busy_retry(
+            &opening_transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": root.to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID
+                }),
+            ),
+        )
+        .await
     });
     tokio::time::timeout(WAIT, async {
         probe.wait_until_paused().await;
@@ -2142,22 +2142,22 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
         let transport = Arc::new(InProcessTransport::new(service));
 
         if !unreadable_policy {
-            let seed = transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        1,
-                        "workspace.open",
-                        None,
-                        json!({
-                            "rootDir": scratch.path().to_string_lossy(),
-                            "workspaceId": WORKSPACE_ID,
-                            "captureMode": "none"
-                        }),
-                    ),
-                )
-                .await
-                .expect("seed existing store");
+            let seed = call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID,
+                        "captureMode": "none"
+                    }),
+                ),
+            )
+            .await
+            .expect("seed existing store");
             let seed_handle: WorkspaceHandle =
                 serde_json::from_value(seed.result["workspace"].clone()).expect("seed handle");
             transport
@@ -2177,20 +2177,20 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
         let opening_transport = Arc::clone(&transport);
         let root = scratch.path().to_path_buf();
         let opening = tokio::spawn(async move {
-            opening_transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        3,
-                        "workspace.open",
-                        None,
-                        json!({
-                            "rootDir": root.to_string_lossy(),
-                            "workspaceId": WORKSPACE_ID
-                        }),
-                    ),
-                )
-                .await
+            call_with_busy_retry(
+                &opening_transport,
+                RequestContext::unbounded(),
+                request(
+                    3,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": root.to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID
+                    }),
+                ),
+            )
+            .await
         });
         tokio::time::timeout(WAIT, async {
             probe.wait_until_paused().await;
@@ -2944,8 +2944,7 @@ async fn measure_initial_capture(measure_typing: bool) {
         assert_eq!(snapshots, 5_000);
         if measure_typing && n == 0 {
             use base64::Engine as _;
-            use dohc_engine_protocol::transport::EngineService as Service;
-            let opened = Service::call(
+            let opened = service_call_with_busy_retry(
                 service.as_ref(),
                 RequestContext::unbounded().with_capability("blobs"),
                 request(
@@ -2970,7 +2969,7 @@ async fn measure_initial_capture(measure_typing: bool) {
                 for i in 0..200 {
                     let update = doc.plaintext_insert(0, "x");
                     let start = std::time::Instant::now();
-                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
+                    call_with_busy_retry(&transport,RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
                     timings.push(start.elapsed().as_micros());
                 }
                 if draining {
@@ -3009,18 +3008,18 @@ async fn measure_initial_capture(measure_typing: bool) {
                 samples[0][199] < 50_000,
                 "drain caused a long typing request"
             );
-            transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        900,
-                        "ydoc.close",
-                        Some(handle.clone()),
-                        json!({"sessionId":session}),
-                    ),
-                )
-                .await
-                .unwrap();
+            call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(
+                    900,
+                    "ydoc.close",
+                    Some(handle.clone()),
+                    json!({"sessionId":session}),
+                ),
+            )
+            .await
+            .unwrap();
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
