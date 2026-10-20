@@ -227,6 +227,7 @@ pub(super) fn baseline(
     );
     match outcome.and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller) {
         Ok(_) => {}
+        Err(error) if error.code() == "file-locked" => return Err(StorageError::FileLocked.into()),
         Err(RuntimeError::Collab(_)) => return Ok(false),
         Err(RuntimeError::Domain(DomainError::InvalidInput {
             reason: "ydoc-remote-updates-pending",

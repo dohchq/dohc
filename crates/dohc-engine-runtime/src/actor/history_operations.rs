@@ -88,6 +88,7 @@ impl ActorHandle {
                                 &policy,
                                 &m,
                                 input.now_ms,
+                                false,
                             )?;
                         }
                         Ok(HistoryOperation {

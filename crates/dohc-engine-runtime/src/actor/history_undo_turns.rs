@@ -624,7 +624,7 @@ impl ActorHandle {
                                 }
                                 break;
                             }
-                            Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                            Err(error) if error.code() == "file-locked" => {
                                 Self::wait_undo_checkpoint(
                                     &token,
                                     &mut locked_since,
