@@ -78,7 +78,7 @@ pub(super) fn read(
     }
     let (pending,barrier): (bool,bool) = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2),
-        EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2 AND kind<>'file')",
+        EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2 AND kind='thread') OR EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2 AND kind='reset')",
         params![ws,channel], |r| Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
     let building = scanning || pending;
     let mut page = json!({"versionId":version,"subject":{"channelWireId":wire},"entries":[],"unchecked":[],
@@ -99,7 +99,10 @@ pub(super) fn read(
         )
     };
     let mut stmt = c.prepare_cached(&query).map_err(sql)?;
-    let mut args = vec![rusqlite::types::Value::Text(ws.into()), channel.into()];
+    let mut args = vec![
+        rusqlite::types::Value::Text(ws.into()),
+        channel.to_owned().into(),
+    ];
     if !pos.key.is_empty() {
         args.extend([
             pos.time.into(),

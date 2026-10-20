@@ -73,18 +73,18 @@ CREATE TRIGGER conversation_file_link_attachment_added AFTER INSERT ON chat_atta
 END;
 CREATE TRIGGER conversation_file_link_attachment_removed BEFORE DELETE ON chat_attachments WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'file',OLD.object_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND OLD.object_id IS NOT NULL AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id)
+ SELECT OLD.workspace_id,s.channel_id,'file',OLD.object_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND OLD.object_id IS NOT NULL AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND OLD.object_id IS NULL AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id)
+ SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND OLD.object_id IS NULL AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
 END;
 CREATE TRIGGER conversation_file_link_attachment_changed AFTER UPDATE ON chat_attachments WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'file',OLD.object_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND OLD.object_id IS NOT NULL AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id)
+ SELECT OLD.workspace_id,s.channel_id,'file',OLD.object_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND OLD.object_id IS NOT NULL AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND OLD.object_id IS NULL AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id)
+ SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND OLD.object_id IS NULL AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
  INSERT INTO chat_conversation_file_links(workspace_id,channel_id,file_key,attachment_id,thread_id,message_id,object_id,path_hint,mentioned_at_ms)
  SELECT a.workspace_id,a.channel_id,a.object_id,a.attachment_id,a.thread_id,a.message_id,a.object_id,a.path_hint,a.created_at_ms
@@ -100,23 +100,23 @@ CREATE TRIGGER conversation_file_link_attachment_changed AFTER UPDATE ON chat_at
 END;
 CREATE TRIGGER conversation_file_link_message_insert AFTER INSERT ON chat_messages WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT NEW.workspace_id,s.channel_id,'thread',NEW.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=NEW.workspace_id AND s.channel_id=s.channel_id AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=NEW.workspace_id AND t.thread_id=NEW.thread_id AND t.channel_id=s.channel_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=NEW.workspace_id AND a.thread_id=NEW.thread_id AND a.message_id=NEW.message_id)
+ SELECT NEW.workspace_id,s.channel_id,'thread',NEW.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=NEW.workspace_id AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=NEW.workspace_id AND t.thread_id=NEW.thread_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=NEW.workspace_id AND a.thread_id=NEW.thread_id AND a.message_id=NEW.message_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
 END;
 CREATE TRIGGER conversation_file_link_message_delete BEFORE DELETE ON chat_messages WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=OLD.workspace_id AND a.thread_id=OLD.thread_id AND a.message_id=OLD.message_id)
+ SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=OLD.workspace_id AND a.thread_id=OLD.thread_id AND a.message_id=OLD.message_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
 END;
 CREATE TRIGGER conversation_file_link_message_update BEFORE UPDATE ON chat_messages WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=s.channel_id AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id AND t.channel_id=s.channel_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=OLD.workspace_id AND a.thread_id=OLD.thread_id AND a.message_id=OLD.message_id)
+ SELECT OLD.workspace_id,s.channel_id,'thread',OLD.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=OLD.workspace_id AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=OLD.workspace_id AND t.thread_id=OLD.thread_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=OLD.workspace_id AND a.thread_id=OLD.thread_id AND a.message_id=OLD.message_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
- SELECT NEW.workspace_id,s.channel_id,'thread',NEW.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=NEW.workspace_id AND s.channel_id=s.channel_id AND EXISTS(SELECT 1 FROM chat_threads t WHERE t.workspace_id=NEW.workspace_id AND t.thread_id=NEW.thread_id AND t.channel_id=s.channel_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=NEW.workspace_id AND a.thread_id=NEW.thread_id AND a.message_id=NEW.message_id)
+ SELECT NEW.workspace_id,s.channel_id,'thread',NEW.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=NEW.workspace_id AND s.channel_id=(SELECT t.channel_id FROM chat_threads t WHERE t.workspace_id=NEW.workspace_id AND t.thread_id=NEW.thread_id) AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=NEW.workspace_id AND a.thread_id=NEW.thread_id AND a.message_id=NEW.message_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
 END;
-CREATE TRIGGER conversation_file_link_thread_insert BEFORE INSERT ON chat_threads WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
+CREATE TRIGGER conversation_file_link_thread_insert AFTER INSERT ON chat_threads WHEN (SELECT store_role FROM engine_ownership WHERE rowid_guard=1)='owner' BEGIN
  INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key)
  SELECT NEW.workspace_id,NEW.channel_id,'thread',NEW.thread_id FROM chat_conversation_file_link_state s WHERE s.workspace_id=NEW.workspace_id AND s.channel_id=NEW.channel_id AND EXISTS(SELECT 1 FROM chat_attachments a WHERE a.workspace_id=NEW.workspace_id AND a.thread_id=NEW.thread_id)
  ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,phase=0,after_message='',after_time=9223372036854775807,after_id='';
