@@ -487,16 +487,6 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   setTextAside(): Promise<string | null>;
 };
 
-// Whether a document's file has existed. Once true, never false. One object
-// per document, shared by every session, replacement generation, close debt
-// and debt payment that continues it, so no open starts over from nothing
-// after the file has existed. `openGeneration` is the one place that sets it:
-// from every generation's open that found a recorded file or a file on disk,
-// and from every settle or close that wrote the file. Every later open tells
-// the engine, which then refuses to create the file, so a file deleted outside
-// dohc stays deleted.
-type DocumentFileFact = { existed: boolean };
-
 export interface WorkspaceEngineCapture {
   // Cancel convergence waits before producers and live sessions drain.
   beginShutdown(): void;
@@ -2003,9 +1993,6 @@ export function createWorkspaceEngineCapture(
     // capture all cancel a debt outright (never restore a cancelled one), so
     // a removed path drops its marker the same way.
     stoodDown: boolean;
-    // The closed session's file fact. Every payment and every later session
-    // for this path reads and sets the same object.
-    fileFact: DocumentFileFact;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
 
@@ -2308,8 +2295,6 @@ export function createWorkspaceEngineCapture(
     ) => boolean | void | Promise<boolean | void>;
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
-    // This document's file fact, which the session reads and sets.
-    fileFact: DocumentFileFact;
     // The first generation's answers to "does the entered version have a
     // snapshot for this path", "did the daemon resume durable CRDT state", and
     // "does that state hold updates the file may not".
@@ -2629,12 +2614,6 @@ export function createWorkspaceEngineCapture(
     let updatesCounted = 0;
     let updatesSettled = 0;
     let settleForgiven = false;
-    // What a generation expects of its file dies with its daemon, so every
-    // generation after the fact is set tells the engine instead.
-    const { fileFact } = input;
-    const noteFileExisted = (): void => {
-      fileFact.existed = true;
-    };
     const settleCovers = new Map<string, number>();
     // Puts text in Notices through the app's draft store, and answers a
     // handle to the write. A refusal tells the person, since the text is then only in
@@ -2687,8 +2666,7 @@ export function createWorkspaceEngineCapture(
               onError(`Y.Doc rebind of ${input.path}`, rebindError);
             });
           };
-          // The disk is read beside the open, so neither waits on the other.
-          const [providerOpened, disk] = await Promise.all([openProvider({
+          const providerOpened = await openProvider({
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -2699,9 +2677,10 @@ export function createWorkspaceEngineCapture(
               : {}),
             // A reopen must find the object this session opened. If the path
             // now names another object, refuse rather than replay this
-            // document into it.
+            // document into it. Naming it also tells the engine this open
+            // continues the document, so it refuses to create a file the
+            // document had and that was deleted outside dohc.
             ...(sessionObjectId ? { expectedObjectId: sessionObjectId } : {}),
-            ...(fileFact.existed ? { fileExisted: true } : {}),
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -2789,17 +2768,10 @@ export function createWorkspaceEngineCapture(
                 updatesSettled = Math.max(updatesSettled, covered);
               }
               settleForgiven = false;
-              if (result.materialized) {
-                diskHeadSha256 = result.sha256;
-                noteFileExisted();
-              }
+              if (result.materialized) diskHeadSha256 = result.sha256;
               return input.onSettled(result, token, generation);
             },
-            onCloseMaterialized: noteFileExisted,
-          }), absentHeadDiskState(rootPath, input.path)]);
-          // Recorded before this generation can be installed or reconnected
-          // from, so every later open already carries it.
-          if (providerOpened.head === "present" || disk !== "missing") noteFileExisted();
+          });
           opened = providerOpened;
           openingRemoteUpdates.set(opened, opening);
           return opened;
@@ -4528,8 +4500,8 @@ export function createWorkspaceEngineCapture(
           // session, over edits made after this recovery, would read as
           // belonging to the deleted incarnation and get wrongly cancelled.
           // The proof holds because the engine refuses a settle while a file
-          // this document had is missing: one this generation opened over or
-          // settled, or one its `DocumentFileFact` records. rpc_ydoc.rs tests
+          // this document had is missing, including in a replacement after a
+          // restart, which names the document it continues. rpc_ydoc.rs tests
           // both, `…after_an_external_delete…` and `…after_a_restart…`.
           //
           // Only a tombstone that predates this settle's own start (codex
@@ -4676,13 +4648,9 @@ export function createWorkspaceEngineCapture(
           );
         };
         let entry: LiveYDocSession | null = null;
-        // A debt still owed for this path is the same document, so this
-        // session continues its file fact instead of starting a new one.
-        const fileFact = detachedLockedDebts.get(input.path)?.fileFact ?? { existed: false };
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
           versionId,
           path: input.path,
-          fileFact,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
           onTypingUnresolved: () => reportSaveState("settling", 0, "status"),
           onDead: () => {
@@ -5065,10 +5033,6 @@ export function createWorkspaceEngineCapture(
               await openRestartSafeRustYDocSession({
                 versionId,
                 path: input.path,
-                // The closed session's fact, which earlier payments also set,
-                // never a blanket yes: a debt can belong to a draft that never
-                // had a file to keep deleted.
-                fileFact,
                 ...(input.contentKind
                   ? { contentKind: input.contentKind }
                   : {}),
@@ -5276,7 +5240,6 @@ export function createWorkspaceEngineCapture(
             arm: armDetachedLockedRetry,
             discard: discardDetachedLockedDebt,
             stoodDown: false,
-            fileFact,
           });
           armDetachedLockedRetry();
         };

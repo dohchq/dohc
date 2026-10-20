@@ -36,12 +36,12 @@ export type ArtifactAssetDescriptor = typeof ArtifactAssetDescriptorSchema.Type;
 export type YdocOpenParams = JsonObject & {
   versionId: string;
   path: string;
+  // The document this open continues. The engine refuses the open when the
+  // path names another object. With no head, it also refuses to create a file
+  // the document had and that was deleted outside dohc.
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
-  // An earlier session on this document opened over its file or wrote it.
-  // With no head, the engine then refuses a settle that would create it.
-  fileExisted?: boolean;
 };
 
 // Declared write provenance beside the actor origin: the kind of actor that
@@ -247,13 +247,7 @@ const SettleResultSchema = mutableStruct({
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
-// `materialized` answers whether the file holds the settled bytes after the
-// close's own settle, written now or already there. It is absent when the
-// close did not settle.
-const CloseResultSchema = mutableStruct({
-  closed: Schema.Literal(true),
-  materialized: Schema.optionalKey(Schema.Boolean),
-});
+const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
   mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
