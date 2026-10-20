@@ -1883,7 +1883,8 @@ pub fn admit_capture_in_tx(
 
 /// What a synced row would do to the head's lineage.
 enum Incoming<'a> {
-    /// A base state, or a delta of another lineage: never an ordinary update.
+    /// A base state, a delta of another lineage, or an imported delete,
+    /// rename, binary write or conflict resolution: never an ordinary update.
     Replacement,
     /// An ordinary update at `path`.
     Update { bytes: &'a [u8], path: &'a str },
@@ -1953,6 +1954,29 @@ fn hold_released_lineage(
         return Err(SyncError::ReleasedLineageUnsettled(binding));
     }
     Ok(())
+}
+
+/// [`hold_released_lineage`] for an imported file operation that retires,
+/// replaces or rebinds `key`'s current lineage, if it has one.
+pub(crate) fn hold_released_replacement(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let Some(lineage) = dohc_engine_collab::read_marker_in(tx, key)
+        .map_err(map_collab_hard_error)?
+        .and_then(|marker| marker.lineage_claim_id)
+    else {
+        return Ok(());
+    };
+    hold_released_lineage(
+        tx,
+        key,
+        &lineage,
+        op,
+        op.relay_seq.unwrap_or_default(),
+        Incoming::Replacement,
+    )
 }
 
 /// The durable file head that must remain canonical after a non-Y.Doc

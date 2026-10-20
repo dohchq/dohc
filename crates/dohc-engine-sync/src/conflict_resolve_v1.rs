@@ -1442,7 +1442,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             let mut review_payload = payload.clone();
             let path_ref = intern_path(&mut review_payload.paths, &path);
             let renamed_head = imported_live_head(tx, &review_payload, path_ref)?;
-            commit_imported_lineage(tx, payload, Some(key), envelope.recorded_at_ms)?;
+            commit_imported_lineage(tx, envelope, payload, Some(key))?;
             tx.execute("UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![key.workspace_id,key.version_id,key.object_id,path]).map_err(SyncError::persist)?;
             let (review_id, inserted) =
@@ -1514,7 +1514,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 )?;
                 materialization_changes.extend(result.materialization_changes);
             }
-            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             close_imported_conflict(tx, payload)?;
         }
         ImportedHeadDisposition::ReviewedSide => {
@@ -1537,7 +1537,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     search_policy,
                 )?,
             );
-            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             close_imported_conflict(tx, payload)?;
         }
         ImportedHeadDisposition::AlreadyResult => {
@@ -1581,7 +1581,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 .as_ref()
                 .is_none_or(|transition| transition.successor.is_some())
             {
-                commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+                commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             }
             close_imported_conflict(tx, payload)?;
         }
@@ -2490,10 +2490,26 @@ fn install_scene_successor_assets(
 
 fn commit_imported_lineage(
     tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
     payload: &ConflictResolveV1,
     key: Option<&DocKey>,
-    now_ms: i64,
 ) -> Result<(), SyncError> {
+    let now_ms = envelope.recorded_at_ms;
+    // The resolution rewrites, retires or replaces both sides' lineages.
+    for head in [payload.current.present(), payload.result.present()]
+        .into_iter()
+        .flatten()
+    {
+        let side = DocKey::new(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            &head.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "conflict.resolve Y.Doc coordinates are invalid",
+        })?;
+        crate::ydoc_apply::hold_released_replacement(tx, &side, envelope)?;
+    }
     let Some(transition) = payload.lineage_transition.as_ref() else {
         return reconcile_unbound_receiver_lineages(tx, payload, now_ms);
     };

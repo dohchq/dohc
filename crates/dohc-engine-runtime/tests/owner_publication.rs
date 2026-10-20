@@ -5869,40 +5869,66 @@ impl RetainedWindow {
 
 /// Every row a synced update, its refusal or its application could write.
 fn ingress_rows(store: &EngineStore) -> Vec<String> {
-    let mut rows: Vec<String> = [
-        "moments",
-        "snapshots",
-        "ydoc_docs",
-        "ydoc_updates",
-        "ydoc_snapshots",
-        "ydoc_deferred_updates",
-        "replication_log",
-        "replication_pending_refusals",
-        "relay_deferred_ops",
-        "owner_ydoc_outbox_entries",
-        "live_owner_activations",
-        "live_device_settlements",
-        "live_device_update_applications",
-        "live_accepted_updates",
-    ]
-    .iter()
-    .flat_map(|table| {
-        store
-            .read_with(|conn| {
-                let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
-                let columns = statement.column_count();
-                statement
-                    .query_map([], |row| {
-                        let values = (0..columns)
-                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok(format!("{table}: {values:?}"))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap()
-    })
-    .collect();
+    rows_of(
+        store,
+        &[
+            "moments",
+            "snapshots",
+            "ydoc_docs",
+            "ydoc_updates",
+            "ydoc_snapshots",
+            "ydoc_deferred_updates",
+            "replication_log",
+            "replication_pending_refusals",
+            "relay_deferred_ops",
+            "owner_ydoc_outbox_entries",
+            "live_owner_activations",
+            "live_device_settlements",
+            "live_device_update_applications",
+            "live_accepted_updates",
+        ],
+    )
+}
+
+/// Every row a synced file operation could write to the document: those of
+/// [`ingress_rows`], its path, outbox, attribution requests and
+/// materialization, and none that name the neighbour.
+fn document_rows(store: &EngineStore) -> Vec<String> {
+    let mut rows = ingress_rows(store);
+    rows.extend(rows_of(
+        store,
+        &[
+            "path_aliases",
+            "owner_ydoc_outboxes",
+            "engine_requests",
+            "materialization_jobs",
+        ],
+    ));
+    rows.retain(|row| !row.contains("neighbour"));
+    rows.sort();
+    rows
+}
+
+fn rows_of(store: &EngineStore, tables: &[&str]) -> Vec<String> {
+    let mut rows: Vec<String> = tables
+        .iter()
+        .flat_map(|table| {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            let values = (0..columns)
+                                .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(format!("{table}: {values:?}"))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        })
+        .collect();
     rows.sort();
     rows
 }
@@ -5930,8 +5956,14 @@ struct Desktop {
 }
 
 async fn desktop_of(base: &[u8], lineage: &str, synced: &[Vec<u8>]) -> Desktop {
+    replica_of("desktop", base, lineage, synced).await
+}
+
+/// A replica under `origin` holding the lineage as ordinary sync brought
+/// it, with its file, and no activation ever captured.
+async fn replica_of(origin: &str, base: &[u8], lineage: &str, synced: &[Vec<u8>]) -> Desktop {
     let root = ScratchDir::new().unwrap();
-    let mut store = window_store(&root, "desktop", base, lineage);
+    let mut store = window_store(&root, origin, base, lineage);
     for (index, update) in synced.iter().enumerate() {
         import_envelope(
             &mut store,
@@ -5964,26 +5996,29 @@ impl Desktop {
         std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
     }
 
-    /// The last `ydoc.update` this desktop journaled, as the relay serves
-    /// it, with its bytes.
-    fn journaled_update(&self) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+    /// The last `op_kind` row this desktop journaled, as the relay serves
+    /// it, with the blob its payload names at `blob`, if any.
+    fn last_journaled(
+        &self,
+        op_kind: &str,
+        blob: &str,
+    ) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
         let (origin_id, origin_seq, payload, recorded_at_ms): (String, i64, String, i64) = self
             .store
             .read_with(|conn| {
                 conn.query_row(
                     "SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log
-                     WHERE op_kind='ydoc.update' AND imported=0 ORDER BY origin_seq DESC LIMIT 1",
-                    [],
+                     WHERE op_kind=?1 AND imported=0 ORDER BY origin_seq DESC LIMIT 1",
+                    [op_kind],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
             })
             .unwrap();
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        let bytes = self
-            .store
-            .get_binary_blob(payload["updateBlobSha256"].as_str().unwrap())
-            .unwrap()
-            .unwrap();
+        let bytes = payload[blob]
+            .as_str()
+            .map(|sha| self.store.get_materialization_blob(sha).unwrap().unwrap())
+            .unwrap_or_default();
         let op = dohc_engine_sync::ReplicationEnvelope {
             settlement_admission: None,
             admitted_author_snapshot: None,
@@ -5991,11 +6026,111 @@ impl Desktop {
             origin_id,
             origin_seq,
             relay_seq: None,
-            op_kind: "ydoc.update".into(),
+            op_kind: op_kind.into(),
             payload,
             recorded_at_ms,
         };
         (op, bytes)
+    }
+
+    /// The last `ydoc.update` this desktop journaled, with its bytes.
+    fn journaled_update(&self) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        self.last_journaled("ydoc.update", "updateBlobSha256")
+    }
+
+    /// How many `ydoc.update` rows this desktop journaled.
+    fn updates_journaled(&self) -> i64 {
+        self.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update' AND imported=0",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    /// The person makes `change` to the document on the desktop. Returns the
+    /// `moment.append` it journaled, with its resulting bytes.
+    async fn change(&self, change: FileChange) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        let root = self.root.path().to_owned();
+        let (self_writes, faults) = (Arc::new(()), Arc::new(NoFaults));
+        match change {
+            FileChange::Delete => {
+                self.actor
+                    .versioned_text_delete(
+                        dohc_engine_domain::DeleteTextFile {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            path: WINDOW_PATH.into(),
+                            moment_id: "desktop-delete".into(),
+                            request_id: None,
+                            metadata_origin: "api".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 60,
+                        },
+                        root,
+                        self_writes,
+                        faults,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            FileChange::Rename => {
+                self.actor
+                    .versioned_text_rename(
+                        dohc_engine_domain::RenameTextFile {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            from_path: WINDOW_PATH.into(),
+                            to_path: RENAMED_PATH.into(),
+                            moment_id: "desktop-rename".into(),
+                            request_id: None,
+                            metadata_origin: "api".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 60,
+                        },
+                        root,
+                        self_writes,
+                        faults,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            FileChange::Binary => {
+                self.actor
+                    .versioned_binary_write(
+                        dohc_engine_domain::WriteBinary {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            object_id: "object".into(),
+                            path: WINDOW_PATH.into(),
+                            bytes: BINARY.to_vec(),
+                            moment_id: "desktop-binary".into(),
+                            metadata_origin: "api".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 60,
+                            request_id: None,
+                        },
+                        root,
+                        self_writes,
+                        faults,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        self.last_journaled("moment.append", "payloadAfterBlobSha256")
     }
 
     /// A disk edit to `text` that capture folds into the Y.Doc.
@@ -6751,4 +6886,219 @@ async fn with_nothing_retained_a_desktop_fold_applies_in_the_released_window() {
     assert_eq!(projection(&w.store), projection(&desktop.store));
     desktop.close().await;
     w.close().await;
+}
+
+/// A change the owner makes to the whole file on the desktop without
+/// editing it first: it retires or rebinds the lineage, and journals no
+/// `ydoc.update`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FileChange {
+    Delete,
+    Rename,
+    Binary,
+}
+
+const FILE_CHANGES: [FileChange; 3] = [FileChange::Delete, FileChange::Rename, FileChange::Binary];
+const RENAMED_PATH: &str = "notes/renamed.md";
+const BINARY: &[u8] = &[0, 255, 13, 10];
+
+/// The files under `notes`, with their bytes, but the neighbour's.
+fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(root.path().join("notes"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .filter(|(name, _)| !name.contains("neighbour"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Opus's review of round 4b2i-1a-2, finding 1, with the rename and binary
+/// write beside it: in the released window the owner deletes, renames or
+/// writes binary bytes over the document on the desktop, so no `ydoc.update`
+/// comes first. The host's hosted pull holds the row before it retires or
+/// rebinds the lineage, and a neighbour in the same pass applies. Native
+/// state, retained records, attribution, the snapshot, settlement evidence
+/// and the files stay as they were, nothing is acknowledged, and successor
+/// capture finds the document not ready.
+#[tokio::test]
+async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_chain_retains() {
+    for change in FILE_CHANGES {
+        let case = format!("{change:?}");
+        let mut w = retained_window(Retained::Carried).await;
+        execute(
+            &mut w.store,
+            "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+            VALUES ('workspace','neighbour','notes/neighbour.md','ready',1)",
+        );
+        let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+        let updates = desktop.updates_journaled();
+        let (op, bytes) = desktop.change(change).await;
+        assert_eq!(desktop.updates_journaled(), updates, "{case}: an update");
+        let feed = HostedFeed::new(&[("neighbour", "notes/neighbour.md"), ("object", WINDOW_PATH)]);
+        let op = feed.serve(op, bytes.clone());
+        let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let (native, rows, files) = (w.native(), document_rows(&w.store), notes(&w.root));
+        let unchanged = |w: &RetainedWindow, stage: &str| {
+            let persisted = dohc_engine_collab::load_persisted(&w.store, &window_key())
+                .unwrap()
+                .map(|persisted| hex_sha256(&persisted.doc.encode_full_state()));
+            assert_eq!(
+                persisted,
+                Some(hex_sha256(&native)),
+                "{case}, {stage}: native"
+            );
+            assert!(w.text().contains(RETAINED), "{case}, {stage}: {}", w.text());
+            assert_eq!(document_rows(&w.store), rows, "{case}, {stage}: records");
+            assert_eq!(notes(&w.root), files, "{case}, {stage}: files");
+        };
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        unchanged(&w, "the pass");
+        assert_eq!(pass.applied, 1, "{case}: the neighbour");
+        assert!(journaled(&w.store, &created), "{case}");
+        assert!(!journaled(&w.store, &op), "{case}: acknowledged");
+        assert!(
+            stopped_before(&pass, &op),
+            "{case}: {:?}",
+            pass.pending_cursor
+        );
+        let committed = client
+            .commit_hosted_cursor(
+                &mut w.store,
+                "workspace",
+                pass.pending_cursor.as_ref().unwrap(),
+                &NoFaults,
+            )
+            .unwrap();
+        assert!(
+            matches!(committed, dohc_engine_storage::TxnOutcome::Committed(_)),
+            "{case}"
+        );
+        // The hold is the released lineage's, not another wait.
+        w.store.put_binary_blob(&bytes).unwrap();
+        let held = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        assert!(
+            matches!(
+                held,
+                Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(_))
+            ),
+            "{case}: {held:?}"
+        );
+        unchanged(&w, "the hold");
+        let captured = w
+            .actor
+            .capture_imported_owner_activation(
+                "relay".into(),
+                window_key(),
+                WINDOW_PATH.into(),
+                1_000_000,
+                None,
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await;
+        assert!(captured.is_err(), "{case}: a held document is not ready");
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// What a file operation left of the document on a replica: its path, its
+/// snapshot's kind, and whether a lineage remains.
+fn file_state(store: &EngineStore) -> (Option<String>, Option<String>, bool) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT path FROM path_aliases WHERE object_id='object'),
+                        (SELECT content_kind FROM snapshots WHERE object_id='object'),
+                        EXISTS(SELECT 1 FROM ydoc_docs WHERE object_id='object')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap()
+}
+
+/// Outside the window, and in it with nothing retained, each file operation
+/// applies as it did before: a delete retires the lineage, a rename moves
+/// the document, and a binary write replaces its text and lineage.
+#[tokio::test]
+async fn a_desktop_delete_rename_or_binary_write_applies_outside_the_window_or_with_nothing_retained()
+ {
+    for change in FILE_CHANGES {
+        for released in [false, true] {
+            let case = format!("{change:?}, released {released}");
+            // The host: released with nothing retained, or a hosted replica
+            // no activation ever reached.
+            let (mut window, mut plain, desktop) = if released {
+                let mut w = adopted_window(false).await;
+                w.release().await;
+                execute(
+                    &mut w.store,
+                    "UPDATE hosted_replicas SET scope_token='scope'",
+                );
+                let desktop = desktop_of(&w.base, &w.lineage, &[w.covered_bytes.clone()]).await;
+                (Some(w), None, desktop)
+            } else {
+                let base = owner_source_base();
+                let lineage = hex_sha256(&base);
+                let mut host = replica_of("origin", &base, &lineage, &[]).await;
+                execute(&mut host.store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq,scope_token)
+                      VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'),'scope');
+                    INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','ready',1)");
+                let desktop = desktop_of(&base, &lineage, &[]).await;
+                (None, Some(host), desktop)
+            };
+            let store = match (&mut window, &mut plain) {
+                (Some(w), _) => &mut w.store,
+                (_, Some(host)) => &mut host.store,
+                _ => unreachable!(),
+            };
+            let (op, bytes) = desktop.change(change).await;
+            let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+            let op = feed.serve(op, bytes);
+            let client = dohc_engine_sync::RelaySyncClient::new(feed);
+            let pass = hosted_pass(
+                store,
+                &client,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+            );
+            assert_eq!(pass.applied, 1, "{case}: {:?}", pass.pending_cursor);
+            assert!(journaled(store, &op), "{case}");
+            assert_eq!(
+                file_state(store),
+                match change {
+                    FileChange::Delete => (None, None, false),
+                    FileChange::Rename => (Some(RENAMED_PATH.into()), Some("text".into()), true),
+                    FileChange::Binary => (Some(WINDOW_PATH.into()), Some("binary".into()), false),
+                },
+                "{case}"
+            );
+            assert_eq!(file_state(store), file_state(&desktop.store), "{case}");
+            desktop.close().await;
+            if let Some(w) = window {
+                w.close().await;
+            }
+            if let Some(host) = plain {
+                host.close().await;
+            }
+        }
+    }
 }

@@ -788,6 +788,20 @@ fn apply_moment_append(
             reason: "ydoc-session-live",
         });
     }
+    // A delete, rename or binary write retires or rebinds the lineage.
+    if mode == MomentApplyMode::Ordinary
+        && (payload.operation != "write" || after_kind == ContentKind::Binary)
+    {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append Y.Doc coordinates are invalid",
+        })?;
+        crate::ydoc_apply::hold_released_replacement(tx, &key, envelope)?;
+    }
 
     let mut owner_settlement = None;
     if mode == MomentApplyMode::Ordinary {
