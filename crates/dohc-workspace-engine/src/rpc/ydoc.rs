@@ -85,8 +85,8 @@ pub(crate) struct YdocSession {
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
     /// until the session's first settle replaces it. With no head, the empty
-    /// artifact's sha when the open found one or the client said the file
-    /// existed.
+    /// file's sha when the open found one or continues a document whose file
+    /// has existed.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -236,16 +236,15 @@ struct OwnerYDocOutboxQuarantineParams {
 struct YdocOpenParams {
     version_id: String,
     path: String,
+    /// The document this open continues. The open refuses when the path
+    /// names another object. With no head, settles may not create a file the
+    /// document had.
     #[serde(default)]
     expected_object_id: Option<String>,
     #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
-    /// The client's earlier session on this document opened over its file
-    /// or wrote it. With no head, settles then refuse to create the file.
-    #[serde(default)]
-    file_existed: bool,
 }
 
 #[derive(Serialize)]
@@ -397,10 +396,6 @@ struct YdocCloseParams {
 #[serde(rename_all = "camelCase")]
 struct YdocCloseResult {
     closed: bool,
-    /// Whether the file holds the settled bytes after this close's settle,
-    /// written now or already there. Absent when it did not settle.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    materialized: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1079,23 +1074,36 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
-        // With no head, the session expects New File's empty artifact when
-        // the open finds it, or when the client says the file existed. Its
-        // settles may replace the file but not create it, so a file deleted
-        // outside dohc stays deleted. Compared with no expectation, this
-        // changes only a missing file's answer, to a refusal.
+        // With no head, the session expects an empty file when it finds New
+        // File's empty file, or when it continues a document whose file has
+        // existed. Its settles may then replace the file but not create it, so
+        // a file deleted outside dohc stays deleted. An open continues the
+        // document when it names the object, as the desktop's replacement
+        // after a restart does, or resumes the document's Y.Doc state. Any
+        // other open may start a new document at a path whose file was
+        // deleted: it expects nothing, so its first settle creates the file.
         let open_head_sha = match state.head_blob_sha256.clone() {
             Some(head) => Some(head),
-            None if params.file_existed => Some(dohc_engine_storage::hex_sha256(b"")),
             None => {
                 let artifact_path = open.root.join(&params.path);
-                tokio::task::spawn_blocking(move || {
+                // Whether the file is there, and if so whether it is empty.
+                let file = tokio::task::spawn_blocking(move || {
                     std::fs::symlink_metadata(artifact_path)
-                        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
+                        .ok()
+                        .filter(|metadata| metadata.file_type().is_file())
+                        .map(|metadata| metadata.len() == 0)
                 })
                 .await
-                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?
-                .then(|| dohc_engine_storage::hex_sha256(b""))
+                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                let continues = params.expected_object_id.is_some() || state.lineage_existing;
+                let existed = (file.is_some() || continues)
+                    && open
+                        .actor
+                        .ydoc_file_has_existed(state.key.clone(), file.is_some())
+                        .await
+                        .map_err(map_runtime)?;
+                (file == Some(true) || (continues && existed))
+                    .then(|| dohc_engine_storage::hex_sha256(b""))
             }
         };
         // The read committed the document's pulled edits, so the open runs to
@@ -1641,16 +1649,13 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
-        let settled = self
-            .ydoc_settle_inner(
-                &cancellation,
-                handle.as_ref(),
-                &params.session_id,
-                params.summary.as_deref(),
-            )
-            .await?;
-        serde_json::to_value(settled)
-            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
+        self.ydoc_settle_inner(
+            &cancellation,
+            handle.as_ref(),
+            &params.session_id,
+            params.summary.as_deref(),
+        )
+        .await
     }
 
     async fn ydoc_settle_inner(
@@ -1659,7 +1664,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
-    ) -> Result<YdocSettleResult, WireError> {
+    ) -> Result<Value, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
         let settled = open
             .actor
@@ -1702,7 +1707,7 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        Ok(YdocSettleResult {
+        serde_json::to_value(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
             content: settled.content,
@@ -1714,6 +1719,7 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
+        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -1755,7 +1761,6 @@ impl EngineService {
             // NoMarker and strand the session/lease.
             !(session.lineage_absent && session.first_update_pending)
         };
-        let mut materialized = None;
         if params.settle.unwrap_or(default_settle) {
             let settled = self
                 .ydoc_settle_inner(
@@ -1766,7 +1771,7 @@ impl EngineService {
                 )
                 .await;
             match settled {
-                Ok(settled) => materialized = Some(settled.materialized),
+                Ok(_) => {}
                 // The refusal fires after the deferred rows drained: for the
                 // explicit settle RPC the client must resync (it keeps
                 // editing), but a close is final — the session ends, so the
@@ -1776,15 +1781,13 @@ impl EngineService {
                 // close refuses and strands the session/lease until the
                 // caller manually resyncs or closes the workspace.
                 Err(error) if error.message == "ydoc-remote-updates-pending" => {
-                    let settled = self
-                        .ydoc_settle_inner(
-                            cancellation,
-                            handle,
-                            &params.session_id,
-                            params.summary.as_deref(),
-                        )
-                        .await?;
-                    materialized = Some(settled.materialized);
+                    self.ydoc_settle_inner(
+                        cancellation,
+                        handle,
+                        &params.session_id,
+                        params.summary.as_deref(),
+                    )
+                    .await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -1860,11 +1863,8 @@ impl EngineService {
         if let Err(error) = close_result {
             return Err(map_runtime(error));
         }
-        serde_json::to_value(YdocCloseResult {
-            closed: true,
-            materialized,
-        })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
+        serde_json::to_value(YdocCloseResult { closed: true })
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     /// End one session without settling and without pruning: the entry — and

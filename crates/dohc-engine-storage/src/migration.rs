@@ -3337,7 +3337,28 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("file_search_key.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 64,
+        id: "v2-ydoc-files-seen",
+        sql: V2_YDOC_FILES_SEEN_DDL,
+        sets_user_version: None,
+    },
 ];
+
+/// Documents whose file a `ydoc.open` found on disk while the version had no
+/// head for it: New File's empty file, before capture records it. A moment
+/// records every other file a document has had. Together they tell a session
+/// that continues the document whether its missing file was deleted.
+const V2_YDOC_FILES_SEEN_DDL: &str = "\
+CREATE TABLE ydoc_files_seen (
+    workspace_id TEXT NOT NULL,
+    version_id   TEXT NOT NULL,
+    object_id    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
 
 /// The ordinary pull pass whose applied pages await their terminal commit.
 /// A replication identity change abandons it.
@@ -4378,6 +4399,10 @@ mod tests {
             (
                 "v2-file-search-key",
                 "60447cc5e4274b65f3f9e71a830288acfc896ac0899d471e8bcebaf754519695",
+            ),
+            (
+                "v2-ydoc-files-seen",
+                "85a36c7e1b7e392360e0caf3136b589cfcf0e052d4a26c53118e1ce045b32b5d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

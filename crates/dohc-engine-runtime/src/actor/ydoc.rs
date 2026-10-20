@@ -734,6 +734,18 @@ impl ActorHandle {
         .await
     }
 
+    /// Whether this document's file has existed in its version. With
+    /// `seen_on_disk`, the caller has just found the file, and this records
+    /// that first.
+    pub async fn ydoc_file_has_existed(
+        &self,
+        key: DocKey,
+        seen_on_disk: bool,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| ydoc_file_has_existed_on_store(store, &key, seen_on_disk))
+            .await
+    }
+
     /// Report the content kind of durable Y.Doc state whose current CRDT
     /// projection is not the materialized version snapshot.
     pub async fn ydoc_version_unsettled_content_kind(
@@ -1616,6 +1628,44 @@ fn seed_scene_from_artifact_on_store(
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(created_job_ids)
+}
+
+/// A document's file has existed when its version records a moment for it, or
+/// when an open found the file before any moment did. Capture's retire of a
+/// deleted file removes the head and the document's Y.Doc rows, but adds a
+/// moment, so the answer survives the delete.
+fn ydoc_file_has_existed_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    seen_on_disk: bool,
+) -> Result<bool, RuntimeError> {
+    let coordinates = params![key.workspace_id, key.version_id, key.object_id];
+    if seen_on_disk {
+        let recorded = store.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO ydoc_files_seen (workspace_id, version_id, object_id) \
+                 VALUES (?1, ?2, ?3)",
+                coordinates,
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })?;
+        if matches!(recorded, TxnOutcome::Crashed { .. }) {
+            return Err(RuntimeError::OperationCrashed);
+        }
+        return Ok(true);
+    }
+    Ok(store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_files_seen \
+               WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3) \
+             OR EXISTS(SELECT 1 FROM moments \
+               WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3)",
+            coordinates,
+            |row| row.get(0),
+        )
+        .map_err(StorageError::corrupt_public)
+    })?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2682,8 +2732,9 @@ pub(super) fn ydoc_settle_on_store(
     };
     // What the disk must hold for this settle to write. A session with no
     // head can expect New File's empty artifact, because the open found it
-    // or the client said the file existed. Only the disk check holds that
-    // expectation: once the file is deleted, the settle must not write it back.
+    // or continues a document whose file has existed. Only the disk check
+    // holds that expectation: once the file is deleted, the settle must not
+    // write it back.
     let expected_disk_sha = expected_head_sha.clone();
     let expected_head_sha =
         expected_head_sha.filter(|sha| head_probe.is_some() || *sha != empty_sha);
