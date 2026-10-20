@@ -187,3 +187,143 @@ describe("commandForSiteScript", () => {
     },
   );
 });
+
+describe("commandForSiteScript loopback defaults", () => {
+  it.each([
+    ["npm", ["run", "dev", "--", "--hostname", "127.0.0.1"]],
+    ["pnpm", ["dev", "--hostname", "127.0.0.1"]],
+    ["yarn", ["dev", "--hostname", "127.0.0.1"]],
+    ["bun", ["run", "dev", "--hostname", "127.0.0.1"]],
+  ] as const)("starts a package.json next dev script on loopback through %s", (manager, args) => {
+    const site = packageSite({
+      packageManager: manager,
+      configuredScripts: {},
+      scripts: { dev: "next dev --turbopack", predev: "node prepare.mjs" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({ command: manager, args: [...args] });
+  });
+
+  it("starts next start on loopback when the app has only a start script", () => {
+    const site = packageSite({ configuredScripts: {}, scripts: { start: "next start -p 4000" } });
+
+    expect(commandForSiteScript(site, "start")).toEqual({
+      command: "npm",
+      args: ["run", "start", "--", "--hostname", "127.0.0.1"],
+    });
+  });
+
+  it.each(["next dev -H 127.0.0.1", "next dev --hostname=localhost", "next dev --hostname ::1"])(
+    "leaves %s on the loopback host it chose",
+    (dev) => {
+      const site = packageSite({ configuredScripts: {}, scripts: { dev } });
+
+      expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
+    },
+  );
+
+  it("appends the host after args a configured npm run forwards", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run --silent dev -- --port 4000" },
+      scripts: { dev: "next dev" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "npm",
+      args: ["run", "dev", "--silent", "--", "--port", "4000", "--hostname", "127.0.0.1"],
+    });
+  });
+
+  it("leaves a host that a configured npm run forwards", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev -- -H 127.0.0.1" },
+      scripts: { dev: "next dev" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "npm",
+      args: ["run", "dev", "--", "-H", "127.0.0.1"],
+    });
+  });
+
+  it("resolves the script a configured wrapper names, not the preview script", () => {
+    const site = packageSite({
+      packageManager: "pnpm",
+      configuredScripts: { dev: "pnpm run serve" },
+      scripts: { serve: "next dev", dev: "node server.mjs" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "pnpm",
+      args: ["serve", "--hostname", "127.0.0.1"],
+    });
+  });
+
+  it.each([
+    ["vite", ["run", "dev", "--", "--host", "127.0.0.1"]],
+    ["vite --port 5174", ["run", "dev", "--", "--host", "127.0.0.1"]],
+    ["vite preview", ["run", "dev", "--", "--host", "127.0.0.1"]],
+    ["vite --host localhost", ["run", "dev"]],
+    ["vite build --watch", ["run", "dev"]],
+  ])("handles a %s dev script", (dev, args) => {
+    const site = packageSite({ configuredScripts: {}, scripts: { dev } });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args });
+  });
+
+  it.each(["npm", "pnpm", "yarn", "bun"] as const)(
+    "sets HOST for react-scripts start run through %s",
+    (manager) => {
+      const site = packageSite({
+        packageManager: manager,
+        configuredScripts: {},
+        scripts: { start: "react-scripts start" },
+      });
+
+      const command = commandForSiteScript(site, "start");
+      expect(command.env).toEqual({ HOST: "127.0.0.1" });
+      expect(command.args).not.toContain("--host");
+    },
+  );
+
+  it("leaves a react-scripts start script that sets its own HOST", () => {
+    const site = packageSite({
+      configuredScripts: {},
+      scripts: { start: "HOST=localhost react-scripts start" },
+    });
+
+    expect(commandForSiteScript(site, "start").env).toBeUndefined();
+  });
+
+  it("starts a configured literal command on loopback", () => {
+    expect(commandForSiteScript(packageSite({ configuredScripts: { dev: "next dev" } }), "dev")).toEqual({
+      command: "next",
+      args: ["dev", "--hostname", "127.0.0.1"],
+    });
+    expect(
+      commandForSiteScript(packageSite({ configuredScripts: { dev: "react-scripts start" } }), "dev").env,
+    ).toEqual({ HOST: "127.0.0.1" });
+  });
+
+  it.each(["next dev && node notify.mjs", "node server.mjs", "next lint", "nextjs dev", "react-scripts test"])(
+    "does not change a %s script it does not recognize",
+    (dev) => {
+      const site = packageSite({ configuredScripts: {}, scripts: { dev } });
+
+      expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
+    },
+  );
+
+  it("does not change build commands", () => {
+    const site = packageSite({
+      configuredScripts: { build: "vite build" },
+      scripts: { dev: "next dev", build: "next build" },
+    });
+
+    expect(commandForSiteScript(site, "build")).toEqual({ command: "vite", args: ["build"] });
+    expect(commandForSiteScript({ ...site, configuredScripts: {} }, "build")).toEqual({
+      command: "npm",
+      args: ["run", "build"],
+    });
+  });
+});

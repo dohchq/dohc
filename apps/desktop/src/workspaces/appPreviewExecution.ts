@@ -103,6 +103,7 @@ export function createAppPreviewExecution(dependencies: {
         siteRoot: input.site.root,
         command: command.command,
         args: command.args,
+        env: command.env,
         signal: input.signal,
       });
       return {

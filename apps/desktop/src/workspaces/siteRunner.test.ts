@@ -385,6 +385,13 @@ describe("package manager helpers", () => {
     expect(detectDevUrl(output)).toBe(expected);
   });
 
+  it.each([
+    ["Next.js", "   - Local:        http://127.0.0.1:3000"],
+    ["Create React App", "  http://127.0.0.1:3000"],
+  ])("detects the URL %s prints when started on 127.0.0.1", (_framework, output) => {
+    expect(detectDevUrl(output)).toBe("http://127.0.0.1:3000");
+  });
+
   it("splits simple configured command strings", () => {
     expect(splitCommandLine('pnpm vite --host "127.0.0.1"')).toEqual({
       command: "pnpm",
