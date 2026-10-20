@@ -1,11 +1,17 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import {createHash} from "node:crypto";
+import {setTimeout as backoff} from "node:timers/promises";
 import {afterEach, expect, it, vi} from "vitest";
 import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createNamedLiveFrameSession, type NamedFrameAppliedUpdate, type NamedFrameSubmissionResult} from "../../../../services/sync-relay/src/namedLiveFrameSession";
 import {OwnerYDocFrameDelivery, type OwnerAcceptedState, type OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
 import type {OwnerYDocDeliveryEnvelope} from "./ownerYDocOutbox";
+
+vi.mock("node:timers/promises", async importOriginal => {
+  const timers = await importOriginal<typeof import("node:timers/promises")>();
+  return {...timers, setTimeout: vi.fn(timers.setTimeout)};
+});
 
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
@@ -16,7 +22,7 @@ const envelope: OwnerYDocDeliveryEnvelope = {outboxId: "outbox", binding, baseUp
   personEdit: true, sequence: 4, appendKey: "append", deliveryId: "stable-delivery", update: new Uint8Array([1,2,3]), updateDigest: hash(new Uint8Array([1,2,3]))};
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 const disposals: (() => void)[] = [];
-afterEach(() => {for (const close of disposals.splice(0)) close(); vi.useRealTimers();});
+afterEach(() => {for (const close of disposals.splice(0)) close(); vi.mocked(backoff).mockReset(); vi.useRealTimers();});
 
 function fixture(overrides: {binding?: typeof binding; initialCursor?: number; initialResult?: "applied" | "retry"; retained?: boolean;
   accountId?: string | null; result?: NamedFrameSubmissionResult; state?: Partial<OwnerAcceptedState>; connect?: OwnerYDocFrameDeliveryOptions["connect"]} = {}) {
@@ -175,19 +181,18 @@ it("retains pending when native ordered application refuses", async () => {
 
 const capacityRefusal = () => new EngineRequestError(1, {code: "OVERLOADED", message: "live-settlement-capacity", retry: "afterBackoff"});
 
-it("retries the received receipt proof without reconnecting or resubmitting", async () => {
-  vi.useFakeTimers();
-  const proof = vi.fn().mockRejectedValueOnce(capacityRefusal()).mockResolvedValue(true);
+it("backs off repeated receipt proof refusals without reconnecting or resubmitting", async () => {
+  const proof = vi.fn().mockResolvedValue(true);
+  for (let refusal = 0; refusal < 6; refusal++) {
+    proof.mockRejectedValueOnce(capacityRefusal());
+    vi.mocked(backoff).mockResolvedValueOnce(undefined);
+  }
   const f = fixture({state: {isReceiptApplied: proof}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
-  let settled = false;
-  const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
-  await vi.advanceTimersByTimeAsync(0);
-  expect(proof).toHaveBeenCalledTimes(1);
-  expect(settled).toBe(false);
-  expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
-  expect(proof).toHaveBeenCalledTimes(2);
-  expect(proof.mock.calls[1]![0]).toEqual(proof.mock.calls[0]![0]);
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(proof).toHaveBeenCalledTimes(7);
+  expect(vi.mocked(backoff).mock.calls.map(([ms]) => ms)).toEqual([25, 50, 100, 200, 250, 250]);
+  for (const [input] of proof.mock.calls) expect(input).toEqual({binding, receipt: f.receipt});
   expect(f.connect).toHaveBeenCalledTimes(1); expect(f.submit).toHaveBeenCalledTimes(1);
 });
 
@@ -210,20 +215,30 @@ it("keeps a refused then false receipt pending until the accepted frame proves i
 
 it.each(["deadline", "cancellation", "replacement"])("bounds repeated proof overloads by %s", async ending => {
   vi.useFakeTimers();
-  const checked = deferred<void>();
-  const proof = vi.fn(async () => {if (proof.mock.calls.length > 1) checked.resolve(); throw capacityRefusal();});
+  const waiting = deferred<void>();
+  vi.mocked(backoff).mockResolvedValueOnce(undefined).mockImplementationOnce((_ms, _value, options) => new Promise<never>((_resolve, reject) => {
+    const signal = options!.signal!;
+    signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+    waiting.resolve();
+  }));
+  const proof = vi.fn().mockRejectedValue(capacityRefusal());
   const f = fixture({state: {isReceiptApplied: proof}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   let settled = false;
   const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
-  await Promise.race([checked.promise, work]);
-  expect(proof.mock.calls.length).toBeGreaterThan(1); expect(settled).toBe(false);
+  await Promise.race([waiting.promise, work]);
+  expect(proof).toHaveBeenCalledTimes(2); expect(settled).toBe(false);
+  const waits = vi.mocked(backoff).mock.calls.length;
+  const pendingWait = vi.mocked(backoff).mock.results.at(-1)!.value;
+  const rejectedWait = expect(pendingWait).rejects.toMatchObject({name: "AbortError"});
   if (ending === "deadline") await vi.advanceTimersByTimeAsync(10_000);
   else if (ending === "cancellation") f.controller.abort();
   else await f.delivery.freshOwnerAuthority(binding);
+  await rejectedWait;
   expect(await work).toEqual({kind: "retry"});
   const calls = proof.mock.calls.length;
-  await vi.advanceTimersByTimeAsync(100);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(vi.mocked(backoff)).toHaveBeenCalledTimes(waits);
   expect(proof).toHaveBeenCalledTimes(calls); expect(f.submit).toHaveBeenCalledTimes(1);
 });
 

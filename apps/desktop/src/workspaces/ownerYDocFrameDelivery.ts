@@ -265,6 +265,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
 
   private async finishReceipt(attempt: Attempt): Promise<void> {
     if (!attempt.receipt) return;
+    let backoffMs = 25;
     while (this.current(attempt)) {
       try {
         const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
@@ -272,7 +273,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
         return;
       } catch (error) {
         if (!isOwnerDeliveryBackoff(error)) throw error;
-        await backoff(25, undefined, {signal: attempt.signal, ref: false});
+        await backoff(backoffMs, undefined, {signal: attempt.signal, ref: false});
+        backoffMs = Math.min(backoffMs * 2, 250);
       }
     }
   }
