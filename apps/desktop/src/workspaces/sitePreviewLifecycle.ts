@@ -76,9 +76,6 @@ type PendingStart = {
   controller: AbortController;
   settled: Promise<void>;
   settle: () => void;
-  // The start was cancelled and its stop left processes running. Their
-  // handle is kept as a stopping preview, to stop again.
-  leftRunning: AppCommandStillRunningError | null;
 };
 
 export type SitePreviewStatus = {
@@ -201,7 +198,6 @@ export function createSitePreviewLifecycle<
       controller: new AbortController(),
       settled,
       settle,
-      leftRunning: null,
     };
     nextStartSequence += 1;
     pendingStarts.add(pending);
@@ -467,7 +463,6 @@ export function createSitePreviewLifecycle<
           execution = await execute(pending.controller.signal);
         } catch (error) {
           if (error instanceof AppCommandStillRunningError) {
-            pending.leftRunning = error;
             keepLeftRunning(key, startInput.workspaceId, startInput.siteRoot, error.handle);
           }
           throw error;
@@ -823,12 +818,20 @@ export function createSitePreviewLifecycle<
           },
         ),
       ),
-      ...draining.map(async (start) => {
-        await start.settled;
-        if (start.leftRunning) failures.push(start.leftRunning);
-      }),
+      ...draining.map((start) => start.settled),
     ]);
-    if (!options.rejectOnFailure || failures.length === 0) return;
+    if (!options.rejectOnFailure) return;
+    // A stop that failed keeps its record, wherever it failed: in a stop
+    // above, in a cancelled start, or in a start's own cleanup after its
+    // command began. So an app command's record still held now is one this
+    // workspace still runs. A static preview started meanwhile runs no app
+    // code.
+    for (const record of activePreviews.values()) {
+      if (record.workspaceId !== workspaceId || !("command" in record.handle)) continue;
+      if (failures.some((failure) => failure instanceof AppCommandStillRunningError && failure.handle === record.handle)) continue;
+      failures.push(new AppCommandStillRunningError(record.handle, []));
+    }
+    if (failures.length === 0) return;
     throw failures.length === 1
       ? failures[0]
       : new AggregateError(failures, "Some app previews did not stop.");

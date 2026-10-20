@@ -228,6 +228,19 @@ describe("trust against races and failed files", () => {
     expect(await trust.isTrusted(workspace)).toBe(false);
   });
 
+  it("keeps a Trust the person gives while a restrict waits to be saved", async () => {
+    const { file, workspace } = await setup();
+    const trust = createWorkspaceTrust({ file });
+    await trust.trust(workspace);
+    trust.revoke("trip");
+    // The restrict's stop is still running when the person trusts again.
+    expect(await trust.trust(workspace)).toBe(true);
+    await trust.persistRevocation("trip");
+    expect(trust.isRevoked("trip")).toBe(false);
+    expect(await trust.isTrusted(workspace)).toBe(true);
+    expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
+  });
+
   it("reads the file again after a failed read, and writes no grant over the others", async () => {
     const { scratch, file, workspace } = await setup();
     const otherRoot = join(scratch, "other");

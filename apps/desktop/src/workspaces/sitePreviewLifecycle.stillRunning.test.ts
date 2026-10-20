@@ -67,6 +67,31 @@ describe("a workspace stop that has to report app commands still running", () =>
     expect(lifecycle.status("trip", "portal").running).toBe(false);
   });
 
+  it("reports a start whose command began and whose own cleanup, after the cancel, left it running", async () => {
+    const lifecycle = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
+    const state = { alive: true };
+    const running = handle(state);
+    const executing = deferred<void>();
+    const release = deferred<void>();
+    const started = acquire(lifecycle, async () => {
+      executing.resolve();
+      await release.promise;
+      return { handle: running.value, result: { logs: [] } };
+    });
+    void started.catch(() => undefined);
+    await executing.promise;
+
+    // The stop cancels the start; the command it began comes back after.
+    const stopping = lifecycle.stopWorkspace("trip", { rejectOnFailure: true });
+    release.resolve();
+    await expect(stopping).rejects.toThrow(AppCommandStillRunningError);
+    expect(running.stop).toHaveBeenCalledTimes(1);
+    expect(lifecycle.status("trip", "portal").running).toBe(true);
+
+    state.alive = false;
+    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).resolves.toBeUndefined();
+  });
+
   it("still only logs it for a workspace switch", async () => {
     const lifecycle = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
     const running = handle({ alive: true });

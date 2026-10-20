@@ -12,7 +12,13 @@ import { deferred } from "../testing/deferred";
 
 type Event = { windowId: number };
 
-async function harness(input: { answer?: boolean; sharedView?: boolean; failWrites?: { value: boolean } } = {}) {
+async function harness(input: {
+  answer?: boolean;
+  sharedView?: boolean;
+  failWrites?: { value: boolean };
+  // Stands in for the workspace's stop, when a test holds it.
+  stop?: () => Promise<void>;
+} = {}) {
   const scratch = await createTestScratch("workspace-trust-ipc-");
   const rootPath = join(scratch, "trip");
   await mkdir(rootPath);
@@ -40,7 +46,8 @@ async function harness(input: { answer?: boolean; sharedView?: boolean; failWrit
     identify: folderIdentity,
     isSharedView: () => input.sharedView ?? false,
     confirm,
-    stopAppCommands: (held) => held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
+    stopAppCommands: (held) =>
+      input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
@@ -91,6 +98,28 @@ describe("main's workspace trust operations", () => {
     await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: false });
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     expect(h.notified).toEqual([]);
+  });
+
+  it("lets a Trust given in another window while the restrict stops apps win", async () => {
+    const stopping = deferred<void>();
+    const stopReached = deferred<void>();
+    const h = await harness({
+      answer: true,
+      stop: () => {
+        stopReached.resolve();
+        return stopping.promise;
+      },
+    });
+    await h.request();
+    const restricting = h.restrict();
+    await stopReached.promise;
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+    await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    stopping.resolve();
+    await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    expect(h.notified.at(-1)).toEqual(["trip", true]);
+    expect(await h.trust.isTrusted(h.workspace)).toBe(true);
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(true);
   });
 
   it("leads with the running app when both its stop and the save fail", async () => {

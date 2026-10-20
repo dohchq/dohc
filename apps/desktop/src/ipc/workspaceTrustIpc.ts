@@ -15,7 +15,7 @@ export function workspaceTrustHandlers<
   Event,
   Operation extends { readonly workspace: TrustedFolder; assertCurrent(): void },
 >(dependencies: {
-  trust: Pick<WorkspaceTrust, "isTrusted" | "trust" | "revoke" | "persistRevocation">;
+  trust: Pick<WorkspaceTrust, "isTrusted" | "trust" | "revoke" | "persistRevocation" | "isRevoked">;
   // The folder now at a path, by identity.
   identify(rootPath: string): Promise<string | null>;
   isSharedView(workspaceId: string): boolean;
@@ -76,8 +76,9 @@ export function workspaceTrustHandlers<
         console.warn("[desktop] could not stop a restricted workspace's app commands", error);
         stopFailed = true;
       } finally {
-        // Windows start their static previews again.
-        dependencies.notifyChanged(workspaceId, false);
+        // Windows start their static previews again, unless a Trust the
+        // person gave meanwhile already told them otherwise.
+        if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
       }
       let saveFailed = false;
       try {
@@ -89,7 +90,7 @@ export function workspaceTrustHandlers<
       if (stopFailed && saveFailed) throw new Error(STOP_AND_SAVE_FAILED_MESSAGE);
       if (stopFailed) throw new Error(STOP_FAILED_MESSAGE);
       if (saveFailed) throw new Error(SAVE_FAILED_MESSAGE);
-      return { workspaceId, trusted: false };
+      return { workspaceId, trusted: !trust.isRevoked(workspaceId) };
     },
   };
 }

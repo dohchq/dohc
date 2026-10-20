@@ -43,11 +43,15 @@ export interface SiteProcessHandle {
 }
 
 // A stop that left some of an app command's processes running. `handle`
-// stops them again, so whoever holds it can keep it and try again.
+// stops them again, so whoever holds it can keep it and try again. The pids
+// stay on `pids` for the console; the words are for a person.
+export const APP_STILL_RUNNING_MESSAGE =
+  "An app is still running because dohc could not stop it. Try again, or end the app in your system's task manager.";
+
 export class AppCommandStillRunningError extends Error {
   override name = "AppCommandStillRunningError";
   constructor(readonly handle: SiteProcessHandle, readonly pids: readonly number[]) {
-    super(`An app command is still running (process ${pids.join(", ")}).`);
+    super(APP_STILL_RUNNING_MESSAGE);
   }
 }
 
@@ -223,8 +227,19 @@ function createDescendantCapture(
   child.once("exit", () => {
     if (timer) clearInterval(timer);
   });
+  // A pid seen dead leaves the set for good, so no later stop signals a
+  // number the system may have given to another program.
+  const captured = (): readonly number[] => {
+    if (capturedDescendants.some((pid) => !isPidAlive(pid))) {
+      for (const pid of capturedDescendantSet) {
+        if (!isPidAlive(pid)) capturedDescendantSet.delete(pid);
+      }
+      capturedDescendants = [...capturedDescendantSet];
+    }
+    return capturedDescendants;
+  };
   return {
-    captured: () => capturedDescendants,
+    captured,
     captureNow,
     awaitAll: () => Promise.all([...inFlightCaptures]).then(() => undefined),
   };
@@ -920,16 +935,18 @@ export function siteCommandEnvironment(
 const STOP_CONFIRM_MS = 1_000;
 
 // The command's processes alive after a stop: the wrapper, while the system
-// has not seen it exit, and every descendant captured while it ran.
+// has not seen it exit, and every descendant captured while it ran. A capture
+// still in flight lands first, so a helper it finds is counted.
 async function survivingProcesses(
   child: ChildProcess,
-  captured: () => readonly number[],
+  descendants: DescendantCapture,
 ): Promise<number[]> {
+  await descendants.awaitAll();
   const deadline = Date.now() + STOP_CONFIRM_MS;
   for (;;) {
     const wrapperAlive = child.pid !== undefined && child.exitCode === null &&
       child.signalCode === null && isPidAlive(child.pid);
-    const left = [...(wrapperAlive ? [child.pid!] : []), ...captured().filter(isPidAlive)];
+    const left = [...(wrapperAlive ? [child.pid!] : []), ...descendants.captured()];
     if (left.length === 0 || Date.now() >= deadline) return left;
     await delay(50);
   }
@@ -953,23 +970,32 @@ function leftoverHandle(
       else child.once("exit", listener);
     },
     stop: () => stopChild(child, descendants.captured, undefined, descendants.awaitAll),
-    stillRunning: () => survivingProcesses(child, descendants.captured),
+    stillRunning: () => survivingProcesses(child, descendants),
   };
 }
 
-// A cancelled start's answer: cancelled, or still running when the stop left
-// processes behind.
+// What is still running once a command's own processes should be gone, as an
+// error that holds them, or null when nothing is.
+async function leftRunning(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+): Promise<AppCommandStillRunningError | null> {
+  const left = await survivingProcesses(child, descendants);
+  return left.length > 0 ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left) : null;
+}
+
+// A start that ends without a ready preview: cancelled, timed out, or exited
+// first. Its answer is the path's own error, or still running when the stop
+// left processes behind.
 async function cancelledStart(
   child: ChildProcess,
   descendants: DescendantCapture,
   command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
-  cancelled: string,
+  message: string,
 ): Promise<Error> {
   await stopChild(child, descendants.captured, undefined, descendants.awaitAll).catch(() => undefined);
-  const left = await survivingProcesses(child, descendants.captured);
-  return left.length > 0
-    ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left)
-    : new Error(cancelled);
+  return (await leftRunning(child, descendants, command)) ?? new Error(message);
 }
 
 // The last check before an app's own command starts. Nothing awaits between
@@ -1033,31 +1059,24 @@ export async function startSiteDevServer(input: {
       input.signal?.removeEventListener("abort", abortStart);
     }
 
-    function abortStart() {
+    // The one way a start ends without a ready preview. It brings the child
+    // and its captured descendants down before it answers, so a caller never
+    // sees the failure while the dev server still holds the site folder.
+    // stopChild also runs the Windows tree kill before the wrapper signal,
+    // so the taskkill cannot race a dead wrapper pid and orphan the server.
+    function endUnready(message: string) {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, "App dev server start was cancelled.")
-        .then(reject);
+      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, message).then(reject);
+    }
+
+    function abortStart() {
+      endUnready("App dev server start was cancelled.");
     }
 
     const failTimer = setTimeout(() => {
-      if (resolved) return;
-      stopped = true;
-      // Bring the child fully down before rejecting. stopChild awaits before it
-      // delivers SIGTERM (non-win32) / completes the tree kill (win32), so
-      // rejecting first would let a caller observe the failure and delete or
-      // switch the workspace while the dev server is still alive, holding the
-      // site dir. stopChild also sequences the Windows tree kill before the
-      // wrapper signal; signalling first would let the taskkill race a dead
-      // wrapper pid and orphan the real dev server.
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
-        reject(
-          new Error(
-            `App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
-          ),
-        );
-      });
+      endUnready(`App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`);
     }, input.readyTimeoutMs ?? 15000);
 
     if (input.signal?.aborted) abortStart();
@@ -1070,7 +1089,8 @@ export async function startSiteDevServer(input: {
       if (stream === "stdout") stdoutCarry = carry;
       else stderrCarry = carry;
       const url = detectDevUrl(combined);
-      if (!url || resolved) return;
+      // A ready line during a cancel's cleanup is too late: that start ended.
+      if (!url || resolved || stopped) return;
       resolved = true;
       clearTimers();
       // The immediate post-spawn snapshot (above) can race a wrapper that
@@ -1103,7 +1123,7 @@ export async function startSiteDevServer(input: {
             },
             descendants.awaitAll,
           ),
-        stillRunning: () => survivingProcesses(child, descendants.captured),
+        stillRunning: () => survivingProcesses(child, descendants),
       });
     }
 
@@ -1118,14 +1138,13 @@ export async function startSiteDevServer(input: {
       maybeResolve(text, "stderr");
     });
     child.once("error", (error) => {
+      if (resolved || stopped) return;
+      stopped = true;
       clearTimers();
-      if (!resolved) reject(error);
+      reject(error);
     });
     child.once("exit", (code, signal) => {
-      clearTimers();
-      if (!resolved && !stopped) {
-        reject(new Error(`App dev server exited before it was ready (code=${code}, signal=${signal}).`));
-      }
+      endUnready(`App dev server exited before it was ready (code=${code}, signal=${signal}).`);
     });
   });
 }
@@ -1166,6 +1185,12 @@ async function stopChild(
   if (process.platform === "win32") {
     if (!alreadyExited) {
       await killChildTreeWin32(child);
+      // A captured helper whose own parent died is outside the wrapper's
+      // tree, so taskkill /T cannot reach it. POSIX signals these through
+      // alsoSignal; here each one still alive gets its own tree kill.
+      for (const descendantPid of capturedDescendants()) {
+        await killProcessTreeWin32(descendantPid, () => false);
+      }
     } else {
       // The wrapper is already gone, so taskkill /PID <wrapper> /T has
       // nothing live left to walk from — reach every descendant this
@@ -1304,60 +1329,57 @@ export async function buildSite(input: {
   });
 
   const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const command = { command: input.command, args, cwd, logs };
     let settled = false;
-    let timedOut = false;
-    // A cancelled build answers once its stop is confirmed, not at the exit.
-    let aborting = false;
+    // A cancelled or timed-out build answers once its stop is confirmed,
+    // not at the exit its own stop causes.
+    let ending = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    function finish(code: number | null) {
+    function settle(answer: () => void) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       input.signal?.removeEventListener("abort", abortBuild);
-      resolve(code);
+      answer();
+    }
+    const finish = (code: number | null) => settle(() => resolve(code));
+    // Processes left running fail the build, whatever its exit code.
+    const answerWith = (left: AppCommandStillRunningError | null, code: number | null) =>
+      left ? settle(() => reject(left)) : finish(code);
+
+    // The one way a build ends early, for a cancel and a timeout alike.
+    function endEarly(reason: string) {
+      if (settled || ending) return;
+      ending = true;
+      if (timer) clearTimeout(timer);
+      pushLog(logs, "system", reason);
+      void cancelledStart(child, descendants, command, reason).then((error) =>
+        answerWith(error instanceof AppCommandStillRunningError ? error : null, null));
     }
 
     function abortBuild() {
-      if (settled || aborting) return;
-      aborting = true;
-      pushLog(logs, "system", "Build cancelled.");
-      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, "Build cancelled.").then((error) => {
-        if (settled) return;
-        if (!(error instanceof AppCommandStillRunningError)) {
-          finish(null);
-          return;
-        }
-        settled = true;
-        if (timer) clearTimeout(timer);
-        reject(error);
-      });
+      endEarly("Build cancelled.");
     }
 
-    timer = setTimeout(() => {
-      timedOut = true;
-      pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
-      // stopChild sequences the Windows tree kill before the wrapper signal
-      // and resolves once the child exits (or the kill grace lapses).
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
-    }, timeoutMs);
+    timer = setTimeout(() => endEarly(`Build timed out after ${timeoutMs}ms.`), timeoutMs);
     if (input.signal?.aborted) abortBuild();
     else input.signal?.addEventListener("abort", abortBuild, { once: true });
     child.stdout.on("data", (chunk) => pushLog(logs, "stdout", String(chunk)));
     child.stderr.on("data", (chunk) => pushLog(logs, "stderr", String(chunk)));
     child.once("error", (error) => {
       pushLog(logs, "system", error.message);
-      finish(null);
+      if (!ending) finish(null);
     });
     child.once("exit", (code) => {
-      // A timed-out build reports exitCode null regardless of how the kill
-      // is delivered (taskkill termination surfaces as a plain exit code).
+      // An early end answers on its own path, with exitCode null.
+      if (ending) return;
       // The wrapper itself has already exited here — stopChild's own guard
       // (and its awaiting every in-flight capture) makes this a no-op
       // unless a descendant was actually captured while the wrapper was
       // alive.
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => {
-        if (!aborting) finish(timedOut ? null : code);
-      });
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll)
+        .then(() => leftRunning(child, descendants, command))
+        .then((left) => answerWith(left, code));
     });
   });
 

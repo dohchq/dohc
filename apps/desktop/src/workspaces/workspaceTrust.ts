@@ -156,9 +156,11 @@ export function createWorkspaceTrust(dependencies: {
   }
 
   // Writes Restricted Mode to the file. A failed write leaves the workspace
-  // restricted in memory; trying again writes it.
+  // restricted in memory; trying again writes it. A grant made since the
+  // revoke is the person's last action, so it stays.
   const persistRevocation = (workspaceId: string): Promise<void> =>
     serial(async () => {
+      if (!restricted.has(workspaceId)) return;
       const records = await load();
       if (!records.some((each) => each.workspaceId === workspaceId)) return;
       await save(records.filter((each) => each.workspaceId !== workspaceId));
@@ -202,6 +204,8 @@ export function createWorkspaceTrust(dependencies: {
     },
     revoke,
     persistRevocation,
+    // Whether this run restricted the workspace and nobody trusted it since.
+    isRevoked: (workspaceId: string): boolean => restricted.has(workspaceId),
     // Both, for a caller with nothing to do in between.
     restrict(workspaceId: string): Promise<void> {
       revoke(workspaceId);
