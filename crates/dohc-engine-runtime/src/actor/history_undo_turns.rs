@@ -801,7 +801,6 @@ impl ActorHandle {
                                 let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                                 crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
                                 let mut inverse = inverse?;
-                                let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
                                 if let Some(inverse) = inverse.as_mut() {
                                     inverse.live = inverse_live_edit(tx,&p.workspace,&p.version,member,&inverse.text,turn_open.as_ref())?;
                                 }
