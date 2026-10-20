@@ -16,27 +16,29 @@ import { once } from 'node:events';
 // Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
 // inside each 30 s test.
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
-// dohc stages the macOS compiler for Apple silicon only.
+// dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
-const owned={skip:!(process.platform==='win32'||darwin),timeout:30000};
-const macos={skip:!darwin,timeout:30000};
-// macOS runs the worker under the staged official Node and owner. Seatbelt
-// stops any Node that loads libraries from outside its own file.
+const confined=darwin||process.platform==='linux'&&process.arch==='x64';
+const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
+const ownerOnly={skip:!confined,timeout:30000};
+// macOS and Linux run the worker under the staged official Node and owner, as
+// the installed app does. Seatbelt stops any Node that loads libraries from
+// outside its own file.
 let staged,stagedRoot;
 before(async()=>{
-  if(!darwin)return;
+  if(!confined)return;
   stagedRoot=await mkdtemp(join(tmpdir(),'dohc-compiler-process-staged-'));
   staged=join(stagedRoot,'app-compiler');
   await stageAppCompiler({destination:staged});
 });
 after(()=>stagedRoot&&rm(stagedRoot,{recursive:true,force:true}));
-const runtimeFor=workerPath=>darwin?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,workerPath};
-const compilerWorker=()=>darwin?join(staged,'worker.mjs'):fileURLToPath(new URL('../src/workspaces/closedAppCompilerWorker.ts',import.meta.url));
-// A worker writes its marker into its build directory, the only place macOS
-// lets it write, so each test gives the supervisor its own temporary root.
+const runtimeFor=workerPath=>confined?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,workerPath};
+const compilerWorker=()=>confined?join(staged,'worker.mjs'):fileURLToPath(new URL('../src/workspaces/closedAppCompilerWorker.ts',import.meta.url));
+// A worker writes its marker into its build directory, the only place the
+// owner's sandbox lets it write, so each test gives the supervisor its own temporary root.
 const markerLine=`const marker=process.env.TMPDIR?process.env.TMPDIR+'ready.json':process.argv[2];`;
-// On macOS the owner removes the build directory, marker included, as soon as
-// the worker ends. A worker that would end on its own waits for the test's go
+// The owner removes the build directory, marker included, as soon as the
+// worker ends. A worker that would end on its own waits for the test's go
 // file after writing its marker.
 const proceedLine=`const proceed=next=>{if(!process.env.TMPDIR)return next();const timer=setInterval(()=>{if(existsSync(process.env.TMPDIR+'go')){clearInterval(timer);next();}},5);};`;
 async function fixture(t,source){
@@ -61,20 +63,20 @@ async function readJson(paths,what){
   throw new Error(`${what} readiness timed out.`);
 }
 const waitForFile=path=>readJson(async()=>[path],'Fixture');
-// The worker's marker: in its build directory on macOS, at argv[2] elsewhere.
-const waitForMarker=({directory,scratch})=>darwin
+// The worker's marker: in its build directory under an owner, at argv[2] on Windows.
+const waitForMarker=({directory,scratch})=>confined
   ?readJson(async()=>(await readdir(scratch).catch(()=>[])).filter(name=>name.startsWith('dohc-app-compiler-')).map(name=>join(scratch,name,'ready.json')),'Worker')
   :waitForFile(join(directory,'ready.json'));
 const proceed=async({scratch})=>{
-  if(!darwin)return;
+  if(!confined)return;
   for(const name of await readdir(scratch))if(name.startsWith('dohc-app-compiler-'))await writeFile(join(scratch,name,'go'),'');
 };
 const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
-// macOS still lists a killed process until its parent reaps it, and launchd
-// reaps orphans soon after.
+// macOS and Linux still list a killed process until its parent reaps it, and
+// launchd or init reaps orphans soon after.
 const zombie=pid=>{try{return execFileSync('ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim().startsWith('Z');}catch{return false}};
 async function exited(pid,ms=5000){
-  for(const deadline=Date.now()+ms;Date.now()<deadline;await delay(20))if(!alive(pid)||darwin&&zombie(pid))return true;
+  for(const deadline=Date.now()+ms;Date.now()<deadline;await delay(20))if(!alive(pid)||confined&&zombie(pid))return true;
   return false;
 }
 const processGroup=pid=>Number(execFileSync('ps',['-o','pgid=','-p',String(pid)],{encoding:'utf8'}).trim());
@@ -118,9 +120,9 @@ test('aggregate memory covers two sub-limit native allocations',owned,async t=>{
   const {runtime}=await fixture(t,`import{spawn}from'node:child_process';globalThis.held=Buffer.alloc(160*1024*1024,1);const child=spawn(process.execPath,['-e','try{globalThis.held=Buffer.alloc(160*1024*1024,1);setInterval(()=>{},1000)}catch{process.exit(42)}'],{windowsHide:true,stdio:'inherit'});child.once('exit',code=>process.exit(code??1));`);
   // Each process's 160 MiB allocation fits 320 MiB alone. Together with the
   // Node runtimes, only the aggregate exceeds the bound. Windows refuses the
-  // allocation. macOS samples the sum, so the child holds its allocation:
+  // allocation. macOS and Linux sample the sum, so the child holds its allocation:
   // a peak shorter than one sample can pass unseen.
-  await assert.rejects(runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:{...bounds,maxMemoryBytes:320*1024*1024}}),darwin?{reason:'memory'}:error=>error.reason==='exit'&&/\(42\)/.test(error.message));
+  await assert.rejects(runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:{...bounds,maxMemoryBytes:320*1024*1024}}),confined?{reason:'memory'}:error=>error.reason==='exit'&&/\(42\)/.test(error.message));
 });
 test('compiles captured app bytes in the job and snapshots before caller mutation',owned,async()=>{
   const bytes=Buffer.from('document.body.textContent="before";');
@@ -170,21 +172,21 @@ test('parent rejects forged worker file and build identities',{...owned,timeout:
   }
 });
 
-test('macOS memory bound stops an allocator and the process it started',macos,async t=>{
+test('memory bound stops an allocator and the process it started',ownerOnly,async t=>{
   const context=await fixture(t,`import{spawn}from'node:child_process';import{existsSync,writeFileSync}from'node:fs';${markerLine}${proceedLine}const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});child.once('spawn',()=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:child.pid}));proceed(()=>{const held=[];for(;;)held.push(Buffer.alloc(32<<20,1));});});`);
   const running=runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds});
   const ids=await waitForMarker(context);await proceed(context);
   await assert.rejects(running,{reason:'memory'});
   for(const pid of [ids.worker,ids.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
 });
-test('macOS process bound stops a spawn loop and leaves no member of the group',macos,async t=>{
+test('process bound stops a spawn loop and leaves no member of the group',ownerOnly,async t=>{
   const {runtime}=await fixture(t,`import{spawn}from'node:child_process';const go=()=>{spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});setImmediate(go);};go();`);
   let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};
   await assert.rejects(runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:{...bounds,maxMemoryBytes:4*1024*1024*1024}}),{reason:'processes'});
   // One kill round can miss a fork in flight. The owner repeats until none is left.
   assert.equal(liveGroupMembers(owner),0);
 });
-test('macOS sandbox keeps the worker inside its compiler and build directory',macos,async t=>{
+test('sandbox keeps the worker inside its compiler and build directory',ownerOnly,async t=>{
   const outside=await mkdtemp(join(tmpdir(),'dohc-compiler-outside-'));t.after(()=>rm(outside,{recursive:true,force:true}));
   await writeFile(join(outside,'canary.txt'),'secret');
   let connections=0;const server=createServer(socket=>{connections++;socket.destroy();});server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>server.close());
@@ -200,13 +202,17 @@ console.log(JSON.stringify({env:Object.keys(process.env),
   await symlink(outside,join(directory,'escape'));
   runtime.workerArgs=[join(outside,'canary.txt'),join(directory,'escape','canary.txt'),join(outside,'written.txt'),String(server.address().port)];
   const result=JSON.parse(Buffer.from((await runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds})).stdout).toString());
-  assert.deepEqual(result.env,['TMPDIR']);
+  // Node stops at startup when Linux's OpenSSL configuration exists but stays unreadable.
+  assert.deepEqual(result.env.sort(),darwin?['TMPDIR']:['OPENSSL_CONF','TMPDIR']);
   assert.equal(result.ownSource,'allowed');assert.equal(result.buildWrite,'allowed');
-  for(const name of ['canary','symlinkEscape','outsideWrite','shell','tcp'])assert.equal(result[name],'EPERM',name);
+  // Seatbelt refuses with EPERM. Landlock refuses files and programs with
+  // EACCES, and seccomp refuses the socket with EPERM.
+  for(const name of ['canary','symlinkEscape','outsideWrite','shell'])assert.equal(result[name],darwin?'EPERM':'EACCES',name);
+  assert.equal(result.tcp,'EPERM');
   assert.equal(connections,0);
   await assert.rejects(readFile(join(outside,'written.txt')),{code:'ENOENT'});
 });
-test('macOS worker cannot stop or kill its owner',macos,async t=>{
+test('worker cannot stop or kill its owner',ownerOnly,async t=>{
   const {runtime}=await fixture(t,`import{writeSync}from'node:fs';const attempt=signal=>{try{process.kill(process.ppid,signal);return'sent';}catch(error){return error.code;}};
 writeSync(2,JSON.stringify({stop:attempt('SIGSTOP'),kill:attempt('SIGKILL')})+'\\n');process.kill(0,'SIGKILL');`);
   // A killed or stopped owner could not report the worker's own exit.
@@ -214,7 +220,7 @@ writeSync(2,JSON.stringify({stop:attempt('SIGSTOP'),kill:attempt('SIGKILL')})+'\
   assert.equal(error.reason,'exit');assert.equal(error.message,'Compiler exited (1).');
   assert.deepEqual(JSON.parse(error.diagnostics.split('\n')[0]),{stop:'EPERM',kill:'EPERM'});
 });
-test('macOS teardown kills a descendant that left the group while its parent lives',macos,async t=>{
+test('teardown kills a descendant that left the group while its parent lives',ownerOnly,async t=>{
   const context=await fixture(t,`import{spawn}from'node:child_process';import{writeFileSync}from'node:fs';${markerLine}const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});child.once('spawn',()=>writeFileSync(marker,JSON.stringify({descendant:child.pid})));setInterval(()=>{},1000);`);
   let owner;context.runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
   const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
@@ -224,7 +230,7 @@ test('macOS teardown kills a descendant that left the group while its parent liv
   controller.abort();await running;
   assert.equal(await exited(descendant),true);
 });
-test('macOS owner leads its own group when started inside the caller group',macos,async t=>{
+test('owner leads its own group when started inside the caller group',ownerOnly,async t=>{
   const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
   const build=await mkdtemp(join(context.scratch,'dohc-app-compiler-'));
   const {runtime}=context;
@@ -236,7 +242,7 @@ test('macOS owner leads its own group when started inside the caller group',maco
   assert.equal((await closed)[0],125,'a closed lifeline ends the build as a lost caller');
   assert.equal(await exited(pid),true);
 });
-test('macOS sandbox accepts quoted and symlinked compiler paths',macos,async t=>{
+test('sandbox accepts quoted and symlinked compiler paths',ownerOnly,async t=>{
   // Node refuses a module path with a backslash; the owner's own tests cover escaping one.
   const quoted=await mkdtemp(join(tmpdir(),'dohc "quoted" root-'));t.after(()=>rm(quoted,{recursive:true,force:true}));
   await writeFile(join(quoted,'worker.mjs'),`let input='';for await(const chunk of process.stdin)input+=chunk;console.log(input);`);
@@ -246,12 +252,12 @@ test('macOS sandbox accepts quoted and symlinked compiler paths',macos,async t=>
     assert.equal(Buffer.from(result.stdout).toString().trim(),'through the sandbox');
   }
 });
-test('macOS spawn failure removes its build directory',macos,async t=>{
+test('spawn failure removes its build directory',ownerOnly,async t=>{
   const {scratch,runtime}=await fixture(t,'');
   await assert.rejects(runOwnedCompilerProcess({...runtime,ownerExecutable:join(scratch,'missing-owner')},{input:Buffer.alloc(0),bounds}),{reason:'spawn'});
   assert.deepEqual(await readdir(scratch),[]);
 });
-test('macOS cleanup keeps files an escaped process links into its build directory',macos,async t=>{
+test('cleanup keeps files an escaped process links into its build directory',ownerOnly,async t=>{
   const canary=await mkdtemp(join(tmpdir(),'dohc-compiler-canary-'));t.after(()=>rm(canary,{recursive:true,force:true}));
   await writeFile(join(canary,'keep.txt'),'user data');
   // An intermediate process starts the swapper in a new session and exits at
@@ -293,7 +299,7 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
   }
   t.skip('The owner caught the swapper in every round, so no escaped process raced the cleanup.');
 });
-test('macOS owner notices a dead caller while the worker never reads its input',macos,async t=>{
+test('owner notices a dead caller while the worker never reads its input',ownerOnly,async t=>{
   const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
   const {directory,runtime}=context;
   const ownerMarker=join(directory,'owner.json'),callerPath=join(directory,'caller.mjs');
