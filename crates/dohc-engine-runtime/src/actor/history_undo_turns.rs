@@ -9,8 +9,6 @@ struct Member {
     effect: OperationMoment,
     head: String,
     sha: Option<String>,
-    #[serde(default)]
-    inverse: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -234,10 +232,10 @@ impl ActorHandle {
         recorder: Arc<dyn SelfWriteRecorder>,
         token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
-        let _stop = self.stop_link_rewrites();
+        let _stop = self.stop_link_rewrites(&operation);
         let _rewrite = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = Arc::clone(&self.link_rewrite_gate).lock_owned() => guard,
+            guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
         };
         dohc_engine_domain::validate_moment_metadata(
             "restore",
@@ -288,6 +286,44 @@ impl ActorHandle {
             {
                 return Ok(replay);
             }
+            // Publish one pending job per turn before comparing disk with the head.
+            // The materializer keeps its normal external-edit and preimage checks.
+            for job in self
+                .history_operation_pending_jobs(ws.clone(), operation.clone())
+                .await?
+            {
+                let (w, root, recorder) = (ws.clone(), root.clone(), recorder.clone());
+                let capture = gates[0].clone().lock_owned().await;
+                let sessions = gates[1].clone().lock_owned().await;
+                self.run_undo_turn(
+                    request.clone(),
+                    "write-publication",
+                    None,
+                    move |store, _| {
+                        let _guards = (capture, sessions);
+                        store.with_materialization_status_batch(|store| {
+                            replay_pending_materializations(
+                                store,
+                                &root,
+                                MaterializationReplayScope {
+                                    holds: None,
+                                    workspace_id: &w,
+                                    self_writes: Some(recorder.as_ref()),
+                                    progress: None,
+                                    file_outcomes_settled: false,
+                                    released_hold_paths: None,
+                                },
+                                now,
+                                &dohc_engine_storage::NoFaults,
+                                Some(&HashSet::from([job])),
+                                false,
+                            )
+                        })?;
+                        Ok(())
+                    },
+                )
+                .await?;
+            }
             let (w, o, r, a) = (
                 ws.clone(),
                 operation.clone(),
@@ -322,18 +358,17 @@ impl ActorHandle {
                         .into_iter()
                         .map(|mut effect| {
                             let head = signature(conn, &w, &version, &effect.object_id)?;
-                            let inverse = if effect.operation == "write" {
-                                let text=link_inverse_input(conn,&w,&version,&effect)?;
+                            if effect.operation == "write" {
+                                link_inverse_input(conn,&w,&version,&effect)?;
                                 effect.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w,version,effect.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                                 effect.before_path=None;
-                                Some(text)
-                            } else {None};
+                            }
                             let sha = if effect.operation == "rename" || effect.operation == "write" {
                                 Some(rename_head_sha(conn, &w, &version, &effect.object_id)?)
                             } else {
                                 None
                             };
-                            Ok(Member { effect, head, sha, inverse })
+                            Ok(Member { effect, head, sha })
                         })
                         .collect::<Result<Vec<_>, RuntimeError>>()
                 })?;
@@ -480,10 +515,23 @@ impl ActorHandle {
                 .ok_or_else(corrupt)?
                 .clone();
             let disk_root = root.clone();
-            let (disk, policy) = tokio::task::spawn_blocking(move || {
+            let (read_db, p) = (db.clone(), plan.clone());
+            let (disk, policy, inverse) = tokio::task::spawn_blocking(move || {
+                let inverse = (|| -> Result<Option<String>, RuntimeError> {
+                    if member.effect.operation != "write" {
+                        return Ok(None);
+                    }
+                    let store = EngineStore::open_read_only(&read_db)?;
+                    store
+                        .read_with(|conn| {
+                            link_inverse_input(conn, &p.workspace, &p.version, &member.effect)
+                        })
+                        .map(Some)
+                })();
                 (
                     disk_check(&disk_root, &member),
                     crate::search::read_engine_search_policy(&disk_root),
+                    inverse,
                 )
             })
             .await
@@ -525,7 +573,7 @@ impl ActorHandle {
                         let inverse = checks.and_then(|()| {
                             let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                             crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
-                            undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),member.inverse.as_deref(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now)).map_err(Into::into)
+                            undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),inverse?.as_deref(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now)).map_err(Into::into)
                         });
                         match inverse {
                             Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,

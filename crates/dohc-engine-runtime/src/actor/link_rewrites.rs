@@ -17,40 +17,51 @@ use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome, 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct RewriteStop(Arc<AtomicU64>);
+#[derive(Default)]
+pub(super) struct RewriteState {
+    pub gate: Arc<tokio::sync::Mutex<()>>,
+    stops: Mutex<HashMap<String, usize>>,
+}
+pub(super) struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let mut stops = self.0.stops.lock().unwrap();
+        let count = stops.get_mut(&self.1).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            stops.remove(&self.1);
+        }
     }
 }
 
 struct Plan {
-    stops: Arc<AtomicU64>,
+    state: Arc<RewriteState>,
     version: String,
     operation: String,
     rename: OperationMoment,
     paths: Vec<String>,
-    revision: i64,
     candidates: incoming::Candidates,
 }
 
 fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError> {
-    if plan.stops.load(Ordering::SeqCst) > 0 {
+    if plan
+        .state
+        .stops
+        .lock()
+        .unwrap()
+        .contains_key(&plan.operation)
+    {
         return Ok(false);
     }
-    let revision: i64 = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,plan.version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
     let undo: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",params![ws,plan.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-    Ok(!undo && revision == plan.revision && conn.query_row(
+    Ok(!undo && conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)
          AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?5)
          AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_order>?6 AND operation IN ('rename','delete'))",
@@ -116,9 +127,15 @@ fn save(
 }
 
 impl ActorHandle {
-    pub(super) fn stop_link_rewrites(&self) -> RewriteStop {
-        self.link_rewrite_stops.fetch_add(1, Ordering::SeqCst);
-        RewriteStop(self.link_rewrite_stops.clone())
+    pub(super) fn stop_link_rewrites(&self, operation: &str) -> RewriteStop {
+        *self
+            .link_rewrites
+            .stops
+            .lock()
+            .unwrap()
+            .entry(operation.into())
+            .or_default() += 1;
+        RewriteStop(self.link_rewrites.clone(), operation.into())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -136,7 +153,7 @@ impl ActorHandle {
     ) -> Result<Value, RuntimeError> {
         let _pass = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = Arc::clone(&self.link_rewrite_gate).lock_owned() => guard,
+            guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
         };
         let receipt = Arc::new(Receipt {
             key: request,
@@ -158,66 +175,68 @@ impl ActorHandle {
                 Ok(store.database_path().to_path_buf())
             })
             .await?;
-        let stops = self.link_rewrite_stops.clone();
+        let state = self.link_rewrites.clone();
         let (plan, mut result) = tokio::task::spawn_blocking(move || -> Result<_, RuntimeError> {
-                let mut store = EngineStore::open_read_only(&db)?;
-                store.read_with(|conn| conn.execute_batch("BEGIN")).map_err(StorageError::corrupt_public)?;
-                #[cfg(test)]
-                let _turn = tests::Turn::start(&ws, "plan");
-                let prior = store.read_with(|conn| r.read(conn))?;
-                if let Some((true, reply)) = prior {
-                    return Ok((None, reply));
+            let mut store = EngineStore::open_read_only(&db)?;
+            store
+                .read_with(|conn| conn.execute_batch("BEGIN"))
+                .map_err(StorageError::corrupt_public)?;
+            #[cfg(test)]
+            let _turn = tests::Turn::start(&ws, "plan");
+            let prior = store.read_with(|conn| r.read(conn))?;
+            if let Some((true, reply)) = prior {
+                return Ok((None, reply));
+            }
+            let version = VersionedTextStore::new(&mut store)
+                .get_active_version(&ws)?
+                .version_id;
+            let plan = store.read_with(|conn| -> Result<_, RuntimeError> {
+                let members = operation_moments_in(conn, &ws, &version, &op)?;
+                let renames: Vec<_> = members.iter().filter(|m| m.operation == "rename").collect();
+                let refuse = || DomainError::UndoRefused {
+                    path: op.clone(),
+                    reason: "operation cannot rewrite links",
+                };
+                let [rename] = renames.as_slice() else {
+                    return Err(refuse().into());
+                };
+                let old = rename.before_path.as_deref().ok_or_else(refuse)?;
+                if old.to_lowercase() == rename.path.to_lowercase()
+                    || members.iter().any(|m| {
+                        m != *rename && (m.operation != "write" || m.object_id == rename.object_id)
+                    })
+                {
+                    return Err(refuse().into());
                 }
-                let version = VersionedTextStore::new(&mut store)
-                    .get_active_version(&ws)?
-                    .version_id;
-                let plan = store.read_with(|conn| -> Result<_, RuntimeError> {
-                    let members = operation_moments_in(conn, &ws, &version, &op)?;
-                    let renames: Vec<_> =
-                        members.iter().filter(|m| m.operation == "rename").collect();
-                    let refuse = || DomainError::UndoRefused {
-                        path: op.clone(),
-                        reason: "operation cannot rewrite links",
-                    };
-                    let [rename] = renames.as_slice() else {
-                        return Err(refuse().into());
-                    };
-                    let old = rename.before_path.as_deref().ok_or_else(refuse)?;
-                    if old.to_lowercase() == rename.path.to_lowercase()
-                        || members.iter().any(|m| {
-                            m != *rename
-                                && (m.operation != "write" || m.object_id == rename.object_id)
-                        })
-                    {
-                        return Err(refuse().into());
-                    }
-                    let mut paths = Resolver::paths_for_version(conn, &ws, &version)?;
-                    paths.sort();
-                    let mut candidates = incoming::candidates(conn, &ws, &version, old, &["wikilink"])?;
-                    let written: HashSet<_> =
-                        members.iter().map(|m| m.object_id.as_str()).collect();
-                    candidates.sources.retain(|(object, path)| {
-                        !written.contains(object.as_str()) && !path.starts_with("shared-with-me/")
-                    });
-                    candidates.unchecked.retain(|path| {
-                        path != &rename.path && !path.starts_with("shared-with-me/")
-                    });
-                    let revision = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-                    let plan = Plan {
-                        version, operation: op.clone(), revision, stops,
-                        rename: (*rename).clone(),
-                        paths,
-                        candidates,
-                    };
-                    if !valid(conn, &ws, &plan)? {
-                        return Err(refuse().into());
-                    }
-                    Ok(plan)
-                })?;
-                let result = prior.map_or(json!({"documents":0,"links":0}), |(_, result)| result);
+                let mut paths = Resolver::paths_for_version(conn, &ws, &version)?;
+                paths.sort();
+                let mut candidates = incoming::candidates(conn, &ws, &version, old, &["wikilink"])?;
+                let written: HashSet<_> = members.iter().map(|m| m.object_id.as_str()).collect();
+                candidates.sources.retain(|(object, path)| {
+                    !written.contains(object.as_str()) && !path.starts_with("shared-with-me/")
+                });
+                candidates
+                    .unchecked
+                    .retain(|path| path != &rename.path && !path.starts_with("shared-with-me/"));
+                let plan = Plan {
+                    version,
+                    operation: op.clone(),
+                    state,
+                    rename: (*rename).clone(),
+                    paths,
+                    candidates,
+                };
+                if !valid(conn, &ws, &plan)? {
+                    return Err(refuse().into());
+                }
+                Ok(plan)
+            })?;
+            let result = prior.map_or(json!({"documents":0,"links":0}), |(_, result)| result);
 
-                Ok((Some(plan), result))
-            }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+            Ok((Some(plan), result))
+        })
+        .await
+        .map_err(|_| RuntimeError::ActorUnavailable)??;
         let Some(plan) = plan else {
             return Ok(result);
         };
@@ -256,15 +275,21 @@ impl ActorHandle {
         let initially_open = Arc::new(initially_open);
         let mut unchecked = plan.candidates.unchecked.clone();
         let mut cursor = 0;
+        let mut stopped = false;
         while cursor < plan.candidates.sources.len() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
+            let serial = tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = session_ops.clone().lock_owned() => guard,
+            };
             let (ws, p, open) = (workspace.clone(), plan.clone(), initially_open.clone());
             let (next_cursor, sources, skipped, admitted) = self
                 .run(move |store, _| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
+                    let _admission = serial;
                     let started = Instant::now();
                     let mut sources = Vec::new();
                     let mut skipped = Vec::new();
@@ -276,6 +301,8 @@ impl ActorHandle {
                     }
                     let mut next = cursor;
                     while next < p.candidates.sources.len() && next - cursor < 16 {
+                        #[cfg(test)]
+                        tests::source();
                         let (object, path) = &p.candidates.sources[next];
                         if open.contains(object) {
                             skipped.push(path.clone());
@@ -302,6 +329,7 @@ impl ActorHandle {
                 .await?;
             unchecked.extend(skipped);
             if !admitted {
+                stopped = true;
                 unchecked.extend(
                     plan.candidates.sources[cursor..]
                         .iter()
@@ -367,6 +395,8 @@ impl ActorHandle {
                     let started = Instant::now();
                     let mut skipped = Vec::new();
                     while let Some((object, head, text, links)) = prepared.pop_front() {
+                    #[cfg(test)]
+                    tests::source();
                     let source_path = head.path.clone();
                     let key = DocKey::new(&ws, &p.version, &object)?;
                     let lease = match leases.acquire_internal(&key) {
@@ -384,6 +414,7 @@ impl ActorHandle {
                         .get_active_version(&ws)?
                         .version_id;
                     if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
+                        stopped = true;
                         return Ok(false);
                     }
                     let current =
@@ -465,10 +496,11 @@ impl ActorHandle {
                     if committed { next_result = next; } else { skipped.push(source_path); }
                     if started.elapsed() >= Duration::from_millis(5) { break; }
                     }
-                    Ok((prepared, next_result, skipped))
+                    Ok((prepared, next_result, skipped, stopped))
                 }).await?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
+                stopped = committed.3;
             }
         }
         unchecked.sort();
@@ -480,7 +512,7 @@ impl ActorHandle {
         self.run(move |store, _| {
             #[cfg(test)]
             let _turn = tests::Turn::start(&workspace, "reply");
-            save(store, &receipt, true, &result, faults.as_ref())?;
+            save(store, &receipt, !stopped, &result, faults.as_ref())?;
             Ok(())
         })
         .await?;

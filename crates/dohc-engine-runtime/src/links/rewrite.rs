@@ -42,13 +42,6 @@ pub(crate) fn replace(text: &str, replacements: &[(Range<usize>, String)]) -> St
     result
 }
 
-fn escape(target: &str) -> String {
-    target
-        .replace('\\', "\\\\")
-        .replace(']', "\\]")
-        .replace('|', "\\|")
-}
-
 fn relative_path(source: &str, target: &str) -> String {
     let directory = source
         .rsplit_once('/')
@@ -118,17 +111,14 @@ pub(crate) fn forward(
         if after.resolve(source, &candidate) != Some(new) {
             return None;
         }
-        edits.push((target.range, escape(&format!("{candidate}{fragment}"))));
+        edits.push((target.range, format!("{candidate}{fragment}")));
     }
     let count = edits.len();
     Some((replace(text, &edits), count))
 }
 
-/// Myers frontiers preserve occurrence positions through later edits.
-fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usize)>> {
+fn myers<T: PartialEq>(a: &[T], b: &[T]) -> Option<Vec<(Range<usize>, usize)>> {
     use std::collections::HashMap;
-    let a: Vec<_> = before.chars().collect();
-    let b: Vec<_> = after.chars().collect();
     let mut frontier = HashMap::from([(1isize, 0usize)]);
     let mut trace = Vec::new();
     'search: for d in 0..=a.len() + b.len() {
@@ -156,16 +146,6 @@ fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usiz
             }
         }
     }
-    let ao: Vec<_> = before
-        .char_indices()
-        .map(|(i, _)| i)
-        .chain([before.len()])
-        .collect();
-    let bo: Vec<_> = after
-        .char_indices()
-        .map(|(i, _)| i)
-        .chain([after.len()])
-        .collect();
     let (mut x, mut y) = (a.len(), b.len());
     let mut ranges = Vec::new();
     for (d, previous) in trace.iter().enumerate().rev() {
@@ -185,13 +165,92 @@ fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usiz
             y -= 1;
         }
         if x < end {
-            ranges.push((ao[x]..ao[end], bo[y]));
+            ranges.push((x..end, y));
         }
         x = px;
         y = py;
     }
     ranges.reverse();
     Some(ranges)
+}
+// Strip common edges before Myers, so a long insertion costs no edit frontier.
+fn matching<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, usize)> {
+    let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
+    let suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut ranges = Vec::new();
+    if prefix > 0 {
+        ranges.push((0..prefix, 0));
+    }
+    // An exhausted hunk remains changed; it cannot invalidate exact edges.
+    if let Some(middle) = myers(&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]) {
+        ranges.extend(
+            middle
+                .into_iter()
+                .map(|(r, b)| (r.start + prefix..r.end + prefix, b + prefix)),
+        );
+    }
+    if suffix > 0 {
+        ranges.push((a.len() - suffix..a.len(), b.len() - suffix));
+    }
+    ranges
+}
+
+/// Diff lines first, then characters only inside the changed line hunks.
+fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usize)>> {
+    let a: Vec<_> = before.split_inclusive('\n').collect();
+    let b: Vec<_> = after.split_inclusive('\n').collect();
+    let offsets = |lines: &[&str]| {
+        std::iter::once(0)
+            .chain(lines.iter().scan(0, |sum, line| {
+                *sum += line.len();
+                Some(*sum)
+            }))
+            .collect::<Vec<_>>()
+    };
+    let (ao, bo) = (offsets(&a), offsets(&b));
+    let mut ranges = Vec::new();
+    let (mut x, mut y) = (0, 0);
+    for (r, start) in matching(&a, &b)
+        .into_iter()
+        .chain([(a.len()..a.len(), b.len())])
+    {
+        let left = &before[ao[x]..ao[r.start]];
+        let right = &after[bo[y]..bo[start]];
+        let chars = |s: &str| {
+            s.char_indices()
+                .map(|(i, _)| i)
+                .chain([s.len()])
+                .collect::<Vec<_>>()
+        };
+        let (ac, bc) = (chars(left), chars(right));
+        for (cr, cs) in matching(
+            &left.chars().collect::<Vec<_>>(),
+            &right.chars().collect::<Vec<_>>(),
+        ) {
+            ranges.push((ao[x] + ac[cr.start]..ao[x] + ac[cr.end], bo[y] + bc[cs]));
+        }
+        if !r.is_empty() {
+            ranges.push((ao[r.start]..ao[r.end], bo[start]));
+        }
+        (x, y) = (r.end, start + r.len());
+    }
+    let mut joined: Vec<(Range<usize>, usize)> = Vec::new();
+    for (r, start) in ranges {
+        if let Some((prior, p)) = joined.last_mut()
+            && prior.end == r.start
+            && *p + prior.len() == start
+        {
+            prior.end = r.end;
+        } else {
+            joined.push((r, start));
+        }
+    }
+    Some(joined)
 }
 pub(crate) fn inverse(before: &str, after: &str, head: &str) -> Option<String> {
     #[cfg(test)]
@@ -295,6 +354,41 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         assert_eq!(text, "[[old]] [[new#part|label]] [old](a/old.md)");
+    }
+
+    #[test]
+    fn inverse_handles_long_paragraphs_in_changed_and_unchanged_lines() {
+        for head in [
+            format!("[[new|label]] tail {}", "typed ".repeat(2000)),
+            format!("{} [[new|label]] tail", "typed ".repeat(2000)),
+            format!(
+                "{}\n[[new|label]] tail\n{}",
+                "typed ".repeat(2000),
+                "more ".repeat(2000)
+            ),
+            format!("[[new|{}]] tail", "label ".repeat(2000)),
+        ] {
+            assert_eq!(
+                inverse("[[old|label]] tail", "[[new|label]] tail", &head).unwrap(),
+                head.replacen("[[new|", "[[old|", 1)
+            );
+        }
+    }
+
+    #[test]
+    fn forward_preserves_already_escaped_fragment_bytes() {
+        let before = Resolver::new(["old.md".into()]);
+        let after = Resolver::new(["new].md".into()]);
+        let result = forward(
+            r"[[old#part\name|label]]",
+            "source.md",
+            "old.md",
+            "new].md",
+            &before,
+            &after,
+        )
+        .unwrap();
+        assert_eq!(result, (r"[[new%5D#part\name|label]]".into(), 1));
     }
 
     #[test]

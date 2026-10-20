@@ -16,10 +16,11 @@ struct StoreWork {
     rows: usize,
     inverses: usize,
     commits: usize,
+    sources: usize,
 }
 thread_local! {
     static STORE_WORK: std::cell::Cell<StoreWork> = const { std::cell::Cell::new(StoreWork {
-        reads: 0, writes: 0, rows: 0, inverses: 0, commits: 0,
+        reads: 0, writes: 0, rows: 0, inverses: 0, commits: 0, sources: 0,
     }) };
 }
 const INVERSE_PROBE: &str = "CREATE TEMP TRIGGER undo_proof_inverse AFTER INSERT ON moments WHEN NEW.metadata_origin='restore' BEGIN SELECT 'undo-proof-inverse'; END;";
@@ -67,6 +68,13 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     let work = STORE_WORK.with(std::cell::Cell::get);
     assert_eq!(work.inverses, 2, "count rows, not inverse statements");
     assert!(work.reads >= 2 && work.writes >= 1);
+}
+pub(in crate::actor) fn source() {
+    STORE_WORK.with(|cell| {
+        let mut work = cell.get();
+        work.sources += 1;
+        cell.set(work);
+    });
 }
 // Start on the actor, so queued Y.Doc work cannot enter this turn's counters.
 pub(in crate::actor) fn begin_turn(request: &str) {
@@ -1373,13 +1381,13 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
     let mut times = Vec::new();
     for p in phases.iter().filter(|p| p.actor) {
         let w = p.store_work.unwrap();
-        let cap = if forward { 16 } else { 1 };
+        assert!(w.sources <= 16);
         // A write inverse replaces an existing search entry, including its FTS
         // shadow rows. The delete-inverse proof above keeps its smaller bounds.
         assert!(
-            w.reads <= 128 * cap
-                && w.writes <= if forward { 128 * cap } else { 512 }
-                && w.rows <= if forward { 256 * cap } else { 512 },
+            w.reads <= if forward { 4 + 64 * w.sources } else { 128 }
+                && w.writes <= if forward { 2 + 112 * w.sources } else { 512 }
+                && w.rows <= if forward { 8 + 96 * w.sources } else { 512 },
             "{}: reads={} writes={} rows={}",
             p.phase,
             w.reads,
@@ -1390,7 +1398,7 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
         assert!(
             w.commits
                 <= if forward {
-                    16
+                    w.sources.max(1)
                 } else if p.phase == "rename-placement" {
                     3
                 } else {

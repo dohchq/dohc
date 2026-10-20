@@ -3337,19 +3337,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("file_search_key.sql"),
         sets_user_version: None,
     },
-    Migration {
-        ordinal: 64,
-        id: "link-rewrite-alias-revision",
-        sql: "CREATE TABLE link_rewrite_revisions (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(workspace_id,version_id)) STRICT;
-              CREATE TRIGGER link_rewrite_alias_insert AFTER INSERT ON path_aliases BEGIN
-                INSERT INTO link_rewrite_revisions VALUES(NEW.workspace_id,NEW.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;
-              CREATE TRIGGER link_rewrite_alias_delete AFTER DELETE ON path_aliases BEGIN
-                INSERT INTO link_rewrite_revisions VALUES(OLD.workspace_id,OLD.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;
-              CREATE TRIGGER link_rewrite_alias_update AFTER UPDATE ON path_aliases WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id OR OLD.path IS NOT NEW.path OR OLD.object_id IS NOT NEW.object_id BEGIN
-                INSERT INTO link_rewrite_revisions VALUES(OLD.workspace_id,OLD.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1;
-                INSERT INTO link_rewrite_revisions VALUES(NEW.workspace_id,NEW.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;",
-        sets_user_version: None,
-    },
+
 ];
 
 /// The ordinary pull pass whose applied pages await their terminal commit.

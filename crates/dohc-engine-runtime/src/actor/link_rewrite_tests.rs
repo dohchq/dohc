@@ -67,6 +67,9 @@ pub(super) fn after_read(conn: &Connection, ws: &str, object: &str) {
         hook(conn, object);
     }
 }
+pub(super) fn source() {
+    undo_probe::source();
+}
 struct Fixture {
     actor: ActorHandle,
     supervisor: Arc<crate::WorkspaceSupervisor>,
@@ -225,6 +228,25 @@ impl Fixture {
             )
             .await
     }
+    async fn publish(&self) {
+        let jobs = self
+            .actor
+            .history_operation_pending_jobs(self.ws.clone(), OP.into())
+            .await
+            .unwrap();
+        for job in jobs {
+            self.actor
+                .materialize_replay_selected_for_fence(
+                    self.root.to_path_buf(),
+                    self.ws.clone(),
+                    Arc::new(()),
+                    vec![job],
+                    9,
+                )
+                .await
+                .unwrap();
+        }
+    }
     async fn restart(&mut self) {
         let supervisor = self.supervisor.clone();
         tokio::task::spawn_blocking(move || supervisor.close_all())
@@ -332,6 +354,25 @@ async fn an_alias_change_during_parse_stops_the_remaining_sources() {
     let result = f.pass("alias-change", Arc::new(NoFaults)).await.unwrap();
     assert_eq!(result["documents"], 0);
     assert_eq!(result["uncheckedCount"], 3);
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = None;
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM path_aliases WHERE workspace_id=?1 AND path='old.md'",
+                    [ws],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, RuntimeError>(())
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let resumed = f.pass("alias-change", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(resumed["documents"], 3);
+    assert_eq!(resumed["complete"], true);
     f.close().await;
 }
 
@@ -401,15 +442,39 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
     f.edit(
         "source-0000",
         "source-0000.md",
-        "typing [[new#part|changed label]] [[./new.md]] [old](old.md) [[new]]",
+        &format!(
+            "typing [[new#part|changed label]] [[./new.md]] [old](old.md) [[new]]\n\n{}",
+            "Long paragraph. ".repeat(3000)
+        ),
     )
     .await;
     let result = f.undo().await.unwrap();
     assert_eq!(result.moments.len(), 2);
     assert_eq!(
         f.text("source-0000.md").await,
-        "typing [[old#part|changed label]] [[./old.md]] [old](old.md) [[new]]"
+        format!(
+            "typing [[old#part|changed label]] [[./old.md]] [old](old.md) [[new]]\n\n{}",
+            "Long paragraph. ".repeat(3000)
+        )
     );
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            store.read_with(|conn| {
+                let plan: String = conn
+                    .query_row(
+                        "SELECT plan_json FROM history_undo_plans WHERE workspace_id=?1",
+                        [ws],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(!plan.contains("Long paragraph"));
+                assert!(!plan.contains("\"inverse\""));
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert!(f.undo().await.unwrap().deduped);
     f.close().await;
 }
@@ -488,6 +553,7 @@ async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
     for removed in [false, true] {
         let f = Fixture::new(1, 1);
         f.pass("rewrite", Arc::new(NoFaults)).await.unwrap();
+        f.publish().await;
         let ws = f.ws.clone();
         f.actor
             .run(move |store, _| {
@@ -543,11 +609,6 @@ async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
             std::fs::rename(
                 f.root.join("source-0000.md"),
                 f.root.join("moved-source.md"),
-            )
-            .unwrap();
-            std::fs::write(
-                f.root.join("moved-source.md"),
-                "[[new#part|label]] [[./new.md]] [old](old.md)",
             )
             .unwrap();
             f.undo().await.unwrap();
@@ -648,7 +709,7 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
         } else {
             OP
         };
-        assert!(
+        assert!(matches!(
             f.actor
                 .history_rewrite_links(
                     f.ws.clone(),
@@ -661,9 +722,12 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     Arc::new(NoFaults),
                     CancellationToken::new()
                 )
-                .await
-                .is_err()
-        );
+                .await,
+            Err(RuntimeError::Domain(DomainError::UndoRefused {
+                reason: "operation cannot rewrite links",
+                ..
+            }))
+        ));
         f.close().await;
     }
 }
@@ -712,7 +776,10 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
         nth: 3,
         seen: AtomicUsize::new(0),
     });
-    assert!(f.pass("partial", fault).await.is_err());
+    assert!(matches!(
+        f.pass("partial", fault).await,
+        Err(RuntimeError::OperationCrashed)
+    ));
     f.restart().await;
     let committed = f
         .actor
@@ -720,19 +787,12 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
         .await
         .unwrap();
     assert_eq!(committed.moments.len(), 3);
-    for i in 0..2 {
-        std::fs::write(
-            f.root.join(format!("source-{i:04}.md")),
-            "[[new#part|label]] [[./new.md]] [old](old.md)",
-        )
-        .unwrap();
-    }
     let fault = Arc::new(CrashNth {
         point: FaultPoint::StorageAfterCommitBeforeAck,
         nth: 1,
         seen: AtomicUsize::new(0),
     });
-    assert!(
+    assert!(matches!(
         f.actor
             .history_undo_in_turns(
                 f.ws.clone(),
@@ -746,9 +806,9 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
                 Arc::new(()),
                 CancellationToken::new(),
             )
-            .await
-            .is_err()
-    );
+            .await,
+        Err(RuntimeError::OperationCrashed)
+    ));
     f.restart().await;
     let replay = f.undo().await.unwrap();
     assert!(!replay.deduped);
@@ -839,7 +899,7 @@ async fn case_only_and_delete_only_operations_refuse() {
             })
             .await
             .unwrap();
-        assert!(
+        assert!(matches!(
             f.actor
                 .history_rewrite_links(
                     f.ws.clone(),
@@ -852,9 +912,12 @@ async fn case_only_and_delete_only_operations_refuse() {
                     Arc::new(NoFaults),
                     CancellationToken::new()
                 )
-                .await
-                .is_err()
-        );
+                .await,
+            Err(RuntimeError::Domain(DomainError::UndoRefused {
+                reason: "operation cannot rewrite links",
+                ..
+            }))
+        ));
         f.close().await;
     }
 }
@@ -977,20 +1040,13 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     );
     let (waits, positions, gaps) = updates.await.unwrap();
     assert!(
-        gaps.iter().all(|g| *g <= 2),
-        "one read and one commit turn at most: {gaps:?}"
+        gaps.iter().all(|g| *g <= 1),
+        "at most one forward turn: {gaps:?}"
     );
     assert!(
         positions.iter().any(|&n| n > 0 && n < 2000),
         "a Y.Doc update must commit between rewrite batches"
     );
-    for i in 0..2000 {
-        std::fs::write(
-            f.root.join(format!("source-{i:04}.md")),
-            "[[new#part|label]] [[./new.md]] [old](old.md)",
-        )
-        .unwrap();
-    }
     let forward_proof = undo_probe::proof(&f.ws, 0, true);
     let committed = Arc::new(tokio::sync::Notify::new());
     undo_probe::notify_inverse(&format!("{}-undo", f.ws), committed.clone());
@@ -1099,15 +1155,8 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(std::sync::Barrier::new(2));
     let (sent, wait) = (reached.clone(), release.clone());
-    let (ws, root) = (f.ws.clone(), f.root.to_path_buf());
-    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
         if object == "source-0016" {
-            for i in 0..20 {
-                let path = format!("source-{i:04}.md");
-                let sha: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path=?2", params![ws,path], |r| r.get(0)).unwrap();
-                let text = dohc_engine_storage::text::read(conn, &sha).unwrap();
-                std::fs::write(root.join(path), text).unwrap();
-            }
             sent.notify_one();
             wait.wait();
         }
@@ -1161,4 +1210,169 @@ async fn a_competing_request_binding_cannot_be_overwritten_with_source_progress(
         })
     }).await.unwrap();
     f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_undo_and_file_creation_do_not_stop_the_pass() {
+    let f = Fixture::new(20, 21);
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            VersionedTextStore::new(store).delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: ws,
+                    version_id: "main".into(),
+                    path: "source-0020.md".into(),
+                    moment_id: "unrelated-delete".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:unrelated".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    std::fs::remove_file(f.root.join("source-0020.md")).unwrap();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let (sent, wait, ws) = (reached.clone(), release.clone(), f.ws.clone());
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
+        if object == "source-0016" {
+            let tx = conn.unchecked_transaction().unwrap();
+            write_text_in_tx(
+                &tx,
+                &write(
+                    &ws,
+                    "unrelated",
+                    "unrelated.md",
+                    "created during the pass",
+                    "unrelated-create",
+                ),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            sent.notify_one();
+            wait.wait();
+        }
+    }));
+    let (forward, undone) = tokio::join!(f.pass("unrelated-undo", Arc::new(NoFaults)), async {
+        reached.notified().await;
+        let undo = f.actor.history_undo_in_turns(
+            f.ws.clone(),
+            "dohc-operation:unrelated".into(),
+            "unrelated-undo-request".into(),
+            None,
+            f.root.to_path_buf(),
+            Arc::new(NoFaults),
+            10,
+            [Arc::default(), f.serial.clone()],
+            Arc::new(()),
+            CancellationToken::new(),
+        );
+        tokio::pin!(undo);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.wait();
+        undo.await
+    });
+    let forward = forward.unwrap();
+    assert_eq!(forward["documents"], 20);
+    assert_eq!(forward["complete"], true);
+    assert_eq!(undone.unwrap().moments.len(), 1);
+    assert_eq!(
+        f.pass("unrelated-undo", Arc::new(NoFaults)).await.unwrap(),
+        forward
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_head_edit_after_read_is_unchecked_and_preserved() {
+    let f = Fixture::new(1, 1);
+    let ws = f.ws.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut input = write(
+            &ws,
+            object,
+            "source-0000.md",
+            "[[old]] peer typing",
+            "peer-edit",
+        );
+        input.metadata_origin = "sync".into();
+        write_text_in_tx(&tx, &input).unwrap();
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES(?1,'peer',1,'moment.append',?2,5,1)", params![ws,json!({"momentId":input.moment_id}).to_string()]).unwrap();
+        tx.commit().unwrap();
+    }));
+    let result = f.pass("peer-edit", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 0);
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
+    assert_eq!(f.text("source-0000.md").await, "[[old]] peer typing");
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        BODY
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_rewrites_publish_before_undo_and_external_disk_edits_still_refuse() {
+    for external in [false, true] {
+        let f = Fixture::new(2, 2);
+        f.pass("pending", Arc::new(NoFaults)).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+            BODY
+        );
+        assert_eq!(
+            f.actor
+                .history_operation_pending_jobs(f.ws.clone(), OP.into())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        if external {
+            std::fs::write(f.root.join("source-0000.md"), "external edit").unwrap();
+            assert!(
+                matches!(f.undo().await, Err(RuntimeError::Domain(DomainError::UndoRefused {
+                reason: "source changed on disk", path
+            })) if path=="source-0000.md")
+            );
+            assert_eq!(
+                std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+                "external edit"
+            );
+            assert!(f.root.join("new.md").is_file());
+        } else {
+            let undone = f.undo().await.unwrap();
+            assert_eq!(undone.moments.len(), 3);
+            assert!(undone.not_restored.is_empty());
+            let placed = f
+                .actor
+                .history_undo_place(
+                    f.ws.clone(),
+                    undone,
+                    f.root.to_path_buf(),
+                    Arc::new(()),
+                    11,
+                    |_| {},
+                )
+                .await;
+            assert!(placed.materialized);
+            assert_eq!(
+                std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+                BODY
+            );
+        }
+        f.close().await;
+    }
 }
