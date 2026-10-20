@@ -17,6 +17,7 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
+  "dohc_duplicate_file",
   "dohc_move_path",
   "dohc_delete_path",
   "dohc_create_app",

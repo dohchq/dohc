@@ -825,6 +825,21 @@ describe("CLI socket server", () => {
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
   });
 
+  it("duplicates through CLI with agent authority, request replay, and path floors", async () => {
+    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    context.duplicateFile = duplicateFile;
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "source.md", requestId: "duplicate-once"};
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(duplicateFile).toHaveBeenCalledOnce();
+    duplicateFile.mockClear();
+    expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
+    context.readOnly = true;
+    expect(await invoke("fileDuplicate", {...args, requestId: "readonly"})).toMatchObject({ok: false});
+    expect(duplicateFile).not.toHaveBeenCalled();
+  });
+
   it("undoes a move through socket, CLI and MCP with one compensation", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     await writeFile(join(workspaceRoot, "a.txt"), "move body");

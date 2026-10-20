@@ -308,6 +308,13 @@ async function openYDoc(
 }
 
 describe("WorkspaceFileMutationOwner", () => {
+  it("rejects untrusted Duplicate and forged operation ids before workspace admission", async () => {
+    const test = await harness();
+    const payload = {workspaceId: test.workspace.workspaceId, relativePath: "source.md"};
+    await expect(test.owner.duplicateFile({trusted: false}, payload)).rejects.toThrow("Untrusted renderer");
+    await expect(test.owner.duplicateFile(trustedEvent, {...payload, operationId: "dohc-operation:forged"})).rejects.toThrow();
+    expect(test.requireWorkspace).not.toHaveBeenCalled();
+  });
   it("stops an Undo waiting on system trash when its workspace retires", async () => {
     const test = await harness();
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
@@ -358,6 +365,7 @@ describe("WorkspaceFileMutationOwner", () => {
     };
     const workspaceId = test.workspace.workspaceId;
     const mutations = [
+      () => test.owner.duplicateFile(staleEvent, {workspaceId, relativePath: "source.md"}),
       () =>
         test.owner.createFile(staleEvent, {
           workspaceId,

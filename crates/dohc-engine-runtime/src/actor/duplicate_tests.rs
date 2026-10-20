@@ -27,7 +27,9 @@ async fn duplicate(
     let result = actor
         .duplicate_file(input(OP), root.to_path_buf(), faults)
         .await;
-    supervisor.close_all()?;
+    tokio::task::spawn_blocking(move || supervisor.close_all())
+        .await
+        .unwrap()?;
     *store = EngineStore::open(&db, 5)?;
     result
 }
@@ -254,7 +256,10 @@ async fn duplicate_one_file_commit_timing() {
             .await
             .unwrap();
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
-        supervisor.close_all().unwrap();
+        tokio::task::spawn_blocking(move || supervisor.close_all())
+            .await
+            .unwrap()
+            .unwrap();
     }
     samples.sort_by(f64::total_cmp);
     println!(

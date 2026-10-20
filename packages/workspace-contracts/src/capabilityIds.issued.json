@@ -244,5 +244,6 @@
   "agent.color.set",
   "links.in",
   "links.resolve",
-  "links.edges"
+  "links.edges",
+  "file.duplicate"
 ]

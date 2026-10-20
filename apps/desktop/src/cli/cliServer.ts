@@ -2190,7 +2190,7 @@ async function dispatch(
   let paths: Awaited<ReturnType<typeof callerPaths>>;
   try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
     if (request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate") {
-      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : "delete"} the file.`);
+      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : request.verb === "fileDuplicate" ? "duplicate" : "delete"} the file.`);
     }
     throw error;
   }
@@ -2202,6 +2202,8 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
         break;
       case "fileDuplicate":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
       case "fileDelete":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
         break;

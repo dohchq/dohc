@@ -756,6 +756,23 @@ impl EngineService {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn duplicate_refuses_forged_operation_and_hold_ids() {
+        assert!(serde_json::from_value::<super::CaptureDuplicateParams>(serde_json::json!({"holdId":"hold-forged","fromPath":"a.md","toPath":"b.md","operationId":"dohc-operation:forged"})).is_err());
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let supervisor = Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = crate::EngineService::with_supervisor(supervisor);
+        let opened = service.workspace_open(&dohc_engine_protocol::transport::RequestContext::unbounded(), serde_json::json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"duplicate-forged","captureMode":"none"})).await.unwrap();
+        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let result = service
+            .capture_duplicate_file(
+                Some(handle.clone()),
+                serde_json::json!({"holdId":"hold-forged","fromPath":"a.md","toPath":"b.md"}),
+            )
+            .await;
+        assert!(result.is_err(), "an arbitrary id never admits a Duplicate");
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
     use crate::EngineService;
     use crate::capture_driver;
     use crate::lock;
