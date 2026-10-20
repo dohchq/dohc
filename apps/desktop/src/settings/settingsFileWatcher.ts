@@ -1,20 +1,57 @@
-import { watch } from "node:fs";
+import { watch, type FSWatcher } from "node:fs";
+import { join } from "node:path";
 
 type WatchDirectory = (
   directory: string,
+  fileName: string,
   listener: (fileName: string | null) => void,
   onError: (error: Error) => void,
 ) => { close(): void };
 
-// Watches the folder, not the file: an editor that saves by renaming a new
-// file over the old one, or by deleting and recreating it, would end a watch
-// held on the old file.
-const watchDirectory: WatchDirectory = (directory, listener, onError) => {
-  const watcher = watch(directory, (_event, fileName) => listener(fileName));
-  watcher.on("error", onError);
-  // The watch never keeps the process alive on its own.
-  watcher.unref();
-  return watcher;
+// macOS starts a directory's FSEvents stream asynchronously. A file watch
+// covers an in-place save during startup; the folder watch survives replacement.
+const watchDirectory: WatchDirectory = (directory, fileName, listener, onError) => {
+  let fileWatcher: FSWatcher | undefined;
+  const closeFile = () => {
+    fileWatcher?.close();
+    fileWatcher = undefined;
+  };
+  const openFile = () => {
+    closeFile();
+    try {
+      fileWatcher = watch(join(directory, fileName), () => listener(fileName));
+      fileWatcher.on("error", onError);
+      fileWatcher.unref();
+    } catch (error) {
+      // A delete or a first launch can leave only the directory to watch.
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  };
+  const directoryWatcher = watch(directory, (event, name) => {
+    if (name !== null && name !== fileName) return;
+    try {
+      if (event === "rename" || !fileWatcher) openFile();
+    } catch (error) {
+      onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    listener(name);
+  });
+  directoryWatcher.on("error", onError);
+  // Neither watch keeps the process alive on its own.
+  directoryWatcher.unref();
+  try {
+    openFile();
+  } catch (error) {
+    directoryWatcher.close();
+    throw error;
+  }
+  return {
+    close: () => {
+      closeFile();
+      directoryWatcher.close();
+    },
+  };
 };
 
 /**
@@ -59,6 +96,7 @@ export function watchSettingsFile(options: {
     try {
       watcher = start(
         options.directory,
+        options.fileName,
         (fileName) => {
           // Some platforms omit the name, so that change may be this file.
           if (fileName === null || fileName === options.fileName) changed();

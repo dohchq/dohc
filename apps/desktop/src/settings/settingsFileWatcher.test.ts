@@ -12,6 +12,7 @@ function fakeDirectory() {
   const watchDirectory = vi.fn(
     (
       _directory: string,
+      _fileName: string,
       next: (fileName: string | null) => void,
       onError: (error: Error) => void,
     ) => {
