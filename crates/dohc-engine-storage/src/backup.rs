@@ -426,8 +426,11 @@ fn restore_test(
     backup_path: &Path,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
-    let copy = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::backup)?;
+    let copy = Connection::open_with_flags(
+        crate::sqlite_path(backup_path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(StorageError::backup)?;
 
     let check: String = copy
         .pragma_query_value(None, "integrity_check", |row| row.get(0))

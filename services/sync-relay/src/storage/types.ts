@@ -794,6 +794,7 @@ export interface SyncRelayStorage {
   storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   nextReplicaHistoryPinAt(workspaceId: string): number | null;
   sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  createReplicaLinkReadService(source:import("../replicaLinkReadService").DevelopmentReplicaReads,watches:Pick<import("../replicaWatches").ReplicaWatches,"holdReader">,activity:Pick<import("../discussionActivity").DiscussionActivityHub,"wakeLog">,freshness:ReturnType<typeof import("../shareReadQueries").createShareReadQueries>["newestFilteredOpFreshness"],key?:string|Uint8Array):ReturnType<typeof import("../replicaLinkReadService").createReplicaLinkReadService>;
   listReplicaHistoryPins(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryList;
   readReplicaHistoryPin(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {pinId: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryRead;
   readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;

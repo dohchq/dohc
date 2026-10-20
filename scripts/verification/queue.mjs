@@ -482,7 +482,7 @@ export const monitorPort = 4250;
 export const launchAgentLabel = "app.dohc.verification-queue";
 export const nightlyAgentLabel = "app.dohc.verification-nightly";
 export const launchAgentsDir = (home = homedir()) => join(home, "Library", "LaunchAgents");
-const guiDomain = () => `gui/${process.getuid()}`;
+export const guiDomain = () => `gui/${process.getuid()}`;
 const launchctl = args => spawnSync("launchctl", args, { encoding: "utf8" });
 
 /** The command that starts the installed service. Starting a running task or LaunchAgent does nothing. */
@@ -657,8 +657,8 @@ export function taskDefinition(root) {
 `;
 }
 
-const plistText = text => `<string>${text.replace(/[&<>]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</string>`;
-const plist = (label, env, entries) => `<?xml version="1.0" encoding="UTF-8"?>
+export const plistText = text => `<string>${text.replace(/[&<>]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</string>`;
+export const plist = (label, env, entries) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -711,7 +711,7 @@ export function nightlyAgentDefinition(root, path = launchPath()) {
  * Unload a LaunchAgent and wait until launchd lets it go. bootout returns while the job may still be stopping;
  * launchd kills a job that has not stopped 20 seconds after it was asked to.
  */
-async function unloadLaunchAgent(label, { command = launchctl, waitMs = 60_000, pollMs = 200 } = {}) {
+export async function unloadLaunchAgent(label, { command = launchctl, waitMs = 60_000, pollMs = 200 } = {}) {
   command(["bootout", `${guiDomain()}/${label}`]);
   for (const deadline = Date.now() + waitMs; command(["print", `${guiDomain()}/${label}`]).status === 0; await sleep(pollMs)) {
     if (Date.now() > deadline) throw new Error(`launchd did not unload ${label}.`);

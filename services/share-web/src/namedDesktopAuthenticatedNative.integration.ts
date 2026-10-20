@@ -168,7 +168,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         selector: {access: "edit", versionId: null, paths: ["docs"]},
         accessEnded: () => false,
         credentials: {relayUrl: audience, token: overrides.token ?? tokens[index]!, userId: users[index]!.id, signal: credentials.signal},
-        assertCurrent, preserveDraft: draft => preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
+        assertCurrent, preserveDraft: async draft => { await preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft); }});
       const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, generation: 1, isCurrent: () => current}),
         acquireWorkspace: () => ({workspace: {workspaceId: localWorkspaceId, rootPath: localRoot, attachmentId: Symbol.for(localWorkspaceId)}, assertCurrent, release() {}}),
         captureFor: () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},

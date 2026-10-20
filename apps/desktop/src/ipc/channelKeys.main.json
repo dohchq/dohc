@@ -134,6 +134,7 @@
   "listSites",
   "listWorkspaceFiles",
   "listWorkspaceHeadings",
+  "liveDraftRecoveryChanged",
   "locateRecordHistoryRun",
   "markChatThreadRead",
   "markPersonalChatFeedSeen",

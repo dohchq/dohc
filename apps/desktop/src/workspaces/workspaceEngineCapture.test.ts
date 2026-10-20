@@ -39,6 +39,7 @@ import {
 import {
   DaemonRefusalError,
   YdocOwnerDraftPendingError,
+  YdocReleasedWithSettleFailureError,
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -58,6 +59,7 @@ import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/li
 import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
+import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
 
 vi.mock("node:timers/promises", { spy: true });
@@ -165,6 +167,7 @@ const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 interface CaptureOptions {
   diskWriter?: EngineDiskWriter;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
+  discardUnsentState?: WorkspaceEngineCaptureOptions["discardUnsentState"];
   store?: CaptureVersionedTextStore;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
@@ -1919,6 +1922,172 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(released).not.toHaveBeenCalled();
     expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
     expect(errors).toHaveBeenCalledWith("draft preservation of notes/a.md", draftError);
+    await engine.stop();
+  });
+
+  // dohc#2308. A replicated document's release can succeed over a refused
+  // save, and its session is then gone. Its text, set aside when the save
+  // over the deleted file was first refused, stays set aside. A draft the
+  // store refuses tells the person.
+  it.each(["kept", "refused"] as const)("sets a deleted file's text aside before a replicated release (%s)", async (store) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const drafts: string[] = [];
+    const preserveUnsentState = vi.fn(async ({doc}: {doc: Y.Doc}) => {
+      if (store === "refused") throw new Error("Draft storage refused.");
+      drafts.push(doc.getText("plainText").toString());
+      return "a".repeat(64);
+    });
+    const discardUnsentState = vi.fn(async () => undefined);
+    const notices = vi.fn();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
+          close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    if (store === "kept") {
+      expect(drafts).toEqual(["typed"]);
+      expect(preserveUnsentState).toHaveBeenCalledWith(expect.objectContaining({path: "notes/a.md", reason: "deleted"}));
+      expect(notices).not.toHaveBeenCalled();
+    } else {
+      expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
+    }
+    engine.beginShutdown();
+    await engine.stop();
+    expect(discardUnsentState).not.toHaveBeenCalled();
+  });
+
+  // A save can write the file and still find it gone, deleted again right
+  // after Save it again. The draft goes only once the file holds the text.
+  it("keeps a deleted file's draft when the file is gone again after a save wrote it", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const preserveUnsentState = vi.fn(async () => "d".repeat(64));
+    const discardUnsentState = vi.fn(async () => undefined);
+    const states: string[] = [];
+    let writes = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        let tokens = 0;
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => {
+            const token = ++tokens;
+            options.onSettleStart?.(token);
+            if (!writes) { options.onSettleError?.(stale, token); throw stale; }
+            const result = {sha256: createHash("sha256").update("typed").digest("hex"), content: "typed", materialized: true};
+            await options.onSettled?.(result as never, token);
+            return result as never;
+          },
+          close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state)});
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
+    writes = true;
+    await session.settleNow();
+    expect(states.at(-1)).toBe("changed-on-disk");
+    await session.close();
+    expect(discardUnsentState).not.toHaveBeenCalled();
+    await engine.stop();
+  });
+
+  // Document A's draft X became obsolete, and removing it failed. Document B's
+  // next draft step retries that removal, and while it is under way A's file
+  // is deleted again: A's refused save writes the same draft X, current
+  // again. The retry must not delete it.
+  it("keeps a draft that is current again while another document's retry removes its older write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const draftDirectory = await createTestScratch("dohc-engine-capture-drafts-");
+    const loopback = new VersionedLoopbackEngine();
+    for (const path of ["notes/a.md", "notes/b.md"]) loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path, text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const store = workspaceDraftStore(draftDirectory, WORKSPACE_ID, {all: () => [], workspaceIdOf: () => undefined});
+    const preserveUnsentState = vi.fn(store.preserveUnsentState);
+    let refusals = 1;
+    const retry = {held: deferred<void>(), holding: deferred<void>(), done: deferred<void>(), handle: ""};
+    const discardUnsentState = vi.fn(async (handle: string) => {
+      if (refusals-- > 0) throw new Error("The draft store is busy.");
+      if (handle !== retry.handle) return await store.discardUnsentState(handle);
+      retry.holding.resolve();
+      await retry.held.promise;
+      await store.discardUnsentState(handle);
+      retry.done.resolve();
+    });
+    const writes = new Map<string, boolean>();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        let tokens = 0;
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: `object-${options.path}`, contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => {
+            const token = ++tokens;
+            options.onSettleStart?.(token);
+            if (!writes.get(options.path)) { options.onSettleError?.(stale, token); throw stale; }
+            const result = {sha256: createHash("sha256").update("typed").digest("hex"), content: "typed", materialized: true};
+            await options.onSettled?.(result as never, token);
+            return result as never;
+          },
+          close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const a = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined});
+    const b = await engine.openYDocSession({path: "notes/b.md", onRemoteUpdate: () => undefined});
+    const handleOf = async (call: number) => await preserveUnsentState.mock.results[call]!.value;
+
+    await expect(a.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
+    retry.handle = await handleOf(0);
+    // A saves, and the removal of X fails.
+    await write(root, "notes/a.md", "typed");
+    writes.set("notes/a.md", true);
+    await a.settleNow();
+    await vi.waitFor(() => expect(discardUnsentState).toHaveBeenCalledOnce());
+
+    // B's draft step retries X's removal, which waits.
+    await expect(b.settleNow()).rejects.toBe(stale);
+    await retry.holding.promise;
+    // A's file is deleted again, and A writes X again.
+    await rm(join(root, "notes/a.md"));
+    writes.set("notes/a.md", false);
+    await expect(a.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledTimes(3));
+    expect((await handleOf(2)).split(":")[0]).toBe(retry.handle.split(":")[0]);
+    retry.held.resolve();
+    await retry.done.promise;
+
+    // Notices lists X, the text A's file never got, and B's draft.
+    expect((await listLiveDraftRecovery(draftDirectory, WORKSPACE_ID)).map(({path, text}) => `${path}: ${text}`).sort())
+      .toEqual(["notes/a.md: typed", "notes/b.md: typed"]);
+    await a.close();
+    await b.close();
     await engine.stop();
   });
 

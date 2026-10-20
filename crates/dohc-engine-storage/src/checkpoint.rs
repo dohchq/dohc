@@ -37,8 +37,11 @@ impl Checkpoints {
     /// The background connection. It never waits for a lock, and it syncs
     /// copied pages as the writer's connection does.
     pub(crate) fn connection(path: &Path) -> Result<Connection, crate::StorageError> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(crate::StorageError::persist)?;
+        let conn = Connection::open_with_flags(
+            crate::sqlite_path(path),
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err(crate::StorageError::persist)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(crate::StorageError::persist)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
@@ -442,6 +445,85 @@ mod tests {
     use crate::{EngineStore, NoFaults, StorageError};
     use dohc_test_scratch::ScratchDir;
     use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_readers_release_checkpoint_locks() {
+        reader_checkpoint_race(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "upstream SQLite UNC misdetection leaks SHM locks for raw verbatim drive paths"]
+    fn raw_verbatim_readers_pin_checkpoint_locks() {
+        reader_checkpoint_race(true);
+    }
+
+    #[cfg(windows)]
+    fn reader_checkpoint_race(raw: bool) {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("reader-race.db");
+        std::fs::File::create(&path).unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let writer = if raw {
+            Connection::open(&path).unwrap()
+        } else {
+            crate::schema::open_engine_db(&path, 0, None).unwrap().conn
+        };
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+                 PRAGMA wal_autocheckpoint=0; CREATE TABLE probe(n);
+                 INSERT INTO probe VALUES(0)",
+            )
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                scope.spawn(move || {
+                    let reader = if raw {
+                        Connection::open(path).unwrap()
+                    } else {
+                        crate::schema::open_engine_db_read_only(&path, None)
+                            .unwrap()
+                            .conn
+                    };
+                    for _ in 0..256 {
+                        reader.execute_batch("BEGIN; SELECT * FROM probe").unwrap();
+                        barrier.wait();
+                        barrier.wait();
+                        reader.execute_batch("ROLLBACK").unwrap();
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                });
+            }
+            let mut pinned = None;
+            for round in 0..256 {
+                barrier.wait();
+                barrier.wait();
+                barrier.wait();
+                // Both read transactions ended. Keep them idle until the
+                // writer checks that no reader still blocks backfill.
+                writer.execute("UPDATE probe SET n=n+1", []).unwrap();
+                let (log, backfilled): (i64, i64) = writer
+                    .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                        Ok((r.get(1)?, r.get(2)?))
+                    })
+                    .unwrap();
+                if log != backfilled {
+                    pinned.get_or_insert((round, log, backfilled));
+                }
+                barrier.wait();
+            }
+            assert!(
+                pinned.is_none(),
+                "finished readers pinned the WAL: {pinned:?}"
+            );
+        });
+    }
 
     fn write(store: &mut EngineStore, n: i64, bytes: usize) {
         store

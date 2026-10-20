@@ -5123,8 +5123,12 @@ export const LiveDraftRecoveryRecord = z.object({
   objectId: z.string().min(1).max(512),
   text: z.string(),
   updateBase64: z.string(),
+  // The text of a file deleted outside dohc.
+  reason: z.literal("deleted").optional(),
 }).strict();
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
+export const LiveDraftRecoveryChangedEvent = z.object({workspaceId: WORKSPACE_ID}).strict();
+export type LiveDraftRecoveryChangedEvent = z.infer<typeof LiveDraftRecoveryChangedEvent>;
 export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), recordId: LiveDraftRecoveryRecord.shape.recordId.optional()}).strict();
 export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), checkpointId: z.string().min(1).optional(), reason: z.enum(["author-refused","invalid-author","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
@@ -6598,6 +6602,9 @@ export const engineYDocAdmissionOperations = {
 export const RetryEngineYDocSavePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
+  // Save it again, on a document whose file was deleted outside dohc: main
+  // first puts the file back. Only that action sends it.
+  recreateFile: z.literal(true).optional(),
 });
 export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
 
@@ -6605,7 +6612,8 @@ export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePaylo
 // for that document when asked. "settled" means the settle ran; its outcome
 // arrives as the session's next save state. "closed" means no session is
 // open, so nothing settled. A settle that could not
-// start or that failed rejects.
+// start or that failed rejects. With `recreateFile`, the session can be one
+// whose tab has closed: its close was refused, so it still holds the text.
 export const RetryEngineYDocSaveResult = z.enum(["settled", "closed"]);
 export type RetryEngineYDocSaveResult = z.infer<typeof RetryEngineYDocSaveResult>;
 export const engineYDocSaveOperations = {
@@ -6781,7 +6789,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
+export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
@@ -7141,6 +7149,10 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // Live push: main wrote or removed a draft it set aside for this
+  // workspace, so listLiveDraftRecovery answers differently. A poke, not the
+  // drafts. Returns an unsubscribe function.
+  onLiveDraftRecoveryChanged(listener: (event: LiveDraftRecoveryChangedEvent) => void): () => void;
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;

@@ -207,6 +207,25 @@ mod linux {
             SYS_lookup_dcookie,
             SYS_syslog,
             SYS_vhangup,
+            // IPC objects are shared across the IPC namespace and Landlock does not mediate them.
+            SYS_shmget,
+            SYS_shmat,
+            SYS_shmdt,
+            SYS_shmctl,
+            SYS_msgget,
+            SYS_msgsnd,
+            SYS_msgrcv,
+            SYS_msgctl,
+            SYS_semget,
+            SYS_semop,
+            SYS_semtimedop,
+            SYS_semctl,
+            SYS_mq_open,
+            SYS_mq_unlink,
+            SYS_mq_timedsend,
+            SYS_mq_timedreceive,
+            SYS_mq_notify,
+            SYS_mq_getsetattr,
         ] {
             rules.insert(syscall, vec![]);
         }

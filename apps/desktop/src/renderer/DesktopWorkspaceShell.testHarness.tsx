@@ -316,6 +316,7 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -485,10 +486,10 @@ function makeBaseBridge(
       truncated: false as const,
       contentHash: "a".repeat(64),
     })),
-    // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call — so a fake that omits it makes every
-    // no-call pin on that read pass for the wrong reason.
-    linksIn: vi.fn(async () => null),
+    // About's Links reads these. Its read of the chats that link to a file is
+    // an ENGINE CAPTURE call, so a fake that omits it makes every no-call pin
+    // on that read pass for the wrong reason.
+    linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     linksEdges: vi.fn(async () => ({ versionId: "main", files: [
@@ -726,6 +727,13 @@ function makeBaseBridge(
       return () => crashReportCallbacks.delete(listener);
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
+    emitLiveDraftRecoveryChanged: (workspaceId: string) => {
+      for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
+    },
+    onLiveDraftRecoveryChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      liveDraftRecoveryCallbacks.add(listener);
+      return () => liveDraftRecoveryCallbacks.delete(listener);
+    }),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     emitWorkspaceActivated: (workspace: Workspace, file?: string) => {
       for (const callback of [...activatedCallbacks]) callback(workspace, file);
