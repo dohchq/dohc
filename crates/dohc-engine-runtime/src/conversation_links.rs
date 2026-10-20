@@ -115,9 +115,11 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             .map_err(sql)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sql)?;
-        for (_, _, _, object) in &rows {
+        for (_, _, id, object) in &rows {
             if let Some(object) = object {
                 enqueue(c, w, object)?;
+            } else {
+                publish(c, &w.ws, &w.channel, id)?;
             }
         }
         if let Some((message, time, id, _)) = rows.last() {
