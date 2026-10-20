@@ -175,11 +175,17 @@ describe("settings file watcher", () => {
       const root = await createTestScratch("dohc-settings-watch-");
       const path = join(root, "dohc-settings.json");
       await writeFile(path, "{}");
-      if (ignoreDirectoryEvents) {
-        const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
-        // Keep the real file watch; late directory events cannot prove this save.
-        vi.mocked(watch).mockImplementationOnce((directory) => fs.watch(directory, () => {}));
-      }
+      const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+      const probeName = "watch-ready";
+      let directoryReady = false;
+      vi.mocked(watch).mockImplementationOnce((directory, listener) =>
+        fs.watch(directory, (event, fileName) => {
+          // Keep the in-place test dependent on the real file watch alone.
+          if (ignoreDirectoryEvents) return;
+          if (fileName === probeName) directoryReady = true;
+          if (typeof listener === "function") listener(event, fileName);
+        }),
+      );
       let next = { content: "{}", changed: deferred() };
       const stop = watchSettingsFile({
         directory: root,
@@ -204,6 +210,11 @@ describe("settings file watcher", () => {
       // Consume the startup reload so only later saves can satisfy these waits.
       try {
         await next.changed.promise;
+        if (!ignoreDirectoryEvents) {
+          // The first probe write may precede FSEvents startup. Keep probing
+          // until the real directory listener hears this unrelated file.
+          while (!directoryReady) await writeFile(join(root, probeName), "ready");
+        }
       } catch (error) {
         stop();
         throw error;
@@ -250,7 +261,7 @@ describe("settings file watcher", () => {
         await writeFile(join(file.root, "dohc-settings.json~"), "{\"a\":3}");
         await rename(join(file.root, "dohc-settings.json~"), file.path);
         await recreated;
-        // The watch outlives the delete: the next save is heard too.
+        // The folder watch survives deletion and hears the next save too.
         const saved = file.changedTo("{\"a\":4}");
         await writeFile(file.path, "{\"a\":4}");
         await saved;
