@@ -110,6 +110,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     lock(&open.capture).as_ref().unwrap().request_shutdown();
     // Wait for the in-flight apply to leave before creating pending jobs.
     drop(open.capture_apply_gate.lock().await);
+    std::fs::rename(root.join("old.md"), root.join("new.md")).unwrap();
     open.actor
         .versioned_text_rename(
             RenameTextFile {
