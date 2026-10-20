@@ -10,7 +10,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-test("Undo refuses an old path occupied by an outside write @undo-outside-write", async () => {
+test("Undo refuses an old path occupied by an outside write @undo-outside-write", async ({}, testInfo) => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -35,7 +35,12 @@ test("Undo refuses an old path occupied by an outside write @undo-outside-write"
     const result = await page.evaluate(input => window.dohcDesktop!.undoHistoryOperation(input), {
       workspaceId: workspace.workspaceId, operationId: moved.operationId,
     });
-    console.log("Undo after outside write", JSON.stringify({ elapsedMs: performance.now() - started, result }));
+    const observation = { elapsedMs: performance.now() - started, result };
+    console.log("Undo after outside write", JSON.stringify(observation));
+    await testInfo.attach("undo-after-outside-write", {
+      body: JSON.stringify(observation, null, 2),
+      contentType: "application/json",
+    });
     expect(result).toEqual({
       ok: false,
       reason: "Cannot undo the rename. old.md now occupies the old path. Move it first.",
