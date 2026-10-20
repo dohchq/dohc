@@ -580,7 +580,7 @@ impl ActorHandle {
                     () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     guard = Arc::clone(&session_ops).lock_owned() => guard,
                 };
-                let (ws, op, author, root, p, r, token, f, leases, resync, mut next_result) = (
+                let (ws, op, author, root, p, r, turn_token, f, leases, resync, mut next_result) = (
                     workspace.clone(),
                     operation.clone(),
                     author.clone(),
@@ -621,7 +621,7 @@ impl ActorHandle {
                     }
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
                     let outcome = (|| -> Result<bool, RuntimeError> {
-                    if token.is_cancelled() {
+                    if turn_token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
                     }
                     let active = VersionedTextStore::new(store)
@@ -709,7 +709,7 @@ impl ActorHandle {
                             }),
                             Some(&|tx| r.save(tx, false, &next)),
                             f.as_ref(),
-                            &token,
+                            &turn_token,
                         ) {
                             Ok(_) => Ok(true),
                             Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
@@ -764,8 +764,9 @@ impl ActorHandle {
         let reply = result.clone();
         let mut reply_locked_since = None;
         loop {
-            let (workspace, receipt, result, faults) = (
-                workspace.clone(),
+            #[cfg(test)]
+            let reply_ws = workspace.clone();
+            let (receipt, result, faults) = (
                 receipt.clone(),
                 result.clone(),
                 faults.clone(),
@@ -778,7 +779,7 @@ impl ActorHandle {
                 .run(move |store, _| {
                     let _admission = serial;
                     #[cfg(test)]
-                    let _turn = tests::Turn::start(&workspace, "reply");
+                    let _turn = tests::Turn::start(&reply_ws, "reply");
                     save(store, &receipt, !stopped, &result, faults.as_ref())?;
                     store
                         .read_with(|conn| {
