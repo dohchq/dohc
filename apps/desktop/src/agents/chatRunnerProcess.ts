@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync } from "node:fs";
-import { delimiter, dirname, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve, win32 } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
@@ -78,8 +78,11 @@ function validPid(pid: number | undefined): pid is number {
   return pid !== undefined && Number.isSafeInteger(pid) && pid > 0;
 }
 
-function appendPathPrefix(prefix: string, current: string | undefined): string {
-  return current ? `${prefix}${delimiter}${current}` : prefix;
+// The runner starts in the workspace folder, so an empty or relative PATH
+// entry would let a program the workspace carries run in place of a real one.
+function runnerSearchPath(prefix: string, current: string | undefined): string {
+  const entries = (current ?? "").split(delimiter).filter((entry) => isAbsolute(entry));
+  return [prefix, ...entries].join(delimiter);
 }
 
 export function resolveDohcCliBinDirectory(input: {
@@ -181,10 +184,14 @@ export function createChatRunnerProcess(
       DOHC_CHAT_ACTOR: "agent",
       DOHC_RUN_ID: input.runId,
       DOHC_STATE_DIR: options.stateDir(),
-      PATH: appendPathPrefix(cliBin, process.env.PATH),
+      PATH: runnerSearchPath(cliBin, process.env.PATH),
       ...(process.env.Path
-        ? { Path: appendPathPrefix(cliBin, process.env.Path) }
+        ? { Path: runnerSearchPath(cliBin, process.env.Path) }
         : {}),
+      // cmd.exe looks in the current directory before PATH, so an npm shim's
+      // bare `node` would run a node.cmd at the workspace root. This turns
+      // that search off for the shim and for anything the agent starts.
+      ...(platform === "win32" ? { NoDefaultCurrentDirectoryInExePath: "1" } : {}),
     };
   }
 
@@ -223,8 +230,16 @@ export function createChatRunnerProcess(
       // and the log descriptor closes in finally.
       const resolved = resolveSpawnCommand(executable, args, {
         env,
+        platform,
         cwd: input.rootPath,
       });
+      // libuv searches the child's cwd for a bare name before PATH, and only
+      // the parent's environment can turn that off. Refuse instead.
+      if (platform === "win32" && !win32.isAbsolute(resolved.command)) {
+        throw new Error(
+          `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
+        );
+      }
       const child = spawnRunner(resolved.command, resolved.args, {
         cwd: input.rootPath,
         env,
