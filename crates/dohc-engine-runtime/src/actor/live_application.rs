@@ -604,10 +604,12 @@ impl ActorLiveApplicationHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            current(&self.actor, &self.token)?;
             if !super::wait_for_reader(&result, attempt).await {
-                return result;
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
             }
+            current(&self.actor, &self.token)?;
         }
         unreachable!()
     }
@@ -682,10 +684,12 @@ impl ActorLiveApplicationHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            current(&self.actor, &self.token)?;
             if !super::wait_for_reader(&result, attempt).await {
-                return result;
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
             }
+            current(&self.actor, &self.token)?;
         }
         unreachable!()
     }
@@ -1555,6 +1559,146 @@ impl ActorHandle {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    async fn native_error_precedes_stale_token(bootstrap: bool) {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let bytes = vec![0, 0];
+        let digest = dohc_engine_storage::hex_sha256(&bytes);
+        let application = owner
+            .register(
+                &mut store,
+                "relay".into(),
+                ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                LiveObjectBinding {
+                    workspace_id: "workspace".into(),
+                    main_version_id: "main".into(),
+                    object_id: "object".into(),
+                    lineage_claim_id: digest.clone(),
+                    current_path: "note.md".into(),
+                    selector_paths: vec!["note.md".into()],
+                    restore_fence_generation: 0,
+                },
+            )
+            .unwrap();
+        drop(store);
+        let actor = super::super::WorkspaceActor::spawn(
+            db.clone(),
+            crate::EngineDbIdentity::of_existing(&db).unwrap(),
+            1,
+            0,
+            None,
+        )
+        .unwrap();
+        let mut actor_handle = actor.handle();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        actor_handle.tx = tx;
+        let token = Arc::new(AtomicBool::new(true));
+        let handle = ActorLiveApplicationHandle {
+            actor: actor_handle,
+            workspace_id: "workspace".into(),
+            token: token.clone(),
+            application,
+        };
+        let respond = tokio::spawn(async move {
+            // Retire the token after enqueue, before delivering the actor error.
+            let Command::LiveApplication(request) = rx.recv().await.unwrap() else {
+                panic!("request")
+            };
+            token.store(false, Ordering::Release);
+            match *request {
+                Request::AdoptOwner { reply, .. } => {
+                    let _ = reply.send(Reserved {
+                        result: Err(ApplicationError::Conflict.into()),
+                        reservation: None,
+                    });
+                }
+                Request::Bootstrap { reply, .. } => {
+                    let _ = reply.send(Reserved {
+                        result: Err(ApplicationError::Conflict.into()),
+                        reservation: None,
+                    });
+                }
+                _ => panic!("unexpected request"),
+            }
+        });
+        let result = if bootstrap {
+            handle
+                .bootstrap(
+                    LiveApplicationBootstrap {
+                        bootstrap_id: "bootstrap".into(),
+                        bootstrap_moment_id: "moment".into(),
+                        baseline_moment_relay_sequence: 0,
+                        baseline_registered_at_ms: 0,
+                        baseline_digest: digest.clone(),
+                        baseline_byte_length: 2,
+                        projected_markdown_digest: dohc_engine_storage::hex_sha256(b""),
+                        projected_markdown_byte_length: 0,
+                    },
+                    bytes,
+                    scratch.path().into(),
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    None,
+                )
+                .await
+                .map(|_| ())
+        } else {
+            handle
+                .adopt_owner(
+                    OwnerAdoptionCut {
+                        relay_database_namespace: "relay".into(),
+                        adoption_id: "adopt".into(),
+                        source_moment_id: "moment".into(),
+                        source_digest: digest,
+                        source_byte_length: 0,
+                        baseline_moment_relay_sequence: 0,
+                        baseline_registered_at_ms: 0,
+                        baseline_bytes: bytes,
+                        expected_local_sequence: 0,
+                        events: vec![],
+                        terminal_receipt: None,
+                        outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                            max_pending_bytes: 1_000_000,
+                            max_pending_age_ms: 100_000,
+                        },
+                    },
+                    1_000_000,
+                    100,
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    Arc::new(()),
+                )
+                .await
+                .map(|_| ())
+        };
+        respond.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::LiveApplication(ApplicationError::Conflict))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_adoption_error_precedes_stale_token() {
+        native_error_precedes_stale_token(false).await;
+    }
+
+    #[tokio::test]
+    async fn native_bootstrap_error_precedes_stale_token() {
+        native_error_precedes_stale_token(true).await;
+    }
 
     type Order = Arc<Mutex<Vec<&'static str>>>;
 

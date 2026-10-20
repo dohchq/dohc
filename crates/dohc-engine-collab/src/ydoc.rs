@@ -755,7 +755,6 @@ impl Ydoc {
                 && matches!(
                     (key, &value),
                     (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
-                        | (LINEAGE_EPOCH_META_KEY, Out::Any(Any::String(_)))
                 );
             if !valid && !item_record && !reader_meta {
                 return Err(invalid());

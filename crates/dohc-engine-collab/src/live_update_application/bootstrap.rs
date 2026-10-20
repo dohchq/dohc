@@ -161,10 +161,23 @@ where
             return Err(E::from(ApplicationError::Conflict));
         }
         applied.map_err(ApplicationError::from).map_err(E::from)?;
+        if occupied && doc.has_reader_source() {
+            let other_occupant: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
+                 OR EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
+                 OR EXISTS(SELECT 1 FROM fork_base_snapshots WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4))
+                 OR EXISTS(SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.current_path], |row| row.get(0)
+            ).map_err(read_sql).map_err(E::from)?;
+            if other_occupant { return Err(E::from(ApplicationError::Conflict)); }
+        }
         if doc.has_missing_updates() {
             return Ok(BootstrapResult::Pending(ApplicationPending::DependenciesUnresolved));
         }
         let reader_source = if doc.has_reader_source() {
+            doc.validate_reader_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
             // Registration can drop a witness. Only an independently received file
             // can supply the bytes this baseline is allowed to preserve.
             let moment: Option<String> = tx.query_row(
@@ -190,12 +203,11 @@ where
                     moment: &moment, path: &binding.current_path, digest: &input.projected_markdown_digest,
                     lineage: &binding.lineage_claim_id, authority: &authority,
                 }, cache.reader_resolver.as_deref()).map_err(ApplicationError::from).map_err(E::from)?;
-            doc.validate_reader_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
             Some(source)
-        } else { None };
-        if reader_source.is_none() {
+        } else {
             doc.validate_public_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
-        }
+            None
+        };
         let mut projection = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?;
         projection.content = if let Some(source) = reader_source { source } else {
             doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content)
@@ -306,15 +318,11 @@ mod tests {
     }
 
     fn reader_vector() -> Vector {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let data: Value =
-            serde_json::from_str(include_str!("../../tests/reader-resolver.json")).unwrap();
+        let (bytes, markdown) = crate::reader_resolver::tests::original_baseline_case("valid");
         Vector {
             name: "reader".into(),
-            bytes: STANDARD
-                .decode(data["checkpoint"].as_str().unwrap())
-                .unwrap(),
-            markdown: data["source"].as_str().unwrap().into(),
+            bytes,
+            markdown,
             registration_accepted: true,
             projection_refused: false,
             kept_frontmatter: None,
@@ -410,7 +418,7 @@ mod tests {
             "foreign-object",
         ] {
             let mut vector = reader_vector();
-            let (bytes, source) = crate::reader_resolver::tests::witness_case(
+            let (bytes, source) = crate::reader_resolver::tests::original_baseline_case(
                 if ["forged", "partial", "stale"].contains(&case) {
                     case
                 } else {
@@ -482,6 +490,74 @@ mod tests {
             projected_markdown_digest: hex_sha256(vector.markdown.as_bytes()),
             projected_markdown_byte_length: vector.markdown.len() as i64,
         }
+    }
+
+    #[test]
+    fn reader_bootstrap_conflicts_with_other_occupants() {
+        for case in [
+            "own",
+            "alias",
+            "other-object",
+            "other-path",
+            "file-only",
+            "fork",
+        ] {
+            let vector = reader_vector();
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            receive_reader_file(&mut store, &vector);
+            store.write_with(&NoFaults, |tx| {
+                match case {
+                    "alias" => { tx.execute("INSERT INTO path_aliases VALUES('workspace','main','other.md','object')", []).unwrap(); }
+                    "other-object" => {
+                        tx.execute("INSERT INTO file_objects VALUES('workspace','foreign',0)", []).unwrap();
+                        tx.execute("INSERT INTO snapshots SELECT workspace_id,version_id,'foreign',path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary,metadata_correlation_id FROM snapshots", []).unwrap();
+                    }
+                    "other-path" => { tx.execute("UPDATE snapshots SET path='other.md'", []).unwrap(); }
+                    "file-only" => { tx.execute("DELETE FROM snapshots", []).unwrap(); }
+                    "fork" => { tx.execute("INSERT INTO fork_base_snapshots SELECT * FROM snapshots", []).unwrap(); }
+                    _ => {}
+                }
+                Ok::<_, StorageError>(())
+            }).unwrap();
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            if case == "own" {
+                assert!(matches!(
+                    result,
+                    Err(Error::Application(ApplicationError::Collab(
+                        CollabError::MarkdownReaderUnavailable
+                    )))
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(Error::Application(ApplicationError::Conflict))),
+                    "{case}: {result:?}"
+                );
+            }
+            assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn reader_bootstrap_validates_before_requesting_proof() {
+        let mut vector = reader_vector();
+        vector.bytes = crate::reader_resolver::tests::baseline_with_meta(&vector.bytes, "foreign");
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        receive_reader_file(&mut store, &vector);
+        let reader = Arc::new(dohc_engine_reader::Reader::new(None));
+        cache.reader_resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )));
+        let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Application(ApplicationError::Collab(
+                    CollabError::MalformedUpdate { .. }
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(reader.dispatch_count(), 0);
     }
     fn fixture(
         vector: &Vector,

@@ -19,7 +19,7 @@ fn corrupt(reason: &str) -> CollabError {
 }
 
 /// Retain the exact source only when this transaction originated a richdoc base.
-/// A missing or stale artifact leaves no bridge. It does not prevent local editing.
+/// Native misses leave no bridge; reader-built notes hold and roll back the seed append.
 pub fn retain_owner_base_source_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
@@ -44,17 +44,6 @@ pub fn retain_owner_base_source_in_tx(
     if original.as_deref() != Some(baseline_digest) {
         return Err(corrupt("original owner base missing"));
     }
-    let artifact: Option<(String, i64)> = tx.query_row(
-        "SELECT b.sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
-        params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
-        |row| Ok((text::from_row(tx, row, 0)?,row.get(1)?)),
-    ).optional().map_err(durable::map_sql)?;
-    let Some((text, byte_length)) = artifact else {
-        return Ok(false);
-    };
-    if text.len() as i64 != byte_length || hex_sha256(text.as_bytes()) != source.blob_sha256 {
-        return Err(corrupt("owner source artifact integrity"));
-    }
     let baseline = durable::binary_blob_for_gate(tx, baseline_digest)?;
     let doc = Ydoc::wire();
     doc.apply(&baseline)?;
@@ -68,8 +57,8 @@ pub fn retain_owner_base_source_in_tx(
         }
         Err(error) => return Err(error),
     };
-    let projection = if doc.has_reader_source() {
-        crate::reader_snapshot::resolve(
+    let byte_length = if doc.has_reader_source() {
+        let text = crate::reader_snapshot::resolve(
             tx,
             key,
             &doc,
@@ -82,14 +71,29 @@ pub fn retain_owner_base_source_in_tx(
                 authority: baseline_digest,
             },
             resolver,
-        )?
+        )?;
+        text.len() as i64
     } else {
-        doc.preserved_markdown_source(&canonical)
+        let artifact: Option<(String, i64)> = tx.query_row(
+            "SELECT b.sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
+            params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
+            |row| Ok((text::from_row(tx, row, 0)?,row.get(1)?)),
+        ).optional().map_err(durable::map_sql)?;
+        let Some((text, byte_length)) = artifact else {
+            return Ok(false);
+        };
+        if text.len() as i64 != byte_length || hex_sha256(text.as_bytes()) != source.blob_sha256 {
+            return Err(corrupt("owner source artifact integrity"));
+        }
+        if doc
+            .preserved_markdown_source(&canonical)
             .unwrap_or(canonical)
+            != text
+        {
+            return Ok(false);
+        }
+        byte_length
     };
-    if projection != text {
-        return Ok(false);
-    }
     let retained: Option<(String,String,String,i64)> = tx.query_row(
         "SELECT path,source_moment_id,source_blob_sha256,source_byte_length FROM ydoc_owner_base_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
         params![key.workspace_id,key.version_id,key.object_id,baseline_digest],

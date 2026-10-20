@@ -1499,7 +1499,7 @@ pub fn adopt_owner_committed(
         }
         let journal = Ydoc::wire();
         journal.apply(&cut.baseline_bytes)?;
-        if imported_source.is_some() && journal.has_reader_source() {
+        if imported_source.as_ref().is_some_and(|source| source.reader_source) {
             journal.validate_reader_baseline(&cut.baseline_bytes)?;
         } else {
             journal.validate_public_baseline(&cut.baseline_bytes)?;

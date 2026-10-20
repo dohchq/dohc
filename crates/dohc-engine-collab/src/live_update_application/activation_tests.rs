@@ -3,15 +3,7 @@ fn imported_fixture() -> Fixture {
 }
 
 fn reader_imported_fixture() -> Fixture {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let data: Value =
-        serde_json::from_str(include_str!("../../tests/reader-resolver.json")).unwrap();
-    imported_source_fixture(Fixture::with_source(
-        data["source"].as_str().unwrap().into(),
-        STANDARD
-            .decode(data["checkpoint"].as_str().unwrap())
-            .unwrap(),
-    ))
+    reader_fixture_case("valid")
 }
 
 #[test]
@@ -996,8 +988,92 @@ fn release_reclaims_only_an_unreferenced_captured_full_state() {
 }
 
 fn reader_fixture_case(case: &str) -> Fixture {
-    let (bytes, text) = crate::reader_resolver::tests::witness_case(case);
+    let (bytes, text) = crate::reader_resolver::tests::original_baseline_case(case);
     imported_source_fixture(Fixture::with_source(text, bytes))
+}
+
+#[test]
+fn reader_activation_validates_before_requesting_proof() {
+    let (bytes, text) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let bytes = crate::reader_resolver::tests::baseline_with_meta(&bytes, "foreign");
+    let mut f = imported_source_fixture(Fixture::with_source(text, bytes));
+    let reader = Arc::new(dohc_engine_reader::Reader::new(None));
+    let resolver = crate::reader_resolver::ReaderResolver::new(reader.clone());
+    let result = capture_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", 1_000_000, &NoFaults, Some(&resolver));
+    assert!(matches!(result, Err(ApplicationError::Collab(CollabError::MalformedUpdate { .. }))), "{result:?}");
+    assert_eq!(reader.dispatch_count(), 0);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_activation_reuses_proof_after_unrelated_relay_progress() {
+    let mut f = reader_fixture_case("valid");
+    let config = serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(config)));
+    let resolver = crate::reader_resolver::ReaderResolver::new(reader.clone());
+    let result = capture_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", 1_000_000, &NoFaults, Some(&resolver));
+    let Err(ApplicationError::Collab(CollabError::MarkdownReaderPending(pending))) = result else { panic!("expected proof miss"); };
+    crate::reader_resolver::tests::run(pending.resolve());
+    assert_eq!(reader.dispatch_count(), 1);
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE sync_relay_cursors SET cursor='10'", []).map_err(write_sql)?;
+        Ok::<_, ApplicationError>(())
+    }).unwrap();
+    let captured = capture_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", 1_000_000, &NoFaults, Some(&resolver)).unwrap();
+    assert_eq!(captured.source.committed_cursor, 10);
+    assert_eq!(reader.dispatch_count(), 1);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_activation_and_adoption_reject_receipts_without_reader_source() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = reader_resolver();
+    let captured = prove_activation(&mut f, &resolver).unwrap();
+    let mut legacy = captured.source;
+    legacy.reader_source = false;
+    let json = serde_json::to_string(&legacy).unwrap();
+    assert!(!json.contains("readerSource"));
+    let id = format!("ordinary-activation-{}", hex_sha256(json.as_bytes()));
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_owner_activation_sources SET activation_id=?1,descriptor_json=?2", params![id,json]).map_err(write_sql)?;
+        Ok::<_, ApplicationError>(())
+    }).unwrap();
+    assert!(resume_imported(&mut f, &id, 1_000_000).is_err());
+    f.cut.adoption_id = id;
+    assert!(f.adopt().is_err());
+    assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_refuses_before_writing_a_fence_or_binding() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = reader_resolver();
+    let captured = prove_activation(&mut f, &resolver).unwrap();
+    f.cut.adoption_id = captured.activation_id;
+    reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    let operation = NativeRestoreFence {
+        operation_id: "reader-restore".into(), relay_database_namespace: "namespace".into(),
+        old_binding: f.binding.clone(), host_id: "host".into(), new_fence: 1,
+        origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
+        terminal: None, applied_sequence: 0,
+    };
+    let before = f.store.read_with(|conn| read_binding(conn, &f.handle.registration.lock().unwrap())).unwrap();
+    let counts = f.counts();
+    for reconnect in [false, true] {
+        let result = if reconnect {
+            f._owner.fence_restore_after_reconnect(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+        } else {
+            f._owner.fence_restore(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+        };
+        assert!(matches!(result, Err(ApplicationError::Collab(CollabError::MarkdownReaderUnavailable))), "{result:?}");
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+        assert_eq!(f.counts(), counts);
+        assert_eq!(f.store.read_with(|conn| read_binding(conn, &f.handle.registration.lock().unwrap())).unwrap(), before);
+        assert!(f.handle.registration.lock().unwrap().live);
+    }
 }
 fn reader_resolver() -> crate::reader_resolver::ReaderResolver {
     let config =
@@ -1100,7 +1176,7 @@ fn reader_owner_base_has_its_own_authority_matrix() {
         )
         .unwrap());
     }
-    for case in ["binding", "claim", "fence", "missing", "self-anchor"] {
+    for case in ["binding", "claim", "fence", "missing"] {
         let mut f = reader_fixture_case("valid");
         let resolver = reader_resolver();
         // Populate a successful cache entry, then change mutable authority.
@@ -1110,7 +1186,7 @@ fn reader_owner_base_has_its_own_authority_matrix() {
             match case {
                 "binding" => { tx.execute("UPDATE ydoc_docs SET path='replaced.md'", []).map_err(write_sql)?; }
                 "claim" => { tx.execute("UPDATE ydoc_docs SET lineage_claim_status='unclaimed',lineage_claim_id=NULL", []).map_err(write_sql)?; }
-                "missing" | "self-anchor" => { f.cut.source_moment_id = "not-recorded".into(); }
+                "missing" => { f.cut.source_moment_id = "not-recorded".into(); }
                 _ => {}
             }
             Ok::<_, ApplicationError>(())
@@ -1139,7 +1215,6 @@ fn reader_imported_activation_has_its_own_authority_matrix() {
         "claim",
         "fence",
         "missing",
-        "self-anchor",
         "update-first",
     ] {
         let mut f = reader_fixture_case(if ["forged", "partial", "stale"].contains(&case) {
@@ -1152,7 +1227,7 @@ fn reader_imported_activation_has_its_own_authority_matrix() {
             match case {
                 "binding" => { tx.execute("UPDATE ydoc_docs SET path='replaced.md'", []).map_err(write_sql)?; }
                 "claim" => { tx.execute("UPDATE ydoc_docs SET lineage_claim_status='unclaimed',lineage_claim_id=NULL", []).map_err(write_sql)?; }
-                "missing" | "self-anchor" | "update-first" => { tx.execute("DELETE FROM snapshots", []).map_err(write_sql)?; }
+                "missing" | "update-first" => { tx.execute("DELETE FROM snapshots", []).map_err(write_sql)?; }
                 _ => {}
             }
             Ok::<_, ApplicationError>(())

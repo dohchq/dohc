@@ -200,11 +200,15 @@ pub fn capture_imported_owner_activation(
         adoption::require_local_replay_budget(tx, key, max_bytes)?;
         let local = durable::load_doc_in(tx, key)?;
         if local.has_missing_updates() { return Err(ApplicationError::Conflict); }
+        let reader_source = local.has_reader_source();
+        let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
+        let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
+        if reader_source { original_doc.validate_reader_baseline(&baseline_bytes)?; }
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
-        let text = if local.has_reader_source() {
-            let authority = serde_json::to_string(&(&namespace, cursor, &epoch, &stream))
+        let text = if reader_source {
+            let authority = serde_json::to_string(&(&namespace, &epoch, &stream))
                 .map_err(|_| ApplicationError::Corrupt)?;
             crate::reader_snapshot::resolve(tx, key, &local, &projection,
                 &crate::reader_snapshot::SnapshotIdentity {
@@ -222,14 +226,10 @@ pub fn capture_imported_owner_activation(
         }
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-        let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
-        let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
-        if local.has_reader_source() {
-            original_doc.validate_reader_baseline(&baseline_bytes)?;
-        } else {
+        if !reader_source {
             original_doc.validate_public_baseline(&baseline_bytes)?;
         }
-        let source = ImportedOwnerSource {version: 1, reader_source: local.has_reader_source(), relay_database_namespace: namespace.to_owned(),
+        let source = ImportedOwnerSource {version: 1, reader_source, relay_database_namespace: namespace.to_owned(),
             workspace_id: key.workspace_id.clone(), main_version_id: key.version_id.clone(), object_id: key.object_id.clone(),
             lineage_claim_id: lineage, current_path: path.to_owned(), replication_epoch: epoch, stream_identity: stream,
             committed_cursor: cursor, base_origin_id, base_origin_seq, base_relay_seq, source_moment_id: moment,
@@ -352,7 +352,10 @@ pub(super) fn matches_imported_state(
     source: &ImportedOwnerSource,
     max_bytes: usize,
 ) -> Result<bool, ApplicationError> {
-    if local.has_reader_source() {
+    if local.has_reader_source() != source.reader_source {
+        return Ok(false);
+    }
+    if source.reader_source {
         let bytes =
             get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
         let retained = Ydoc::wire();

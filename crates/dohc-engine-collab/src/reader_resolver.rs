@@ -76,6 +76,7 @@ impl PendingProof {
                             constructed_source(checkpoint, &delta, &proof)
                         }) =>
                     {
+                        // Construct refreshes the old projection hash; constructed_source checks its replacement.
                         // This is a proof on a clone. No returned edit enters the
                         // live document, and no content clock may be changed.
                         Ok(true)

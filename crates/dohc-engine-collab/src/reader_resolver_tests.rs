@@ -651,6 +651,48 @@ fn real_reader_checks_the_current_witness_and_holds_without_a_runtime() {
     ));
 }
 
+pub(crate) fn baseline_with_meta(bytes: &[u8], key: &str) -> Vec<u8> {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(bytes).unwrap())
+        .unwrap();
+    raw.get_or_insert_map("meta")
+        .insert(&mut raw.transact_mut(), key, "unexpected");
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    bytes
+}
+
+/// An original imported base has no successor epoch. Keep the resolver fixture intact.
+pub(crate) fn original_baseline_case(case: &str) -> (Vec<u8>, String) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let (bytes, source) = witness_case(case);
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    raw.get_or_insert_map("meta")
+        .remove(&mut raw.transact_mut(), "dohcLineageEpoch");
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    (bytes, source)
+}
+
+#[test]
+fn reader_baseline_refuses_lineage_epoch() {
+    let (bytes, _) = witness_case("valid");
+    let bytes = baseline_with_meta(&bytes, "dohcLineageEpoch");
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).unwrap();
+    assert!(matches!(
+        doc.validate_reader_baseline(&bytes),
+        Err(CollabError::MalformedUpdate { .. })
+    ));
+}
+
 /// Each caller applies these wire mutations before selecting its own authority.
 pub(crate) fn witness_case(case: &str) -> (Vec<u8>, String) {
     use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
