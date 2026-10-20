@@ -1,11 +1,11 @@
 use dohc_engine_crypto::create_key_file;
 use dohc_engine_domain::{
-    CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretFileStore, SecretWrite,
-    VersionedTextStore,
+    CreateNamedVersion, MergeTextFileFromVersion, RenameTextFile, SecretDelete, SecretDiskIntent,
+    SecretFileStore, SecretWrite, VersionedTextStore, WriteText,
 };
-use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
-use dohc_engine_storage::{EngineStore, JobStatus};
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_runtime::{ActiveVersionSwitch, CancellationToken, NoFaults, WorkspaceSupervisor};
+use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -277,5 +277,217 @@ async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
             .unwrap()
             .status,
         JobStatus::Complete
+    );
+}
+
+fn text_write(version: &str, path: &str, text: &str, moment: &str) -> WriteText {
+    WriteText {
+        workspace_id: WS.into(),
+        version_id: version.into(),
+        object_id: format!("object-{moment}"),
+        path: path.into(),
+        text: text.into(),
+        moment_id: moment.into(),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 1,
+        request_id: None,
+    }
+}
+
+fn complete_pending_jobs(store: &mut EngineStore) {
+    for job in store.list_pending_materialization_jobs().unwrap() {
+        store.mark_materialization_complete(&job.job_id, 1).unwrap();
+    }
+}
+
+fn disk_names(root: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".dohc")
+        .collect();
+    names.sort();
+    names
+}
+
+/// Main has `notes.md`; the draft edits it and renames it to `Notes.md`.
+/// The desktop merges the path Main loses first. With `replay`, both merge
+/// jobs are left pending, as after a crash, and run on reopen.
+async fn text_case_only_merge(replay: bool) {
+    let root = ScratchDir::new().unwrap();
+    if !ignores_case(&root) {
+        return;
+    }
+    let db = engine_db_path(&root).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut texts = VersionedTextStore::new(&mut store);
+        texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
+        texts
+            .write_text(&text_write("main", "notes.md", "old", "base"), &NoFaults)
+            .unwrap();
+        fork(&mut store);
+        let mut texts = VersionedTextStore::new(&mut store);
+        texts
+            .write_text(&text_write("draft", "notes.md", "new", "edit"), &NoFaults)
+            .unwrap();
+        texts
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "draft".into(),
+                    from_path: "notes.md".into(),
+                    to_path: "Notes.md".into(),
+                    moment_id: "rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        complete_pending_jobs(&mut store);
+    }
+    std::fs::write(root.join("notes.md"), "old").unwrap();
+    let merge = |path: &str, now_ms| MergeTextFileFromVersion {
+        workspace_id: WS.into(),
+        target_version_id: "main".into(),
+        source_version_id: "draft".into(),
+        path: path.into(),
+        object_id: format!("merged-{path}"),
+        moment_id: format!("merge-{path}"),
+        request_id: None,
+        conflict_id: format!("conflict-{path}"),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    if replay {
+        let mut store = EngineStore::open(&db, 4).unwrap();
+        for (now_ms, path) in [(4, "notes.md"), (5, "Notes.md")] {
+            VersionedTextStore::new(&mut store)
+                .merge_text_file_from_version_with(&merge(path, now_ms), &NoFaults, |_, _| Ok(()))
+                .unwrap();
+        }
+        assert_eq!(store.list_pending_materialization_jobs().unwrap().len(), 2);
+        drop(store);
+        let actor = supervisor.open(&db, 6).unwrap().actor;
+        actor
+            .materialize_replay_pending(root.path().into(), WS.into(), 6)
+            .await
+            .unwrap();
+    } else {
+        let actor = supervisor.open(&db, 4).unwrap().actor;
+        for (now_ms, path) in [(4, "notes.md"), (5, "Notes.md")] {
+            actor
+                .versioned_text_merge(
+                    merge(path, now_ms),
+                    root.path().into(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    supervisor.close(&db).unwrap();
+    // Capture respells a head whose file is stored under another spelling,
+    // so the stored name must be the new one.
+    assert_eq!(disk_names(&root), ["Notes.md"]);
+    assert_eq!(std::fs::read(root.join("Notes.md")).unwrap(), b"new");
+    let store = EngineStore::open(&db, 7).unwrap();
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn text_case_only_merge_keeps_the_new_spelling() {
+    text_case_only_merge(false).await;
+}
+
+#[tokio::test]
+async fn text_case_only_merge_survives_reopen_replay() {
+    text_case_only_merge(true).await;
+}
+
+/// A switch's delete that couldn't finish replays after the person renamed
+/// the file only by its capitals and capture recorded that spelling (#2299).
+#[tokio::test]
+async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
+    let root = ScratchDir::new().unwrap();
+    if !ignores_case(&root) {
+        return;
+    }
+    let db = engine_db_path(&root).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut texts = VersionedTextStore::new(&mut store);
+        texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
+        fork(&mut store);
+        VersionedTextStore::new(&mut store)
+            .write_text(&text_write("main", "notes.md", "text", "base"), &NoFaults)
+            .unwrap();
+        complete_pending_jobs(&mut store);
+    }
+    std::fs::write(root.join("notes.md"), "text").unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 2).unwrap().actor;
+    let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    let _ = actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WS.into(),
+                version_id: "draft".into(),
+                root_dir: root.path().into(),
+                self_writes: Arc::new(()),
+                now_ms: 2,
+            },
+            crash.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(crash.fired());
+    supervisor.close(&db).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 3).unwrap();
+        let pending = store.list_pending_materialization_jobs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].job_id.starts_with("version-switch-mat_"));
+        std::fs::rename(root.join("notes.md"), root.join("Notes.md")).unwrap();
+        // Capture records the renamed file, with the bytes the delete expects.
+        let mut renamed = text_write("draft", "Notes.md", "text", "renamed");
+        renamed.now_ms = 3;
+        VersionedTextStore::new(&mut store)
+            .write_text(&renamed, &NoFaults)
+            .unwrap();
+    }
+    let actor = supervisor.open(&db, 4).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().into(), WS.into(), 4)
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    assert_eq!(disk_names(&root), ["Notes.md"]);
+    assert_eq!(std::fs::read(root.join("Notes.md")).unwrap(), b"text");
+    let store = EngineStore::open(&db, 5).unwrap();
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .is_empty()
     );
 }

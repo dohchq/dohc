@@ -686,10 +686,7 @@ pub(super) fn replay_pending_materializations(
     // Filter small replays in SQL; cache the full version only for larger batches.
     let cache_all_paths = jobs
         .iter()
-        .filter(|job| {
-            job.operation == MaterializationOperation::Delete
-                && job.job_id.starts_with("secret-mat_")
-        })
+        .filter(|job| job.operation == MaterializationOperation::Delete)
         .take(9)
         .count()
         > 8;
@@ -704,8 +701,11 @@ pub(super) fn replay_pending_materializations(
         // Replay changes disk and the job ledger, never active tips.
         let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut paths_loaded = false;
+        // A file stored under another spelling of a delete's path, as a disk
+        // that ignores case or normalization allows, belongs to the active
+        // head at that spelling. The delete completes without removing it.
         let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
-            if std::fs::canonicalize(root_dir.join(&job.target_path)).is_err() {
+            if !dohc_engine_files::stored_under_other_spelling(root_dir, &job.target_path) {
                 return Ok::<_, RuntimeError>(false);
             }
             let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
@@ -804,7 +804,7 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
-                    if ordinary_secret && retire_delete(store, &job)? {
+                    if retire_delete(store, &job)? {
                         summary.completed += 1;
                         continue;
                     }
@@ -990,6 +990,10 @@ pub(super) fn replay_pending_materializations(
                         continue;
                     }
                 }
+            }
+            if job.operation == MaterializationOperation::Delete && retire_delete(store, &job)? {
+                summary.completed += 1;
+                continue;
             }
             let outcome = if let Some(self_writes) = scope.self_writes {
                 let (materialized, reported) = materialize_pending_job(

@@ -6446,7 +6446,10 @@ export function createWorkspaceEngineCapture(
         // through the engine's three-way per-file merge (which preserves
         // base/current/incoming when it conflicts). The differing paths come
         // from the engine's metadata listing, one page at a time — the walk
-        // needs paths, never text bodies.
+        // needs paths, never text bodies. Each text merge reaches disk at
+        // once, so paths Main loses merge first, like the protected half
+        // below: a delete cannot then remove a renamed file's other spelling.
+        const deletedPaths: string[] = [];
         const changedPaths: string[] = [];
         {
           let afterPath: string | undefined;
@@ -6457,7 +6460,9 @@ export function createWorkspaceEngineCapture(
               targetVersionId: ENGINE_MAIN_VERSION_ID,
               ...(afterPath !== undefined ? { afterPath } : {}),
             });
-            changedPaths.push(...page.entries.map((entry) => entry.path));
+            for (const entry of page.entries) {
+              (entry.status === "deleted" ? deletedPaths : changedPaths).push(entry.path);
+            }
             afterPath = page.nextAfterPath ?? undefined;
           } while (afterPath !== undefined);
         }
@@ -6491,7 +6496,7 @@ export function createWorkspaceEngineCapture(
         let conflictCount = 0;
         let mergedFileCount = 0;
         let unchangedFileCount = 0;
-        for (const path of changedPaths) {
+        for (const path of [...deletedPaths, ...changedPaths]) {
           if (openConflictPaths.has(path)) {
             conflictCount += 1;
             continue;
