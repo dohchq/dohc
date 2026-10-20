@@ -46,6 +46,86 @@ fn undo_copy(
     test_undo_in_turns(store, WS, OP, "undo-copy", None, root, faults, 10)
 }
 #[tokio::test]
+async fn duplicate_undo_before_create_placement_cancels_copy_without_conflict() {
+    let (root, mut store) = fixture();
+    seed(&mut store, root.path(), "source.md", "source", "Original");
+    // This actor has no placement driver. The create stays pending until Undo.
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let jobs = |store: &EngineStore| -> Vec<(String, String)> {
+        store.read_with(|conn| {
+            conn.prepare("SELECT operation,status FROM materialization_jobs WHERE workspace_id=?1 AND target_path='copy.md' ORDER BY target_generation")?
+                .query_map([WS], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        }).unwrap()
+    };
+    assert_eq!(jobs(&store), vec![("write".into(), "pending".into())]);
+    assert!(!root.path().join("copy.md").exists());
+    let undone = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap();
+    assert!(undone.materialized);
+    assert!(undone.not_restored.is_empty());
+    assert_eq!(undone.moments.len(), 1);
+    assert_eq!(undone.moments[0].object_id, copy.moments[0].object_id);
+    assert_eq!(undone.moments[0].operation, "delete");
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "main", "copy.md")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!root.path().join("copy.md").exists());
+    let settled = vec![
+        ("write".into(), "cancelled".into()),
+        ("delete".into(), "complete".into()),
+    ];
+    assert_eq!(jobs(&store), settled);
+    let preimage: (bool, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT preimage_present,preimage_sha256 FROM materialization_jobs WHERE workspace_id=?1 AND target_path='copy.md' AND operation='delete'",
+                [WS],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(preimage, (false, None));
+    let replay = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap();
+    assert!(replay.deduped && replay.materialized);
+    assert_eq!(replay.moments, undone.moments);
+    // Startup replay must never publish the cancelled create.
+    let db = store.database_path().to_path_buf();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 12).unwrap().actor;
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            actor.materialize_replay_pending_counting(
+                root.path().to_path_buf(),
+                WS.into(),
+                12,
+                None
+            )
+        )
+        .await
+        .expect("startup replay of cancelled Duplicate did not finish")
+        .unwrap(),
+        0
+    );
+    tokio::task::spawn_blocking(move || supervisor.close_all())
+        .await
+        .unwrap()
+        .unwrap();
+    let store = EngineStore::open(&db, 13).unwrap();
+    assert!(!root.path().join("copy.md").exists());
+    assert_eq!(jobs(&store), settled);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("source.md")).unwrap(),
+        "Original"
+    );
+}
+#[tokio::test]
 async fn duplicate_source_edit_undo_and_same_request_replay() {
     let (root, mut store) = fixture();
     seed(&mut store, root.path(), "source.md", "source", "Original");

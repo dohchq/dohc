@@ -10,7 +10,7 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -57,6 +57,7 @@ import {
 import * as Y from "yjs";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import { deferred } from "../testing/deferred";
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
@@ -5131,3 +5132,48 @@ it.each(["pending-placement", "undone", "deleted", "renamed", "superseded", "rep
     } finally {await engine.stop();}
   },
 );
+
+it("drops an undone pending-placement receipt through the real guard before a fresh Duplicate", async () => {
+  const root = await createTestScratch("duplicate-pending-undo-receipt-");
+  await writeFile(join(root, "source.md"), "Original");
+  const loopback = new VersionedLoopbackEngine();
+  const sessions = mockLiveSessions(loopback);
+  const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+  await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+  // Only the operation header is supplied; the receipt guard reads actual heads and moments.
+  vi.spyOn(store, "readHistoryOperation").mockImplementation(async ({operationId}) => ({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"}));
+  const engine = capture(root, {store, rustEngineSessions: sessions});
+  const commits: string[] = [];
+  const pendingCapture: Pick<WorkspaceEngineCapture, "changePathsAs"> = {
+    changePathsAs: (paths, authored, work, removed) => engine.changePathsAs(paths, authored, held => work({
+      ...held,
+      recordDisk: async (_path, files) => [...files],
+      duplicateFile: async (_from, path) => {
+        commits.push(authored.operationId!);
+        await store.writeTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path, text: "Original", metadata: {origin: "api", correlationId: authored.operationId}});
+        const materialized = commits.length > 1;
+        if (materialized) await writeFile(join(root, path), "Original");
+        return {path, materialized};
+      },
+    }), removed),
+  };
+  const operation = {workspace: {workspaceId: WORKSPACE_ID, rootPath: root}, assertCurrent() {}};
+  const run = () => duplicateWorkspaceFile(operation, "source.md", RESTORER, pendingCapture);
+  const directory = join(root, ".dohc/duplicate-pending");
+  try {
+    const pending = await run();
+    expect(pending.materialized).toBe(false);
+    expect(existsSync(join(root, pending.path))).toBe(false);
+    const receipt = join(directory, (await readdir(directory))[0]!);
+    expect(JSON.parse(await readFile(receipt, "utf8"))).toMatchObject({operationId: pending.operationId});
+    // The Rust pending-create proof exercises the Undo transaction and placement.
+    // Apply its resulting head here, without ever writing the cancelled copy.
+    await store.deleteTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path: pending.path, metadata: {origin: "restore"}});
+    const fresh = await run();
+    expect(fresh.operationId).not.toBe(pending.operationId);
+    expect(fresh.path).toBe(pending.path);
+    expect(commits).toEqual([pending.operationId, fresh.operationId]);
+    expect(await readdir(directory)).toEqual([]);
+    expect(await readFile(join(root, fresh.path), "utf8")).toBe("Original");
+  } finally {await engine.stop();}
+});
