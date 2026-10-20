@@ -292,19 +292,18 @@ async fn capture_hold_survives_restart_without_another_attempt() {
     let mut f = Fixture::new().await;
     let before = f.status().await;
     f.close().await;
-    let opened = f
-        .transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                20,
-                "workspace.open",
-                None,
-                json!({"rootDir": f.scratch.path().to_string_lossy(), "workspaceId": WS}),
-            ),
-        )
-        .await
-        .unwrap();
+    let opened = call_with_busy_retry(
+        &f.transport,
+        RequestContext::unbounded(),
+        request(
+            20,
+            "workspace.open",
+            None,
+            json!({"rootDir": f.scratch.path().to_string_lossy(), "workspaceId": WS}),
+        ),
+    )
+    .await
+    .unwrap();
     f.handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     f.scan().await;
     let after = f.status().await;

@@ -1,3 +1,6 @@
+mod common;
+
+use common::service_call_with_busy_retry;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineService as _, RequestContext},
@@ -31,7 +34,7 @@ async fn ordinary_open_refuses_socket_transport_and_requires_base_url() {
         json!({"bearerToken":"owner"}),
     ] {
         let root = ScratchDir::new().unwrap();
-        let result = EngineService::new().call(RequestContext::unbounded(), request("workspace.open",
+        let result = service_call_with_busy_retry(&EngineService::new(),RequestContext::unbounded(), request("workspace.open",
             json!({"rootDir":root.path(),"workspaceId":"owner","captureMode":"none","relay":relay}))).await;
         assert_eq!(
             result.expect_err("ordinary transport must be refused").code,
@@ -125,12 +128,12 @@ async fn replica_open_refuses_foreign_roots_and_network_transports() {
     p.as_object_mut().unwrap().remove("relay");
     cases.push(p);
     for params in cases {
-        let result = service
-            .call(
-                RequestContext::unbounded(),
-                request("workspace.open", params),
-            )
-            .await;
+        let result = service_call_with_busy_retry(
+            &service,
+            RequestContext::unbounded(),
+            request("workspace.open", params),
+        )
+        .await;
         let error = result.expect_err("open must refuse");
         assert_eq!(error.message, "replica-open-refused");
     }
@@ -142,19 +145,19 @@ async fn replica_open_refuses_foreign_roots_and_network_transports() {
 async fn replica_open_forces_passive_without_capture_or_dispatch_recovery() {
     let root = ScratchDir::new().unwrap();
     let service = replica(root.path());
-    let answer = service
-        .call(
-            RequestContext::unbounded(),
-            request(
-                "workspace.open",
-                json!({
-                    "rootDir":root.path(),"workspaceId":"replica","recoverRunningDispatches":true,
-                    "relay":{"socketPath":root.path().join("relay.sock"),"bearerToken":"lease"}
-                }),
-            ),
-        )
-        .await
-        .unwrap();
+    let answer = service_call_with_busy_retry(
+        &service,
+        RequestContext::unbounded(),
+        request(
+            "workspace.open",
+            json!({
+                "rootDir":root.path(),"workspaceId":"replica","recoverRunningDispatches":true,
+                "relay":{"socketPath":root.path().join("relay.sock"),"bearerToken":"lease"}
+            }),
+        ),
+    )
+    .await
+    .unwrap();
     let db = rusqlite::Connection::open(root.path().join(".dohc/engine/engine.db")).unwrap();
     let role: String = db
         .query_row("SELECT store_role FROM engine_ownership", [], |r| r.get(0))

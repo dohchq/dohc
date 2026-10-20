@@ -161,23 +161,23 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "recoverRunningDispatches": false,
-                    "skipStartupMaintenance": true,
-                }),
-            ),
-        )
-        .await
-        .expect("maintenance-free workspace open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": true,
+            }),
+        ),
+    )
+    .await
+    .expect("maintenance-free workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -456,22 +456,22 @@ async fn open_capture_author_stamps_the_startup_baseline() {
     });
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "captureAuthor": author,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "captureAuthor": author,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     wait_until_capture_ready(&transport, &handle, 2).await;
@@ -542,13 +542,13 @@ async fn capture_authors_are_declared_agents_never_a_person() {
     let mut params = json!({"captureAuthor": person});
     params["rootDir"] = json!(scratch.path().to_string_lossy());
     params["workspaceId"] = json!(WORKSPACE_ID);
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            request(8, "workspace.open", None, params),
-        )
-        .await
-        .expect_err("an open never makes a person its capture author");
+    let refused = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(8, "workspace.open", None, params),
+    )
+    .await
+    .expect_err("an open never makes a person its capture author");
     assert_eq!(refused.message, "person-author-refused");
     transport
         .call(
@@ -1415,20 +1415,20 @@ async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
     let opening_transport = Arc::clone(&transport);
     let root = scratch.path().to_path_buf();
     let opening = tokio::spawn(async move {
-        opening_transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": root.to_string_lossy(),
-                        "workspaceId": WORKSPACE_ID
-                    }),
-                ),
-            )
-            .await
+        call_with_busy_retry(
+            &opening_transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": root.to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID
+                }),
+            ),
+        )
+        .await
     });
     tokio::time::timeout(WAIT, async {
         probe.wait_until_paused().await;
@@ -2142,22 +2142,22 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
         let transport = Arc::new(InProcessTransport::new(service));
 
         if !unreadable_policy {
-            let seed = transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        1,
-                        "workspace.open",
-                        None,
-                        json!({
-                            "rootDir": scratch.path().to_string_lossy(),
-                            "workspaceId": WORKSPACE_ID,
-                            "captureMode": "none"
-                        }),
-                    ),
-                )
-                .await
-                .expect("seed existing store");
+            let seed = call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID,
+                        "captureMode": "none"
+                    }),
+                ),
+            )
+            .await
+            .expect("seed existing store");
             let seed_handle: WorkspaceHandle =
                 serde_json::from_value(seed.result["workspace"].clone()).expect("seed handle");
             transport
@@ -2177,20 +2177,20 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
         let opening_transport = Arc::clone(&transport);
         let root = scratch.path().to_path_buf();
         let opening = tokio::spawn(async move {
-            opening_transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        3,
-                        "workspace.open",
-                        None,
-                        json!({
-                            "rootDir": root.to_string_lossy(),
-                            "workspaceId": WORKSPACE_ID
-                        }),
-                    ),
-                )
-                .await
+            call_with_busy_retry(
+                &opening_transport,
+                RequestContext::unbounded(),
+                request(
+                    3,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": root.to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID
+                    }),
+                ),
+            )
+            .await
         });
         tokio::time::timeout(WAIT, async {
             probe.wait_until_paused().await;

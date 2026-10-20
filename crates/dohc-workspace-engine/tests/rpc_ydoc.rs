@@ -3452,16 +3452,6 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
-    async fn call_after_backfill(
-        transport: &InProcessTransport<EngineService>,
-        workspace: &WorkspaceHandle,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> Value {
-        call(transport, workspace, id, method, params).await
-    }
-
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
@@ -3502,7 +3492,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = call_after_backfill(
+    let settled = call(
         &transport,
         &handle,
         4,
@@ -3587,7 +3577,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
-    call_after_backfill(
+    call(
         &transport,
         &handle,
         7,

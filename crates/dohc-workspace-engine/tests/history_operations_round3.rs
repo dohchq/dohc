@@ -7,7 +7,8 @@ use dohc_engine_domain::{
     DomainError, RenameTextFile, VersionedTextStore, WriteText, rename_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    error::ErrorCode,
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults};
@@ -212,8 +213,7 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
     let doc = Ydoc::wire();
     let update =
         base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "Still open"));
-    let response = transport
-        .call(
+    let response = call_with_busy_retry(&transport,
             RequestContext::unbounded(),
             request(
                 22,
@@ -265,8 +265,7 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
         refusal.is_err(),
         "a live restoration endpoint must settle before Undo preflight"
     );
-    let retired_session = transport
-        .call(
+    let retired_session = call_with_busy_retry(&transport,
             RequestContext::unbounded(),
             request(
                 26,
@@ -276,10 +275,10 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
             ),
         )
         .await;
-    assert!(
-        retired_session.is_err(),
-        "the affected endpoint session must be closed"
-    );
+    let retired_session =
+        retired_session.expect_err("the affected endpoint session must be closed");
+    assert_eq!(retired_session.code, ErrorCode::InvalidParams);
+    assert_eq!(retired_session.message, "ydoc-session-not-found");
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(target)).unwrap(),
         "Unsaved target"
