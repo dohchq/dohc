@@ -264,9 +264,22 @@ impl ActorHandle {
             })
             .await?;
         let read_db = db.clone();
-        let prior = tokio::task::spawn_blocking(move || {
+        let (prior, pending) = tokio::task::spawn_blocking(move || {
             let store = EngineStore::open_read_only(&read_db)?;
-            store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref()))
+            store.read_with(|conn| -> Result<_, RuntimeError> {
+                let prior = load(conn, &w, &o, &r, a.as_deref())?;
+                let mut jobs = Vec::new();
+                if prior.is_none() {
+                    let mut stmt = conn.prepare_cached("SELECT DISTINCT j.job_id FROM moments m
+                        JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=m.version_id AND s.object_id=m.object_id
+                        JOIN materialization_jobs j ON j.workspace_id=s.workspace_id AND j.target_path=s.path
+                        WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.operation='write'
+                          AND j.operation='write' AND j.status='pending'").map_err(StorageError::corrupt_public)?;
+                    jobs = stmt.query_map(params![w,o],|r|r.get::<_,String>(0))
+                        .map_err(StorageError::corrupt_public)?.collect::<Result<_,_>>().map_err(StorageError::corrupt_public)?;
+                }
+                Ok((prior,jobs))
+            })
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)??;
@@ -288,10 +301,7 @@ impl ActorHandle {
             }
             // Publish one pending job per turn before comparing disk with the head.
             // The materializer keeps its normal external-edit and preimage checks.
-            for job in self
-                .history_operation_pending_jobs(ws.clone(), operation.clone())
-                .await?
-            {
+            for job in pending {
                 let (w, root, recorder) = (ws.clone(), root.clone(), recorder.clone());
                 let capture = gates[0].clone().lock_owned().await;
                 let sessions = gates[1].clone().lock_owned().await;
