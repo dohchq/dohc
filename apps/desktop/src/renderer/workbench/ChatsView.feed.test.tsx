@@ -1105,6 +1105,7 @@ describe("Home and a file's chat share one reaction store", () => {
             onError={onError}
             notices={ABOUT_NOTICES}
             accessContext={ACCESS_CONTEXT}
+            links={{ revision: 0, onOpenLink: vi.fn() }}
           />
         </div>
       </ReactionStoreProvider>,

@@ -486,10 +486,10 @@ function makeBaseBridge(
       truncated: false as const,
       contentHash: "a".repeat(64),
     })),
-    // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call — so a fake that omits it makes every
-    // no-call pin on that read pass for the wrong reason.
-    linksIn: vi.fn(async () => null),
+    // About's Links reads these. Its read of the chats that link to a file is
+    // an ENGINE CAPTURE call, so a fake that omits it makes every no-call pin
+    // on that read pass for the wrong reason.
+    linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     linksEdges: vi.fn(async () => ({ versionId: "main", files: [

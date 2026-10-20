@@ -3,6 +3,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { ArrowLeft, Info, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ChatFileMentionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   ListFileChatsResponse,
@@ -15,6 +16,7 @@ import {
   AboutChatRow,
   AboutHeader,
   AboutHistory,
+  AboutLinks,
   AboutNote,
   AboutSection,
   type AboutFile,
@@ -29,8 +31,8 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The About rail for a file: its Chats, History and Access. A focused chat
-// tab gets AboutConversationPanel instead.
+// The About rail for a file: its Links, Chats, History and Access. A focused
+// chat tab gets AboutConversationPanel instead.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.
@@ -60,7 +62,7 @@ type ThreadsState =
   | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
-const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { chats: true, history: true, access: false };
+const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { links: true, chats: true, history: true, access: false };
 
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const THREAD_LOAD_RETRY_MS = 1_000;
@@ -120,6 +122,13 @@ export function LinkedChatsPanel(props: {
   history?: {
     revision: number;
     onOpenMoment: (momentId: string, filePath: string) => void;
+  };
+  // The links into the file, read again as `revision` changes. Chats that
+  // link here are read only where `onOpenChat` can open them.
+  links: {
+    revision: number;
+    onOpenLink: (path: string, line: number) => void;
+    onOpenChat?: (mention: ChatFileMentionRecord) => void;
   };
   // Where a section read that failed reports, and what can explain an Access
   // answer that covers nothing. Both stay the same object between renders.
@@ -494,6 +503,16 @@ export function LinkedChatsPanel(props: {
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
       <AboutHeader subject={{ path: filePath }} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
+        <AboutLinks
+          workspaceId={workspaceId}
+          path={filePath}
+          revision={props.links.revision}
+          expanded={sectionsOpen.links}
+          onToggle={toggleSection("links")}
+          onOpenLink={props.links.onOpenLink}
+          {...(props.links.onOpenChat ? { onOpenChat: props.links.onOpenChat } : {})}
+          notices={notices}
+        />
         <AboutSection
           id="chats"
           icon={MessageSquare}
