@@ -472,3 +472,42 @@ fn conversation_links_cancel_wrong_purpose_and_long_labels() {
 
 #[path = "measurement_tests.rs"]
 mod measurement;
+
+#[test]
+fn conversation_links_identity_hydration_seeks_without_sorting_many_aliases() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "a.md");
+    attach(&mut s, "mention", Some("f"), 1, "t", "m");
+    demand(&mut s, "a");
+    drain(&mut s);
+    s.write_with(&NoFaults, |c| {
+        for i in 0..2000 {
+            c.execute(
+                "INSERT INTO path_aliases VALUES('ws','main',?1,'f')",
+                [format!("z/{i:04}.md")],
+            )
+            .map_err(sql)?;
+        }
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    let counter = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&counter))).unwrap();
+    assert_eq!(entries(&s, "a")[0]["file"]["path"], "a.md");
+    s.count_work(None).unwrap();
+    assert!(
+        counter.load(Ordering::Relaxed) * 1000 < 2000,
+        "hydration must not visit every alias"
+    );
+    let plans=s.read_with(|c|c.prepare("EXPLAIN QUERY PLAN SELECT path FROM path_aliases WHERE workspace_id='ws' AND version_id='main' AND object_id='f' ORDER BY path LIMIT 1").unwrap().query_map([],|r|r.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
+    assert!(
+        plans
+            .iter()
+            .any(|s| s.contains("conversation_file_link_alias"))
+    );
+    assert!(plans.iter().all(|s| !s.contains("TEMP B-TREE")));
+}

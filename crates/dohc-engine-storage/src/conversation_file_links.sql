@@ -1,3 +1,6 @@
+-- Cover identity hydration without scanning or sorting aliases across versions.
+CREATE INDEX conversation_file_link_alias ON path_aliases(workspace_id,version_id,object_id,path);
+
 -- Local derived data. State exists only after a conversation is requested.
 CREATE TABLE chat_conversation_file_link_state (
  workspace_id TEXT NOT NULL, channel_id TEXT NOT NULL,

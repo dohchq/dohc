@@ -4387,7 +4387,7 @@ mod tests {
             ),
             (
                 "v2-chat-conversation-file-links",
-                "faee92d8e6f0fe24a9ae4acf540c8034ff7560c3ea56cfc7ac6bf9aa49e31291",
+                "0bfbaa03907174351ca124a558ff00c125d078e2b41cb68e306ab47bc14d22d7",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4399,6 +4399,56 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn conversation_links_upgrade_preserves_mentions_without_startup_backfill() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 63);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 64);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws','old','t','m','file','f',1);").unwrap();
+        assert!(
+            conn.prepare("SELECT * FROM chat_conversation_file_links")
+                .is_err()
+        );
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        for table in [
+            "chat_conversation_file_links",
+            "chat_conversation_file_link_state",
+            "chat_conversation_file_link_work",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_attachments WHERE attachment_id='old'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

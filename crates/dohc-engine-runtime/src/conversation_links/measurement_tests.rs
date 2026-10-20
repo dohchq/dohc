@@ -11,6 +11,7 @@ use std::time::Instant;
 #[ignore = "scheduled conversation Links measurement"]
 async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pages() {
     let mut results = Vec::new();
+    let mut baseline = None;
     for (history, unrelated) in [(1_000_i64, 0_i64), (10_000, 0), (10_000, 10_000)] {
         let (scratch, mut s) = fixture();
         s.write_with(&NoFaults,|c| {
@@ -77,10 +78,17 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         assert!(page_plan.iter().all(|s| !s.contains("TEMP B-TREE")));
         assert_eq!(first["entries"].as_array().unwrap().len(), 100);
         assert_eq!(second["entries"].as_array().unwrap().len(), 100);
-        assert!(
-            first_steps < 30_000 && second_steps < 30_000,
-            "page work grew with history"
+        println!(
+            "PAGE_WORK history={history} unrelated={unrelated} first={first_steps} continuation={second_steps}"
         );
+        if let Some((first_base, second_base)) = baseline {
+            assert!(
+                first_steps <= first_base + 2000 && second_steps <= second_base + 2000,
+                "page work grew with history or unrelated rows"
+            );
+        } else {
+            baseline = Some((first_steps, second_steps));
+        }
         // Retained repair must yield rather than consume all unrelated mentions.
         exec(
             &mut s,
@@ -96,6 +104,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
             attach(&mut s, "id-009999", Some("f-000"), 9999, "t", "m");
             drain(&mut s);
         }
+        exec(&mut s, "DROP INDEX conversation_file_link_alias;");
         s.count_work(None).unwrap();
         drop(s);
         let supervisor = WorkspaceSupervisor::new();
