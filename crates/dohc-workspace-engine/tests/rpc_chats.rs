@@ -5655,3 +5655,93 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         Ok::<_,rusqlite::Error>(())
     }).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_links_rpc_seeds_on_demand_and_pages_with_restart_errors() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+    store.bind_root_token(TOKEN, &NoFaults).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("conversation-links-rpc", "main", 1, &NoFaults)
+        .unwrap();
+    store.write_with(&NoFaults,|c| {
+        c.execute_batch("INSERT INTO chat_channels(workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES('conversation-links-rpc','c','C','c','channel',1,1);
+        INSERT INTO chat_channel_wire_ids VALUES('conversation-links-rpc','wire','c');
+        INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES('conversation-links-rpc','t','T',1,1,'c');
+        INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('conversation-links-rpc','t',0,'m','human','Ada','',1);").map_err(StorageError::persist_public)?;
+        for i in 0..125 {
+            let key=format!("f-{i:03}");
+            c.execute("INSERT INTO file_objects VALUES('conversation-links-rpc',?1,1)",[&key]).map_err(StorageError::persist_public)?;
+            c.execute("INSERT INTO path_aliases VALUES('conversation-links-rpc','main',?1,?2)",rusqlite::params![format!("notes/{key}.md"),key]).map_err(StorageError::persist_public)?;
+            c.execute("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('conversation-links-rpc',?1,'t','m','file',?1,?2)",rusqlite::params![key,i]).map_err(StorageError::persist_public)?;
+        }
+        Ok::<_,StorageError>(())
+    }).unwrap();
+    drop(store);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "conversation-links-rpc").await;
+    let mut id = 1;
+    let params = json!({"channelWireId":"wire","scope":"owner","sharedChannelRowsUncovered":0});
+    let first = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let p = call(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.conversations.listLinks",
+                params.clone(),
+            )
+            .await;
+            if p["indexBuilding"] == false {
+                break p;
+            }
+            assert_eq!(p["complete"], false);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bounded seed finishes");
+    assert_eq!(first["entries"].as_array().unwrap().len(), 100);
+    assert!(first.to_string().len() <= 64 * 1024);
+    let mut next = params.clone();
+    next["cursor"] = first["nextCursor"].clone();
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.conversations.listLinks",
+        next.clone(),
+    )
+    .await;
+    assert_eq!(second["entries"].as_array().unwrap().len(), 25);
+    assert!(second["nextCursor"].is_null());
+    next["scope"] = json!("changed");
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.conversations.listLinks",
+            next
+        )
+        .await
+        .code,
+        ErrorCode::Conflict
+    );
+    let mut invalid = params;
+    invalid["limit"] = json!(1);
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.conversations.listLinks",
+            invalid
+        )
+        .await
+        .code,
+        ErrorCode::InvalidParams
+    );
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}

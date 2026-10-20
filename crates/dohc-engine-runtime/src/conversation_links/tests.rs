@@ -326,3 +326,149 @@ fn conversation_links_repairs_in_windows_and_restarts_after_an_insert() {
     drain(&mut s);
     assert_eq!(entries(&s, "a")[0]["attachmentId"], "new");
 }
+
+#[test]
+fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
+    use dohc_engine_domain::{
+        ChatActorKind, ChatThreadLane, LinkedChatStore, LocalAttachmentInput, StartChannelThread,
+        attachment_id_for,
+    };
+    use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    drain(&mut s);
+    for object in ["local", "sync", "replay"] {
+        alias(&mut s, object, &format!("{object}.md"));
+    }
+    LinkedChatStore::new(&mut s)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: "ws".into(),
+                channel_id: "a".into(),
+                thread_id: "local-thread".into(),
+                message_id: "local-message".into(),
+                title: Some("Local".into()),
+                lane: ChatThreadLane::Posts,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".into(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "local".into(),
+                needs_decision: false,
+                options: vec![],
+                attachments: vec![LocalAttachmentInput {
+                    object_id: "local".into(),
+                    path_hint: None,
+                    heading_text: None,
+                    heading_anchor: None,
+                    heading_occurrence: None,
+                }],
+                now_ms: 10,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let envelope = |origin: &str, kind: &str, payload: Value| ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".into(),
+        origin_id: origin.into(),
+        origin_seq: 0,
+        op_kind: kind.into(),
+        payload,
+        recorded_at_ms: 2000,
+        relay_seq: Some(0),
+    };
+    let attachment = |message: &str, object: &str, time: i64| {
+        json!({
+            "attachmentId":attachment_id_for(message,object,None,None),"threadId":"t","messageId":message,
+            "targetKind":"file","objectId":object,"createdAtMs":time
+        })
+    };
+    let sync = envelope(
+        "direct-attachment",
+        "chat.attachment.add",
+        attachment("m", "sync", 20),
+    );
+    apply_chat_envelope(&mut s, &sync, &NoFaults).unwrap();
+    apply_chat_envelope(&mut s, &sync, &NoFaults).unwrap();
+    let replay = envelope(
+        "pending-attachment",
+        "chat.attachment.add",
+        attachment("late", "replay", 30),
+    );
+    apply_chat_envelope(&mut s, &replay, &NoFaults).unwrap();
+    assert!(
+        !entries(&s, "a")
+            .iter()
+            .any(|r| r["file"]["objectId"] == "replay")
+    );
+    apply_chat_envelope(&mut s,&envelope("late-message","chat.message.append",json!({
+        "messageId":"late","threadId":"t","authorKind":"human","authorDisplayName":"Ada","body":"later","createdAtMs":25
+    })),&NoFaults).unwrap();
+    drain(&mut s);
+    let rows = entries(&s, "a");
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["file"]["objectId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["replay", "sync", "local"]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["mentionedAtMs"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [30, 20, 10]
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["author"]["authorDisplayName"] == "Ada")
+    );
+}
+
+#[test]
+fn conversation_links_cancel_wrong_purpose_and_long_labels() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    drain(&mut s);
+    for i in 0..100 {
+        let id = format!("f-{i:03}");
+        alias(&mut s, &id, &format!("{}-{id}.md", "x".repeat(1800)));
+        attach(&mut s, &id, Some(&id), i, "t", "m");
+    }
+    let first = page(&s, "a", None).unwrap();
+    assert!(first["entries"].as_array().unwrap().len() < 100);
+    assert!(first.to_string().len() <= 64 * 1024);
+    let cursor = first["nextCursor"].as_str().unwrap();
+    assert!(
+        crate::chat_mentions::unseal_cursor::<Value>(
+            "ws",
+            "chats.attachments.listFileMentions",
+            cursor
+        )
+        .is_err()
+    );
+    let token = CancellationToken::new();
+    token.cancel();
+    assert!(matches!(
+        s.read_with(|c| super::page::read(
+            c, "ws", "a", "wire-a", "main", "scope", 0, None, &token
+        )),
+        Err(RuntimeError::Cancelled)
+    ));
+    let mut count = first["entries"].as_array().unwrap().len();
+    let mut next = Some(cursor.to_owned());
+    while let Some(cursor) = next {
+        let p = page(&s, "a", Some(cursor)).unwrap();
+        assert!(p.to_string().len() <= 64 * 1024);
+        count += p["entries"].as_array().unwrap().len();
+        next = p["nextCursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(count, 100);
+}
+
+#[path = "measurement_tests.rs"]
+mod measurement;
