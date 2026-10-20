@@ -1620,15 +1620,23 @@ async fn ydoc_update_retries_a_locked_writer() {
     close(supervisor).await;
 }
 
-
 pub(in crate::actor) fn pause_checkpoint(request: &str) -> [Arc<tokio::sync::Notify>; 2] {
     let hook = [Arc::default(), Arc::default()];
-    probes().lock().unwrap().entry(request.into()).or_default().checkpoint = Some(hook.clone());
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .checkpoint = Some(hook.clone());
     hook
 }
 
 pub(in crate::actor) async fn checkpoint_wait(request: &str) {
-    let hook = probes().lock().unwrap().get_mut(request).and_then(|p| p.checkpoint.take());
+    let hook = probes()
+        .lock()
+        .unwrap()
+        .get_mut(request)
+        .and_then(|p| p.checkpoint.take());
     if let Some([entered, release]) = hook {
         entered.notify_one();
         release.notified().await;

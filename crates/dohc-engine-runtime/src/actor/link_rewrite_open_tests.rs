@@ -988,10 +988,12 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
     let errors: serde_json::Value = serde_json::from_str(&errors).unwrap();
     let errors = errors.as_object().unwrap();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors.values().next().unwrap(), "domain error: storage error: write failed to persist");
+    assert_eq!(
+        errors.values().next().unwrap(),
+        "domain error: storage error: write failed to persist"
+    );
     assert_eq!(restored, BODY);
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preflight_checkpoint_wait_releases_editor_gates() {
@@ -999,11 +1001,20 @@ async fn preflight_checkpoint_wait_releases_editor_gates() {
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("preflight-lock", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
-    f.type_document("source-0000", "typing [[new#part|label]] [[./new.md]] [old](old.md)").await;
-    f.actor.run(|store, _| {
-        store.read_with(|c| c.busy_timeout(Duration::ZERO)).map_err(StorageError::persist_public)?;
-        Ok(())
-    }).await.unwrap();
+    f.type_document(
+        "source-0000",
+        "typing [[new#part|label]] [[./new.md]] [old](old.md)",
+    )
+    .await;
+    f.actor
+        .run(|store, _| {
+            store
+                .read_with(|c| c.busy_timeout(Duration::ZERO))
+                .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let writer = rusqlite::Connection::open(engine_db_path(&f.root).unwrap()).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let request = format!("{}-undo", f.ws);
@@ -1011,8 +1022,15 @@ async fn preflight_checkpoint_wait_releases_editor_gates() {
     let capture = Arc::new(tokio::sync::Mutex::new(()));
     let leases = f.leases.clone();
     let undo = f.actor.history_undo_in_turns(
-        f.ws.clone(), OP.into(), request, None, f.root.to_path_buf(),
-        Arc::new(NoFaults), 10, [capture.clone(), f.serial.clone()], Arc::new(()),
+        f.ws.clone(),
+        OP.into(),
+        request,
+        None,
+        f.root.to_path_buf(),
+        Arc::new(NoFaults),
+        10,
+        [capture.clone(), f.serial.clone()],
+        Arc::new(()),
         Some((Arc::new(move |key| leases.is_held(key)), Arc::new(|_| {}))),
         CancellationToken::new(),
     );
@@ -1022,13 +1040,24 @@ async fn preflight_checkpoint_wait_releases_editor_gates() {
         let updated = tokio::time::timeout(Duration::from_secs(5), async {
             let _capture = capture.lock().await;
             let _sessions = f.serial.lock().await;
-            f.type_document("source-0000", "typing during wait [[new#part|label]] [[./new.md]] [old](old.md)").await;
-        }).await.is_ok();
+            f.type_document(
+                "source-0000",
+                "typing during wait [[new#part|label]] [[./new.md]] [old](old.md)",
+            )
+            .await;
+        })
+        .await
+        .is_ok();
         release.notify_one();
         updated
     };
     let (result, updated) = tokio::join!(undo, edit);
-    let text = f.document("source-0000").await.project(ContentKind::Richdoc).unwrap().content;
+    let text = f
+        .document("source-0000")
+        .await
+        .project(ContentKind::Richdoc)
+        .unwrap()
+        .content;
     drop(lease);
     drop(writer);
     f.close().await;
@@ -1037,30 +1066,48 @@ async fn preflight_checkpoint_wait_releases_editor_gates() {
     assert!(text.contains("typing during wait"));
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_read_retries_a_locked_baseline_without_replaying_the_pass() {
     let f = Fixture::new(1, 1);
     let (lease, _) = f.open_document("source-0000").await;
-    f.actor.run(|store, _| {
-        store.read_with(|c| c.busy_timeout(Duration::ZERO)).map_err(StorageError::persist_public)?;
-        Ok(())
-    }).await.unwrap();
-    let writer = Arc::new(Mutex::new(rusqlite::Connection::open(engine_db_path(&f.root).unwrap()).unwrap()));
+    f.actor
+        .run(|store, _| {
+            store
+                .read_with(|c| c.busy_timeout(Duration::ZERO))
+                .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let writer = Arc::new(Mutex::new(
+        rusqlite::Connection::open(engine_db_path(&f.root).unwrap()).unwrap(),
+    ));
     let lock_once = Arc::new(AtomicUsize::new(0));
     let writer2 = writer.clone();
     let leases = f.leases.clone();
     let open = Arc::new(move |key: &DocKey| {
         if lock_once.fetch_add(1, Ordering::SeqCst) == 0 {
-            writer2.lock().unwrap().execute_batch("BEGIN IMMEDIATE").unwrap();
+            writer2
+                .lock()
+                .unwrap()
+                .execute_batch("BEGIN IMMEDIATE")
+                .unwrap();
         }
         leases.is_held(key)
     });
     let [entered, release] = undo_probe::pause_checkpoint(&f.ws);
     let pass = f.actor.history_rewrite_links(
-        f.ws.clone(), OP.into(), "forward-read-lock".into(), None,
-        f.root.to_path_buf(), f.leases.clone(), f.serial.clone(), Arc::new(NoFaults),
-        (open, Arc::new(|_| {})), Arc::new(()), CancellationToken::new(),
+        f.ws.clone(),
+        OP.into(),
+        "forward-read-lock".into(),
+        None,
+        f.root.to_path_buf(),
+        f.leases.clone(),
+        f.serial.clone(),
+        Arc::new(NoFaults),
+        (open, Arc::new(|_| {})),
+        Arc::new(()),
+        CancellationToken::new(),
     );
     let done = Arc::new(tokio::sync::Notify::new());
     let unlock = async {
@@ -1084,5 +1131,8 @@ async fn forward_read_retries_a_locked_baseline_without_replaying_the_pass() {
     drop(lease);
     drop(writer);
     f.close().await;
-    assert_eq!(result.expect("forward read must wait for the checkpoint lock")["documents"], 1);
+    assert_eq!(
+        result.expect("forward read must wait for the checkpoint lock")["documents"],
+        1
+    );
 }

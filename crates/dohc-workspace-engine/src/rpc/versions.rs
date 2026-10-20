@@ -805,8 +805,10 @@ impl VersionFence {
             EngineService::read_under_ctx(
                 cancellation,
                 "history.undo (open writes)",
-                open.actor.history_undo_open_writes(open.workspace_id.clone(), operation_id.clone()),
-            ).await?
+                open.actor
+                    .history_undo_open_writes(open.workspace_id.clone(), operation_id.clone()),
+            )
+            .await?
         } else {
             std::collections::HashSet::new()
         };

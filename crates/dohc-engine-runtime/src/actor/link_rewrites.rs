@@ -265,7 +265,11 @@ impl ActorHandle {
                             .map_err(StorageError::corrupt_public)?,
                     )
                 })?;
-                Ok((store.database_path().to_path_buf(), external, Arc::new(store.checkpoint_cycle())))
+                Ok((
+                    store.database_path().to_path_buf(),
+                    external,
+                    Arc::new(store.checkpoint_cycle()),
+                ))
             })
             .await?;
         let state = self.link_rewrites.clone();
