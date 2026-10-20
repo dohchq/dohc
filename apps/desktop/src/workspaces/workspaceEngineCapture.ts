@@ -40,7 +40,7 @@ import {
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { foldPathSegment } from "@dohc/workspace-contracts/path-floor";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import type {
   MaterializeRelayPullPage,
   RelayMaterializedPath,
@@ -1596,15 +1596,6 @@ function deletesBeforeWrites(operations: readonly MaterializeOperation[]): Mater
     ...operations.filter((operation) => operation.kind === "delete"),
     ...operations.filter((operation) => operation.kind !== "delete"),
   ];
-}
-
-// The engine's `path_collision_key`: one key for every spelling a disk that
-// ignores case or normalization treats as the same path.
-function pathCollisionKey(path: string): string {
-  return path
-    .split("/")
-    .map((segment) => foldPathSegment(segment).replace(/[. ]+$/, ""))
-    .join("/");
 }
 
 function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): boolean {

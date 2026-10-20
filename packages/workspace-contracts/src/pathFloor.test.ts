@@ -2,7 +2,8 @@ import { expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import data from "./pathFoldData.json" with { type: "json" };
 import fixtures from "../../../crates/dohc-engine-files/src/pathFoldFixtures.json";
-import { foldPathSegment, isIgnoredPathSegment } from "./pathFloor";
+import collisionFixtures from "../../../crates/dohc-engine-files/src/pathCollisionFixtures.json";
+import { foldPathSegment, isIgnoredPathSegment, pathCollisionKey } from "./pathFloor";
 
 it("keeps the generated TypeScript data equal to the crate's canonical data", () => {
   const canonical = new URL("../../../crates/dohc-engine-files/src/pathFoldData.json", import.meta.url);
@@ -12,6 +13,10 @@ it("keeps the generated TypeScript data equal to the crate's canonical data", ()
 it.each(fixtures)("folds $input and admits only ordinary names", ({ input, folded, ignored }) => {
   expect(foldPathSegment(input)).toBe(folded);
   expect(isIgnoredPathSegment(input)).toBe(ignored);
+});
+
+it.each(collisionFixtures)("keys $path as the engine does", ({ path, key }) => {
+  expect(pathCollisionKey(path)).toBe(key);
 });
 
 it("removes the complete Default_Ignorable_Code_Point set", () => {

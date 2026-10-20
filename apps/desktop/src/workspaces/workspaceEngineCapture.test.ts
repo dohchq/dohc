@@ -272,6 +272,7 @@ describe("merge materialization order", () => {
   it.each([
     ["merges a text file's old spelling before its new one", "notes.md", "Notes.md", ["notes.md", "Notes.md"]],
     ["keeps path order for a rename to another name", "b.md", "a.md", ["a.md", "b.md"]],
+    ["merges a dotless i's old spelling first", "\u0131.md", "I.md", ["\u0131.md", "I.md"]],
     ["merges a normalization respelling's old spelling first", "caf\u00e9.md", "cafe\u0301.md", ["caf\u00e9.md", "cafe\u0301.md"]],
   ])("%s", async (_name, from, to, order) => {
     const root = await createTestScratch("dohc-text-merge-order-");
