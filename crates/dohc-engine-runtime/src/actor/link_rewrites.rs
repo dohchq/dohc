@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 pub(super) struct RewriteState {
     pub gate: Arc<tokio::sync::Mutex<()>>,
+    pub undo_gate: Arc<tokio::sync::Mutex<()>>,
     stops: Mutex<HashMap<String, usize>>,
 }
 pub(super) struct RewriteStop(Arc<RewriteState>, String);

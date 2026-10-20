@@ -253,6 +253,10 @@ impl ActorHandle {
         token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
         let _stop = self.stop_link_rewrites(&operation);
+        let _undo = tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            guard = Arc::clone(&self.link_rewrites.undo_gate).lock_owned() => guard,
+        };
         dohc_engine_domain::validate_moment_metadata(
             "restore",
             Some("Undo"),
