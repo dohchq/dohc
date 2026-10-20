@@ -152,11 +152,13 @@ impl OpenFixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_open_source_stays_open_through_rewrite_and_undo() {
-    open_session_proof(false).await;
+    open_session_proof(false, "open-rpc-timings.json").await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stays_open_oracle_kills_closing_write_sessions_in_the_fence() {
-    let mutant = tokio::spawn(open_session_proof(true)).await;
+    let started = Instant::now();
+    let mutant = tokio::spawn(open_session_proof(true, "unused")).await;
+    let mutant_ns = started.elapsed().as_nanos();
     let error = mutant.expect_err("close-write-session mutation survived");
     assert!(error.is_panic());
     let panic = error.into_panic();
@@ -165,16 +167,19 @@ async fn stays_open_oracle_kills_closing_write_sessions_in_the_fence() {
         .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied());
     assert_eq!(message, Some("Undo closed the write member's session"));
+    let started = Instant::now();
+    open_session_proof(false, "open-rpc-reverted-timings.json").await;
+    let reverted_ns = started.elapsed().as_nanos();
     if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             std::path::Path::new(&dir).join("open-session-mutation.json"),
-            r#"{"closeWriteSessions":"killed"}"#,
+            json!({"closeWriteSessions":"killed","reverted":"passed","mutantNs":mutant_ns,"revertedNs":reverted_ns}).to_string(),
         )
         .unwrap();
     }
 }
-async fn open_session_proof(mutate: bool) {
+async fn open_session_proof(mutate: bool, timing_file: &str) {
     let f = fixture().await;
     let sid = f.open_document().await;
     let mut events = f.service.events().subscribe();
@@ -203,7 +208,7 @@ async fn open_session_proof(mutate: bool) {
     )
     .await;
     if mutate {
-        super::super::versions::mutate_close_write_session(sid.clone());
+        crate::rpc::versions::mutate_close_write_session(sid.clone());
     }
     let start = Instant::now();
     let undone = rpc(&f.transport, &f.handle, "history.undo", "open-undo").await;
@@ -252,7 +257,7 @@ async fn open_session_proof(mutate: bool) {
         if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
-                std::path::Path::new(&dir).join("open-rpc-timings.json"),
+                std::path::Path::new(&dir).join(timing_file),
                 json!({"forwardNs":forward_ns,"undoNs":undo_ns}).to_string(),
             )
             .unwrap();
