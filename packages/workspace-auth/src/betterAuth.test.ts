@@ -192,7 +192,8 @@ describeWithPostgres("closed sign-up", () => {
       new Request("http://localhost:1786/api/auth/sign-up/email", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password: PASSWORD, name: "Test User", callbackURL: "/device?user_code=ABCD-EFGH" }),
+        // The closed sign-up page has no name field.
+        body: JSON.stringify({ email, password: PASSWORD, name: "", callbackURL: "/device?user_code=ABCD-EFGH" }),
       }),
     );
     expect(response.status).toBe(200);
@@ -259,6 +260,18 @@ describeWithPostgres("closed sign-up", () => {
     expect(signin.user.emailVerified).toBe(true);
   });
 
+  it("never keeps a name someone else typed before the owner opened the emailed link", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
+    await closed.api.signUpEmail({ body: { email, password: "owner-password-bbb", name: "Owner" } });
+
+    await choosePassword(closed, email, "owner-password-bbb");
+
+    const name = await pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [user.id]);
+    expect(name.rows).toEqual([{ name: email.slice(0, email.indexOf("@")) }]);
+  });
+
   it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {
     const email = `${unique()}@dohc.test`;
     // A session from while sign-up was open.
@@ -272,7 +285,7 @@ describeWithPostgres("closed sign-up", () => {
     const verify = vi.spyOn(internalAdapter, "updateUser").mockRejectedValueOnce(new Error("The database went away."));
     try {
       await expect(choosePassword(closed, email, "owner-password-ccc")).rejects.toThrow("The database went away.");
-      expect(verify).toHaveBeenCalledWith(user.id, { emailVerified: true });
+      expect(verify).toHaveBeenCalledWith(user.id, { name: email.slice(0, email.indexOf("@")), emailVerified: true });
     } finally {
       verify.mockRestore();
     }
@@ -364,6 +377,7 @@ describeWithPostgres("account email", () => {
 
     const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
     expect(signin.user.email).toBe(email);
+    expect(signin.user.name).toBe("Test User");
     // An open server keeps verification a separate step.
     expect(signin.user.emailVerified).toBe(false);
     await expect(

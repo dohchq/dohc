@@ -185,9 +185,10 @@ A pending invite exists when someone shares work with an email address that has 
 Revoking that share removes the invite.
 The server ignores case and surrounding spaces when it compares addresses.
 
-With a list, the sign-up page asks for no password.
+With a list, the sign-up page asks for no name or password.
 The server emails a link instead, and the person chooses their password there.
 Opening that link also verifies the address and signs out every session of the account.
+It names the account after the part of the address before the `@`, so nobody can choose the name before the mailbox owner opens the link.
 Until then, nobody can sign in to the account.
 An existing account that never verified its address works the same way: select **Forgot your password?** to get the link.
 When the server starts with a list, it signs out everyone whose email is not verified.

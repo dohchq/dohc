@@ -189,13 +189,15 @@ describe("account pages", () => {
     expect(body).toContain('data-next="/device?user_code=ABCD-EFGH"');
   });
 
-  it("asks for a password at sign-up only on an open server", async () => {
+  it("asks for a name and password at sign-up only on an open server", async () => {
     const open = await (await router()(get("/account/sign-up"))).text();
+    expect(open).toContain('id="name"');
     expect(open).toContain('id="password"');
     expect(open).toContain("Send a verification link");
 
-    // A closed server binds the password when the person opens the emailed link.
+    // A closed server sets the password and name when the person opens the emailed link.
     const closed = await (await router({ closedSignUp: true })(get("/account/sign-up"))).text();
+    expect(closed).not.toContain('id="name"');
     expect(closed).not.toContain('id="password"');
     expect(closed).not.toContain("Send a verification link");
   });

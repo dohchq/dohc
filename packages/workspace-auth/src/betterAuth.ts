@@ -61,10 +61,12 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   };
   // Better Auth commits each step of a reset on its own. Signing out first
   // means a failure in between leaves an unverified account nobody is in.
-  const verifyOnPasswordReset = async (userId: string): Promise<void> => {
+  // Anyone could have typed the sign-up name too, so the same write that
+  // verifies the address replaces it with the address's own name.
+  const verifyOnPasswordReset = async (user: { id: string; email: string }): Promise<void> => {
     const { internalAdapter } = await auth.$context;
-    await internalAdapter.deleteUserSessions(userId);
-    await internalAdapter.updateUser(userId, { emailVerified: true });
+    await internalAdapter.deleteUserSessions(user.id);
+    await internalAdapter.updateUser(user.id, { name: user.email.slice(0, user.email.lastIndexOf("@")), emailVerified: true });
   };
   const auth = betterAuth({
     ...(admitAccount
@@ -119,8 +121,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
             onExistingUserSignUp: async ({ user }: { user: { email: string; emailVerified: boolean } }) => {
               if (!user.emailVerified) await sendPasswordLink(user.email, null);
             },
-            onPasswordReset: async ({ user }: { user: { id: string; emailVerified: boolean } }) => {
-              if (!user.emailVerified) await verifyOnPasswordReset(user.id);
+            onPasswordReset: async ({ user }: { user: { id: string; email: string; emailVerified: boolean } }) => {
+              if (!user.emailVerified) await verifyOnPasswordReset(user);
             },
           }
         : {}),

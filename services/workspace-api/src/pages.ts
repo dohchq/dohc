@@ -90,8 +90,8 @@ export function signUpPage(options: { next?: string; closed?: boolean } = {}): s
     data: { next },
     main: `<h1>Create your dohc account</h1>
 <form id="form">
-${field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus')}
-${field("email", "Email", 'type="email" name="email" autocomplete="username" required')}
+${closed ? "" : field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus')}
+${field("email", "Email", `type="email" name="email" autocomplete="username" required${closed ? " autofocus" : ""}`)}
 ${closed ? "" : field("password", "Password", 'type="password" name="password" autocomplete="new-password" minlength="8" required')}
 <button type="submit">Create account</button>
 </form>

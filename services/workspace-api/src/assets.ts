@@ -276,9 +276,9 @@ if (page === "sign-in") {
   });
 }
 
-// A closed server replaces the sign-up password when the person opens the
-// emailed link, so its form has no password field. Better Auth still requires
-// one; this value is never shown or kept.
+// A closed server replaces the sign-up password and name when the person opens
+// the emailed link, so its form has neither field. Better Auth still requires a
+// password; this value is never shown or kept.
 function unusedPassword() {
   return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -287,7 +287,7 @@ if (page === "sign-up") {
   const form = byId("form");
   onSubmit(form, "Creating your account\\u2026", async () => {
     await call("/api/auth/sign-up/email", {
-      name: byId("name").value.trim(),
+      name: byId("name") ? byId("name").value.trim() : "",
       email: byId("email").value.trim(),
       password: byId("password") ? byId("password").value : unusedPassword(),
       callbackURL: samePath(document.body.dataset.next) || "/account",
