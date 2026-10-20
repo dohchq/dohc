@@ -1068,6 +1068,15 @@ async fn preflight_checkpoint_wait_releases_editor_gates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_read_retries_a_locked_baseline_without_replaying_the_pass() {
+    forward_lock_proof(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_commit_retries_a_locked_writer_without_losing_the_source() {
+    forward_lock_proof(true).await;
+}
+
+async fn forward_lock_proof(lock_at_commit: bool) {
     let f = Fixture::new(1, 1);
     let (lease, _) = f.open_document("source-0000").await;
     f.actor
@@ -1083,10 +1092,19 @@ async fn forward_read_retries_a_locked_baseline_without_replaying_the_pass() {
         rusqlite::Connection::open(engine_db_path(&f.root).unwrap()).unwrap(),
     ));
     let lock_once = Arc::new(AtomicUsize::new(0));
+    if lock_at_commit {
+        let writer = writer.clone();
+        let lock_once = lock_once.clone();
+        probes().lock().unwrap().entry(f.ws.clone()).or_default().hook = Some(Arc::new(move |_, _| {
+            if lock_once.fetch_add(1, Ordering::SeqCst) == 0 {
+                writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE").unwrap();
+            }
+        }));
+    }
     let writer2 = writer.clone();
     let leases = f.leases.clone();
     let open = Arc::new(move |key: &DocKey| {
-        if lock_once.fetch_add(1, Ordering::SeqCst) == 0 {
+        if !lock_at_commit && lock_once.fetch_add(1, Ordering::SeqCst) == 0 {
             writer2
                 .lock()
                 .unwrap()

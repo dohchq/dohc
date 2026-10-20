@@ -347,20 +347,29 @@ impl ActorHandle {
         let Some(plan) = plan else {
             return Ok(result);
         };
-        let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
-        #[cfg(test)]
-        let reserve_ws = workspace.clone();
-        let serial = tokio::select! {
-            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = session_ops.clone().lock_owned() => guard,
-        };
-        self.run(move |store, _| {
-            let _admission = serial;
+        let mut reserve_locked_since = None;
+        loop {
+            let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
             #[cfg(test)]
-            let _turn = tests::Turn::start(&reserve_ws, "reserve");
-            save(store, &r, false, &initial, f.as_ref())
-        })
-        .await?;
+            let reserve_ws = workspace.clone();
+            let serial = tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = session_ops.clone().lock_owned() => guard,
+            };
+            let outcome = self.run(move |store, _| {
+                let _admission = serial;
+                #[cfg(test)]
+                let _turn = tests::Turn::start(&reserve_ws, "reserve");
+                save(store, &r, false, &initial, f.as_ref())
+            }).await;
+            match outcome {
+                Ok(()) => break,
+                Err(error) if error.code() == "file-locked" => {
+                    Self::wait_undo_checkpoint(&token, &mut reserve_locked_since, checkpoint.clone()).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let (plan, before, after) = tokio::task::spawn_blocking(move || {
             let old = plan.rename.before_path.as_deref().unwrap_or("");
             let before = Resolver::new(
@@ -379,6 +388,7 @@ impl ActorHandle {
         let mut pending: VecDeque<_> = plan.candidates.sources.clone().into();
         let mut stopped = false;
         let mut locked_since = None;
+        let mut commit_locked_since = None;
         'sources: while !pending.is_empty() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -585,6 +595,7 @@ impl ActorHandle {
                     let started = Instant::now();
                     let mut skipped = Vec::new();
                     let mut refresh = Vec::new();
+                    let mut locked = false;
                     while let Some((object, head, text, links, live)) = prepared.pop_front() {
                     #[cfg(test)]
                     tests::source();
@@ -602,7 +613,7 @@ impl ActorHandle {
                         refresh.push((object, source_path)); continue;
                     }
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
-                    let committed = (|| -> Result<bool, RuntimeError> {
+                    let outcome = (|| -> Result<bool, RuntimeError> {
                     if token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
                     }
@@ -700,16 +711,32 @@ impl ActorHandle {
                             Err(error) => Err(error),
                         }
                     })
-                    })()?;
+                    })();
+                    let committed = match outcome {
+                        Ok(value) => value,
+                        Err(error) if error.code() == "file-locked" => {
+                            refresh.push((object, source_path));
+                            locked = true;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if committed { next_result = next; } else { skipped.push(source_path); }
                     if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
-                    Ok((prepared, next_result, skipped, stopped, refresh))
+                    Ok((prepared, next_result, skipped, stopped, refresh, locked))
                 }).await?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
                 stopped = committed.3;
                 pending.extend(committed.4);
+                if committed.5 {
+                    #[cfg(test)]
+                    super::history_operations::turns::tests::checkpoint_wait(&workspace).await;
+                    Self::wait_undo_checkpoint(&token, &mut commit_locked_since, checkpoint.clone()).await?;
+                } else {
+                    commit_locked_since = None;
+                }
                 if stopped {
                     unchecked.extend(prepared.drain(..).map(|(_, head, _, _, _)| head.path));
                     unchecked.extend(pending.iter().map(|(_, path)| path.clone()));
@@ -723,11 +750,16 @@ impl ActorHandle {
         result["complete"] = json!(unchecked.is_empty());
         result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
         let reply = result.clone();
+        let mut reply_locked_since = None;
+        loop {
+            let (workspace, receipt, result, faults) = (
+                workspace.clone(), receipt.clone(), result.clone(), faults.clone(),
+            );
         let serial = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             guard = session_ops.clone().lock_owned() => guard,
         };
-        self.run(move |store, _| {
+        let outcome = self.run(move |store, _| {
             let _admission = serial;
             #[cfg(test)]
             let _turn = tests::Turn::start(&workspace, "reply");
@@ -741,7 +773,15 @@ impl ActorHandle {
                 .map_err(StorageError::corrupt_public)?;
             Ok(())
         })
-        .await?;
+        .await;
+            match outcome {
+                Ok(()) => break,
+                Err(error) if error.code() == "file-locked" => {
+                    Self::wait_undo_checkpoint(&token, &mut reply_locked_since, checkpoint.clone()).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(reply)
     }
 }
