@@ -62,6 +62,7 @@ Every orphan becomes the owner's child, and the owner walks each process's child
 It needs no process group walk, which would read the whole process table every sample.
 The kernel builds those lists without one lock, so a fork or exit during a read can hide a process from one census.
 Teardown therefore also waits until the owner has no child left: every live descendant has a live ancestor that is the owner's child.
+The owner also reaps every exited child but the worker on each sample, so adopted processes cannot hold the user's pids as zombies until teardown.
 The worker dies with the owner. A descendant whose owner was killed outright still outlives it, unless the supervisor's group kill reaches it.
 
 ## The Seatbelt profile
@@ -104,20 +105,25 @@ Landlock denies every file right it handles unless a rule allows it. The rules a
 
 The first Landlock ABI, in Linux 5.13, is required, so the owner refuses to build without it and the desktop refuses older kernels.
 Later rights apply where the kernel has them: renames across folders, truncation and device ioctls, TCP from ABI 4, and from ABI 6 signals and abstract sockets that leave the sandbox.
-Ubuntu 24.04's 6.8 kernel has ABI 4, so seccomp guards signals there.
+Ubuntu 24.04's 6.8 kernel has ABI 4, so the seccomp filters also cover what Landlock leaves open there.
 
 The seccomp filters:
 
 - refuse `socket` entirely, so the tree has no network and cannot reach D-Bus or another local service through a Unix socket. Node and esbuild talk over `socketpair` and pipes;
-- refuse signals to the owner, its process group, the caller's own group and every process, through `kill`, `tkill`, `tgkill` and both `sigqueue` calls, and refuse `pidfd_open` of the owner;
-- refuse async I/O ownership, which signals without `kill`, and changes to the owner's limits and scheduling;
-- refuse tracing, other processes' memory, keyrings, BPF, perf events, `userfaultfd`, `unshare` and `setns`;
-- answer `io_uring` with ENOSYS, because it can open sockets and files without the calls the filters check. Node's libuv falls back to ordinary calls;
+- refuse every signal, through `kill`, `tkill`, `tgkill`, both `sigqueue` calls and `pidfd_send_signal`. Seatbelt lets the tree signal processes inside its sandbox, but seccomp cannot tell those apart from the desktop or another program of the same user. Node and esbuild need no signal to compile, and the owner does all stopping;
+- refuse async I/O ownership, which signals without `kill`, and changes to another process's limits and scheduling;
+- refuse changes to a file's mode, owner, extended attributes and times, which Landlock does not mediate, and truncation by path, which it mediates only from ABI 3;
+- refuse reads of extended attributes by path, which can hold a download's source address;
+- refuse System V shared memory, message queues and semaphores, and POSIX message queues, which other programs of the user may hold;
+- refuse `inotify` and `fanotify`, which would report activity on paths outside the sandbox;
+- refuse tracing, other processes' memory, keyrings, BPF, perf events, `userfaultfd`, `unshare`, `setns`, and `clone` with a new namespace;
+- answer `io_uring` and `clone3` with ENOSYS. `io_uring` can open sockets and files without the calls the filters check, and Node's libuv falls back to ordinary calls. `clone3` passes its flags where a filter cannot read them, and glibc falls back to `clone`;
 - refuse every x32 call, which shares the x86-64 audit architecture but numbers syscalls differently.
 
 Landlock does not mediate path metadata, so as on macOS a confined worker can learn whether a path exists.
 It cannot read `/proc`, so unlike on macOS it cannot read other processes' arguments.
 Landlock cannot refuse an executable mapping of a file the worker wrote, as Seatbelt does, so a worker that gains code execution can load native code from its build directory.
+Through the dynamic loader or a memory file, it can also run any program it can read. Each still runs inside the same rules and the owner's tree.
 That still needs a memory-safety exploit in V8 or esbuild first.
 Node stops at startup when the system's OpenSSL configuration exists but stays unreadable, so the owner sets `OPENSSL_CONF` to `/dev/null`. The compiler needs no OpenSSL configuration.
 

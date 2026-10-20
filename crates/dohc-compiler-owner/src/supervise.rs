@@ -95,7 +95,7 @@ fn run() -> Result<u8, String> {
     command.env("OPENSSL_CONF", "/dev/null");
     sys::confine(
         &mut command,
-        sys::sandbox(&args.root, &args.node, &args.build, owner)?,
+        sys::sandbox(&args.root, &args.node, &args.build)?,
         cpu_seconds,
     );
     let mut child = command
@@ -153,6 +153,10 @@ fn watch(
             Ok(Some(status)) => return Outcome::Exited(worker_code(status)),
             Ok(None) => {}
             Err(error) => return Outcome::Unmeasurable(error),
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = sys::reap_adopted(child.id() as sys::Pid) {
+            return Outcome::Unmeasurable(error);
         }
         match tree.measure() {
             Ok(sample) if sample.footprint > args.memory_bytes => return Outcome::Memory,

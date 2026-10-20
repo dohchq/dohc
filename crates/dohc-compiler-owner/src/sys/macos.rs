@@ -186,9 +186,8 @@ pub fn close_inherited_descriptors_on_exec() -> io::Result<()> {
 /// The Seatbelt profile, as SBPL source.
 pub type Sandbox = CString;
 
-/// The profile for one build. Seatbelt lets the tree signal only processes
-/// inside its own sandbox, never the owner, so `owner` needs no rule here.
-pub fn sandbox(root: &Path, node: &Path, build: &Path, _owner: Pid) -> Result<Sandbox, String> {
+/// The profile for one build.
+pub fn sandbox(root: &Path, node: &Path, build: &Path) -> Result<Sandbox, String> {
     crate::profile::profile(root, node, build)
 }
 

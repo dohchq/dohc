@@ -5,11 +5,11 @@
 //! read those, the compiler root and the system libraries, and read and write
 //! its own build directory, where it can run nothing. It cannot open a
 //! socket, so it has no network and cannot reach D-Bus or any other local
-//! service. It cannot signal, trace or change the limits of the owner, even
-//! on a kernel too old for Landlock to scope signals. Path metadata stays
-//! readable everywhere, as on macOS, because Landlock does not mediate it.
+//! service. It cannot signal any process, trace one or change its limits,
+//! even on a kernel too old for Landlock to scope signals, and cannot change
+//! a file's mode, owner, attributes or times. Path metadata stays readable
+//! everywhere, as on macOS, because Landlock does not mediate reading it.
 //! See docs/engineering/app-compiler.md.
-use crate::sys::Pid;
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd,
     Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope,
@@ -62,13 +62,13 @@ impl Rules {
 }
 
 /// `root`, `node` and `build` must already be canonical.
-pub fn rules(root: &Path, node: &Path, build: &Path, owner: Pid) -> Result<Rules, String> {
+pub fn rules(root: &Path, node: &Path, build: &Path) -> Result<Rules, String> {
     let landlock = landlock(root, node, build).map_err(|error| {
         format!("{error}. The app compiler needs Landlock, in Linux 5.13 or later with Landlock enabled.")
     })?;
     let seccomp = [
         absent_syscalls().map_err(|error| format!("seccomp: {error}"))?,
-        refused_syscalls(owner).map_err(|error| format!("seccomp: {error}"))?,
+        refused_syscalls().map_err(|error| format!("seccomp: {error}"))?,
     ];
     Ok(Rules { landlock, seccomp })
 }
@@ -125,14 +125,17 @@ fn landlock(root: &Path, node: &Path, build: &Path) -> Result<RulesetCreated, St
     Ok(rules)
 }
 
-/// io_uring can open sockets and files without the syscalls the next filter
-/// checks. Node's libuv falls back to ordinary calls when it is absent.
+/// Calls that look absent, so callers fall back to ones the next filter
+/// checks. io_uring can open sockets and files without those calls, and
+/// Node's libuv then uses ordinary ones. clone3 passes its flags in memory a
+/// filter cannot read, and glibc then uses clone, whose flags it can.
 fn absent_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
-    use libc::{ENOSYS, SYS_io_uring_enter, SYS_io_uring_register, SYS_io_uring_setup};
+    use libc::{ENOSYS, SYS_clone3, SYS_io_uring_enter, SYS_io_uring_register, SYS_io_uring_setup};
     let rules = [
         SYS_io_uring_setup,
         SYS_io_uring_enter,
         SYS_io_uring_register,
+        SYS_clone3,
     ]
     .into_iter()
     .map(|syscall| (syscall, vec![]))
@@ -146,18 +149,84 @@ fn absent_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
     Ok(guard_x32(filter.try_into()?))
 }
 
-fn refused_syscalls(owner: Pid) -> Result<BpfProgram, Box<dyn std::error::Error>> {
+/// The calls the tree may not make, on any kernel. Landlock mediates neither
+/// a file's mode, owner, extended attributes or times, nor truncation by path
+/// before ABI 3, nor System V IPC, file watches or namespaces. The tree may
+/// signal no process, itself included: Node and esbuild need no signal to
+/// compile, the owner does all stopping, and seccomp cannot keep signals
+/// inside the tree as Seatbelt does.
+fn refused_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
     use libc::*;
+    // libc 0.2.189 omits these. Linux 6.6 and 6.13 number them alike on every
+    // architecture.
+    #[cfg(target_arch = "aarch64")]
+    #[allow(non_upper_case_globals)]
+    const SYS_fchmodat2: c_long = 452;
+    #[allow(non_upper_case_globals)]
+    const SYS_setxattrat: c_long = 463;
+    #[allow(non_upper_case_globals)]
+    const SYS_getxattrat: c_long = 464;
+    #[allow(non_upper_case_globals)]
+    const SYS_listxattrat: c_long = 465;
+    #[allow(non_upper_case_globals)]
+    const SYS_removexattrat: c_long = 466;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    // No sockets at all. Node and esbuild talk over socketpair and pipes.
-    // Tracing, other processes' memory, keys, namespaces and priorities.
     for syscall in [
+        // No sockets at all. Node and esbuild talk over socketpair and pipes.
         SYS_socket,
+        // Signals.
+        SYS_kill,
+        SYS_tkill,
+        SYS_tgkill,
+        SYS_rt_sigqueueinfo,
+        SYS_rt_tgsigqueueinfo,
+        SYS_pidfd_send_signal,
+        // A file's mode, owner, attributes, times and length.
+        SYS_fchmod,
+        SYS_fchmodat,
+        SYS_fchmodat2,
+        SYS_fchown,
+        SYS_fchownat,
+        SYS_setxattr,
+        SYS_lsetxattr,
+        SYS_fsetxattr,
+        SYS_removexattr,
+        SYS_lremovexattr,
+        SYS_fremovexattr,
+        SYS_setxattrat,
+        SYS_removexattrat,
+        SYS_getxattr,
+        SYS_lgetxattr,
+        SYS_listxattr,
+        SYS_llistxattr,
+        SYS_getxattrat,
+        SYS_listxattrat,
+        SYS_utimensat,
+        SYS_truncate,
+        // System V IPC and POSIX message queues, which other programs of the
+        // user may hold, and watches on paths outside the sandbox.
+        SYS_shmget,
+        SYS_shmat,
+        SYS_shmdt,
+        SYS_shmctl,
+        SYS_msgget,
+        SYS_msgsnd,
+        SYS_msgrcv,
+        SYS_msgctl,
+        SYS_semget,
+        SYS_semop,
+        SYS_semtimedop,
+        SYS_semctl,
+        SYS_mq_open,
+        SYS_inotify_init1,
+        SYS_inotify_add_watch,
+        SYS_fanotify_init,
+        SYS_fanotify_mark,
+        // Tracing, other processes' memory, keys, namespaces and priorities.
         SYS_ptrace,
         SYS_process_vm_readv,
         SYS_process_vm_writev,
         SYS_pidfd_getfd,
-        SYS_pidfd_send_signal,
         SYS_kcmp,
         SYS_bpf,
         SYS_perf_event_open,
@@ -172,38 +241,47 @@ fn refused_syscalls(owner: Pid) -> Result<BpfProgram, Box<dyn std::error::Error>
     ] {
         rules.insert(syscall, vec![]);
     }
-    let equals = |index: u8, value: u64| -> Result<SeccompRule, seccompiler::BackendError> {
-        SeccompRule::new(vec![SeccompCondition::new(
-            index,
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Eq,
-            value,
-        )?])
-    };
-    // A pid as the kernel reads the 32-bit argument.
-    let pid = |pid: Pid| u64::from(pid as u32);
-    // kill reaches the owner by its pid, its group, the caller's group (0),
-    // which the worker shares, or every process (-1).
-    rules.insert(
-        SYS_kill,
-        [owner, -owner, 0, -1]
-            .into_iter()
-            .map(|target| equals(0, pid(target)))
-            .collect::<Result<_, _>>()?,
-    );
+    #[cfg(target_arch = "x86_64")]
     for syscall in [
-        SYS_tkill,
-        SYS_tgkill,
-        SYS_rt_sigqueueinfo,
-        SYS_rt_tgsigqueueinfo,
-        SYS_pidfd_open,
+        SYS_chmod,
+        SYS_chown,
+        SYS_lchown,
+        SYS_utime,
+        SYS_utimes,
+        SYS_futimesat,
+        SYS_inotify_init,
+    ] {
+        rules.insert(syscall, vec![]);
+    }
+    let rule = |index: u8, op: SeccompCmpOp, value: u64| {
+        SeccompCondition::new(index, SeccompCmpArgLen::Dword, op, value)
+            .and_then(|condition| SeccompRule::new(vec![condition]))
+    };
+    // A new namespace of any kind.
+    rules.insert(
+        SYS_clone,
+        [
+            CLONE_NEWNS,
+            CLONE_NEWCGROUP,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+        ]
+        .into_iter()
+        .map(|flag| rule(0, SeccompCmpOp::MaskedEq(flag as u64), flag as u64))
+        .collect::<Result<_, _>>()?,
+    );
+    // Another process's limits and scheduling. A pid of 0 names the caller.
+    for syscall in [
         SYS_prlimit64,
         SYS_sched_setaffinity,
         SYS_sched_setparam,
         SYS_sched_setscheduler,
         SYS_sched_setattr,
     ] {
-        rules.insert(syscall, vec![equals(0, pid(owner))?]);
+        rules.insert(syscall, vec![rule(0, SeccompCmpOp::Ne, 0)?]);
     }
     // Async I/O ownership lets the kernel signal another process without kill:
     // F_SETOWN, F_SETOWN_EX and F_SETSIG, then FIOSETOWN and SIOCSPGRP.
@@ -211,14 +289,14 @@ fn refused_syscalls(owner: Pid) -> Result<BpfProgram, Box<dyn std::error::Error>
         SYS_fcntl,
         [F_SETOWN as u64, 15, 10]
             .into_iter()
-            .map(|command| equals(1, command))
+            .map(|command| rule(1, SeccompCmpOp::Eq, command))
             .collect::<Result<_, _>>()?,
     );
     rules.insert(
         SYS_ioctl,
         [0x8901, 0x8902]
             .into_iter()
-            .map(|command| equals(1, command))
+            .map(|command| rule(1, SeccompCmpOp::Eq, command))
             .collect::<Result<_, _>>()?,
     );
     let filter = SeccompFilter::new(

@@ -31,6 +31,26 @@ pub fn adopt_orphans() -> io::Result<()> {
     Ok(())
 }
 
+/// Reaps every exited child of the owner but `worker`, which stays for
+/// `Child::try_wait`. The owner adopts every orphan, so without this a loop of
+/// short-lived processes could hold the user's pids as zombies until
+/// teardown.
+pub fn reap_adopted(worker: Pid) -> io::Result<()> {
+    // SAFETY: getpid takes no arguments.
+    #[allow(unsafe_code)]
+    let owner = unsafe { libc::getpid() };
+    for pid in children(owner)?.into_iter().filter(|&pid| pid != worker) {
+        let mut status: c_int = 0;
+        // SAFETY: `status` is a valid c_int for waitpid to fill. WNOHANG
+        // never blocks, and a child still running is left alone.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::waitpid(pid, &mut status, libc::WNOHANG)
+        };
+    }
+    Ok(())
+}
+
 /// None on Linux. The owner adopts every orphan, so `children` reaches the
 /// whole tree, and a group walk would read the whole process table on every
 /// sample.
@@ -85,7 +105,9 @@ pub fn state(pid: Pid) -> io::Result<State> {
         .map(|(_, rest)| rest.split_ascii_whitespace().collect())
         .unwrap_or_default();
     match fields.first() {
-        Some(&("Z" | "X")) => return Ok(State::Gone),
+        // A leader that exited before its other threads reads as a zombie,
+        // but the process lives until its last thread ends.
+        Some(&("Z" | "X")) if threads(pid)? <= 1 => return Ok(State::Gone),
         Some(_) => {}
         None => return Err(io::Error::other("unreadable process status")),
     }
@@ -105,12 +127,30 @@ pub fn state(pid: Pid) -> io::Result<State> {
 /// footprint. Node's binary and the shared libraries stay out. None once the
 /// process is gone.
 pub fn footprint(pid: Pid) -> io::Result<Option<u64>> {
-    let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
-        Ok(status) => status,
+    let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => tasks,
         Err(error) if gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let mut kilobytes: u64 = 0;
+    // Every thread shares the process's memory. A leader that exited before
+    // the others reports none, so the first thread that reports it counts.
+    for task in tasks {
+        let status = match task.and_then(|task| std::fs::read_to_string(task.path().join("status")))
+        {
+            Ok(status) => status,
+            Err(error) if gone(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(kilobytes) = resident_kilobytes(&status)? {
+            return Ok(Some(kilobytes.saturating_mul(1024)));
+        }
+    }
+    Ok(Some(0))
+}
+
+/// RssAnon plus RssShmem, or None when the status shows no memory.
+fn resident_kilobytes(status: &str) -> io::Result<Option<u64>> {
+    let mut kilobytes = None;
     for line in status.lines() {
         let Some(value) = line
             .strip_prefix("RssAnon:")
@@ -123,9 +163,18 @@ pub fn footprint(pid: Pid) -> io::Result<Option<u64>> {
             .strip_suffix(" kB")
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| io::Error::other("unreadable process memory"))?;
-        kilobytes = kilobytes.saturating_add(value);
+        kilobytes = Some(kilobytes.unwrap_or(0u64).saturating_add(value));
     }
-    Ok(Some(kilobytes.saturating_mul(1024)))
+    Ok(kilobytes)
+}
+
+/// How many threads /proc lists for `pid`. 0 once it is gone.
+fn threads(pid: Pid) -> io::Result<usize> {
+    match std::fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => Ok(tasks.count()),
+        Err(error) if gone(&error) => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 /// Marks every descriptor above stderr close-on-exec, so the worker inherits
@@ -162,8 +211,8 @@ pub fn close_inherited_descriptors_on_exec() -> io::Result<()> {
 /// The Landlock ruleset and seccomp filters, built before the fork.
 pub type Sandbox = crate::rules::Rules;
 
-pub fn sandbox(root: &Path, node: &Path, build: &Path, owner: Pid) -> Result<Sandbox, String> {
-    crate::rules::rules(root, node, build, owner)
+pub fn sandbox(root: &Path, node: &Path, build: &Path) -> Result<Sandbox, String> {
+    crate::rules::rules(root, node, build)
 }
 
 /// Confines the child between fork and exec: no core file, a CPU-time limit
@@ -215,7 +264,10 @@ pub fn confine(command: &mut Command, sandbox: Sandbox, cpu_seconds: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     const PROBE: &str = "DOHC_COMPILER_OWNER_RULES_PROBE";
 
@@ -244,6 +296,10 @@ mod tests {
     /// Runs inside the sandbox: tries what the rules allow and what they refuse.
     fn probe(root: &Path, build: &Path, outside: &Path) {
         let owner: Pid = std::env::var("DOHC_PROBE_OWNER").unwrap().parse().unwrap();
+        let unrelated: Pid = std::env::var("DOHC_PROBE_UNRELATED")
+            .unwrap()
+            .parse()
+            .unwrap();
         let report = |name: &str, result: &str| println!("probe {name}={result}");
         report(
             "read root",
@@ -262,10 +318,12 @@ mod tests {
             io_outcome(std::fs::write(outside.join("new"), b"x")),
         );
         let program = build.join("program");
-        let written = std::fs::write(&program, b"#!/bin/sh\n").and_then(|()| {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        });
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&program)
+            .and_then(|mut file| file.write_all(b"#!/bin/sh\n"));
         report("write program", io_outcome(written));
         report(
             "run from build",
@@ -274,6 +332,13 @@ mod tests {
         report("run system", io_outcome(Command::new("/bin/true").status()));
         let environ = format!("/proc/{owner}/environ");
         report("read owner environ", io_outcome(std::fs::read(environ)));
+        let secret = outside.join("secret");
+        let mode = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000));
+        report("chmod outside", io_outcome(mode));
+        report(
+            "chown outside",
+            io_outcome(std::os::unix::fs::chown(&secret, None, None)),
+        );
         // SAFETY: Each call takes integers or a valid array, and every
         // descriptor it returns is closed with the process.
         #[allow(unsafe_code)]
@@ -289,9 +354,29 @@ mod tests {
             let mut pair = [0 as c_int; 2];
             let made = libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr());
             report("socketpair", outcome(made));
+            let path = std::ffi::CString::new(secret.as_os_str().as_encoded_bytes()).unwrap();
+            report(
+                "truncate outside",
+                outcome(libc::truncate(path.as_ptr(), 0)),
+            );
+            let name = c"user.dohc";
+            let attribute = libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0);
+            report("read attributes outside", outcome(attribute as c_int));
+            let memory = libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600);
+            report("System V memory", outcome(memory));
+            report("watch a path", outcome(libc::inotify_init1(0)));
+            let flags = (libc::CLONE_NEWUSER | libc::SIGCHLD) as libc::c_ulong;
+            let cloned = libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0);
+            if cloned == 0 {
+                libc::_exit(0);
+            }
+            report("new namespace", outcome(cloned as c_int));
+            let cloned = libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<u8>(), 0);
+            report("clone3", outcome(cloned as c_int));
             report("signal owner", outcome(libc::kill(owner, 0)));
             report("signal own group", outcome(libc::kill(0, 0)));
             report("signal everyone", outcome(libc::kill(-1, 0)));
+            report("signal unrelated", outcome(libc::kill(unrelated, 0)));
             report("signal self", outcome(libc::kill(libc::getpid(), 0)));
             let mut limits = libc::rlimit {
                 rlim_cur: 0,
@@ -300,6 +385,8 @@ mod tests {
             let owner_limits =
                 libc::prlimit(owner, libc::RLIMIT_NOFILE, std::ptr::null(), &mut limits);
             report("owner limits", outcome(owner_limits));
+            let own_limits = libc::prlimit(0, libc::RLIMIT_NOFILE, std::ptr::null(), &mut limits);
+            report("own limits", outcome(own_limits));
             report(
                 "own async signals",
                 outcome(libc::fcntl(pair[0], libc::F_SETOWN, owner)),
@@ -339,7 +426,9 @@ mod tests {
         // The test binary stands in for Node: it is the one program, with
         // esbuild, that the rules let run.
         let me = std::env::current_exe().unwrap().canonicalize().unwrap();
-        let sandbox = sandbox(&root, &me, &build, owner).unwrap();
+        let sandbox = sandbox(&root, &me, &build).unwrap();
+        // Another process of the same user, outside the tree.
+        let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
         let mut command = Command::new(&me);
         command
             .args([
@@ -350,9 +439,13 @@ mod tests {
             ])
             .env(PROBE, "1")
             .env("DOHC_PROBE_OWNER", owner.to_string())
+            .env("DOHC_PROBE_UNRELATED", unrelated.id().to_string())
             .env("TMPDIR", std::env::temp_dir());
         confine(&mut command, sandbox, 10);
         let output = command.output().unwrap();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let untouched = std::fs::metadata(outside.join("secret")).unwrap();
         for path in [&root, &build, &outside] {
             std::fs::remove_dir_all(path).unwrap();
         }
@@ -374,25 +467,152 @@ mod tests {
                 "run from build=EACCES",
                 "run system=EACCES",
                 "read owner environ=EACCES",
+                "chmod outside=EPERM",
+                "chown outside=EPERM",
                 "tcp socket=EPERM",
                 "unix socket=EPERM",
                 "socketpair=done",
+                "truncate outside=EPERM",
+                "read attributes outside=EPERM",
+                "System V memory=EPERM",
+                "watch a path=EPERM",
+                "new namespace=EPERM",
+                "clone3=ENOSYS",
                 "signal owner=EPERM",
                 "signal own group=EPERM",
                 "signal everyone=EPERM",
-                "signal self=done",
+                "signal unrelated=EPERM",
+                "signal self=EPERM",
                 "owner limits=EPERM",
+                "own limits=done",
                 "own async signals=EPERM",
                 "io_uring=ENOSYS",
             ],
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // The refused calls left the outside file's length and mode alone.
+        assert_eq!(untouched.len(), 1);
+        assert_ne!(untouched.permissions().mode() & 0o777, 0);
     }
 
     #[test]
     fn a_missing_program_stops_the_rules() {
         let missing = Path::new("/nonexistent/dohc-compiler-owner");
-        assert!(sandbox(missing, missing, missing, 1).is_err());
+        assert!(sandbox(missing, missing, missing).is_err());
+    }
+
+    /// Runs in a forked owner, so its reaping cannot touch another test's
+    /// children. 0 when the adopted zombie is reaped and the worker is not.
+    fn reap_around_the_worker() -> c_int {
+        // SAFETY: Each forked child only exits. waitpid fills a valid c_int.
+        #[allow(unsafe_code)]
+        unsafe {
+            let adopted = libc::fork();
+            if adopted == 0 {
+                libc::_exit(0);
+            }
+            let worker = libc::fork();
+            if worker == 0 {
+                libc::_exit(0);
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while [adopted, worker]
+                .iter()
+                .any(|&pid| !matches!(state(pid), Ok(State::Gone)))
+            {
+                if Instant::now() >= deadline {
+                    return 2;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if reap_adopted(worker).is_err() {
+                return 3;
+            }
+            let mut status: c_int = 0;
+            let adopted_reaped = libc::waitpid(adopted, &mut status, libc::WNOHANG) == -1;
+            let worker_left = libc::waitpid(worker, &mut status, libc::WNOHANG) == worker;
+            if adopted_reaped && worker_left { 0 } else { 1 }
+        }
+    }
+
+    #[test]
+    fn the_owner_reaps_an_exited_child_but_not_the_worker() {
+        // SAFETY: The forked child runs `reap_around_the_worker` and exits
+        // without returning into the test.
+        #[allow(unsafe_code)]
+        let owner = unsafe { libc::fork() };
+        if owner == 0 {
+            let code = reap_around_the_worker();
+            // SAFETY: _exit takes an integer and never returns.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::_exit(code)
+            }
+        }
+        let mut status: c_int = 0;
+        // SAFETY: `status` is a valid c_int for waitpid to fill.
+        #[allow(unsafe_code)]
+        let reaped = unsafe { libc::waitpid(owner, &mut status, 0) };
+        assert_eq!(reaped, owner);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+
+    extern "C" fn sleep_then_exit(_: *mut libc::c_void) -> *mut libc::c_void {
+        // SAFETY: sleep and _exit take integers only.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::sleep(30);
+            libc::_exit(0)
+        }
+    }
+
+    #[test]
+    fn a_process_whose_first_thread_exited_reads_live_until_its_last_ends() {
+        // SAFETY: The forked child calls only pthread_create, which glibc
+        // supports after fork, and the exit syscall, which ends the calling
+        // thread without unwinding into the test.
+        #[allow(unsafe_code)]
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // SAFETY: `thread` is a valid place for the new thread's id, and
+            // `sleep_then_exit` matches the start routine pthread_create takes.
+            #[allow(unsafe_code)]
+            unsafe {
+                let mut thread: libc::pthread_t = 0;
+                libc::pthread_create(
+                    &mut thread,
+                    std::ptr::null(),
+                    sleep_then_exit,
+                    std::ptr::null_mut(),
+                );
+                libc::syscall(libc::SYS_exit, 0);
+            }
+        }
+        assert!(pid > 0);
+        let first_exited = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !first_exited() {
+            assert!(Instant::now() < deadline, "the first thread never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(state(pid).unwrap(), State::Live(identity) if identity.pid == pid));
+        assert!(footprint(pid).unwrap().unwrap() > 0);
+        assert!(matches!(
+            super::super::kill(pid).unwrap(),
+            super::super::Signalled::Sent
+        ));
+        let mut status: c_int = 0;
+        // SAFETY: `status` is a valid c_int for waitpid to fill.
+        #[allow(unsafe_code)]
+        let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(reaped, pid);
+        assert!(matches!(state(pid).unwrap(), State::Gone));
     }
 }
