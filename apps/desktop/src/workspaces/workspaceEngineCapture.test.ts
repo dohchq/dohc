@@ -4919,3 +4919,46 @@ it("checks one root copy name with one bounded identity lookup, including binary
     }, () => []);
   } finally {await engine.stop();}
 });
+
+it.each(["pending-placement", "undone", "deleted", "renamed", "superseded", "replaced"] as const)(
+  "checks the real Duplicate receipt guard when the copy is %s", async state => {
+    const root = await createTestScratch("duplicate-receipt-guard-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const sessions = mockLiveSessions(loopback, requests);
+    const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const path = "copy.md";
+    const target = {workspaceId: WORKSPACE_ID, versionId: "main", path};
+    await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+    await store.writeTextFile({...target, text: "copied", metadata: {origin: "api", correlationId: operationId}});
+    // The loopback has no operation ledger. Only its header is supplied here;
+    // identity resolution and moment reads use the loopback's actual state.
+    vi.spyOn(store, "readHistoryOperation").mockResolvedValue({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"});
+    const engine = capture(root, {store, rustEngineSessions: sessions});
+    const readReceipt = () => engine.changePathsAs(["source.md"], {operation: "duplicate", operationId, author: RESTORER}, async held => {
+      requests.length = 0;
+      const result = await held.readDuplicate(operationId, path);
+      expect(requests.every(request => request.method !== VERSIONED_METHOD.historyPage)).toBe(true);
+      const moments = requests.filter(request => request.method === VERSIONED_METHOD.momentsList);
+      expect(moments.length).toBeLessThanOrEqual(1);
+      if (moments.length) expect(moments[0]?.params).toMatchObject({limit: 1});
+      return result;
+    }, () => []);
+    try {
+      // Valid even before any copy exists on disk.
+      expect(await readReceipt()).toEqual({path});
+      if (state === "pending-placement") return;
+      if (state === "undone" || state === "deleted" || state === "replaced") {
+        await store.deleteTextFile({...target, metadata: {origin: state === "undone" ? "restore" : "api"}});
+      }
+      if (state === "renamed") {
+        await store.renameTextFile({workspaceId: WORKSPACE_ID, versionId: "main", fromPath: path, toPath: "renamed.md", metadata: {origin: "api"}});
+      }
+      if (state === "superseded" || state === "replaced") {
+        await store.writeTextFile({...target, text: "later", metadata: {origin: "api", correlationId: "later-operation"}});
+      }
+      expect(await readReceipt()).toBeNull();
+    } finally {await engine.stop();}
+  },
+);

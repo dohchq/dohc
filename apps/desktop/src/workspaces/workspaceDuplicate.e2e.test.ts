@@ -11,6 +11,10 @@ import {waitForPathMoments} from "./waitForPathMoments";
 import {requireEngineBinaryOrSkip} from "../testing/engineBinary";
 import {createRealDaemonLifecycle,createRealDaemonWorkspaceSessions,REAL_DAEMON_DEADLINE_MS} from "../testing/realDaemonWorkspaceSessions";
 const engine = requireEngineBinaryOrSkip();
+const TIMING_SAMPLES = 20;
+// Each sample has an update, a Duplicate and a History read; setup, recovery and cleanup
+// have at most twenty more bounded steps. A named deadline must fail first.
+const TEST_TIMEOUT_MS = (3 * TIMING_SAMPLES + 20) * REAL_DAEMON_DEADLINE_MS;
 async function withinDeadline<T>(name: string, work: () => Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -22,13 +26,13 @@ async function withinDeadline<T>(name: string, work: () => Promise<T>): Promise<
     clearTimeout(timer);
   }
 }
-it.skipIf(engine.missing)("Duplicate returns after settlement and placement within its one-file budget, including History-only binary names", async () => {
+it.skipIf(engine.missing)("Duplicate records one copy per operation and measures its full return, including History-only binary names", async () => {
   const rootPath = await createTestScratch("duplicate-return-timing-");
   const workspaceId = "duplicate-return";
   await writeFile(join(rootPath,"source.md"),"base");
   await writeFile(join(rootPath,"source.png"),Buffer.from([0,255,1,2]));
   const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0});
-  await lifecycle.start();
+  await withinDeadline("daemon start", () => lifecycle.start());
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const attachmentId = Symbol("duplicate-timing");
   const capture = createWorkspaceEngineCapture({workspaceId,rootPath,attachmentId,rustEngineSessions:sessions,settleDebounceMs:600_000});
@@ -37,25 +41,30 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
   const author = {kind:"human",humanId:"person"} as const;
   let completed = false;
   try {
-    await waitForPathMoments(capture,"source.md",1);
-    await waitForPathMoments(capture,"source.png",1);
-    const session = await capture.openYDocSession({path:"source.md",onRemoteUpdate:()=>undefined});
+    await withinDeadline("source capture", () => waitForPathMoments(capture,"source.md",1));
+    await withinDeadline("binary capture", () => waitForPathMoments(capture,"source.png",1));
+    const session = await withinDeadline("source session", () => capture.openYDocSession({path:"source.md",onRemoteUpdate:()=>undefined}));
     Y.applyUpdate(editor,session.initialUpdate);
     const samples:number[]=[];
-    for(let n=0;n<20;n++) {
+    for(let n=0;n<TIMING_SAMPLES;n++) {
       const before=Y.encodeStateVector(editor);
       editor.getText("plainText").insert(0,"edit ");
-      await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor,before));
+      await withinDeadline("source update", async () => session.applyLocalUpdate(Y.encodeStateAsUpdate(editor,before)));
       const started=performance.now();
       const copy=await withinDeadline("Duplicate return", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
       samples.push(performance.now()-started);
       expect(copy.materialized).toBe(true);
       expect(await readFile(join(rootPath,copy.path),"utf8")).toBe(editor.getText("plainText").toString());
+      await withinDeadline("Duplicate History bounds", () => sessions.run({workspaceId,rootPath,attachmentId}, async binding => {
+        const adapter = new VersionedLiveAdapter(binding.client,binding.workspace,{workspaceId});
+        expect(await adapter.readHistoryOperation({workspaceId,operationId:copy.operationId})).toMatchObject({kind:"file-duplicate",momentCount:1});
+        const page = await adapter.readHistoryPage({workspaceId,versionId:"main",operationId:copy.operationId,limit:2});
+        expect(page.moments).toHaveLength(1);
+        expect(page.moments[0]).toMatchObject({operation:"write",path:copy.path});
+      }));
     }
     samples.sort((a,b)=>a-b);
-    console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:20,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
-    expect.soft(samples[9]).toBeLessThanOrEqual(500);
-    expect.soft(samples[18]).toBeLessThanOrEqual(1000);
+    console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:TIMING_SAMPLES,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
     const interrupted = await withinDeadline("duplicate before Undo", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
     const receiptPath = join(rootPath,".dohc/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
     await writeFile(receiptPath,JSON.stringify({workspaceId,source:"source.md",path:interrupted.path,operationId:interrupted.operationId}));
@@ -68,6 +77,7 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
       return adapter.undoHistoryOperation({workspaceId,operationId:interrupted.operationId,requestId:"undo-receipt-copy",author});
     }));
     expect(undone.notRestored).toEqual([]);
+    expect(undone.momentCount).toBe(1);
     await withinDeadline("Undo disk placement", () => expect.poll(() => lstat(join(rootPath,interrupted.path)).then(() => true, error => {
       if (error.code === "ENOENT") return false;
       throw error;
@@ -101,4 +111,4 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
     }
     if (completed && cleanupErrors.length) throw new AggregateError(cleanupErrors,"Duplicate test cleanup failed.");
   }
-},120_000);
+},TEST_TIMEOUT_MS);

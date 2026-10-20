@@ -64,11 +64,9 @@ export async function duplicateWorkspaceFile(
           const target = await admitPath(workspace.rootPath, previous.path);
           if (previous.path !== pending.path || !allowed(target.path) || !allowed(target.physical)) throw new Error("dohc could not confirm the pending Duplicate. Check its operation in History.");
           const materialized = await lstat(join(workspace.rootPath, previous.path)).then(entry => entry.isFile(), error => {if (error.code === "ENOENT") return false; throw error;});
-          if (materialized) {
-            assertWritable();
-            markChanged();
-            return {path: previous.path, materialized, operationId: pending.operationId, undo: {available: true as const}};
-          }
+          assertWritable();
+          markChanged();
+          return {path: previous.path, materialized, operationId: pending.operationId, undo: {available: true as const}};
         }
         await rm(pendingPath, {force: true});
       }
@@ -92,7 +90,7 @@ export async function duplicateWorkspaceFile(
       markChanged();
       return {path: copied.path, materialized: copied.materialized, operationId, undo: {available: true as const}};
     }, () => []);
-    await rm(pendingPath, {force: true});
+    if (result.materialized) await rm(pendingPath, {force: true});
     return result;
   }, {markOnSuccess: false});
 }
