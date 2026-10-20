@@ -80,8 +80,6 @@ export interface EngineYdocProviderSessionOptions {
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
   seedAbsentLineage?: boolean;
-  // Forwarded to the adapter: an earlier generation had this document's file.
-  fileExisted?: boolean;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
@@ -103,10 +101,6 @@ export interface EngineYdocProviderSessionOptions {
   onSettleError?: (error: unknown, token: number) => void;
   // Return false when artifact verification failed, so close retries settlement.
   onSettled?: (result: YdocSettleResult, token: number) => boolean | void | Promise<boolean | void>;
-  // A close left the file holding its settled bytes on its way out, through a settle
-  // that has no `onSettled`: the reused settle of a replicated lineage, or
-  // the settling close a refused release escalates to.
-  onCloseMaterialized?: () => void;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
 }
@@ -202,7 +196,6 @@ export async function openEngineYdocProviderSession(
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }
         : {}),
-      ...(options.fileExisted ? { fileExisted: true } : {}),
     });
   } catch (error) {
     if (ownsAdapter) adapter.dispose();
@@ -259,14 +252,6 @@ export async function openEngineYdocProviderSession(
       options.onSettleStart?.(token);
     } catch {
       // Observer boundary, like notifyError.
-    }
-  }
-
-  function notifyCloseMaterialized(): void {
-    try {
-      options.onCloseMaterialized?.();
-    } catch {
-      // Observer boundary, like notifySettleStart.
     }
   }
 
@@ -556,7 +541,6 @@ export async function openEngineYdocProviderSession(
               if (!result.materialized) {
                 throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
               }
-              notifyCloseMaterialized();
             } catch (error) {
               // Reuse has no success callback. Give failures an observable token.
               notifySettleStart(token);
@@ -597,7 +581,7 @@ export async function openEngineYdocProviderSession(
           if (closeOptions?.settleOnRefusal === false || session.ownerDraft) throw error;
           // Escalate to a settling close after a transient failure so
           // pending edits are preserved.
-          if ((await session.close({ settle: true })).materialized) notifyCloseMaterialized();
+          await session.close({ settle: true });
         }
         if (ownsAdapter) adapter.dispose();
         observedDoc.off("update", noteDocumentChange);

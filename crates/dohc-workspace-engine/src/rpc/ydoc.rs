@@ -85,8 +85,8 @@ pub(crate) struct YdocSession {
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
     /// until the session's first settle replaces it. With no head, the empty
-    /// artifact's sha when the open found one or the client said the file
-    /// existed.
+    /// file's sha when the open found one or continues a document whose file
+    /// has existed.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -142,6 +142,21 @@ pub(super) struct YdocSessionView {
     pub(super) last_settled_sha: Option<String>,
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+}
+
+/// Whether each part of `path` is on disk under `root` with exactly that name.
+fn names_exactly(root: &std::path::Path, path: &str) -> bool {
+    let mut directory = root.to_path_buf();
+    for name in path.split('/') {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == name) {
+            return false;
+        }
+        directory.push(name);
+    }
+    true
 }
 
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
@@ -236,16 +251,15 @@ struct OwnerYDocOutboxQuarantineParams {
 struct YdocOpenParams {
     version_id: String,
     path: String,
+    /// The document this open continues. The open refuses when the path
+    /// names another object. With no head, settles may not create a file the
+    /// document had.
     #[serde(default)]
     expected_object_id: Option<String>,
     #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
-    /// The client's earlier session on this document opened over its file
-    /// or wrote it. With no head, settles then refuse to create the file.
-    #[serde(default)]
-    file_existed: bool,
 }
 
 #[derive(Serialize)]
@@ -397,10 +411,6 @@ struct YdocCloseParams {
 #[serde(rename_all = "camelCase")]
 struct YdocCloseResult {
     closed: bool,
-    /// Whether the file holds the settled bytes after this close's settle,
-    /// written now or already there. Absent when it did not settle.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    materialized: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1079,23 +1089,46 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
-        // With no head, the session expects New File's empty artifact when
-        // the open finds it, or when the client says the file existed. Its
-        // settles may replace the file but not create it, so a file deleted
-        // outside dohc stays deleted. Compared with no expectation, this
-        // changes only a missing file's answer, to a refusal.
+        // With no head, the session expects an empty file when it finds New
+        // File's empty file, or when it continues a document whose file has
+        // existed. Its settles may then replace the file but not create it, so
+        // a file deleted outside dohc stays deleted. An open continues the
+        // document when it names the object, as the desktop's replacement
+        // after a restart does, or resumes the document's Y.Doc state. Any
+        // other open may start a new document at a path whose file was
+        // deleted: it expects nothing, so its first settle creates the file.
         let open_head_sha = match state.head_blob_sha256.clone() {
             Some(head) => Some(head),
-            None if params.file_existed => Some(dohc_engine_storage::hex_sha256(b"")),
             None => {
-                let artifact_path = open.root.join(&params.path);
-                tokio::task::spawn_blocking(move || {
-                    std::fs::symlink_metadata(artifact_path)
-                        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
+                let root = open.root.clone();
+                let path = params.path.clone();
+                // Whether the file is there, whether it is empty, and whether
+                // it is there under exactly this path. A case-insensitive
+                // volume also finds it under another spelling, which names
+                // another document.
+                let file = tokio::task::spawn_blocking(move || {
+                    let metadata = std::fs::symlink_metadata(root.join(&path))
+                        .ok()
+                        .filter(|metadata| metadata.file_type().is_file())?;
+                    Some((metadata.len() == 0, names_exactly(&root, &path)))
                 })
                 .await
-                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?
-                .then(|| dohc_engine_storage::hex_sha256(b""))
+                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                let empty = file.is_some_and(|(empty, _)| empty);
+                let seen = file.is_some_and(|(_, exact)| exact);
+                let continues = params.expected_object_id.is_some() || state.lineage_existing;
+                // A known limit: with no head, the object comes from the path,
+                // so an earlier file at this path counts for a new document
+                // there. Journaled and reopened before its first save, that
+                // document is refused like a deleted file, and Save it again
+                // writes it.
+                let existed = (seen || continues)
+                    && open
+                        .actor
+                        .ydoc_file_has_existed(state.key.clone(), seen)
+                        .await
+                        .map_err(map_runtime)?;
+                (empty || (continues && existed)).then(|| dohc_engine_storage::hex_sha256(b""))
             }
         };
         // The read committed the document's pulled edits, so the open runs to
@@ -1755,7 +1788,6 @@ impl EngineService {
             // NoMarker and strand the session/lease.
             !(session.lineage_absent && session.first_update_pending)
         };
-        let mut materialized = None;
         if params.settle.unwrap_or(default_settle) {
             let settled = self
                 .ydoc_settle_inner(
@@ -1766,7 +1798,7 @@ impl EngineService {
                 )
                 .await;
             match settled {
-                Ok(settled) => materialized = Some(settled.materialized),
+                Ok(_) => {}
                 // The refusal fires after the deferred rows drained: for the
                 // explicit settle RPC the client must resync (it keeps
                 // editing), but a close is final — the session ends, so the
@@ -1776,15 +1808,13 @@ impl EngineService {
                 // close refuses and strands the session/lease until the
                 // caller manually resyncs or closes the workspace.
                 Err(error) if error.message == "ydoc-remote-updates-pending" => {
-                    let settled = self
-                        .ydoc_settle_inner(
-                            cancellation,
-                            handle,
-                            &params.session_id,
-                            params.summary.as_deref(),
-                        )
-                        .await?;
-                    materialized = Some(settled.materialized);
+                    self.ydoc_settle_inner(
+                        cancellation,
+                        handle,
+                        &params.session_id,
+                        params.summary.as_deref(),
+                    )
+                    .await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -1860,11 +1890,8 @@ impl EngineService {
         if let Err(error) = close_result {
             return Err(map_runtime(error));
         }
-        serde_json::to_value(YdocCloseResult {
-            closed: true,
-            materialized,
-        })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
+        serde_json::to_value(YdocCloseResult { closed: true })
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     /// End one session without settling and without pruning: the entry — and
@@ -2083,6 +2110,17 @@ mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_matches_only_its_exact_spelling_on_disk() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        std::fs::create_dir(scratch.path().join("notes")).expect("folder");
+        std::fs::write(scratch.path().join("notes/caseOnly.md"), b"").expect("file");
+        assert!(super::names_exactly(scratch.path(), "notes/caseOnly.md"));
+        for other in ["notes/CASEONLY.md", "Notes/caseOnly.md", "notes/missing.md"] {
+            assert!(!super::names_exactly(scratch.path(), other), "{other}");
+        }
+    }
+
     #[test]
     fn desktop_automation_drafts_do_not_require_server_declarations() {
         let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
