@@ -430,6 +430,10 @@ interface HostBindCandidate {
   unverifiableFlag?: string;
 }
 
+export function choosesHost(args: string[]): boolean {
+  return args.some((arg) => HOST_BIND_FLAG_PATTERN.test(arg));
+}
+
 function explicitHostBinds(args: string[]): HostBindCandidate[] {
   const hosts: HostBindCandidate[] = [];
   for (let index = 0; index < args.length; index += 1) {
