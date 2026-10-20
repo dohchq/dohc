@@ -146,7 +146,6 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.pendingView = false;
       entry.historyObservations?.clear();
       armHistory(entry);
-      notifyRead(entry,view);
       return true;
     } catch (error) {
       entry.newest = undefined; entry.pendingView = false; entry.storedManifest=false; entry.resync=true;
@@ -180,7 +179,6 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         const persisted=persist(entry);
         if (sampleHistory && (!attempted || persisted)) {
           if (!persisted) options.storage.sampleReplicaHistory(entry.lease);
-          notifyRead(entry);
           armHistory(entry);
         }
       }
@@ -189,6 +187,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   function acceptView(entry: Entry, page: ReplicaCurrentView, spilled: boolean, delta: boolean, removed:ReplicaCurrentViewPage["removed"], manifest:ReplicaManifest, selectorDigest:string) {
     if (!principal.current(entry.lease)) return;
     const previous=entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
+    const reset=manifest!==entry.manifest;
     const result=manifest.apply(page,delta,removed);
     const {view,changed,structural,predecessor}=result;
     if(!entry.manifest && !entry.resync)entry.storedManifest=!!manifest.view;
@@ -208,14 +207,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.pendingView=true;
       if(persist(entry,view,false,undefined,"adopt")) {
         entry.manifest=result.next;entry.selectorDigest=selectorDigest;entry.newest=view;
-        notifyRead(entry,view,result.readChanges);
+        if(changed || reset)notifyRead(entry,view,result.readChanges,reset);
         if(!delta && entry.storedManifest)entry.resync=false;
       }
       return;
     }
     entry.newest=view;
     const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedManifest)entry.resync=false;
-      notifyRead(entry,entry.newest,result.readChanges);};
+      if(changed || reset)notifyRead(entry,entry.newest,result.readChanges,reset);};
     if (!changed && !entry.pendingView && previous && entry.storedManifest && !entry.resync && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
       entry.pendingView=true;if(persist(entry,view,false,previous))adopt();return;
     }

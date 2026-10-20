@@ -5,7 +5,7 @@ import {ReplicaWatches} from "../replicaWatches";
 import {hashLinkBearer} from "../linkSecurity";
 import {createReplicaReadPrincipal} from "../replicaReadPrincipal";
 import {inspectDatabase,json,jsonBody,LINK_KEY,request,seedLinkGrant,sha256,storagePath,testHandler,testStorage,type HandlerOverrides} from "./index";
-export async function fixture(access: "view"|"comment"|"edit" = "view", enabled = true) {
+export async function fixture(access: "view"|"comment"|"edit" = "view", enabled = true, overrides:HandlerOverrides={}) {
   const storage=await testStorage(), activity=new DiscussionActivityHub(), watches=new ReplicaWatches(activity);
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner@dohc.test",createdAtMs:1});
   storage.claimWorkspaceIdentity({workspaceId:"w",replicationEpoch:"epoch",streamIdentity:"stream"});
@@ -23,7 +23,7 @@ export async function fixture(access: "view"|"comment"|"edit" = "view", enabled 
   const options={discussionActivity:activity,replicaWatches:watches,publicEditRelease:{version:1},
     shareWebOrigin:"https://viewer.dohc.test",relayExchangeKey:"e".repeat(64),
     namedBrowserSessionLimits:{maxSessions:8,retentionMs:60_000,maxPendingRequests:4,maxRequestBytes:8192,maxResponseBytes:16384,timeoutMs:1000},
-    ...(enabled ? {developmentReplicaReads:source}: {})} as HandlerOverrides;
+    ...(enabled ? {developmentReplicaReads:source}: {}),...overrides} as HandlerOverrides;
   const h=testHandler(storage,options);
   const saved=testHandler(storage,{...options,developmentReplicaReads:undefined});
   const exchanged=await json(await h(request(null,"/sync/link-exchange",{...jsonBody({secret}),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":"e".repeat(64)}})));
@@ -36,6 +36,21 @@ export async function fixture(access: "view"|"comment"|"edit" = "view", enabled 
       texts:[{sha256:sha256(text),text}],omitted:[]};
     for(const listener of listeners)listener("w",latest,[...previous,...latest.files]);
   }
-  return {storage,activity,watches,h,send,savedSend:(path:string,headers:Record<string,string>={})=>saved(request(null,path,{headers:{...headers,authorization:`LinkCapability ${exchanged.capabilityToken}`}})),publish,source,get latest(){return latest!;},lease,
-    db:inspectDatabase(storagePath(storage)),dispose:()=>watches.dispose()};
+  const retire=()=>{const old=latest;latest=undefined;if(old)for(const listener of listeners)listener("w",old,[],true);};
+  return {storage,activity,watches,h,send,savedSend:(path:string,headers:Record<string,string>={})=>saved(request(null,path,{headers:{...headers,authorization:`LinkCapability ${exchanged.capabilityToken}`}})),publish,source,retire,get latest(){return latest!;},omit(){latest={...latest!,revision:++revision,omitted:[{versionId:"main",objectId:"large",path:"docs/large.md",sha256:sha256("large"),reason:"text-frame-limit"}]};},lease,
+    db:inspectDatabase(storagePath(storage)),dispose:()=>{h.dispose();saved.dispose();watches.dispose();}};
+}
+
+export const transientReplicaStates=["restore fence","frame limit","retirement","epoch floor"] as const;
+export function blockReplica(f:Awaited<ReturnType<typeof fixture>>,kind:typeof transientReplicaStates[number]) {
+  if(kind==="restore fence")f.db.prepare(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,baseline_moment_relay_seq,
+    baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,
+    lineage_state,admission_state,restore_fence_generation,registered_at_ms)
+    VALUES('w','main','fenced',?,'docs/fenced.md',1,?,0,?,x'01','current','closed',2,1)`)
+    .run(sha256("fence"),sha256(""),sha256("fence"));
+  if(kind==="frame limit")f.omit();
+  if(kind==="retirement")f.retire();
+  if(kind==="epoch floor")f.db.exec("UPDATE sync_relay_workspaces SET epoch_log_floor=1 WHERE workspace_id='w'");
+  return ()=>{f.db.exec("DELETE FROM sync_relay_live_documents; UPDATE sync_relay_workspaces SET epoch_log_floor=0 WHERE workspace_id='w'");f.publish("recovered");};
 }

@@ -6,7 +6,7 @@ import {
   linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
-import { notFound, relayError } from "./errors";
+import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
@@ -104,7 +104,7 @@ export function createLinkReadRoutes(
       if(replica) {
         const body=replica.inventory({grantId:capability.grantId,generation:capability.generation,principal:{kind:"link"}},
           ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
-        if(body.files.length>linkCurrentFileLimit)throw notFound();
+        if(body.files.length>linkCurrentFileLimit)throw relayError("link_read_rate_limited");
         return linkJsonResponse(capability.shareId,capability.grantId,body);
       }
       const snapshot = storage.readCurrentFileState({
@@ -328,21 +328,23 @@ export function createLinkReadRoutes(
     assertSha256(route.sha256);
     const replicaInput={grantId:capability.grantId,generation:capability.generation,principal:{kind:"link" as const}};
     const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFreshLinkRead(capabilityToken,capability),route.sha256,includeBytes);
-    const replicaBytes=replica ? readReplicaBlob()?.bytes : null;
+    let historicalByteLength:number|null|undefined;
+    const historicalLength=()=>historicalByteLength===undefined ? historicalByteLength=capability.access === "edit" ? linkRevisionByteLength(
+      share.workspaceId,capability.effectiveSelector,route.sha256,epochLogFloor) : null : historicalByteLength;
+    let replicaMetadata:ReturnType<typeof readReplicaBlob>=null;
+    if(replica) {
+      try {replicaMetadata=readReplicaBlob(false);}
+      catch(error) {if(!(error instanceof RelayError) || error.code!=="link_read_rate_limited" || historicalLength()===null)throw error;}
+    }
     // A current file first, then an earlier revision of a file still in the share.
-    const currentByteLength = replica ? replicaBytes?.byteLength ?? null : storage.currentFileBlobByteLength({
+    const currentByteLength = replica ? replicaMetadata?.byteLength ?? null : storage.currentFileBlobByteLength({
       workspaceId: share.workspaceId,
       versionId: targetVersionId(capability.effectiveSelector),
       selectorPaths: capability.effectiveSelector.paths,
       sha256: route.sha256,
       epochLogFloor,
     });
-    const byteLength = currentByteLength ?? (capability.access === "edit" ? linkRevisionByteLength(
-      share.workspaceId,
-      capability.effectiveSelector,
-      route.sha256,
-      epochLogFloor,
-    ) : null);
+    const byteLength = currentByteLength ?? historicalLength();
     if (
       byteLength === null ||
       !Number.isSafeInteger(byteLength) ||
@@ -368,7 +370,8 @@ export function createLinkReadRoutes(
     }
     let streamOwnsAdmission = false;
     try {
-      const blob = replicaBytes ?? storage.getBlob(share.workspaceId, route.sha256);
+      const replicaBlob=replicaMetadata ? readReplicaBlob() : null;
+      const blob = replicaMetadata ? replicaBlob?.bytes : storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
       const fresh = requireFreshLinkRead(capabilityToken, capability);
       if (currentByteLength === null && fresh.access !== "edit") throw notFound();
@@ -382,7 +385,7 @@ export function createLinkReadRoutes(
           "content-length": String(byteLength),
           "content-type": "application/octet-stream",
         },
-        replicaBytes ? {signal:request.signal,guard(){if(!readReplicaBlob(false))throw notFound();}} : undefined,
+        replicaBlob ? {signal:request.signal,guard:replicaBlob.guard} : undefined,
       );
       streamOwnsAdmission = true;
       return response;

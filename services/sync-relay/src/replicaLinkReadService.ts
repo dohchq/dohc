@@ -6,7 +6,7 @@ import {withReplicaCurrentView, type ReplicaCurrentViewSource, type ReplicaCurre
 import type {StorageContext} from "./storage/context";
 import type {ReplicaWatches} from "./replicaWatches";
 import type {DiscussionActivityHub} from "./discussionActivity";
-import {notFound} from "./errors";
+import {notFound,relayError} from "./errors";
 import {fileSideOf} from "./shareFilter";
 import type {createShareReadQueries} from "./shareReadQueries";
 
@@ -25,13 +25,13 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
   newestFilteredOpFreshness:ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],key?:string|Uint8Array) {
   const windows=new Map<string,Window>(), identity=createReceivedIdentity(key);
   // Reserve most watch capacity for named readers. Admission never affects output.
-  const links=new Map<string,{owner:string;until:number}>(),activations=new Map<string,number>();
+  const links=new Map<string,number>(),activations=new Map<string,number>();
   const hold=(authorized:Snapshot["authorized"])=>{
     const now=Date.now();
-    for(const [workspace,held] of links)if(held.until<=now)links.delete(workspace);
-    const workspace=authorized.share.workspaceId,owner=authorized.share.granterUserId;
-    if(!links.has(workspace) && (links.size>=256 || [...links.values()].filter(h=>h.owner===owner).length>=8))return;
-    links.set(workspace,{owner,until:now+35_000});
+    for(const [workspace,held] of links)if(held<=now)links.delete(workspace);
+    const workspace=authorized.share.workspaceId;
+    if(!links.has(workspace) && links.size>=256)return;
+    links.set(workspace,now+35_000);
     watches.holdReader(authorized);
   };
   const stride=2**20;
@@ -51,6 +51,7 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
       state={revision,head:base,floor:base,ceiling:base+stride-1,changes:[]};windows.set(workspace,state);
       if(windows.size>64)windows.delete(windows.keys().next().value!);
     }
+    windows.delete(workspace);windows.set(workspace,state);
     return state;
   }
   const unsubscribe=source.subscribeReadChanges((workspace,view,changed,reset)=>{
@@ -68,14 +69,18 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
   storage.unavailable.addEventListener("abort",close,{once:true});
   type Snapshot=Parameters<Parameters<typeof withReplicaCurrentView>[3]>[0];
   const file=(s:Snapshot,path:string)=>{
-    const row=s.rows.get(path), metadata=s.files.find(f=>f.path===path);
-    if(!row || metadata?.status!=="ready")throw notFound();
+    const row=s.rows.get(path);
+    if(!row)throw notFound();
     return {path,objectId:identity.object(["link",s.authorized.grant.grantId],s.workspace,row.objectId),
       blobSha256:row.sha256,contentKind:row.contentKind};
   };
-  function read<T>(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,run:(s:Snapshot)=>T) {
-    const result=withReplicaCurrentView(storage,input,source,run,undefined,true,{onAuthorized:authorized=>{
-      fresh();hold(authorized);
+  function read<T>(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,run:(s:Snapshot)=>T,requestedPath?:string,watch=true) {
+    const result=withReplicaCurrentView(storage,input,source,s=>{
+      if(s.files.some(f=>f.status!=="ready") || fileSideOf(s.authorized.effectiveSelector)!.access==="edit" && s.view.logCursor<storage.getEpochLogFloor(s.workspace))throw relayError("link_read_rate_limited");
+      return run(s);
+    },requestedPath,true,{onAuthorized:()=>{fresh();},onStanding:authorized=>{
+      if(!watch)return;
+      hold(authorized);
       const workspace=authorized.share.workspaceId,now=Date.now();
       if(source.activate && (activations.get(workspace) ?? 0)<=now) {
         activations.delete(workspace);activations.set(workspace,now+30_000);
@@ -83,18 +88,16 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
         queueMicrotask(()=>{void source.activate!(workspace).catch(()=>{});});
       }
     }});
-    if(result && typeof result==="object" && "status" in result)throw notFound();
+    if(result && typeof result==="object" && "status" in result)throw result.status==="denied" ? notFound() : relayError("link_read_rate_limited");
     return result as T;
   }
   return {
     close,
     inventory(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,requestedFolder?:string|null) {
       return read(input,fresh,s=>{
-        if(s.files.some(f=>f.status!=="ready"))throw notFound();
         const state=window(s.workspace,s.view.revision);
         const selector=fileSideOf(s.authorized.effectiveSelector)!;
         const epochLogFloor=storage.getEpochLogFloor(s.workspace);
-        if(selector.access==="edit" && s.view.logCursor<epochLogFloor)throw notFound();
         return {ok:true,effectiveSelector:createAccountlessPathProjection(selector).selector,
           access:selector.access,subjectName:storage.getShareLabels(s.authorized.share.shareId).subjectName,
           files:s.files.map(f=>{
@@ -115,8 +118,10 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
         const reset=()=>{const nextCursor=Math.max(since+1,state.head);
           if(!Number.isSafeInteger(nextCursor))throw notFound();
           return {ops:[{relaySeq:nextCursor,opKind:"files.reset",payload:{}}],nextCursor,hasMore:false,epochLogFloor};};
-        if(since<state.floor || since>state.head || since!==state.floor && since!==state.head && !state.changes.some(c=>c.seq===since)
-          || state.revision!==s.view.revision || s.files.some(f=>f.status!=="ready"))return reset();
+        // A failed persist can expose the older saved view. Wait for a new publish.
+        if(state.revision>s.view.revision)return {ops:[],nextCursor:since,hasMore:false,epochLogFloor};
+        if(since<state.floor || since>state.head || since!==state.floor && since!==state.head && !state.changes.some(c=>c.seq===since))return reset();
+        const paths=new Map([...s.rows].map(([path,row])=>[JSON.stringify([row.versionId,row.objectId]),path]));
         const changes=state.changes.filter(c=>c.seq>since);
         const ops:Array<{relaySeq:number;opKind:string;payload:unknown}>=[];
         let nextCursor=since;
@@ -124,10 +129,9 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
           nextCursor=change.seq;
           const path=s.visiblePath(change.object.versionId,change.object.path);
           if(path===null)continue;
-          const current=[...s.rows].find(([,row])=>row.versionId===change.object.versionId && row.objectId===change.object.objectId);
-          if(current && s.files.find(f=>f.path===current[0])?.status!=="ready")return reset();
+          const current=paths.get(JSON.stringify([change.object.versionId,change.object.objectId]));
           ops.push({relaySeq:change.seq,opKind:"file.current",payload:{
-            objectId:identity.object(["link",input.grantId],s.workspace,change.object.objectId),file:current ? file(s,current[0]) : null}});
+            objectId:identity.object(["link",input.grantId],s.workspace,change.object.objectId),file:current!==undefined ? file(s,current) : null}});
           if(ops.length>=limit)break;
         }
         return {ops,nextCursor:changes.length ? nextCursor : state.head,hasMore:nextCursor<state.head,epochLogFloor};
@@ -135,16 +139,19 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
     },
     blob(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,sha:string,includeBytes=true) {
       return read(input,fresh,s=>{
-        const row=[...s.rows.values()].find(row=>row.sha256===sha);
-        if(!row)return null;
-        const path=[...s.rows].find(([,value])=>value===row)![0];
-        if(s.files.find(f=>f.path===path)?.status!=="ready")throw notFound();
-        if(!includeBytes)return {byteLength:row.byteLength,bytes:null};
+        const match=[...s.rows].find(([,row])=>row.sha256===sha);
+        if(!match)return null;
+        const [path,row]=match,byteLength=row.byteLength;
+        const guard=()=>read(input,fresh,current=>{
+          const member=current.rows.get(path);
+          if(!member || member.sha256!==sha || member.byteLength!==byteLength)throw notFound();
+        },path,false);
+        if(!includeBytes)return {byteLength,bytes:null,guard};
         const text=row.contentKind==="text" ? s.readText(row) : null;
-        if(row.contentKind==="text" && text===null)throw notFound();
+        if(row.contentKind==="text" && text===null)throw relayError("link_read_rate_limited");
         const bytes=row.contentKind==="text" ? Buffer.from(text!) : storage.getBlob(s.workspace,sha);
         if(!bytes || bytes.byteLength!==row.byteLength)throw notFound();
-        return {byteLength:row.byteLength,bytes};
+        return {byteLength,bytes,guard};
       });
     },
   };

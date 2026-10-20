@@ -263,7 +263,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
   }) => T, requestedPath?: string, includeRows = false,
-  authority?:{history?:boolean;onAuthorized?:(authorized:AuthorizedShareAction)=>void},
+  authority?:{history?:boolean;onStanding?:(authorized:AuthorizedShareAction)=>void;onAuthorized?:(authorized:AuthorizedShareAction)=>void},
 ): T | Unavailable {
   try {return storage.readTx(() => {
     if (!Number.isSafeInteger(input.generation) || input.generation < 1) return {status:"denied"};
@@ -277,6 +277,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     const standing = storage.readReplicaStanding(workspace);
     if (!standing) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     if (standing.ownerUserId !== authorized.share.granterUserId) return {status:"denied"};
+    authority?.onStanding?.(authorized);
     const projection = input.principal.kind === "link" ? createAccountlessPathProjection(selector) : null;
     const realPath = requestedPath === undefined ? undefined : projection ? projection.resolvePath(requestedPath) ?? "" : requestedPath;
     const stored = readReplicaCurrentViewHead(storage,workspace);

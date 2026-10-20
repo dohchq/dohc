@@ -1,8 +1,25 @@
 vi.mock("./markdown",()=>({renderMarkdown:()=>""}));
 import {afterEach,expect,it,vi} from "vitest";
-import {fixture} from "../../../sync-relay/src/testing/replicaLink";
+import {fixture,blockReplica,transientReplicaStates} from "../../../sync-relay/src/testing/replicaLink";
 import {closeTestStorages,json,moment,putBlob,sha256} from "../../../sync-relay/src/testing";
-afterEach(async()=>{await closeTestStorages();});
+afterEach(async()=>{vi.useRealTimers();vi.unstubAllGlobals();await closeTestStorages();});
+
+it.each(transientReplicaStates)("R4 review: viewer keeps retrying %s within its retry budget and recovers",async kind=>{
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});vi.stubGlobal("window",globalThis);
+  const {loadCurrentState,loadLog}=await import("./App"),f=await fixture(kind==="epoch floor"?"edit":"view");
+  let attempts=0;
+  const fetcher=vi.spyOn(globalThis,"fetch").mockImplementation(async input=>{attempts++;const url=new URL(String(input),"https://viewer.dohc.test");return f.send(url.pathname.replace("/api/view/","/sync/link/")+url.search);});
+  try {f.publish();const current=await loadCurrentState("abcdefghijkl");const recover=blockReplica(f,kind);
+    for(const follow of [false,true]) {
+      const controller=new AbortController();let refused=false;
+      const pending=(follow&&kind!=="epoch floor" ? loadLog("abcdefghijkl",current.nextCursor,current.fileAccumulator,1,controller.signal,current.epochLogFloor,undefined,true):loadCurrentState("abcdefghijkl",controller.signal));
+      const checked=pending.catch(error=>{refused=String(error).includes("refused");return null;});
+      const before=attempts;await vi.advanceTimersByTimeAsync(100_000);expect(attempts).toBeGreaterThan(before+5);expect(refused).toBe(false);
+      controller.abort();await checked;expect(refused).toBe(false);
+    }
+    recover();expect((await loadCurrentState("abcdefghijkl")).fileAccumulator.size).toBe(1);
+  }finally{fetcher.mockRestore();f.dispose();}
+});
 it.each(["view","comment","edit"] as const)("R4: %s responses preserve the viewer contract and saved settlement facts",async access=>{
   const {loadCurrentState,loadLog}=await import("./App");
   const f=await fixture(access);

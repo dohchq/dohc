@@ -257,6 +257,7 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  dispose(): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
@@ -693,6 +694,8 @@ export function createSyncRelayHandler({
     reads: { chatResolverFor },
   });
 
+  const replicaLinkReads=developmentReplicaReads ? storage.createReplicaLinkReadService(developmentReplicaReads,
+    {holdReader:authorized=>replicaWatches.holdReader?.(authorized)},discussionActivity,newestFilteredOpFreshness,linkKey) : undefined;
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -712,8 +715,7 @@ export function createSyncRelayHandler({
     admitLinkBlobBytes,
     respondWithLinkBytes,
     linkKey,
-    developmentReplicaReads ? storage.createReplicaLinkReadService(developmentReplicaReads,
-      {holdReader:authorized=>replicaWatches.holdReader?.(authorized)},discussionActivity,newestFilteredOpFreshness,linkKey) : undefined,
+    replicaLinkReads,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
@@ -1021,6 +1023,7 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    dispose(){replicaLinkReads?.close();},
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       presence.deleteAccount(userId, workspaceIds);
       deletePresenceAccount(userId);
