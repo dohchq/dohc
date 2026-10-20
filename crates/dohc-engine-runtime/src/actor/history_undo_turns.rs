@@ -11,6 +11,8 @@ struct Member {
     effect: OperationMoment,
     head: String,
     sha: Option<String>,
+    #[serde(default)]
+    settle_error: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -538,7 +540,7 @@ impl ActorHandle {
                                 None
                             };
                             let sha = unpublished.get(&effect.path).cloned().unwrap_or(sha);
-                            Ok(Member { effect, head, sha })
+                            Ok(Member { effect, head, sha, settle_error: None })
                         })
                         .collect::<Result<Vec<_>, RuntimeError>>()
                 })?;
@@ -557,7 +559,10 @@ impl ActorHandle {
                     return Err(RuntimeError::Cancelled);
                 }
                 let guards = if member.effect.operation == "write" {
-                    let capture = gates[0].clone().lock_owned().await;
+                    let capture = tokio::select! {
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        guard = gates[0].clone().lock_owned() => guard,
+                    };
                     let sessions = tokio::select! {
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
                         guard = gates[1].clone().lock_owned() => guard,
@@ -575,14 +580,16 @@ impl ActorHandle {
                     && open_documents
                         .as_ref()
                         .is_some_and(|(is_open, _)| is_open(&key));
-                let usable = if live {
+                if live {
+                    loop {
+                    let key = key.clone();
                     let (path, root2, recorder2, token2) = (
                         member.effect.path.clone(),
                         root.clone(),
                         recorder.clone(),
                         token.clone(),
                     );
-                    let (usable, head, sha) = self
+                    let outcome = self
                         .run(move |store, cache| {
                             let usable = super::super::link_documents::baseline(
                                 store,
@@ -607,13 +614,28 @@ impl ActorHandle {
                             })?;
                             Ok((usable, head, sha))
                         })
-                        .await?;
-                    member.head = head;
-                    member.sha = Some(sha);
-                    usable
-                } else {
-                    true
-                };
+                        .await;
+                    match outcome {
+                        Ok((usable, head, sha)) => {
+                            member.head = head;
+                            member.sha = Some(sha);
+                            locked_since = None;
+                            if !usable {
+                                member.settle_error = Some("document projection unavailable".into());
+                            }
+                            break;
+                        }
+                        Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                            Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone()).await?;
+                        }
+                        Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
+                        Err(error) => {
+                            member.settle_error = Some(error.to_string());
+                            break;
+                        }
+                    }
+                    }
+                }
                 let (w, v, member) = (
                     prepared.workspace.clone(),
                     prepared.version.clone(),
@@ -623,15 +645,7 @@ impl ActorHandle {
                 let reader = inverse_store;
                 let (input, reader) = tokio::task::spawn_blocking(move || {
                     let _guards = guards;
-                    let inverse = if usable {
-                        reader.read_with(|c| inverse_input(c, &w, &v, &member, None))
-                    } else {
-                        Err(DomainError::UndoRefused {
-                            path: member.effect.path.clone(),
-                            reason: "document projection unavailable",
-                        }
-                        .into())
-                    };
+                    let inverse = reader.read_with(|c| inverse_input(c, &w, &v, &member, None));
                     let inverse = match inverse {
                         value @ (Ok(_)
                         | Err(RuntimeError::Domain(DomainError::UndoRefused {
@@ -641,6 +655,7 @@ impl ActorHandle {
                                 | "document projection unavailable",
                             ..
                         }))) => value,
+                        value if member.settle_error.is_some() => value,
                         Err(error) => return Err(error),
                     };
                     Ok((
@@ -859,7 +874,11 @@ impl ActorHandle {
                                 Ok(())
                             })();
                             tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
+                            let settle_error = member.settle_error.as_ref().filter(|_| turn_open.as_ref().is_some_and(|(is_open,_)| DocKey::new(&p.workspace,&p.version,&member.effect.object_id).is_ok_and(|key| is_open(&key))));
                             let outcome = checks.and_then(|()| {
+                                if settle_error.is_some() {
+                                    return Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"document settlement failed"}.into());
+                                }
                                 let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                                 crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
                                 let mut inverse = inverse?;
@@ -898,13 +917,13 @@ impl ActorHandle {
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
                                     let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
                                     if refusal {
-                                        tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),error.to_string()]).map_err(StorageError::persist_public)?;
+                                        tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),settle_error.cloned().unwrap_or_else(|| error.to_string())]).map_err(StorageError::persist_public)?;
                                     }
                                     if !refusal {
                                         tx.execute("UPDATE history_undo_plans SET attempts=attempts+1,last_error=?2 WHERE request_id=?1",params![p.request,error.to_string()]).map_err(StorageError::persist_public)?;
                                         let attempts: i64 = tx.query_row("SELECT attempts FROM history_undo_plans WHERE request_id=?1",[&p.request],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                                         if attempts<3 { retry_error = Some(error); break; }
-                                        tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),error.to_string()]).map_err(StorageError::persist_public)?;
+                                        tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),settle_error.cloned().unwrap_or_else(|| error.to_string())]).map_err(StorageError::persist_public)?;
                                     }
                                     let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
                                     tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
