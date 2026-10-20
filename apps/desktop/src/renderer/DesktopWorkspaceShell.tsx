@@ -70,6 +70,7 @@ import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
+import { useWorkspaceTrust } from "./useWorkspaceTrust";
 import {
   chatMentionOpenTarget,
   graphChatOpenTarget,
@@ -1807,6 +1808,17 @@ export function DesktopWorkspaceShell(props: {
   const agentActive = useAgentRunActive(workspaceId, workspaceIsReady, (error, retry) =>
     reportLaneFailure("dohc could not refresh agent runs.", error, retry),
   );
+  // Restricted Mode in the title bar. A shared view never runs app code, so it
+  // shows none.
+  const workspaceTrust = useWorkspaceTrust(workspaceId, workspaceIsReady && !shareView);
+  const { requestTrust: requestWorkspaceTrust } = workspaceTrust;
+  const trustWorkspace = useCallback(async () => {
+    try {
+      await requestWorkspaceTrust();
+    } catch (error) {
+      reportShellError("dohc could not trust this workspace.", error, () => void trustWorkspace());
+    }
+  }, [reportShellError, requestWorkspaceTrust]);
   // The engine's newest file moment, whatever the History page holds: 50
   // newer Collection changes, or a moment that arrived with an old date,
   // can keep a changed file off the first page.
@@ -5066,6 +5078,10 @@ export function DesktopWorkspaceShell(props: {
         failedSaves={failedSaves}
         showWorkbenchMenu={showWorkbenchMenu}
         agentActive={agentActive}
+        restrictedMode={workspaceTrust.trusted === false ? {
+          asking: workspaceTrust.asking,
+          onTrust: () => void trustWorkspace(),
+        } : undefined}
         wb={wb}
         toggleSidePanel={toggleSidePanel}
         mutateWb={mutateWb}

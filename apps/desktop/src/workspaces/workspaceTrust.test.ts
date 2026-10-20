@@ -31,7 +31,18 @@ describe("workspace trust", () => {
     await createWorkspaceTrust({ file }).trust(workspace);
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
     const saved = JSON.parse(await readFile(file, "utf8")) as { trusted: Array<{ workspaceId: string; rootPath: string; folder: string | null }> };
-    expect(saved.trusted).toEqual([expect.objectContaining({ workspaceId: "trip", rootPath: workspace.rootPath, folder: expect.any(String) })]);
+    expect(saved.trusted).toEqual([expect.objectContaining({ workspaceId: "trip", rootPath: workspace.rootPath.replaceAll("\\", "/"), folder: expect.any(String) })]);
+  });
+
+  it.runIf(process.platform === "win32")("matches one folder spelled with forward slashes or backslashes", async () => {
+    const { file, workspace } = await setup();
+    const forward = { ...workspace, rootPath: workspace.rootPath.replaceAll("\\", "/") };
+    const back = { ...workspace, rootPath: workspace.rootPath.replaceAll("/", "\\") };
+    const trust = createWorkspaceTrust({ file });
+    await trust.trust(forward);
+    expect(await trust.isTrusted(back)).toBe(true);
+    await trust.trust(back);
+    expect(await createWorkspaceTrust({ file }).isTrusted(forward)).toBe(true);
   });
 
   it("gives another workspace in the same folder, or the same workspace elsewhere, no trust", async () => {
@@ -76,6 +87,16 @@ describe("workspace trust", () => {
     expect(await trust.isTrusted(workspace)).toBe(false);
     expect(await trust.isTrusted(other)).toBe(true);
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
+  });
+
+  it("keeps a revoke when the first reads race with it", async () => {
+    const { file, workspace } = await setup();
+    await createWorkspaceTrust({ file }).trust(workspace);
+    const trust = createWorkspaceTrust({ file });
+    const reading = trust.isTrusted(workspace);
+    await trust.restrict("trip");
+    await reading;
+    expect(await trust.isTrusted(workspace)).toBe(false);
   });
 
   it("trusts nothing from an unreadable file", async () => {

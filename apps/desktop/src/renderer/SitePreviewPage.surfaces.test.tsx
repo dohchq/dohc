@@ -85,6 +85,8 @@ function mainProcess() {
       return () => { listeners.delete(listener); };
     }),
     openExternalUrl: vi.fn(async () => undefined),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    onWorkspaceTrustChanged: vi.fn(() => () => undefined),
   };
   return { lifecycle, handles, bridge };
 }

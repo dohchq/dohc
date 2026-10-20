@@ -727,6 +727,10 @@ function makeBaseBridge(
       return () => crashReportCallbacks.delete(listener);
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false })),
+    onWorkspaceTrustChanged: vi.fn((_listener: (event: { workspaceId: string; trusted: boolean }) => void) => () => {}),
     emitLiveDraftRecoveryChanged: (workspaceId: string) => {
       for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
     },

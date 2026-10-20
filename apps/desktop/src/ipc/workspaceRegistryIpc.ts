@@ -185,13 +185,14 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
-    registerPhysicalWorkspace(created);
+    // Before registering, so no window shows the workspace before its trust.
     // Restricted Mode is what a failed write leaves, and one click undoes it.
     if (empty) {
       await trustNewWorkspace(created).catch((error: unknown) => {
         console.warn("[desktop] could not trust a new workspace", error);
       });
     }
+    registerPhysicalWorkspace(created);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });

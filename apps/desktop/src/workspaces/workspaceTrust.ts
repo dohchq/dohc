@@ -1,3 +1,4 @@
+import { normalizeRootPath } from "@dohc/workspace-core";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
@@ -64,6 +65,10 @@ export async function isEmptyOrMissingFolder(path: string): Promise<boolean> {
   }
 }
 
+// Main spells a root two ways on Windows, with forward slashes in the
+// registry and with backslashes in a workspace operation. Both are one folder.
+const spelling = (rootPath: string) => normalizeRootPath(rootPath, process.platform);
+
 export function createWorkspaceTrust(dependencies: {
   file: string;
   identify?: (rootPath: string) => Promise<string | null>;
@@ -71,7 +76,9 @@ export function createWorkspaceTrust(dependencies: {
 }) {
   const identify = dependencies.identify ?? folderIdentity;
   const now = dependencies.now ?? Date.now;
-  let records: TrustRecord[] | null = null;
+  // One read for every caller, replaced by each write, so a read that
+  // finishes late never overwrites a newer record.
+  let records: Promise<TrustRecord[]> | null = null;
   // Writes go one at a time, so the last one lands last.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -81,8 +88,7 @@ export function createWorkspaceTrust(dependencies: {
   };
 
   // An unreadable file trusts nothing. The next change replaces it.
-  async function load(): Promise<TrustRecord[]> {
-    if (records) return records;
+  async function read(): Promise<TrustRecord[]> {
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(dependencies.file, "utf8"));
@@ -90,20 +96,21 @@ export function createWorkspaceTrust(dependencies: {
       parsed = null;
     }
     const trusted = parsed && typeof parsed === "object" && "trusted" in parsed ? parsed.trusted : null;
-    records = Array.isArray(trusted) ? trusted.filter(isRecord) : [];
-    return records;
+    return Array.isArray(trusted) ? trusted.filter(isRecord) : [];
   }
+  const load = (): Promise<TrustRecord[]> => (records ??= read());
 
   async function save(next: TrustRecord[]): Promise<void> {
     await mkdir(dirname(dependencies.file), { recursive: true });
     await atomicReplaceFile(dependencies.file, (temporary) =>
       writeFile(temporary, `${JSON.stringify({ version: 1, trusted: next }, null, 2)}\n`));
-    records = next;
+    records = Promise.resolve(next);
   }
 
   async function isTrusted(workspace: TrustedFolder): Promise<boolean> {
+    const rootPath = spelling(workspace.rootPath);
     const record = (await load()).find((each) =>
-      each.workspaceId === workspace.workspaceId && each.rootPath === workspace.rootPath);
+      each.workspaceId === workspace.workspaceId && each.rootPath === rootPath);
     if (!record) return false;
     try {
       return (await identify(workspace.rootPath)) === record.folder;
@@ -122,7 +129,7 @@ export function createWorkspaceTrust(dependencies: {
       serial(async () => {
         const folder = await identify(workspace.rootPath);
         const kept = (await load()).filter((each) => each.workspaceId !== workspace.workspaceId);
-        await save([...kept, { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, folder, trustedAtMs: now() }]);
+        await save([...kept, { workspaceId: workspace.workspaceId, rootPath: spelling(workspace.rootPath), folder, trustedAtMs: now() }]);
       }),
     // Restricted Mode for every folder this workspace was trusted in.
     restrict: (workspaceId: string): Promise<void> =>
