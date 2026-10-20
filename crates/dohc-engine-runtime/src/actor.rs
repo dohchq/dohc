@@ -907,9 +907,14 @@ fn worker_main(
                     && link_drain_holds.load(Ordering::Acquire) == 0
                 {
                     links_started = true;
-                    timer = tokio::runtime::Builder::new_current_thread().enable_time().build().ok();
+                    timer = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .ok();
                     #[cfg(test)]
-                    if timer.is_some() { link_metrics.lock().unwrap().timer_starts += 1; }
+                    if timer.is_some() {
+                        link_metrics.lock().unwrap().timer_starts += 1;
+                    }
                     match DrainWorker::new(Arc::clone(&link_metrics)) {
                         Ok(worker) => {
                             links = Some(worker);
@@ -1031,7 +1036,10 @@ fn worker_main(
     drop(store);
 }
 
-async fn wait_for_conversation_retry(rx: &mut mpsc::Receiver<Command>, delay: std::time::Duration) -> Option<Command> {
+async fn wait_for_conversation_retry(
+    rx: &mut mpsc::Receiver<Command>,
+    delay: std::time::Duration,
+) -> Option<Command> {
     tokio::select! { biased; cmd = rx.recv() => cmd, () = tokio::time::sleep(delay) => None }
 }
 
@@ -1200,10 +1208,17 @@ mod saturation_tests {
 
     #[tokio::test]
     async fn conversation_retry_wakes_without_a_parser_and_keeps_command_priority() {
-        let (tx,mut rx)=mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(2);
         tx.send(Command::WakeLinks).await.unwrap();
-        assert!(matches!(wait_for_conversation_retry(&mut rx,Duration::ZERO).await,Some(Command::WakeLinks)));
-        assert!(wait_for_conversation_retry(&mut rx,Duration::ZERO).await.is_none());
+        assert!(matches!(
+            wait_for_conversation_retry(&mut rx, Duration::ZERO).await,
+            Some(Command::WakeLinks)
+        ));
+        assert!(
+            wait_for_conversation_retry(&mut rx, Duration::ZERO)
+                .await
+                .is_none()
+        );
     }
 
     #[test]

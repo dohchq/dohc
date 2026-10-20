@@ -624,117 +624,205 @@ fn conversation_links_uncovered_rows_remain_incomplete_across_continuations() {
     assert!(last["nextCursor"].is_null());
 }
 
-
 #[test]
 fn conversation_links_late_parent_preserves_reply_cursor_and_visible_links() {
-    use dohc_engine_sync::{ReplicationEnvelope,apply_chat_envelope};
+    use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
     let (_scratch, mut s) = fixture();
-    demand(&mut s,"a"); drain(&mut s);
+    demand(&mut s, "a");
+    drain(&mut s);
     let message = |id: &str, parent: Option<&str>| ReplicationEnvelope {
-        settlement_admission:None,admitted_author_snapshot:None,workspace_id:"ws".into(),
-        origin_id:format!("origin-{id}"),origin_seq:0,op_kind:"chat.message.append".into(),
-        payload:json!({"messageId":id,"threadId":"t","authorKind":"human","authorDisplayName":"Ada",
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".into(),
+        origin_id: format!("origin-{id}"),
+        origin_seq: 0,
+        op_kind: "chat.message.append".into(),
+        payload: json!({"messageId":id,"threadId":"t","authorKind":"human","authorDisplayName":"Ada",
             "body":"","createdAtMs":2,"parentMessageId":parent}),
-        recorded_at_ms:2,relay_seq:Some(0),
+        recorded_at_ms: 2,
+        relay_seq: Some(0),
     };
     // Omit the optional field rather than sending null, as the production wire does.
-    let mut reply=message("reply",Some("parent"));
-    apply_chat_envelope(&mut s,&reply,&NoFaults).unwrap();
+    let mut reply = message("reply", Some("parent"));
+    apply_chat_envelope(&mut s, &reply, &NoFaults).unwrap();
     for i in 0..125 {
-        let f=format!("f-{i:03}");alias(&mut s,&f,&format!("{f}.md"));
-        attach(&mut s,&f,Some(&f),i,"t","reply");
+        let f = format!("f-{i:03}");
+        alias(&mut s, &f, &format!("{f}.md"));
+        attach(&mut s, &f, Some(&f), i, "t", "reply");
     }
-    let first=page(&s,"a",None).unwrap();
-    reply=message("parent",None);
-    reply.payload.as_object_mut().unwrap().remove("parentMessageId");
-    apply_chat_envelope(&mut s,&reply,&NoFaults).unwrap();
-    let parent:String=s.read_with(|c|c.query_row("SELECT parent_message_id FROM chat_messages WHERE message_id='reply'",[],|r|r.get(0))).unwrap();
-    assert_eq!(parent,"parent");
-    let next=page(&s,"a",Some(first["nextCursor"].as_str().unwrap().into())).unwrap();
-    assert_eq!(next["entries"].as_array().unwrap().len(),25);
-    assert_eq!(next["indexBuilding"],false);
-    let count:i64=s.read_with(|c|c.query_row("SELECT count(*) FROM chat_conversation_file_link_work",[],|r|r.get(0))).unwrap();
-    assert_eq!(count,0);
+    let first = page(&s, "a", None).unwrap();
+    reply = message("parent", None);
+    reply
+        .payload
+        .as_object_mut()
+        .unwrap()
+        .remove("parentMessageId");
+    apply_chat_envelope(&mut s, &reply, &NoFaults).unwrap();
+    let parent: String = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT parent_message_id FROM chat_messages WHERE message_id='reply'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(parent, "parent");
+    let next = page(&s, "a", Some(first["nextCursor"].as_str().unwrap().into())).unwrap();
+    assert_eq!(next["entries"].as_array().unwrap().len(), 25);
+    assert_eq!(next["indexBuilding"], false);
+    let count: i64 = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_work",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]
 fn conversation_links_message_delete_hides_only_its_files() {
-    let (_scratch,mut s)=fixture();demand(&mut s,"a");drain(&mut s);
-    exec(&mut s,"INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','t',1,'remove','human','Ada','',1);");
-    for (id,message) in [("retained","m"),("removed","remove")] {
-        alias(&mut s,id,&format!("{id}.md"));attach(&mut s,id,Some(id),1,"t",message);
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    drain(&mut s);
+    exec(
+        &mut s,
+        "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','t',1,'remove','human','Ada','',1);",
+    );
+    for (id, message) in [("retained", "m"), ("removed", "remove")] {
+        alias(&mut s, id, &format!("{id}.md"));
+        attach(&mut s, id, Some(id), 1, "t", message);
     }
-    exec(&mut s,"DELETE FROM chat_messages WHERE message_id='remove';");
-    let p=page(&s,"a",None).unwrap();
-    assert_eq!(p["entries"].as_array().unwrap().len(),1);
-    assert_eq!(p["entries"][0]["file"]["objectId"],"retained");
-    assert_eq!(p["indexBuilding"],true);
-    let kinds:Vec<String>=s.read_with(|c|c.prepare("SELECT kind FROM chat_conversation_file_link_work").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
-    assert!(kinds.iter().all(|k|k=="file"));
-    drain(&mut s);assert_eq!(entries(&s,"a").len(),1);
+    exec(
+        &mut s,
+        "DELETE FROM chat_messages WHERE message_id='remove';",
+    );
+    let p = page(&s, "a", None).unwrap();
+    assert_eq!(p["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(p["entries"][0]["file"]["objectId"], "retained");
+    assert_eq!(p["indexBuilding"], true);
+    let kinds: Vec<String> = s
+        .read_with(|c| {
+            c.prepare("SELECT kind FROM chat_conversation_file_link_work")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    assert!(kinds.iter().all(|k| k == "file"));
+    drain(&mut s);
+    assert_eq!(entries(&s, "a").len(), 1);
 }
 
 #[test]
 fn conversation_links_seed_is_conversation_scoped_and_request_ordered() {
-    let (_scratch,mut s)=fixture();
-    alias(&mut s,"small","small.md");attach(&mut s,"small",Some("small"),1,"u","n");
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "small", "small.md");
+    attach(&mut s, "small", Some("small"), 1, "u", "n");
     s.write_with(&NoFaults,|c| {
         let mut insert=c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,'t','m','file','large',?2)").map_err(sql)?;
         for i in 0..10_000 {insert.execute(params![format!("large-{i:05}"),i]).map_err(sql)?;}
         Ok::<_,StorageError>(())
     }).unwrap();
-    demand(&mut s,"b");demand(&mut s,"a");
-    assert!(tick(&mut s).unwrap());assert!(tick(&mut s).unwrap());
-    assert_eq!(page(&s,"b",None).unwrap()["indexBuilding"],false);
-    assert_eq!(entries(&s,"b").len(),1);
-    let after:String=s.read_with(|c|c.query_row("SELECT seed_after FROM chat_conversation_file_link_state WHERE channel_id='a'",[],|r|r.get(0))).unwrap();
-    assert!(after.is_empty(),"request order must win over channel order");
+    demand(&mut s, "b");
+    demand(&mut s, "a");
+    assert!(tick(&mut s).unwrap());
+    assert!(tick(&mut s).unwrap());
+    assert_eq!(page(&s, "b", None).unwrap()["indexBuilding"], false);
+    assert_eq!(entries(&s, "b").len(), 1);
+    let after: String = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT seed_after FROM chat_conversation_file_link_state WHERE channel_id='a'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        after.is_empty(),
+        "request order must win over channel order"
+    );
     drain(&mut s);
     // A reset must also scan only this conversation, not the large neighbour.
-    exec(&mut s,"INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','b','reset','');");
-    let mut slices=0;while tick(&mut s).unwrap(){slices+=1;}
-    assert!(slices<=4,"small conversation reset took {slices} slices");
+    exec(
+        &mut s,
+        "INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','b','reset','');",
+    );
+    let mut slices = 0;
+    while tick(&mut s).unwrap() {
+        slices += 1;
+    }
+    assert!(slices <= 4, "small conversation reset took {slices} slices");
 }
 
 #[test]
 fn conversation_links_failed_repair_backs_off_without_releasing_its_barrier_or_stalling_others() {
-    let (scratch,mut s)=fixture();demand(&mut s,"a");demand(&mut s,"b");drain(&mut s);
-    for (ch,t,m) in [("a","t","m"),("b","u","n")] {
-        alias(&mut s,ch,&format!("{ch}.md"));attach(&mut s,ch,Some(ch),1,t,m);
+    let (scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    drain(&mut s);
+    for (ch, t, m) in [("a", "t", "m"), ("b", "u", "n")] {
+        alias(&mut s, ch, &format!("{ch}.md"));
+        attach(&mut s, ch, Some(ch), 1, t, m);
     }
     exec(&mut s,"INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES
         ('ws','a','file','a'),('ws','a','thread','barrier'),('ws','b','file','b'),('ws','b','thread','barrier');
         UPDATE chat_conversation_file_link_work SET phase=2 WHERE kind='thread';
         CREATE TRIGGER fail_a BEFORE DELETE ON chat_conversation_file_links WHEN OLD.channel_id='a' BEGIN SELECT RAISE(ABORT,'injected repair failure'); END;");
-    assert_eq!(tick_at(&mut s,1000).unwrap(),std::time::Duration::ZERO);
+    assert_eq!(tick_at(&mut s, 1000).unwrap(), std::time::Duration::ZERO);
     let retry:(i64,i64)=s.read_with(|c|c.query_row("SELECT failures,retry_at_ms FROM chat_conversation_file_link_work WHERE channel_id='a' AND kind='file'",[],|r|Ok((r.get(0)?,r.get(1)?)))).unwrap();
-    assert_eq!(retry,(1,1250));
-    drop(s);let mut s=EngineStore::open(&engine_db_path(&scratch).unwrap(),2).unwrap();
-    for _ in 0..2 {tick_at(&mut s,1001).unwrap();}
-    assert_eq!(entries(&s,"b").len(),1);
-    assert_eq!(page(&s,"b",None).unwrap()["indexBuilding"],false);
-    assert!(entries(&s,"a").is_empty(),"failed conversation retains its barrier");
-    assert_eq!(tick_at(&mut s,1001).unwrap(),std::time::Duration::from_millis(250));
-    exec(&mut s,"DROP TRIGGER fail_a;");
-    for _ in 0..3 {tick_at(&mut s,1250).unwrap();}
-    assert_eq!(entries(&s,"a").len(),1);
-    assert_eq!(page(&s,"a",None).unwrap()["indexBuilding"],false);
+    assert_eq!(retry, (1, 1250));
+    drop(s);
+    let mut s = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+    for _ in 0..2 {
+        tick_at(&mut s, 1001).unwrap();
+    }
+    assert_eq!(entries(&s, "b").len(), 1);
+    assert_eq!(page(&s, "b", None).unwrap()["indexBuilding"], false);
+    assert!(
+        entries(&s, "a").is_empty(),
+        "failed conversation retains its barrier"
+    );
+    assert_eq!(
+        tick_at(&mut s, 1001).unwrap(),
+        std::time::Duration::from_millis(250)
+    );
+    exec(&mut s, "DROP TRIGGER fail_a;");
+    for _ in 0..3 {
+        tick_at(&mut s, 1250).unwrap();
+    }
+    assert_eq!(entries(&s, "a").len(), 1);
+    assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], false);
 }
 
 #[test]
 fn conversation_links_failed_seed_does_not_stall_later_requests() {
-    let (_scratch,mut s)=fixture();
-    for (ch,t,m) in [("a","t","m"),("b","u","n")] {
-        alias(&mut s,ch,&format!("{ch}.md"));attach(&mut s,ch,Some(ch),1,t,m);
+    let (_scratch, mut s) = fixture();
+    for (ch, t, m) in [("a", "t", "m"), ("b", "u", "n")] {
+        alias(&mut s, ch, &format!("{ch}.md"));
+        attach(&mut s, ch, Some(ch), 1, t, m);
     }
-    demand(&mut s,"a");demand(&mut s,"b");
-    exec(&mut s,"CREATE TRIGGER fail_seed BEFORE INSERT ON chat_conversation_file_links WHEN NEW.channel_id='a' BEGIN SELECT RAISE(ABORT,'injected seed failure'); END;");
-    tick_at(&mut s,1000).unwrap();
-    for _ in 0..2 {tick_at(&mut s,1001).unwrap();}
-    assert_eq!(page(&s,"b",None).unwrap()["indexBuilding"],false);
-    assert_eq!(entries(&s,"b").len(),1);
-    assert_eq!(page(&s,"a",None).unwrap()["indexBuilding"],true);
-    exec(&mut s,"DROP TRIGGER fail_seed;");
-    for _ in 0..2 {tick_at(&mut s,1250).unwrap();}
-    assert_eq!(entries(&s,"a").len(),1);
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    exec(
+        &mut s,
+        "CREATE TRIGGER fail_seed BEFORE INSERT ON chat_conversation_file_links WHEN NEW.channel_id='a' BEGIN SELECT RAISE(ABORT,'injected seed failure'); END;",
+    );
+    tick_at(&mut s, 1000).unwrap();
+    for _ in 0..2 {
+        tick_at(&mut s, 1001).unwrap();
+    }
+    assert_eq!(page(&s, "b", None).unwrap()["indexBuilding"], false);
+    assert_eq!(entries(&s, "b").len(), 1);
+    assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true);
+    exec(&mut s, "DROP TRIGGER fail_seed;");
+    for _ in 0..2 {
+        tick_at(&mut s, 1250).unwrap();
+    }
+    assert_eq!(entries(&s, "a").len(), 1);
 }

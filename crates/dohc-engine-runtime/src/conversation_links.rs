@@ -51,9 +51,10 @@ fn enqueue(c: &Connection, work: &Work, object: &str) -> Result<(), StorageError
 
 fn finish(c: &Connection, work: &Work) -> Result<(), StorageError> {
     c.prepare_cached(
-        "DELETE FROM chat_conversation_file_link_work WHERE work_id=?1 AND revision=?2").map_err(sql)?.execute(
-        params![work.id, work.revision],
+        "DELETE FROM chat_conversation_file_link_work WHERE work_id=?1 AND revision=?2",
     )
+    .map_err(sql)?
+    .execute(params![work.id, work.revision])
     .map_err(sql)?;
     Ok(())
 }
@@ -83,10 +84,10 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             let eligible: bool = c
                 .prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_candidates
-                WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3)").map_err(sql)?.query_row(
-                    params![w.ws, w.channel, id],
-                    |r| r.get(0),
+                WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3)",
                 )
+                .map_err(sql)?
+                .query_row(params![w.ws, w.channel, id], |r| r.get(0))
                 .map_err(sql)?;
             if eligible {
                 c.prepare_cached("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3").map_err(sql)?.execute(params![w.ws,w.channel,w.key]).map_err(sql)?;
@@ -165,7 +166,6 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
     Ok(())
 }
 
-
 type AttachmentCoordinate = (String, i64, String, Option<String>);
 fn thread_slice(c: &Connection, w: &Work) -> Result<Vec<AttachmentCoordinate>, StorageError> {
     c.prepare_cached("SELECT message_id,created_at_ms,attachment_id,object_id FROM chat_attachments
@@ -176,35 +176,63 @@ fn thread_slice(c: &Connection, w: &Work) -> Result<Vec<AttachmentCoordinate>, S
 }
 
 fn seed(c: &Connection, w: &Work) -> Result<(), StorageError> {
-    let thread: Option<String> = c.prepare_cached(
-        "SELECT thread_id FROM chat_threads WHERE workspace_id=?1 AND channel_id=?2
-         AND thread_id>=?3 AND (?4=0 OR thread_id>?3) ORDER BY thread_id LIMIT 1"
-    ).map_err(sql)?.query_row(params![w.ws,w.channel,w.key,w.phase], |r| r.get(0)).optional().map_err(sql)?;
+    let thread: Option<String> = c
+        .prepare_cached(
+            "SELECT thread_id FROM chat_threads WHERE workspace_id=?1 AND channel_id=?2
+         AND thread_id>=?3 AND (?4=0 OR thread_id>?3) ORDER BY thread_id LIMIT 1",
+        )
+        .map_err(sql)?
+        .query_row(params![w.ws, w.channel, w.key, w.phase], |r| r.get(0))
+        .optional()
+        .map_err(sql)?;
     let Some(thread) = thread else {
         c.prepare_cached("UPDATE chat_conversation_file_link_state SET seed_phase='ready',failures=0,retry_at_ms=0 WHERE request_id=?1")
             .map_err(sql)?.execute([w.id]).map_err(sql)?;
         return Ok(());
     };
     let same = thread == w.key && w.phase == 0;
-    let scan = Work {key:thread.clone(),message:if same {w.message.clone()} else {String::new()},
-        time:if same {w.time} else {i64::MAX},after:if same {w.after.clone()} else {String::new()}, ..w.clone()};
+    let scan = Work {
+        key: thread.clone(),
+        message: if same {
+            w.message.clone()
+        } else {
+            String::new()
+        },
+        time: if same { w.time } else { i64::MAX },
+        after: if same { w.after.clone() } else { String::new() },
+        ..w.clone()
+    };
     let rows = thread_slice(c, &scan)?;
-    for (_,_,id,_) in &rows { publish(c,&w.ws,&w.channel,id)?; }
+    for (_, _, id, _) in &rows {
+        publish(c, &w.ws, &w.channel, id)?;
+    }
     let done = rows.len() < BATCH as usize;
-    let (message,time,id) = if !done {
-        let (m,t,id,_) = rows.last().expect("full slice");
-        (m.as_str(),*t,id.as_str())
-    } else {("",i64::MAX,"")};
+    let (message, time, id) = if !done {
+        let (m, t, id, _) = rows.last().expect("full slice");
+        (m.as_str(), *t, id.as_str())
+    } else {
+        ("", i64::MAX, "")
+    };
     c.prepare_cached("UPDATE chat_conversation_file_link_state SET seed_thread=?2,seed_message=?3,seed_time=?4,seed_after=?5,seed_done=?6,failures=0,retry_at_ms=0 WHERE request_id=?1")
         .map_err(sql)?.execute(params![w.id,thread,message,time,id,done]).map_err(sql)?;
     Ok(())
 }
 
 /// Retain the failed item and its barrier, but let other conversations advance.
-fn backoff(store: &mut EngineStore, w: &Work, now: i64, seed: bool, error: StorageError) -> Result<(), StorageError> {
+fn backoff(
+    store: &mut EngineStore,
+    w: &Work,
+    now: i64,
+    seed: bool,
+    error: StorageError,
+) -> Result<(), StorageError> {
     let delay = (250_i64 * (1_i64 << w.failures.min(8))).min(60_000);
-    eprintln!("conversation links {} item {} retained, attempt {}, retry in {delay}ms: {error}",
-        if seed {"seed"} else {"repair"},w.id,w.failures.saturating_add(1));
+    eprintln!(
+        "conversation links {} item {} retained, attempt {}, retry in {delay}ms: {error}",
+        if seed { "seed" } else { "repair" },
+        w.id,
+        w.failures.saturating_add(1)
+    );
     store.write_background_with(&NoFaults, |c| {
         let query = if seed {
             "UPDATE chat_conversation_file_link_state SET failures=failures+1,retry_at_ms=?2 WHERE request_id=?1"
@@ -229,7 +257,7 @@ fn tick_at(store: &mut EngineStore, now: i64) -> Result<std::time::Duration, Sto
         })).optional().map_err(sql))?;
     if let Some(work) = work {
         if let Err(error) = store.write_background_with(&NoFaults, |c| repair(c, &work)) {
-            backoff(store,&work,now,false,error)?;
+            backoff(store, &work, now, false, error)?;
         }
         return Ok(Duration::ZERO);
     }
@@ -241,21 +269,28 @@ fn tick_at(store: &mut EngineStore, now: i64) -> Result<std::time::Duration, Sto
         time:r.get(6)?,after:r.get(7)?,failures:r.get(8)?,kind:String::new(),revision:0,
     })).optional().map_err(sql))?;
     if let Some(requested) = requested {
-        if let Err(error) = store.write_background_with(&NoFaults, |c| seed(c,&requested)) {
-            backoff(store,&requested,now,true,error)?;
+        if let Err(error) = store.write_background_with(&NoFaults, |c| seed(c, &requested)) {
+            backoff(store, &requested, now, true, error)?;
         }
         return Ok(Duration::ZERO);
     }
     let pending: bool = store.read_with(|c| c.query_row(
         "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_work) OR EXISTS(SELECT 1 FROM chat_conversation_file_link_state WHERE seed_phase='scan')",
         [], |r| r.get(0)).map_err(sql))?;
-    Ok(if pending {Duration::from_millis(250)} else {Duration::MAX})
+    Ok(if pending {
+        Duration::from_millis(250)
+    } else {
+        Duration::MAX
+    })
 }
 
 pub(crate) fn tick_delay(store: &mut EngineStore) -> Result<std::time::Duration, StorageError> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
-    tick_at(store,now)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    tick_at(store, now)
 }
 
 #[cfg(test)]

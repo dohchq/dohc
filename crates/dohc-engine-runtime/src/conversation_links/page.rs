@@ -139,10 +139,12 @@ pub(super) fn read(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if let Some(entry) = hydrate(c,ws,channel,version,&key,&id,&thread,&message,time)? {
+        if let Some(entry) = hydrate(c, ws, channel, version, &key, &id, &thread, &message, time)? {
             let size = entry.to_string().len() + 1;
             if bytes + size > BYTES {
-                if count == 0 { return Err(invalid()); }
+                if count == 0 {
+                    return Err(invalid());
+                }
                 more = true;
                 break;
             }
@@ -164,12 +166,22 @@ pub(super) fn read(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn hydrate(c: &Connection, ws: &str, channel: &str, version: &str, key: &str, id: &str, thread: &str, message: &str, time: i64) -> Result<Option<Value>,RuntimeError> {
-let path: Option<String>=c.prepare_cached(
+pub(super) fn hydrate(
+    c: &Connection,
+    ws: &str,
+    channel: &str,
+    version: &str,
+    key: &str,
+    id: &str,
+    thread: &str,
+    message: &str,
+    time: i64,
+) -> Result<Option<Value>, RuntimeError> {
+    let path: Option<String>=c.prepare_cached(
     "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1").map_err(sql)?.query_row(
     params![ws,version,key],|r| r.get(0)).optional().map_err(sql)?;
-if let Some(path) = path {
-    let author: Option<Value>=c.prepare_cached(
+    if let Some(path) = path {
+        let author: Option<Value>=c.prepare_cached(
         "SELECT m.author_kind,substr(m.author_display_name,1,100),m.author_owner_display_name,m.author_user_id,m.author_actor_key
          FROM chat_messages m JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id
          JOIN chat_channels ch ON ch.workspace_id=t.workspace_id AND ch.channel_id=t.channel_id
@@ -181,16 +193,18 @@ if let Some(path) = path {
             }
             Ok(author)
         }).optional().map_err(sql)?;
-    if let Some(author) = author {
-        let folder = path
-            .rsplit_once('/')
-            .map(|(folder, _)| folder)
-            .unwrap_or("");
-        return Ok(Some(json!({"file":{"objectId":key,"path":path,"folder":folder},
-            "attachmentId":id,"threadId":thread,"messageId":message,"mentionedAtMs":time,"author":author})));
+        if let Some(author) = author {
+            let folder = path
+                .rsplit_once('/')
+                .map(|(folder, _)| folder)
+                .unwrap_or("");
+            return Ok(Some(
+                json!({"file":{"objectId":key,"path":path,"folder":folder},
+            "attachmentId":id,"threadId":thread,"messageId":message,"mentionedAtMs":time,"author":author}),
+            ));
+        }
     }
-}
-Ok(None)
+    Ok(None)
 }
 
 impl ActorHandle {
