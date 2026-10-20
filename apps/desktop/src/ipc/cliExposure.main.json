@@ -238,7 +238,7 @@
         },
         {
           "group": "chat",
-          "block": "  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export,\n               file-mentions\n"
+          "block": "  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export,\n               links, file-mentions\n"
         },
         {
           "group": "dataset",

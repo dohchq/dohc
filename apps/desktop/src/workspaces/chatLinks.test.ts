@@ -90,3 +90,44 @@ describe("chat Links authority",()=>{
   await expect(h.read("w",{channelWireId:"wire"},()=>{if(!active)throw Error("stale");})).rejects.toThrow("stale");
  });
 });
+
+it("binds continuation scope to authority between pages and preserves engine refusals",async()=>{
+  const h=harness();let original="";
+  h.store.linksPage.mockImplementation(async input=>{
+    const value=input as {scope:string;cursor?:string};
+    if(value.cursor&&value.scope!==original)throw Error("chat-mention-access-changed");
+    original=value.scope;return raw();
+  });
+  await h.read("w",{channelWireId:"wire"});
+  await h.read("w",{channelWireId:"wire",cursor:"sealed"});
+  h.principal();
+  await expect(h.read("w",{channelWireId:"wire",cursor:"sealed"})).rejects.toThrow("chat-mention-access-changed");
+  h.store.linksPage.mockRejectedValue(Error("chat-conversation-links-changed"));
+  await expect(h.read("w",{channelWireId:"wire",cursor:"sealed"})).rejects.toThrow("chat-conversation-links-changed");
+});
+it.each([".dohc/private.md","../outside.md","/absolute.md"])("omits reserved or escaping resolved paths: %s",async path=>{
+  const h=harness();h.resolveEngineFiles.mockResolvedValue([{status:"found",objectId:"object",path}]);
+  expect(await h.read("w",{channelWireId:"wire"})).toMatchObject({entries:[]});
+  expect(h.present).not.toHaveBeenCalled();
+});
+it("uses the received source token for a received object and current authorized path",async()=>{
+  const h=harness(true),objectId="share-object:v1:"+"a".repeat(64),receivedSource="share-source:v1:"+"b".repeat(64);
+  h.change({shareView:{shareId:"s",recipientUserId:"u",grantedSelector:{paths:["notes"],versionId:null,access:"view"},
+    receivedIdentity:{receivedSource,grantId:"grant",generation:1}} as RegistryEntry["shareView"]});
+  const page=raw();page.entries[0]!.file.objectId=objectId;
+  h.store.linksPage.mockResolvedValue(page);
+  h.resolveEngineFiles.mockResolvedValue([{status:"found",objectId,path:"notes/renamed.md"}]);
+  expect(await h.read("w",{channelWireId:"wire"})).toMatchObject({
+    complete:false,entries:[{file:{objectId,receivedSource,path:"notes/renamed.md",folder:"notes"}}],
+  });
+  expect(h.resolveEngineFiles).toHaveBeenCalledWith(expect.anything(),[
+    expect.objectContaining({source:{receivedSource},target:{kind:"file",objectId}}),
+  ]);
+  h.resolveEngineFiles.mockResolvedValue([{status:"found",objectId,path:"private/secret.md"}]);
+  expect(await h.read("w",{channelWireId:"wire"})).toMatchObject({entries:[],complete:false});
+});
+it("refuses damaged share authority without trying the owned file boundary",async()=>{
+  const h=harness(true);h.change({shareView:{shareId:"s",grantedSelector:null} as never});
+  await expect(h.read("w",{channelWireId:"wire"})).rejects.toThrow("chat-mention-access-changed");
+  expect(h.store.linksPage).not.toHaveBeenCalled();expect(h.resolveEngineFiles).not.toHaveBeenCalled();
+});
