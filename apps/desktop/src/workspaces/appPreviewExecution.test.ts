@@ -82,7 +82,7 @@ async function harness() {
   resolvePort = resolveOwner;
   const devHandle: SiteProcessHandle = {
     url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: join(workspaceRoot, "portal"),
-    logs: () => [log("Ready")], onExit: () => undefined, stop: vi.fn(async () => undefined),
+    logs: () => [log("Ready")], onExit: () => undefined, stop: vi.fn(async () => undefined), stillRunning: async () => [],
   };
   vi.mocked(startSiteDevServer).mockResolvedValue(devHandle);
   vi.mocked(buildSite).mockResolvedValue({ ok: true, command: "node", args: ["build.js"], outputPath: join(workspaceRoot, "portal", "dist"), logs: [log("Built")], exitCode: 0 });

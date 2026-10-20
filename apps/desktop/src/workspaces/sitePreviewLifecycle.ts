@@ -264,9 +264,12 @@ export function createSitePreviewLifecycle<
       .then(async () => {
         // A stop counts once the command's processes are gone. Until then the
         // record stays, so nothing starts over them and the next stop retries.
+        // A static preview runs no app process.
         const { handle } = record;
-        const left = "stillRunning" in handle ? await handle.stillRunning?.() : undefined;
-        if ("stillRunning" in handle && left && left.length > 0) throw new AppCommandStillRunningError(handle, left);
+        if ("stillRunning" in handle) {
+          const left = await handle.stillRunning();
+          if (left.length > 0) throw new AppCommandStillRunningError(handle, left);
+        }
         if (activePreviews.get(key) === record) activePreviews.delete(key);
       })
       .finally(() => {

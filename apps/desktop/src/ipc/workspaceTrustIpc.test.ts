@@ -18,6 +18,8 @@ async function harness(input: {
   failWrites?: { value: boolean };
   // Stands in for the workspace's stop, when a test holds it.
   stop?: () => Promise<void>;
+  // Runs before each write of the trust file, to hold it.
+  writeGate?: { hold: (() => Promise<void>) | null };
 } = {}) {
   const scratch = await createTestScratch("workspace-trust-ipc-");
   const rootPath = join(scratch, "trip");
@@ -27,6 +29,7 @@ async function harness(input: {
   const trust = createWorkspaceTrust({
     file,
     writeText: async (path, text) => {
+      await input.writeGate?.hold?.();
       if (input.failWrites?.value) throw new Error("disk full");
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, text);
@@ -64,7 +67,7 @@ async function harness(input: {
 function devServer(h: Awaited<ReturnType<typeof harness>>, stop: () => Promise<void>): Promise<unknown> {
   const handle: SiteProcessHandle = {
     url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: h.workspace.rootPath,
-    logs: () => [], onExit: () => undefined, stop,
+    logs: () => [], onExit: () => undefined, stop, stillRunning: async () => [],
   };
   return h.lifecycle.acquire({
     holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,
@@ -120,6 +123,41 @@ describe("main's workspace trust operations", () => {
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(h.notified.at(-1)).toEqual(["trip", true]);
     expect(await h.trust.isTrusted(h.workspace)).toBe(true);
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(true);
+  });
+
+  it("lets a Trust whose write the restrict's save waited behind win, with no error", async () => {
+    const stopping = deferred<void>();
+    const stopReached = deferred<void>();
+    const writeGate: { hold: (() => Promise<void>) | null } = { hold: null };
+    const h = await harness({
+      answer: true,
+      writeGate,
+      stop: () => {
+        stopReached.resolve();
+        return stopping.promise;
+      },
+    });
+    await h.request();
+    const restricting = h.restrict();
+    await stopReached.promise;
+    // The Trust from another window is writing its grant when the stop ends.
+    const writing = deferred<void>();
+    const releaseWrite = deferred<void>();
+    writeGate.hold = async () => {
+      writeGate.hold = null;
+      writing.resolve();
+      await releaseWrite.promise;
+    };
+    const trusting = h.request();
+    await writing.promise;
+    const persisting = vi.spyOn(h.trust, "persistRevocation");
+    stopping.reject(new Error("An app is still running because dohc could not stop it."));
+    // The restrict passed its first check and queued its save behind the write.
+    await vi.waitFor(() => expect(persisting).toHaveBeenCalledWith("trip"));
+    releaseWrite.resolve();
+    await expect(trusting).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(true);
   });
 
@@ -222,7 +260,7 @@ describe("main's workspace trust operations", () => {
     const stop = vi.fn(async () => undefined);
     const handle: SiteProcessHandle = {
       url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: h.workspace.rootPath,
-      logs: () => [], onExit: () => undefined, stop,
+      logs: () => [], onExit: () => undefined, stop, stillRunning: async () => [],
     };
     await h.lifecycle.acquire({
       holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,

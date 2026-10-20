@@ -39,7 +39,7 @@ export interface SiteProcessHandle {
   stop(): Promise<void>;
   // The command's processes still alive after a stop, as pids. Empty when
   // everything stopped.
-  stillRunning?(): Promise<number[]>;
+  stillRunning(): Promise<number[]>;
 }
 
 // A stop that left some of an app command's processes running. `handle`
@@ -205,13 +205,15 @@ function createDescendantCapture(
   const inFlightCaptures = new Set<Promise<void>>();
   const readDescendants = options.reader ?? defaultDescendantsReader;
   const captureOnce = (pid: number): Promise<void> => {
+    // A read that fails or times out found nothing, so every stop that waits
+    // for captures in flight still ends.
     const capture = readDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
       for (const capturedPid of capturedDescendantSet) {
         if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
       }
       capturedDescendants = [...capturedDescendantSet];
-    });
+    }, () => undefined);
     inFlightCaptures.add(capture);
     void capture.finally(() => inFlightCaptures.delete(capture));
     return capture;
@@ -1183,22 +1185,15 @@ async function stopChild(
   if (alreadyExited && capturedDescendants().length === 0) return;
   beforeKill?.();
   if (process.platform === "win32") {
-    if (!alreadyExited) {
-      await killChildTreeWin32(child);
-      // A captured helper whose own parent died is outside the wrapper's
-      // tree, so taskkill /T cannot reach it. POSIX signals these through
-      // alsoSignal; here each one still alive gets its own tree kill.
-      for (const descendantPid of capturedDescendants()) {
-        await killProcessTreeWin32(descendantPid, () => false);
-      }
-    } else {
-      // The wrapper is already gone, so taskkill /PID <wrapper> /T has
-      // nothing live left to walk from — reach every descendant this
-      // session's periodic poll captured directly by pid instead, the same
-      // fallback POSIX takes below via capturedDescendants.
-      for (const descendantPid of capturedDescendants()) {
-        await killProcessTreeWin32(descendantPid, () => false);
-      }
+    if (!alreadyExited) await killChildTreeWin32(child);
+    // Each captured helper still alive gets its own tree kill: one whose
+    // parent died is outside the wrapper's tree, and once the wrapper is
+    // gone taskkill /PID <wrapper> /T has nothing live left to walk from.
+    // POSIX signals these through alsoSignal. Each pid is checked just
+    // before its taskkill, since an earlier one may have ended it and
+    // Windows reuses numbers quickly.
+    for (const descendantPid of capturedDescendants()) {
+      await killProcessTreeWin32(descendantPid, () => !isPidAlive(descendantPid));
     }
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
@@ -1220,26 +1215,32 @@ async function stopChild(
     if (!alreadyExited) child.kill("SIGTERM");
     return;
   }
+  const wrapperExited = () => child.exitCode !== null || child.signalCode !== null;
   const exited = alreadyExited
     ? Promise.resolve()
     : new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  let captured: number[] = [...capturedDescendants()];
-  try {
-    captured = await killProcessTreePosix(pid, "SIGTERM", { alsoSignal: captured });
-  } catch {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-  }
+  // Node reaped a wrapper it saw exit, so its pid may name another program
+  // by now. A round's roots are the wrapper only while it runs, and the
+  // captured pids still alive.
+  const signalRound = async (signal: NodeJS.Signals, helpers: readonly number[]): Promise<number[]> => {
+    const roots = [...(wrapperExited() ? [] : [pid]), ...helpers.filter((each) => each !== pid && isPidAlive(each))];
+    const [root, ...alsoSignal] = roots;
+    if (root === undefined) return [];
+    try {
+      return await killProcessTreePosix(root, signal, { alsoSignal });
+    } catch {
+      if (!wrapperExited()) child.kill(signal);
+      return roots;
+    }
+  };
+  const signalled = await signalRound("SIGTERM", capturedDescendants());
   let graceTimer: NodeJS.Timeout | undefined;
   const grace = new Promise<void>((resolve) => {
     graceTimer = setTimeout(resolve, BUILD_HARD_KILL_GRACE_MS);
   });
   await Promise.race([exited, grace]);
   if (graceTimer) clearTimeout(graceTimer);
-  try {
-    await killProcessTreePosix(pid, "SIGKILL", { alsoSignal: captured });
-  } catch {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  }
+  await signalRound("SIGKILL", signalled);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -1379,7 +1380,11 @@ export async function buildSite(input: {
       // alive.
       void stopChild(child, descendants.captured, undefined, descendants.awaitAll)
         .then(() => leftRunning(child, descendants, command))
-        .then((left) => answerWith(left, code));
+        .then((left) => {
+          // A cancel or a timeout that arrived during this cleanup answers
+          // instead: its error outranks the build's own exit.
+          if (!ending) answerWith(left, code);
+        });
     });
   });
 

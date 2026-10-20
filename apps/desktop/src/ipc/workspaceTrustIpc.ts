@@ -91,6 +91,8 @@ export function workspaceTrustHandlers<
         console.warn("[desktop] could not save Restricted Mode", error);
         saveFailed = true;
       }
+      // The save can wait behind a Trust's write and then skip, so ask again.
+      if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
       if (stopFailed && saveFailed) throw new Error(STOP_AND_SAVE_FAILED_MESSAGE);
       if (stopFailed) throw new Error(STOP_FAILED_MESSAGE);
       if (saveFailed) throw new Error(SAVE_FAILED_MESSAGE);
