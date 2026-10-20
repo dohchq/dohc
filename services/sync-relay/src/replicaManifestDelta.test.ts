@@ -69,10 +69,10 @@ it("advances the restart header after the stored cache changes identity",async()
     expect(advance).toHaveBeenCalledTimes(1);
     expect(f.storage.readReplicaCurrentView("w")).toMatchObject({revision:2,logCursor:1});
     const input={...f.input,grantId:"new"};
-    expect(f.storage.listReplicaHistoryPins(input,f.supervisor)).toMatchObject({status:"ready"});
+    expect(f.storage.listReplicaHistoryPins(input,f.supervisor)).toMatchObject({status:"denied"});
     await f.supervisor.evict("w");
     forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
-    expect(f.storage.listReplicaHistoryPins(input)).toMatchObject({status:"ready"});
+    expect(f.storage.listReplicaHistoryPins(input)).toMatchObject({status:"denied"});
     expect(f.errors).toEqual([]);
   } finally {await f.supervisor.close();}
 });

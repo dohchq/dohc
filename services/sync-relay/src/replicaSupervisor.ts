@@ -3,6 +3,7 @@ import {historyObjectKey,sameHistoryState,type ReplicaHistoryObservation} from "
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import {ReplicaManifest} from "./replicaManifest";
 import {publishPersistedReplicaIndex} from "./replicaCurrentViewReads";
+import type {ReplicaReadChangeListener} from "./replicaLinkReadService";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readdir, realpath, rm, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -79,6 +80,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   }
   const principal = createReplicaReadPrincipal(options.storage);
   const entries = new Map<string, Entry>();
+  const readListeners=new Set<ReplicaReadChangeListener>();
+  const notifyRead=(entry:Entry,view=entry.newest,changed:Parameters<ReplicaReadChangeListener>[2]=[],reset=false)=>{
+    if(view)for(const listener of readListeners)listener(entry.lease.workspaceId,view,changed,reset);
+  };
   // Leases and stores belong to this process. Finish the crash sweep before activation.
   // Only this supervisor's replica-* stores are removed; anything else under the root stays.
   const ready = mkdir(options.storeRoot, { recursive: true, mode: 0o700 })
@@ -141,6 +146,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.pendingView = false;
       entry.historyObservations?.clear();
       armHistory(entry);
+      notifyRead(entry,view);
       return true;
     } catch (error) {
       entry.newest = undefined; entry.pendingView = false; entry.storedManifest=false; entry.resync=true;
@@ -174,6 +180,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         const persisted=persist(entry);
         if (sampleHistory && (!attempted || persisted)) {
           if (!persisted) options.storage.sampleReplicaHistory(entry.lease);
+          notifyRead(entry);
           armHistory(entry);
         }
       }
@@ -201,12 +208,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.pendingView=true;
       if(persist(entry,view,false,undefined,"adopt")) {
         entry.manifest=result.next;entry.selectorDigest=selectorDigest;entry.newest=view;
+        notifyRead(entry,view,result.readChanges);
         if(!delta && entry.storedManifest)entry.resync=false;
       }
       return;
     }
     entry.newest=view;
-    const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedManifest)entry.resync=false;};
+    const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedManifest)entry.resync=false;
+      notifyRead(entry,entry.newest,result.readChanges);};
     if (!changed && !entry.pendingView && previous && entry.storedManifest && !entry.resync && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
       entry.pendingView=true;if(persist(entry,view,false,previous))adopt();return;
     }
@@ -222,6 +231,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     if (entry.retirement) return entry.retirement;
     entry.stopping = true;
     principal.revoke(entry.lease);
+    notifyRead(entry,entry.newest,[],true);
     clearTimeout(entry.idle);
     clearTimeout(entry.lifetime); clearTimeout(entry.disk);
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
@@ -470,6 +480,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
 
   return {
     activate,
+    subscribeReadChanges(listener:ReplicaReadChangeListener) {readListeners.add(listener);return()=>{readListeners.delete(listener);};},
     // Recipient reads apply their own selector and fences in the read transaction.
     currentReadView(workspaceId: string, readStored = () => options.storage.readReplicaCurrentView(workspaceId)) {
       const entry = entries.get(workspaceId);
@@ -512,6 +523,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       stopObserving();
       await ready;
       await Promise.all([...entries.values()].map(retire));
+      readListeners.clear();
     },
   };
 }

@@ -57,6 +57,7 @@ export function createLinkReadRoutes(
   admitLinkBlobBytes: (grantId: string, byteLength: number) => (() => void) | null,
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
   linkKey?: string | Uint8Array,
+  replica?:ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
 ) {
   const identity = createReceivedIdentity(linkKey);
   return async function respondToLinkRead(
@@ -100,6 +101,12 @@ export function createLinkReadRoutes(
     }
 
     if (route.route === "link-current") {
+      if(replica) {
+        const body=replica.inventory({grantId:capability.grantId,generation:capability.generation,principal:{kind:"link"}},
+          ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
+        if(body.files.length>linkCurrentFileLimit)throw notFound();
+        return linkJsonResponse(capability.shareId,capability.grantId,body);
+      }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
         versionId: targetVersionId(capability.effectiveSelector),
@@ -148,6 +155,29 @@ export function createLinkReadRoutes(
     if (route.route === "link-log") {
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
+      if(replica && currentOnly) {
+        const input={grantId:capability.grantId,generation:capability.generation,principal:{kind:"link" as const}};
+        let since=parseCursor(url.searchParams.get("since"));
+        if(!Number.isSafeInteger(since))throw notFound();
+        const limit=parseLimit(url.searchParams.get("limit")),hold=parseLinkLogHold(url.searchParams.get("hold"));
+        const deadline=Date.now()+hold;
+        const read=()=>replica.feed(input,()=>requireFreshLinkRead(capabilityToken,capability),since,limit);
+        let page=read();
+        while(hold>0 && !page.ops.length && !page.hasMore && Date.now()<deadline && !request.signal.aborted) {
+          since=page.nextCursor;
+          try {
+            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId),`link:${capability.session.capabilityHash}`,{
+              holdMs:Math.max(0,deadline-Date.now()),signal:request.signal,shouldPark:()=>{
+                try {const checked=read();return !checked.ops.length && !checked.hasMore;}catch{return false;}
+              }});
+          }catch(error) {
+            if(error instanceof DiscussionActivityCapacityError)throw relayError("link_read_rate_limited");
+            throw error;
+          }
+          page=read();
+        }
+        return linkJsonResponse(capability.shareId,capability.grantId,{ok:true,...page});
+      }
       if (!currentOnly && capability.access !== "edit") throw notFound();
       const freshRead = () => {
         const fresh = requireFreshLinkRead(capabilityToken, capability);
@@ -296,8 +326,11 @@ export function createLinkReadRoutes(
     }
 
     assertSha256(route.sha256);
+    const replicaInput={grantId:capability.grantId,generation:capability.generation,principal:{kind:"link" as const}};
+    const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFreshLinkRead(capabilityToken,capability),route.sha256,includeBytes);
+    const replicaBytes=replica ? readReplicaBlob()?.bytes : null;
     // A current file first, then an earlier revision of a file still in the share.
-    const currentByteLength = storage.currentFileBlobByteLength({
+    const currentByteLength = replica ? replicaBytes?.byteLength ?? null : storage.currentFileBlobByteLength({
       workspaceId: share.workspaceId,
       versionId: targetVersionId(capability.effectiveSelector),
       selectorPaths: capability.effectiveSelector.paths,
@@ -335,7 +368,7 @@ export function createLinkReadRoutes(
     }
     let streamOwnsAdmission = false;
     try {
-      const blob = storage.getBlob(share.workspaceId, route.sha256);
+      const blob = replicaBytes ?? storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
       const fresh = requireFreshLinkRead(capabilityToken, capability);
       if (currentByteLength === null && fresh.access !== "edit") throw notFound();
@@ -349,6 +382,7 @@ export function createLinkReadRoutes(
           "content-length": String(byteLength),
           "content-type": "application/octet-stream",
         },
+        replicaBytes ? {signal:request.signal,guard(){if(!readReplicaBlob(false))throw notFound();}} : undefined,
       );
       streamOwnsAdmission = true;
       return response;
