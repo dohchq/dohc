@@ -1,9 +1,12 @@
-import { rename, unlink, writeFile } from "node:fs/promises";
+import { watch } from "node:fs";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
 import { watchSettingsFile } from "./settingsFileWatcher";
+
+vi.mock("node:fs", { spy: true });
 
 function fakeSettingsWatch() {
   let listener: ((fileName: string | null) => void) | null = null;
@@ -168,38 +171,60 @@ describe("settings file watcher", () => {
   });
 
   describe("on the real file system", () => {
-    async function watched() {
+    async function watched({ ignoreDirectoryEvents = false } = {}) {
       const root = await createTestScratch("dohc-settings-watch-");
       const path = join(root, "dohc-settings.json");
       await writeFile(path, "{}");
-      let changed = deferred();
+      if (ignoreDirectoryEvents) {
+        const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+        // Keep the real file watch; late directory events cannot prove this save.
+        vi.mocked(watch).mockImplementationOnce((directory) => fs.watch(directory, () => {}));
+      }
+      let next = { content: "{}", changed: deferred() };
       const stop = watchSettingsFile({
         directory: root,
         fileName: "dohc-settings.json",
         debounceMs: 0,
-        onChange: () => changed.resolve(),
-        onError: (error) => changed.reject(error),
+        onChange: () => {
+          // A read started for an earlier wait cannot satisfy a later save.
+          const pending = next;
+          void readFile(path, "utf8").then(
+            (content) => {
+              if (content === pending.content) pending.changed.resolve();
+            },
+            (error: unknown) => {
+              // Deleting and recreating the file can briefly leave no file to read.
+              if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+              pending.changed.reject(error);
+            },
+          );
+        },
+        onError: (error) => next.changed.reject(error),
       });
       // Consume the startup reload so only later saves can satisfy these waits.
-      await changed.promise;
-      changed = deferred();
+      try {
+        await next.changed.promise;
+      } catch (error) {
+        stop();
+        throw error;
+      }
       return {
         root,
         path,
         stop,
-        // Waits for the next settled change, then arms for the one after.
-        changed: async () => {
-          await changed.promise;
-          changed = deferred();
+        changedTo: (content: string) => {
+          next = { content, changed: deferred() };
+          return next.changed.promise;
         },
       };
     }
 
     it("hears a save in place", async () => {
-      const file = await watched();
+      const file = await watched({ ignoreDirectoryEvents: true });
       try {
+        const saved = file.changedTo("{\"a\":1}");
         await writeFile(file.path, "{\"a\":1}");
-        await file.changed();
+        await saved;
       } finally {
         file.stop();
       }
@@ -208,9 +233,10 @@ describe("settings file watcher", () => {
     it("hears a save that renames a new file over the old one", async () => {
       const file = await watched();
       try {
+        const saved = file.changedTo("{\"a\":2}");
         await writeFile(join(file.root, "dohc-settings.json.new"), "{\"a\":2}");
         await rename(join(file.root, "dohc-settings.json.new"), file.path);
-        await file.changed();
+        await saved;
       } finally {
         file.stop();
       }
@@ -219,13 +245,15 @@ describe("settings file watcher", () => {
     it("hears a save that deletes the file and renames a new one in", async () => {
       const file = await watched();
       try {
+        const recreated = file.changedTo("{\"a\":3}");
         await unlink(file.path);
         await writeFile(join(file.root, "dohc-settings.json~"), "{\"a\":3}");
         await rename(join(file.root, "dohc-settings.json~"), file.path);
-        await file.changed();
+        await recreated;
         // The watch outlives the delete: the next save is heard too.
+        const saved = file.changedTo("{\"a\":4}");
         await writeFile(file.path, "{\"a\":4}");
-        await file.changed();
+        await saved;
       } finally {
         file.stop();
       }

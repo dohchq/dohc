@@ -57,9 +57,9 @@ const watchSettings: WatchSettings = (directory, fileName, listener, onError) =>
 /**
  * Calls onChange once a burst of changes to one file settles. An editor's
  * save is often several events: a write, a rename, a timestamp touch. A watch
- * that fails, at the start or later, is started again after `retryMs`, and
- * the file counts as changed then, because an edit may have landed while
- * nothing watched. Answers the function that stops the watch.
+ * that fails, at the start or later, is started again after `retryMs`.
+ * The file counts as changed after every successful open, because an edit
+ * may have landed while nothing watched. Answers the function that stops the watch.
  */
 export function watchSettingsFile(options: {
   directory: string;
@@ -110,7 +110,6 @@ export function watchSettingsFile(options: {
     }
   };
 
-  // A save may have landed after settings were read but before the watch opened.
   if (open()) changed();
   return () => {
     stopped = true;
