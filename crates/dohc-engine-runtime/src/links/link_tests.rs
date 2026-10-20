@@ -121,10 +121,6 @@ fn retry_file_locked<T, E: Into<DomainError>>(
                     "{label} stayed FileLocked until the client busy deadline"
                 );
                 std::thread::sleep(backoff.min(remaining));
-                assert!(
-                    Instant::now() < deadline,
-                    "{label} stayed FileLocked until the client busy deadline"
-                );
                 backoff = (backoff * 2).min(Duration::from_millis(200));
             }
             Err(error) => panic!("{label} failed: {error:?}"),

@@ -1076,8 +1076,8 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     );
     let (waits, positions, gaps, retry_evidence) = updates.await.unwrap();
     assert!(
-        gaps.iter().all(|g| *g <= 1),
-        "at most one forward turn: {gaps:?}"
+        retry_evidence.iter().all(|timing| timing.max_turn_gap <= 1),
+        "at most one forward turn per attempt: {retry_evidence:?}"
     );
     assert!(
         positions.iter().any(|&n| n > 0 && n < 2000),
@@ -1145,8 +1145,10 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     let undo_ns = undo_start.elapsed().as_nanos();
     let (undo_waits, _, undo_gaps, undo_retry_evidence) = updates.await.unwrap();
     assert!(
-        undo_gaps.iter().all(|g| *g <= 1),
-        "at most one Undo turn: {undo_gaps:?}"
+        undo_retry_evidence
+            .iter()
+            .all(|timing| timing.max_turn_gap <= 1),
+        "at most one Undo turn per attempt: {undo_retry_evidence:?}"
     );
     let undo_proof = undo_probe::proof(&format!("{}-undo", f.ws), 2001, false);
     let placed = f

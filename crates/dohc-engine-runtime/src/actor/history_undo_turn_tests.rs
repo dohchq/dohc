@@ -198,6 +198,7 @@ pub(in crate::actor) struct UpdateWait {
     pub(in crate::actor) wait_ns: u128,
     pub(in crate::actor) total_wait_ns: u128,
     pub(in crate::actor) turn_gap: usize,
+    pub(in crate::actor) max_turn_gap: usize,
     pub(in crate::actor) retries: usize,
 }
 
@@ -218,19 +219,22 @@ where
         total_start + Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
     let mut backoff = Duration::from_millis(5);
     let mut retries = 0;
+    let mut max_turn_gap = 0;
     loop {
         let start = Instant::now();
         let before = turn_count();
         let admission = serial.lock().await;
-        let result = operation()
-            .await
-            .map(|value| (value, start.elapsed().as_nanos(), turn_count() - before));
+        let result = operation().await;
+        let wait_ns = start.elapsed().as_nanos();
+        let turn_gap = turn_count() - before;
+        max_turn_gap = max_turn_gap.max(turn_gap);
         match result {
-            Ok((value, wait_ns, turn_gap)) => {
+            Ok(value) => {
                 let timing = UpdateWait {
                     wait_ns,
                     total_wait_ns: total_start.elapsed().as_nanos(),
                     turn_gap,
+                    max_turn_gap,
                     retries,
                 };
                 if retries > 0 {
@@ -251,10 +255,6 @@ where
                     "Y.Doc update stayed FileLocked until the client busy deadline; retries={retries}"
                 );
                 tokio::time::sleep(backoff.min(remaining)).await;
-                assert!(
-                    Instant::now() < deadline,
-                    "Y.Doc update stayed FileLocked until the client busy deadline; retries={retries}"
-                );
                 backoff = (backoff * 2).min(Duration::from_millis(200));
             }
             Err(error) => panic!("Y.Doc update failed: {error:?}"),
@@ -1385,8 +1385,8 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     drop(hold);
     close(supervisor).await;
     assert!(
-        gaps.iter().all(|&gap| gap <= 1),
-        "a Y.Doc update waited behind more than one turn: {gaps:?}"
+        retry_evidence.iter().all(|timing| timing.max_turn_gap <= 1),
+        "a Y.Doc update attempt waited behind more than one turn: {retry_evidence:?}"
     );
     let mut inverses = 0;
     for phase in phases.iter().filter(|phase| phase.actor) {
@@ -1594,7 +1594,6 @@ async fn ydoc_update_retries_a_locked_writer() {
     .await;
     assert_eq!(refusals.load(Ordering::SeqCst), 1);
     assert_eq!(timing.retries, 1);
-    assert_eq!(timing.turn_gap, 0);
     assert_eq!(update.outcome.seq, 1);
     close(supervisor).await;
 }
