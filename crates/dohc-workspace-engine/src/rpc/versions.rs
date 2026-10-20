@@ -728,6 +728,21 @@ impl VersionFence {
         } else {
             None
         };
+        let undo_writes: std::collections::HashSet<_> = undo_group.as_ref().into_iter()
+            .flatten().filter(|m| m.operation == "write").map(|m| m.object_id.clone()).collect();
+        let resync: dohc_engine_runtime::actor::DocumentResync = {
+            let sessions = self.sessions.clone();
+            let events = self.events.clone();
+            let handle = handle.clone();
+            Arc::new(move |key| {
+                let ids: Vec<_> = lock(&sessions).iter()
+                    .filter(|(_, s)| s.workspace == handle && s.key == *key)
+                    .map(|(id, _)| id.clone()).collect();
+                for id in ids {
+                    events.emit("ydoc.remoteUpdate", json!({"sessionId":id,"resyncRequired":true}));
+                }
+            })
+        };
         let undo_objects = undo_group.as_ref().map(|members| {
             members
                 .iter()
@@ -828,17 +843,14 @@ impl VersionFence {
                 CancellationToken::new()
             };
             for session_id in session_ids {
-                close_ydoc_session_for_version_fence(
-                    &sessions,
-                    &self_writes,
-                    &events,
-                    &open,
-                    &handle,
-                    &session_id,
-                    &settle_summary,
-                    &token,
-                )
-                .await?;
+                let view = version_fence_session_view(&sessions, &handle, &session_id)?;
+                if undo && undo_writes.contains(&view.key.object_id) {
+                    settle_ydoc_session_for_version_fence(&sessions, &self_writes, &events,
+                        &open, &session_id, &view, &token).await?;
+                } else {
+                    close_ydoc_session_for_version_fence(&sessions, &self_writes, &events,
+                        &open, &handle, &session_id, &settle_summary, &token).await?;
+                }
             }
 
             if let VersionFenceIntent::Fork { input } = &intent
@@ -947,6 +959,9 @@ impl VersionFence {
                     let mut undo_leases = undo_objects
                         .unwrap_or_default()
                         .into_iter()
+                        .filter(|object| !lock(&sessions).values().any(|s|
+                            s.workspace == handle && s.key.object_id == *object &&
+                            s.key.version_id == reconcile_version_id))
                         .map(|object| {
                             let key =
                                 DocKey::new(&open.workspace_id, &reconcile_version_id, &object)
@@ -968,7 +983,7 @@ impl VersionFence {
                         Arc::new(NoFaults),
                         placement_now,
                         [open.capture_apply_gate.clone(), open.session_ops.clone()],
-                        Arc::new(self_writes.scoped(&open.root)),
+                        Arc::new(self_writes.scoped(&open.root)), Some((capture_leases.clone(), resync)),
                         token,
                     ))
                     .await

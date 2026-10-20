@@ -222,6 +222,7 @@ impl ActorHandle {
         leases: LeaseRegistry,
         session_ops: Arc<tokio::sync::Mutex<()>>,
         faults: Arc<dyn FaultInjector>,
+        resync: super::link_documents::DocumentResync,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
         let _pass = tokio::select! {
@@ -365,16 +366,6 @@ impl ActorHandle {
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let initially_open: HashSet<_> = plan
-            .candidates
-            .sources
-            .iter()
-            .filter_map(|(object, _)| {
-                let key = DocKey::new(&workspace, &plan.version, object).ok()?;
-                leases.is_held(&key).then(|| object.clone())
-            })
-            .collect();
-        let initially_open = Arc::new(initially_open);
         let mut unchecked = plan.candidates.unchecked.clone();
         let mut cursor = 0;
         let mut stopped = false;
@@ -386,9 +377,9 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let (ws, p, open) = (workspace.clone(), plan.clone(), initially_open.clone());
+            let (ws, p, open, root, read_token) = (workspace.clone(), plan.clone(), leases.clone(), root.clone(), token.clone());
             let (next_cursor, sources, skipped, admitted) = self
-                .run(move |store, _| {
+                .run(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
                     let _admission = serial;
@@ -406,21 +397,30 @@ impl ActorHandle {
                         #[cfg(test)]
                         tests::source();
                         let (object, path) = &p.candidates.sources[next];
-                        if open.contains(object) {
-                            skipped.push(path.clone());
-                        } else {
+                        let key = DocKey::new(&ws, &p.version, object)?;
+                        let usable = if open.is_held(&key) {
+                            match super::link_documents::baseline(store, cache, &root, &key, path, &read_token) {
+                                Ok(value) => value,
+                                Err(RuntimeError::Domain(DomainError::UndoRefused {..}) |
+                                    RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)) => false,
+                                Err(error) => return Err(error),
+                            }
+                        } else { true };
+                        if usable {
                             let source = store.read_with(|conn| {
                                 let source = incoming::read_source(conn, &ws, &p.version, object)?;
                                 #[cfg(test)]
                                 tests::after_read(conn, &ws, object);
-                                Ok::<_, StorageError>(source)
+                                let live = if open.is_held(&key) {
+                                    dohc_engine_collab::read_marker_in(conn, &key)?
+                                        .map(|marker| dohc_engine_collab::load_doc_in(conn, &key).map(|doc| (doc, marker))).transpose()?
+                                } else { None };
+                                Ok::<_, RuntimeError>((source, live))
                             })?;
-                            if let Some(source) = source {
-                                sources.push((object.clone(), path.clone(), source));
-                            } else {
-                                skipped.push(path.clone());
-                            }
-                        }
+                            if let (Some(source), live) = source {
+                                sources.push((object.clone(), path.clone(), source, live));
+                            } else { skipped.push(path.clone()); }
+                        } else { skipped.push(path.clone()); }
                         next += 1;
                         if started.elapsed() >= Duration::from_millis(5) {
                             break;
@@ -444,8 +444,9 @@ impl ActorHandle {
             let (mut prepared, skipped) = tokio::task::spawn_blocking(move || {
                 let mut prepared = VecDeque::new();
                 let mut skipped = Vec::new();
-                for (object, path, source) in sources {
-                    let text = source.text().unwrap_or("").to_owned();
+                for (object, path, source, live) in sources {
+                    let original_text = source.text().unwrap_or("").to_owned();
+                    let text = original_text.clone();
                     let parsed = source.parse()?;
                     let edit = if parsed.reason.is_some() {
                         None
@@ -461,7 +462,8 @@ impl ActorHandle {
                     };
                     match (parsed.head, edit) {
                         (Some(head), Some((text, links))) if links > 0 => {
-                            prepared.push_back((object, head, text, links))
+                            let live = live.map(|(doc, marker)| super::link_documents::prepare_doc(&doc, marker, &original_text, &text)).transpose()?.flatten();
+                            prepared.push_back((object, head, text, links, live))
                         }
                         (Some(_), Some(_)) => {}
                         _ => skipped.push(path),
@@ -477,7 +479,7 @@ impl ActorHandle {
                     () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     guard = Arc::clone(&session_ops).lock_owned() => guard,
                 };
-                let (ws, op, author, root, p, r, token, f, leases, mut next_result) = (
+                let (ws, op, author, root, p, r, token, f, leases, resync, mut next_result) = (
                     workspace.clone(),
                     operation.clone(),
                     author.clone(),
@@ -487,6 +489,7 @@ impl ActorHandle {
                     token.clone(),
                     faults.clone(),
                     leases.clone(),
+                    resync.clone(),
                     result.clone(),
                 );
                 let committed = self
@@ -496,7 +499,7 @@ impl ActorHandle {
                     let _admission = serial;
                     let started = Instant::now();
                     let mut skipped = Vec::new();
-                    while let Some((object, head, text, links)) = prepared.pop_front() {
+                    while let Some((object, head, text, links, live)) = prepared.pop_front() {
                     #[cfg(test)]
                     tests::source();
                     let source_path = head.path.clone();
@@ -508,7 +511,6 @@ impl ActorHandle {
                     };
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
                     let committed = (|| -> Result<bool, RuntimeError> {
-                    if lease.is_none() { return Ok(false); }
                     if token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
                     }
@@ -553,6 +555,9 @@ impl ActorHandle {
                     {
                         return Ok(false);
                     }
+                    let live = if lease.is_none() {
+                        match live { Some(edit) => Some(edit), None => return Ok(false) }
+                    } else { None };
                     let input = WriteText {
                         workspace_id: ws.clone(),
                         version_id: p.version.clone(),
@@ -574,6 +579,15 @@ impl ActorHandle {
                         now_ms: crate::links::now_ms(),
                     };
                     with_local_file_mutation_cache_reset(cache, || {
+                        if let Some(edit) = &live {
+                            return match super::link_documents::write(store, &input, &root, &key, edit,
+                                &head.hash, &|tx| r.save(tx, false, &next), f.as_ref()) {
+                                Ok(()) => { resync(&key); Ok(true) },
+                                Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {..} |
+                                    DomainError::UndoRefused {..})) => Ok(false),
+                                Err(error) => Err(error),
+                            };
+                        }
                         match versioned_text_write_with_publication_on_store(
                             store,
                             &input,
@@ -604,7 +618,7 @@ impl ActorHandle {
                 unchecked.extend(committed.2);
                 stopped = committed.3;
                 if stopped {
-                    unchecked.extend(prepared.drain(..).map(|(_, head, _, _)| head.path));
+                    unchecked.extend(prepared.drain(..).map(|(_, head, _, _, _)| head.path));
                     unchecked.extend(
                         plan.candidates.sources[cursor..]
                             .iter()

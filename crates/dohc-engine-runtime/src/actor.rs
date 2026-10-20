@@ -36,6 +36,8 @@ mod checked_deletes;
 mod collections;
 mod history_operations;
 mod link_rewrites;
+mod link_documents;
+pub use link_documents::DocumentResync;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 mod journal;
 mod live_application;

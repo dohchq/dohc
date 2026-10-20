@@ -498,6 +498,21 @@ struct AgentAuthorWire<'a> {
 }
 
 impl EngineService {
+    pub(super) fn link_document_resync(&self, handle: &WorkspaceHandle)
+        -> dohc_engine_runtime::actor::DocumentResync {
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let handle = handle.clone();
+        std::sync::Arc::new(move |key| {
+            let ids: Vec<_> = lock(&sessions).iter()
+                .filter(|(_, session)| session.workspace == handle && session.key == *key)
+                .map(|(id, _)| id.clone()).collect();
+            for id in ids {
+                events.emit("ydoc.remoteUpdate", json!({"sessionId":id,"resyncRequired":true}));
+            }
+        })
+    }
+
     pub(super) async fn history_rewrite_links(
         &self,
         ctx: &RequestContext,
@@ -532,7 +547,7 @@ impl EngineService {
                 open.root.clone(),
                 self.leases.scoped(&open.root),
                 std::sync::Arc::clone(&open.session_ops),
-                std::sync::Arc::new(dohc_engine_runtime::NoFaults),
+                std::sync::Arc::new(dohc_engine_runtime::NoFaults), self.link_document_resync(handle.ok_or_else(workspace_unavailable)?),
                 cancellation.token(),
             ),
         )

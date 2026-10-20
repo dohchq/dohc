@@ -141,7 +141,7 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
                 Arc::new(CrashAfter(AtomicUsize::new(3))),
                 10,
                 [open.capture_apply_gate.clone(), open.session_ops.clone()],
-                Arc::new(()),
+                Arc::new(()), None,
                 dohc_engine_runtime::CancellationToken::new(),
             )
             .await,
@@ -231,7 +231,7 @@ async fn workspace_open_continues_after_one_pending_undo_fails_once() {
                     Arc::new(CrashAfter(AtomicUsize::new(1))),
                     10,
                     [open.capture_apply_gate.clone(), open.session_ops.clone()],
-                    Arc::new(()),
+                    Arc::new(()), None,
                     dohc_engine_runtime::CancellationToken::new(),
                 )
                 .await,
@@ -383,7 +383,7 @@ async fn workspace_close_finishes_while_request_undo_waits_between_turns() {
                     request_open.capture_apply_gate.clone(),
                     request_open.session_ops.clone(),
                 ],
-                Arc::new(()),
+                Arc::new(()), None,
                 dohc_engine_runtime::CancellationToken::new(),
             )
             .await

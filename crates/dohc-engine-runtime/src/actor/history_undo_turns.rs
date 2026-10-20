@@ -21,17 +21,28 @@ struct Plan {
     author: Option<String>,
     members: Vec<Member>,
 }
+struct Inverse { text: String, live: Option<super::super::link_documents::Edit> }
 struct Prepared {
-    inverse: Result<Option<String>, RuntimeError>,
+    inverse: Result<Option<Inverse>, RuntimeError>,
     disk: Result<DiskProof, RuntimeError>,
 }
 fn inverse_input(
     conn: &rusqlite::Connection,
     plan: &Plan,
     member: &Member,
-) -> Result<Option<String>, RuntimeError> {
+    open: Option<&(dohc_engine_collab::LeaseRegistry, super::super::link_documents::DocumentResync)>,
+) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
-        link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect).map(Some)
+        let text = link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect)?;
+        let key = DocKey::new(&plan.workspace, &plan.version, &member.effect.object_id)?;
+        let live = if open.is_some_and(|(leases, _)| leases.is_held(&key)) {
+            let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![plan.workspace,plan.version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+            let before = dohc_engine_storage::text::read(conn, &head).map_err(StorageError::corrupt_public)?;
+            Some(super::super::link_documents::prepare(conn, &key, &before, &text)?
+                .ok_or(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"link changed after rename"})?)
+        } else { None };
+        Ok(Some(Inverse {text, live}))
     } else {
         Ok(None)
     }
@@ -50,6 +61,7 @@ fn signature(
 ) -> Result<String, RuntimeError> {
     conn.query_row("SELECT json_array(
         (SELECT max(moment_order) FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),
+        (SELECT json_array(head_update_seq,head_snapshot_seq,lineage_claim_id) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),
         (SELECT json_array(path,blob_sha256,binary_sha256) FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3))", params![ws,version,object], |r| r.get(0)).map_err(StorageError::corrupt_public).map_err(Into::into)
 }
 fn load(
@@ -341,6 +353,7 @@ impl ActorHandle {
         now: i64,
         gates: [Arc<tokio::sync::Mutex<()>>; 2],
         recorder: Arc<dyn SelfWriteRecorder>,
+        open_documents: Option<(dohc_engine_collab::LeaseRegistry, super::super::link_documents::DocumentResync)>,
         token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
         let _stop = self.stop_link_rewrites(&operation);
@@ -457,6 +470,7 @@ impl ActorHandle {
             let read_db = db.clone();
             let disk_root = root.clone();
             let prepare_token = token.clone();
+            let prepare_open = open_documents.clone();
             let (prepared, body, prepared_inputs) = tokio::task::spawn_blocking(move || {
                 let mut store = EngineStore::open_read_only(&read_db)?;
                 store
@@ -510,7 +524,7 @@ impl ActorHandle {
                 let mut inputs = std::collections::VecDeque::new();
                 for member in &prepared.members {
                     if prepare_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                    let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member));
+                    let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member, prepare_open.as_ref()));
                     let inverse = match inverse {
                         value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason: "link diff budget exceeded", ..}))) => value,
                         Err(error) => return Err(error),
@@ -652,6 +666,7 @@ impl ActorHandle {
             let cached: Vec<_> = (0..count).map(|_| inputs.pop_front()).collect();
             let disk_root = root.clone();
             let p = plan.clone();
+            let prepare_open = open_documents.clone();
             let (batch, policy, reader) = tokio::task::spawn_blocking(move || {
                 let batch = cached
                     .into_iter()
@@ -661,7 +676,7 @@ impl ActorHandle {
                             let member = &p.members[prepared_cursor + offset];
                             Prepared {
                                 inverse: inverse_store
-                                    .read_with(|conn| inverse_input(conn, &p, member)),
+                                    .read_with(|conn| inverse_input(conn, &p, member, prepare_open.as_ref())),
                                 disk: disk_check(&disk_root, member),
                             }
                         })
@@ -690,6 +705,7 @@ impl ActorHandle {
             let turn_budget = std::time::Duration::from_millis(5);
             #[cfg(test)]
             let turn_budget = tests::turn_budget(&request).unwrap_or(turn_budget);
+            let turn_open = open_documents.clone();
             let next = self.run_undo_turn(request.clone(),phase,Some(prepared_cursor),move |store,cache| {
                 let _guards = (_capture,_sessions);
                 if turn_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
@@ -705,6 +721,7 @@ impl ActorHandle {
                     let started = std::time::Instant::now();
                     let mut retry_error = None;
                     let mut committed = false;
+                    let mut resyncs = Vec::new();
                     match store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                         while let Some(Prepared { inverse, disk }) = batch.pop_front() {
                             let member = &p.members[index];
@@ -723,11 +740,21 @@ impl ActorHandle {
                             let outcome = checks.and_then(|()| {
                                 let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                                 crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
-                                undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),inverse?.as_deref(),|tx,m| {
+                                let inverse = inverse?;
+                                let live = inverse.as_ref().and_then(|i| i.live.as_ref());
+                                let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
+                                if let Some(edit) = live {
+                                    super::super::link_documents::append(tx,&key,&member.effect.path,edit,p.author.as_deref(),now)?;
+                                }
+                                undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),inverse.as_ref().map(|i| i.text.as_str()),|tx,m| {
                                     if member.effect.operation == "write" {
                                         dohc_engine_storage::cancel_pending_jobs_for_path(tx,&p.workspace,&member.effect.path,now)?;
                                     }
-                                    publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now)?;
+                                    publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now,live.is_some())?;
+                                    if live.is_some() {
+                                        let sha = tx.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,m.object_id],|r|r.get::<_,String>(0)).map_err(StorageError::persist_public)?;
+                                        super::super::link_documents::settled(tx,&key,m,&sha,now)?;
+                                    }
                                     if member.effect.operation == "write" {
                                         tx.execute("UPDATE materialization_jobs SET preimage_present=?2,preimage_sha256=?3 WHERE job_id=?1",params![binary_rollback_job_identity(&p.workspace,&p.version,&m.moment_id),i64::from(member.sha.is_some()),member.sha]).map_err(StorageError::persist_public)?;
                                     }
@@ -735,7 +762,12 @@ impl ActorHandle {
                                 }).map_err(Into::into)
                             });
                             match outcome {
-                                Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,
+                                Ok(_) => {
+                                    tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?;
+                                    if turn_open.as_ref().is_some_and(|(leases,_)| DocKey::new(&p.workspace,&p.version,&member.effect.object_id).is_ok_and(|key| leases.is_held(&key))) {
+                                        resyncs.push(DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?);
+                                    }
+                                },
                                 Err(error) => {
                                     tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
@@ -758,6 +790,9 @@ impl ActorHandle {
                         }
                         Ok(())
                     })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) };
+                    if let Some((_, notify)) = &turn_open {
+                        for key in resyncs { notify(&key); }
+                    }
                     if let Some(error) = retry_error { return Err(error); }
                     Ok((index,committed,batch))
                 })
