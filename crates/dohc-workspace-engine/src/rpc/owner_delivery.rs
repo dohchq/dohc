@@ -531,7 +531,7 @@ impl EngineService {
             input.reservation,
         )?;
         let cancellation = OperationCancellation::new(&ctx);
-        let _serial = self
+        let serial = self
             .mutation_session_guard(&guard.open, &cancellation, "owner delivery (queued)")
             .await?;
         if !guard.is_current() {
@@ -546,6 +546,7 @@ impl EngineService {
             None
         };
         let binding = p.binding.clone();
+        let namespace = p.relay_database_namespace.clone();
         let applied = dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
             binding: p.binding,
             relay_database_namespace: p.relay_database_namespace,
@@ -555,35 +556,63 @@ impl EngineService {
             journal_cursor: p.journal_cursor,
             update_bytes: bytes,
         };
-        let result = if let Some(vector) = vector {
-            guard
-                .open
-                .actor
-                .owner_ydoc_apply_initial_sync(
-                    guard.open.workspace_id.clone(),
-                    applied,
-                    vector,
-                    now_ms()?,
-                    cancellation.token(),
-                    guard.reservation.clone(),
-                )
-                .await
-        } else {
-            guard
-                .open
-                .actor
-                .owner_ydoc_apply_accepted(
-                    guard.open.workspace_id.clone(),
-                    applied,
-                    now_ms()?,
-                    cancellation.token(),
-                    guard.reservation.clone(),
-                )
-                .await
-        }
-        .map_err(map_runtime)?
-        .map_err(map_owner_outbox)?;
-        self.notify_owner_sessions(&guard.workspace, &binding);
+        let service = guard.service.upgrade().ok_or_else(workspace_unavailable)?;
+        let token = cancellation.token();
+        let now = now_ms()?;
+        // Keep commit and session refresh ordered even if the RPC future is
+        // dropped after the actor commits. The next edit must see both.
+        let result = tokio::spawn({
+            let guard = Arc::clone(&guard);
+            async move {
+                let _serial = serial;
+                let result = if let Some(vector) = vector {
+                    guard
+                        .open
+                        .actor
+                        .owner_ydoc_apply_initial_sync(
+                            guard.open.workspace_id.clone(),
+                            applied,
+                            vector,
+                            now,
+                            token,
+                            guard.reservation.clone(),
+                        )
+                        .await
+                } else {
+                    guard
+                        .open
+                        .actor
+                        .owner_ydoc_apply_accepted(
+                            guard.open.workspace_id.clone(),
+                            applied,
+                            now,
+                            token,
+                            guard.reservation.clone(),
+                        )
+                        .await
+                }
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?;
+                for session in crate::lock(&service.sessions).values_mut() {
+                    if session.workspace == guard.workspace
+                        && let Some(draft) = &mut session.owner_draft
+                        && draft.binding == binding
+                        && draft.relay_database_namespace == namespace
+                        && draft.revision == p.expected_revision
+                        && draft.accepted_cursor == p.previous_accepted_cursor
+                        && draft.native_head_sequence == p.expected_native_head_sequence
+                    {
+                        draft.revision = result.revision;
+                        draft.accepted_cursor = result.accepted_cursor;
+                        draft.native_head_sequence = result.native_head_sequence;
+                    }
+                }
+                service.notify_owner_sessions(&guard.workspace, &binding);
+                Ok::<_, WireError>(result)
+            }
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "owner delivery task failed"))??;
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
