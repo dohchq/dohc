@@ -166,6 +166,17 @@ describe("app preview execution", () => {
     expect(startStaticSitePreview).not.toHaveBeenCalled();
   });
 
+  it("passes the environment a recognized dev command needs to the dev server", async () => {
+    const h = await harness();
+    h.input.mode = "dev";
+    h.app.configuredScripts = { dev: "react-scripts start" };
+    await h.run();
+    expect(startSiteDevServer).toHaveBeenCalledWith({
+      workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "react-scripts", args: ["start"],
+      env: { HOST: "127.0.0.1" }, signal: h.controller.signal,
+    });
+  });
+
   it("refuses a missing dev/start script before process work", async () => {
     const h = await harness();
     h.input.mode = "dev";

@@ -23,9 +23,20 @@ interface PackageManagerScriptRun {
   forwardedArgs: string[];
 }
 
-// localhost keeps each tool's default origin, so OAuth callbacks, cookies, and
-// HMR settings that name it keep working.
-const LOOPBACK_HOST = "localhost";
+// The renderer's preview frame admits only http://127.0.0.1:*, so a server
+// that prints localhost or [::1] would not show inside dohc.
+const LOOPBACK_HOST = "127.0.0.1";
+
+// A server's own `--` ends its options, so a host flag after it is ignored.
+function serverOptions(args: string[]): string[] {
+  const end = args.indexOf("--");
+  return end === -1 ? args : args.slice(0, end);
+}
+
+function beforeServerSeparator(args: string[], flag: string[]): string[] {
+  const end = args.indexOf("--");
+  return end === -1 ? [...args, ...flag] : [...args.slice(0, end), ...flag, ...args.slice(end)];
+}
 
 // Next.js and Create React App listen on every interface when no host is
 // given, yet still print a localhost URL. Vite listens on localhost, but a
@@ -36,28 +47,39 @@ function loopbackDefault(server: {
   command: string;
   args: string[];
 }): { args: string[] } | { env: NodeJS.ProcessEnv } | null {
-  if (choosesHost(server.args)) return null;
+  const options = serverOptions(server.args);
+  if (choosesHost(options)) return null;
   const name = server.command.replaceAll("\\", "/").split("/").at(-1);
-  const [subcommand] = server.args;
+  const [subcommand] = options;
   if (name === "next" && (subcommand === "dev" || subcommand === "start")) {
     return { args: ["--hostname", LOOPBACK_HOST] };
   }
-  if (name === "vite" && !server.args.some((arg) => arg === "build" || arg === "optimize")) {
+  // `build` or `optimize` first is a Vite build; `vite --mode build` serves.
+  // A build written as `vite --mode x build` rejects the added --host and
+  // exits, which costs nothing: a build never prints a URL to preview.
+  if (name === "vite" && subcommand !== "build" && subcommand !== "optimize") {
     return { args: ["--host", LOOPBACK_HOST] };
   }
   if (name === "react-scripts" && subcommand === "start") return { env: { HOST: LOOPBACK_HOST } };
   return null;
 }
 
-// The package manager appends trailing args to the script's last command, so
-// only a single-statement script is recognized.
+// A body that ends in a separator, a backslash, or a newline would run the
+// trailing args as their own command.
+const TRAILING_SHELL_OPERATOR = /[;&|\\\r\n][ \t]*$/;
+
+// The package manager appends trailing args to the script's text, so they
+// reach the server only when the script is one statement that ends in the
+// server's own options: not after a separator, a comment, or its own `--`.
 function scriptLoopbackDefault(
   scriptBody: string,
   forwardedArgs: string[],
 ): ReturnType<typeof loopbackDefault> {
+  if (TRAILING_SHELL_OPERATOR.test(scriptBody)) return null;
   const statements = splitShellStatements(scriptBody);
   if (statements.length !== 1) return null;
   const { command, args } = splitCommandLine(statements[0]!);
+  if (args.some((arg) => arg === "--" || arg.startsWith("#"))) return null;
   return loopbackDefault({ command, args: [...args, ...forwardedArgs] });
 }
 
@@ -156,7 +178,9 @@ function validatedPackageManagerRun(
   const loopback =
     previewScript === "build" ? null : scriptLoopbackDefault(scriptBody, run.forwardedArgs);
   const forwardedArgs =
-    loopback && "args" in loopback ? [...run.forwardedArgs, ...loopback.args] : run.forwardedArgs;
+    loopback && "args" in loopback
+      ? beforeServerSeparator(run.forwardedArgs, loopback.args)
+      : run.forwardedArgs;
   const env = loopback && "env" in loopback ? { env: loopback.env } : {};
   // npm needs the `--` separator to forward args — without it `npm run dev
   // --port 3000` lets npm's CLI consume --port instead of forwarding it to
@@ -193,7 +217,7 @@ function validatedLiteralCommand(
   const loopback = previewScript === "build" ? null : loopbackDefault(command);
   if (!loopback) return command;
   if ("env" in loopback) return { ...command, env: loopback.env };
-  return { command: command.command, args: [...command.args, ...loopback.args] };
+  return { command: command.command, args: beforeServerSeparator(command.args, loopback.args) };
 }
 
 export function commandForSiteScript(

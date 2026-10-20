@@ -385,15 +385,11 @@ describe("package manager helpers", () => {
     expect(detectDevUrl(output)).toBe(expected);
   });
 
-  // Next.js and Create React App print the host they were given. Vite prints
-  // the address localhost resolved to when Node's resolver order differs from
-  // the OS, so a localhost that resolves to ::1 appears as [::1].
   it.each([
-    ["Next.js", "   - Local:        http://localhost:3000", "http://localhost:3000"],
-    ["Create React App", "  http://localhost:3000", "http://localhost:3000"],
-    ["Vite", "  ➜  Local:   http://localhost:5173/", "http://localhost:5173/"],
-    ["Vite, localhost on ::1", "  ➜  Local:   http://[::1]:5173/", "http://[::1]:5173/"],
-  ])("detects the URL %s prints when started on localhost", (_framework, output, expected) => {
+    ["Next.js", "   - Local:        http://127.0.0.1:3000", "http://127.0.0.1:3000"],
+    ["Create React App", "  http://127.0.0.1:3000", "http://127.0.0.1:3000"],
+    ["Vite", "  ➜  Local:   http://127.0.0.1:5173/", "http://127.0.0.1:5173/"],
+  ])("detects the URL %s prints when started on 127.0.0.1", (_framework, output, expected) => {
     expect(detectDevUrl(output)).toBe(expected);
   });
 
