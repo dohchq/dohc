@@ -138,6 +138,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     disposeDatabase(): Promise<void>;
     closeRelay(): Promise<void>;
     stopEngine(): Promise<void>;
+    // Writes how dohc's own shutdown ended, just before the process exits.
+    reportQuit(line: string): void;
   };
 }) {
   const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
@@ -154,6 +156,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   app.on("will-quit", (event) => {
     if (quitting) return;
     quitting = true;
+    const shutdownStarted = Date.now();
     // Every ordinary quit reaches here, including Update and Restart's.
     launch.finished();
     event.preventDefault();
@@ -206,6 +209,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }),
     ]).finally(() => {
       clearTimeout(shutdownTimer);
+      shutdown.reportQuit(budgetExpired
+        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget`
+        : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`);
       app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
   });
