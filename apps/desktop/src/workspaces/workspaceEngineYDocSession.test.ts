@@ -64,6 +64,23 @@ vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, createReadStream: vi.fn(fs.createReadStream) };
 });
+// Reads one `lstat` of `path`, then holds its answer until the test releases it.
+const lstatGate = vi.hoisted(() => ({ held: null as { path: string; entered: () => void; release: Promise<void> } | null }));
+vi.mock("node:fs/promises", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  const lstat: typeof fs.lstat = (async (path: Parameters<typeof fs.lstat>[0], ...rest: unknown[]) => {
+    const held = lstatGate.held;
+    const answer = (fs.lstat as (...args: unknown[]) => ReturnType<typeof fs.lstat>)(path, ...rest);
+    if (held && String(path) === held.path) {
+      lstatGate.held = null;
+      await answer.catch(() => undefined);
+      held.entered();
+      await held.release;
+    }
+    return await answer;
+  }) as typeof fs.lstat;
+  return { ...fs, lstat };
+});
 
 let root = "";
 // Milliseconds the loopback daemon takes to answer one journal RPC. A busy
@@ -86,6 +103,7 @@ let blockedMaterialization = false;
 let closeRefusal: unknown = null;
 let beforeRecordUpdate: (() => Promise<void>) | null = null;
 let beforeClose: (() => Promise<void>) | null = null;
+let beforeSettle: (() => Promise<void>) | null = null;
 let enforceRecordOwner = false;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
@@ -155,6 +173,11 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === YDOC_METHOD.settle && beforeSettle) {
+        const hook = beforeSettle;
+        beforeSettle = null;
+        await hook();
       }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
@@ -305,6 +328,7 @@ beforeEach(async () => {
   closeRefusal = null;
   beforeRecordUpdate = null;
   beforeClose = null;
+  beforeSettle = null;
   enforceRecordOwner = false;
   nextRecordRefusal = null;
   nextOpenRefusal = null;
@@ -1139,6 +1163,135 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
 
+// dohc#2366. History holds all of the document, so a close over its deleted
+// file has nothing to save. A settle would be refused and read as a failed save.
+it.each(["local-only", "synced"] as const)(
+  "releases a %s document with nothing new over a file deleted outside dohc, without a save",
+  async (regime) => {
+    claimedLineage = regime === "synced";
+    const states: string[] = [];
+    const session = await capture.openYDocSession({
+      path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+    });
+    if (regime === "synced") ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+    states.length = 0;
+    await rm(join(root, PATH));
+    settleRefusal = wireRefusal("conflict-stale-target");
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(states).toEqual([]);
+    expect(captureErrors).toEqual([]);
+    expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+    expect(requests.filter(request => request.method === YDOC_METHOD.close).map(request => request.params)).toEqual([
+      expect.objectContaining({ settle: false }),
+    ]);
+    expect(daemon.leases.size).toBe(0);
+  },
+);
+
+// A synced engine releases over unsettled text, so an edit made while the
+// close reads the disk must keep the ordinary close and its failed save.
+async function captureKeepingDrafts(): Promise<string[]> {
+  const drafts: string[] = [];
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    onError: (context) => captureErrors.push(context),
+    preserveUnsentState: async ({ doc }) => { drafts.push(documentMarkdown(Y.encodeStateAsUpdate(doc))); return "draft"; },
+    discardUnsentState: async () => undefined,
+  });
+  return drafts;
+}
+
+it("keeps a synced document's edit made while its close checks the deleted file", async () => {
+  claimedLineage = true;
+  const drafts = await captureKeepingDrafts();
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+  const editor = mirrorEditor(session);
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  const checking = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  lstatGate.held = { path: join(root, PATH), entered: checking.resolve, release: release.promise };
+  const closing = session.close();
+  await checking.promise;
+  typeIntoBody(editor, "Typed during the close.");
+  release.resolve();
+  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  await vi.waitFor(() => expect(drafts).toEqual([expect.stringContaining("Typed during the close.")]));
+  editor.destroy();
+});
+
+// The close can wait behind other work on the session after its disk check.
+// A peer update counted there must still keep the ordinary close.
+it("keeps a peer update that arrives while a synced document's close waits its turn", async () => {
+  claimedLineage = true;
+  const drafts = await captureKeepingDrafts();
+  const states: string[] = [];
+  const delivered = Promise.withResolvers<void>();
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => delivered.resolve(), onSaveState: state => states.push(state),
+  });
+  const sessionId = ydoc.activeSessionIds()[0]!;
+  ydoc.markSessionReplicated(sessionId);
+  const peer = new Y.Doc();
+  Y.applyUpdate(peer, session.initialUpdate);
+  const before = Y.encodeStateVector(peer);
+  typeIntoBody(peer, "From a peer.");
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+
+  // Other work holds the session: a settle the engine has not answered yet.
+  const settling = Promise.withResolvers<void>();
+  const answerSettle = Promise.withResolvers<void>();
+  beforeSettle = async () => { settling.resolve(); await answerSettle.promise; };
+  const earlierSettle = session.settleNow().catch(() => undefined);
+  await settling.promise;
+
+  // The close finds the file gone and queues behind that settle.
+  const checked = Promise.withResolvers<void>();
+  const answerCheck = Promise.withResolvers<void>();
+  lstatGate.held = { path: join(root, PATH), entered: checked.resolve, release: answerCheck.promise };
+  const closing = session.close();
+  await checked.promise;
+  answerCheck.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  ydoc.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(peer, before));
+  await delivered.promise;
+  answerSettle.resolve();
+  await earlierSettle;
+  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(2);
+  expect(states.at(-1)).toBe("error");
+  await vi.waitFor(() => expect(drafts.at(-1)).toContain("From a peer."));
+  peer.destroy();
+});
+
+// The engine refuses that release while it holds text History lacks. Then the
+// ordinary close runs, and its refused settle is the failed save it reports.
+it("closes as before when the engine refuses to release a deleted file's document without a save", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  beforeClose = async () => { throw wireRefusal("ydoc-unsettled-close"); };
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(2);
+  expect(daemon.leases.size).toBe(0);
+});
+
 // The narrowness guard for the downgrade above. Any other refusal means the
 // user's edits did not reach the engine, which is what the thrown settle
 // failure and the retryable `error` state exist to say.
@@ -1241,11 +1394,20 @@ it.each([
   await session.close({settle: false});
 });
 
+// A close reads the disk before its first retry, so real I/O gets a turn
+// between steps of the faked retry delays.
+const realSetImmediate = setImmediate;
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
   vi.useFakeTimers();
   try {
-    const assertion = expect(operation()).rejects.toThrow(message);
-    await vi.advanceTimersByTimeAsync(10_000);
+    let settled = false;
+    const assertion = expect(operation().finally(() => { settled = true; })).rejects.toThrow(message);
+    // 200 steps of 100 ms: twice the 10 s busy budget.
+    for (let step = 0; !settled; step += 1) {
+      if (step === 200) throw new Error("The busy-store operation did not finish within 20 s of faked retry delays.");
+      await new Promise((resolve) => realSetImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(100);
+    }
     await assertion;
   } finally { vi.useRealTimers(); }
 }
