@@ -316,6 +316,7 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -726,6 +727,13 @@ function makeBaseBridge(
       return () => crashReportCallbacks.delete(listener);
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
+    emitLiveDraftRecoveryChanged: (workspaceId: string) => {
+      for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
+    },
+    onLiveDraftRecoveryChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      liveDraftRecoveryCallbacks.add(listener);
+      return () => liveDraftRecoveryCallbacks.delete(listener);
+    }),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     emitWorkspaceActivated: (workspace: Workspace, file?: string) => {
       for (const callback of [...activatedCallbacks]) callback(workspace, file);

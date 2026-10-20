@@ -5122,6 +5122,8 @@ export const LiveDraftRecoveryRecord = z.object({
   updateBase64: z.string(),
 }).strict();
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
+export const LiveDraftRecoveryChangedEvent = z.object({workspaceId: WORKSPACE_ID}).strict();
+export type LiveDraftRecoveryChangedEvent = z.infer<typeof LiveDraftRecoveryChangedEvent>;
 export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), recordId: LiveDraftRecoveryRecord.shape.recordId.optional()}).strict();
 export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), checkpointId: z.string().min(1).optional(), reason: z.enum(["author-refused","invalid-author","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
@@ -7142,6 +7144,10 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // Live push: main wrote or removed a draft it set aside for this
+  // workspace, so listLiveDraftRecovery answers differently. A poke, not the
+  // drafts. Returns an unsubscribe function.
+  onLiveDraftRecoveryChanged(listener: (event: LiveDraftRecoveryChangedEvent) => void): () => void;
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;

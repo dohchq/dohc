@@ -2430,10 +2430,17 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
             if (row.checkpoint.objectId === checkpoint.objectId && row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
           }
         },
-        preserveUnsentState: draft => preserveUnsentLiveDraft(
-          join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
-        ),
-        discardUnsentState: draftId => removeLiveDraft(join(stateDir(), "live-draft-recovery"), draftId),
+        // Each write and removal tells the workspace's windows, so Notices
+        // shows the drafts main keeps as they change.
+        preserveUnsentState: async draft => {
+          const draftId = await preserveUnsentLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft);
+          sendToWorkspaceWindows(CHANNELS.liveDraftRecoveryChanged, { workspaceId: workspace.workspaceId });
+          return draftId;
+        },
+        discardUnsentState: async draftId => {
+          await removeLiveDraft(join(stateDir(), "live-draft-recovery"), draftId);
+          sendToWorkspaceWindows(CHANNELS.liveDraftRecoveryChanged, { workspaceId: workspace.workspaceId });
+        },
         hasRetainedLiveDraft: (path, objectId) => hasRetainedLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, path, objectId,
         ),

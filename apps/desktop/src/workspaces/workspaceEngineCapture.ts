@@ -1905,6 +1905,20 @@ export function createWorkspaceEngineCapture(
     armRemovalSuppression: (expected: boolean, deletedSeq: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+  // Set-aside drafts of a deleted file's text that a newer draft or a save
+  // replaced, and that the draft store has not removed yet. Every later draft
+  // step and the capture's stop try again, so none lingers as a duplicate.
+  const obsoleteDrafts = new Set<string>();
+  const discardObsoleteDrafts = async (): Promise<void> => {
+    for (const draft of [...obsoleteDrafts]) {
+      try {
+        await options.discardUnsentState?.(draft);
+        obsoleteDrafts.delete(draft);
+      } catch (error) {
+        onError("discard of a set-aside draft", error);
+      }
+    }
+  };
 
   function borrowRecordSession(entry: LiveYDocSession): RecordEditSession {
     const owner = entry.publicSession;
@@ -4432,23 +4446,26 @@ export function createWorkspaceEngineCapture(
         // path and the document's history goes with it. So from the first
         // save refused over the missing file until a save writes the file,
         // Notices keeps a draft of the newest text, through a crash or any
-        // close. The chain holds the draft's id.
-        let textSetAside: Promise<string | null> = Promise.resolve(null);
-        const setTextAside = (): void => {
-          textSetAside = textSetAside.then(async (previous) => {
-            if (entry === null || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return previous;
-            // A draft the store refused has told the person.
-            const draft = await entry.session.setTextAside().catch(() => null);
-            if (draft === null) return previous;
-            if (previous !== null && previous !== draft) await discardDraft(previous);
-            return draft;
-          });
+        // close. The steps run in order, and each one retries the removal of
+        // drafts a newer one replaced.
+        let currentDraft: string | null = null;
+        let draftSteps: Promise<void> = Promise.resolve();
+        const draftStep = (step: () => Promise<void>): void => {
+          draftSteps = draftSteps.then(step).then(discardObsoleteDrafts);
         };
-        const discardDraft = (draft: string): Promise<boolean> =>
-          (options.discardUnsentState?.(draft) ?? Promise.resolve()).then(() => true, (error: unknown) => {
-            onError(`discard of the draft of ${input.path}`, error);
-            return false;
-          });
+        const setTextAside = (): void => draftStep(async () => {
+          if (entry === null || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return;
+          // A draft the store refused has told the person.
+          const draft = await entry.session.setTextAside().catch(() => null);
+          if (draft === null) return;
+          obsoleteDrafts.delete(draft);
+          if (currentDraft !== null && currentDraft !== draft) obsoleteDrafts.add(currentDraft);
+          currentDraft = draft;
+        });
+        const retireTextSetAside = (): void => draftStep(async () => {
+          if (currentDraft !== null) obsoleteDrafts.add(currentDraft);
+          currentDraft = null;
+        });
         const onSettled = async (
           result: {
             sha256: string;
@@ -4485,10 +4502,6 @@ export function createWorkspaceEngineCapture(
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
             return false;
           }
-          // The file has the text, so a draft set aside for it goes. One the
-          // store did not remove waits for the next save.
-          textSetAside = textSetAside.then(async (draft) =>
-            draft === null || (await discardDraft(draft)) ? null : draft);
           // The engine just wrote this path's settled content to disk — the
           // proof a stand-down marker denies. This fires for every
           // settle on this session, including the pre-close one a rename's
@@ -4592,6 +4605,8 @@ export function createWorkspaceEngineCapture(
             return false;
           }
           reportSaveState("saved", takeSaveToken(token, generation), "outcome");
+          // The file holds the text, so its draft goes.
+          retireTextSetAside();
           return true;
         };
         // Claim exactly what this settle can carry. The daemon serves one
@@ -5317,9 +5332,13 @@ export function createWorkspaceEngineCapture(
         let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
         const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
           if (shuttingDown && quitClose) return quitClose;
-          // A close waits for the draft its refused save sets aside.
+          // A close waits for the draft its refused save sets aside, and
+          // tries again to remove drafts a newer one replaced.
           const closing = shuttingDown && closeInFlight ? closeInFlight
-            : attemptCloseEntry(opts).finally(() => textSetAside);
+            : attemptCloseEntry(opts).finally(() => {
+              draftStep(async () => undefined);
+              return draftSteps;
+            });
           closeInFlight = closing;
           if (shuttingDown) quitClose = closing;
           const completed = (): void => {
@@ -7807,6 +7826,7 @@ export function createWorkspaceEngineCapture(
         daemonCaptureHealthTimer = null;
       }
       await chain;
+      await discardObsoleteDrafts();
       try {
         if (store) {
           try {

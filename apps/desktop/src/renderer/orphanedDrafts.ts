@@ -110,11 +110,23 @@ function findWorkspaceDraft(workspaceId: string, matches: (draft: OrphanedDraft)
   }
 }
 
+// Every draft main keeps for the workspace, as main lists them now. A row of
+// main's draft that is no longer listed goes: main removed it, or replaced it
+// with a draft of newer text, which the listing adds.
 export function loadLiveDraftRecovery(workspaceId: string, isCurrent: () => boolean): Promise<void> {
   return withRecoveryRequest(workspaceId, async () => {
     if (!isCurrent()) return;
     const records = await bridge().listLiveDraftRecovery({workspaceId});
     if (!isCurrent()) return;
+    const listed = new Set(records.map(record => record.recordId));
+    for (const [key, kept] of [...drafts]) {
+      const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
+      if (keyWorkspaceId !== workspaceId) continue;
+      for (const draft of kept) {
+        const recordId = draft.recovery?.recordId;
+        if (recordId !== undefined && !listed.has(recordId)) retireOrphanedDraft(workspaceId, path, draft.id);
+      }
+    }
     captureLiveDraftRecovery(workspaceId, records);
   });
 }

@@ -519,6 +519,21 @@ function shareUnjournalableNotice(
   return lines.join(" ");
 }
 
+// Lists the drafts main keeps for the workspace again. A failed read files a
+// notice whose Try again reads again.
+function recoverLiveDrafts(
+  workspaceId: string,
+  isCurrent: () => boolean,
+  report: (message: string, error: unknown, retry: () => void) => void,
+): void {
+  const recover = (): void => {
+    void loadLiveDraftRecovery(workspaceId, isCurrent).catch((error: unknown) => {
+      if (isCurrent()) report("dohc could not read set-aside edits.", error, recover);
+    });
+  };
+  recover();
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -3758,13 +3773,7 @@ export function DesktopWorkspaceShell(props: {
         }
       };
       void refreshInitialFiles().catch(reportInitialFilesFailure);
-      const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
-      const reportDraftRecoveryFailure = (error: unknown) => {
-        if (!cancelled && !workspaceAdmission.superseded) {
-          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
-        }
-      };
-      void recoverDrafts().catch(reportDraftRecoveryFailure);
+      recoverLiveDrafts(workspaceId, () => !cancelled && !workspaceAdmission.superseded, reportShellError);
     })();
     return () => {
       cancelled = true;
@@ -3780,6 +3789,21 @@ export function DesktopWorkspaceShell(props: {
     syncStatusLane,
     workspaceAdmission,
   ]);
+
+  // Main also sets drafts aside while the workspace is open, such as the text
+  // of a file deleted outside dohc, and removes them once a save writes it.
+  useEffect(() => {
+    let current = true;
+    const unsubscribe = bridge().onLiveDraftRecoveryChanged((event) => {
+      if (event.workspaceId === workspaceId) {
+        recoverLiveDrafts(workspaceId, () => current && !workspaceAdmission.superseded, reportShellError);
+      }
+    });
+    return () => {
+      current = false;
+      unsubscribe();
+    };
+  }, [workspaceId, workspaceAdmission, reportShellError]);
 
   // Once open has established watcher readiness, refresh everything whenever
   // a settled batch is recorded. The timeline and status stay live without

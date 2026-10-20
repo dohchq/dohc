@@ -1968,6 +1968,50 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(discardUnsentState).not.toHaveBeenCalled();
   });
 
+  // A save can write the file and still find it gone, deleted again right
+  // after Save it again. The draft goes only once the file holds the text.
+  it("keeps a deleted file's draft when the file is gone again after a save wrote it", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const preserveUnsentState = vi.fn(async () => "d".repeat(64));
+    const discardUnsentState = vi.fn(async () => undefined);
+    const states: string[] = [];
+    let writes = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        let tokens = 0;
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => {
+            const token = ++tokens;
+            options.onSettleStart?.(token);
+            if (!writes) { options.onSettleError?.(stale, token); throw stale; }
+            const result = {sha256: createHash("sha256").update("typed").digest("hex"), content: "typed", materialized: true};
+            await options.onSettled?.(result as never, token);
+            return result as never;
+          },
+          close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state)});
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
+    writes = true;
+    await session.settleNow();
+    expect(states.at(-1)).toBe("changed-on-disk");
+    await session.close();
+    expect(discardUnsentState).not.toHaveBeenCalled();
+    await engine.stop();
+  });
+
   it("settles and retires every live Y.Doc session before stopping the capture", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

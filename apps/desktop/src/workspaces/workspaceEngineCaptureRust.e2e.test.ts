@@ -1275,8 +1275,9 @@ it.skipIf(engine.missing)(
 // refuses every save over the missing file, so nothing writes it back until
 // the person chooses Save it again. `shape` is a file capture recorded and
 // saved over, or one New File left empty and deleted before its first save.
-// Drafts go to a real draft store, as the app keeps them.
-async function openDeletedDocument(shape: "recorded" | "new") {
+// Drafts go to a real draft store, as the app keeps them. The store refuses
+// the first `failedDiscards` removals.
+async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0) {
   const root = await createTestScratch("dohc-deleted-file-");
   const draftStore = await createTestScratch("dohc-deleted-file-drafts-");
   const workspaceId = `deleted-file-${shape}`;
@@ -1286,7 +1287,10 @@ async function openDeletedDocument(shape: "recorded" | "new") {
   const capture = createWorkspaceEngineCapture({
     workspaceId, rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
     preserveUnsentState: (draft) => preserveUnsentLiveDraft(draftStore, workspaceId, draft),
-    discardUnsentState: (draftId) => removeLiveDraft(draftStore, draftId),
+    discardUnsentState: async (draftId) => {
+      if (failedDiscards-- > 0) throw new Error("The draft store is busy.");
+      await removeLiveDraft(draftStore, draftId);
+    },
   });
   const absolute = join(root, "note.md");
   const states: string[] = [];
@@ -1380,6 +1384,20 @@ it.skipIf(engine.missing)("saves a deleted file again after its tab closed, and 
     await rm(deleted.absolute);
     await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(false);
     expect(existsSync(deleted.absolute)).toBe(false);
+  } finally {
+    await deleted.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing)("removes a replaced draft the store first refused to remove, by the time the session ends", async () => {
+  const deleted = await openDeletedDocument("recorded", 1);
+  try {
+    deleted.type("more\n");
+    await expect(deleted.session.settleNow()).rejects.toThrow("conflict-stale-target");
+    // The newer draft is written, and the older one stays until a removal works.
+    await vi.waitFor(async () => expect(await deleted.drafts()).toHaveLength(2));
+    await expect(deleted.session.close()).rejects.toThrow("conflict-stale-target");
+    expect(await deleted.drafts()).toEqual([`note.md: ${deleted.text()}`]);
   } finally {
     await deleted.stop();
   }
