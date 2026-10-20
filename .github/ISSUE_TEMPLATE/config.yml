@@ -1,0 +1,4 @@
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/dohchq/dohc/security/advisories/new
+    about: Report it privately. Don't open a public issue.
