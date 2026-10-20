@@ -412,7 +412,7 @@ describe("relay write and response lifetime", () => {
     const raw = new DatabaseSync(":memory:");
     raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER,nonce TEXT,previous_nonce TEXT); INSERT INTO sync_relay_continuity VALUES(1,0,'initial',NULL)");
     let confirmed = false;
-    const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
+    const db: SqliteDb = { get isTransaction() { return raw.isTransaction; }, prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
       exec(sql) { if (sql === "COMMIT") throw new Error("commit failed"); raw.exec(sql); if (sql === "ROLLBACK") throw new Error("lost rollback result"); } };
     const owner = new RelayWriteOwner(db, { confirm() { confirmed = true; }, close() {} }, 0, "initial");
     try {
@@ -426,7 +426,7 @@ describe("relay write and response lifetime", () => {
     const raw = new DatabaseSync(":memory:");
     raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER,nonce TEXT,previous_nonce TEXT); INSERT INTO sync_relay_continuity VALUES(1,0,'initial',NULL)");
     let confirmed = false;
-    const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
+    const db: SqliteDb = { get isTransaction() { return raw.isTransaction; }, prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
       exec(sql) { raw.exec(sql); if (sql === "COMMIT") throw new Error("lost COMMIT result"); } };
     const owner = new RelayWriteOwner(db, { confirm() { confirmed = true; }, close() {} }, 0, "initial");
     try {

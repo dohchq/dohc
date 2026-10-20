@@ -14,23 +14,36 @@ export function deriveServiceHostBearer(workspace: ServiceHostWorkspace, config:
   return `dohc-service-v1.${createHmac("sha256", config.key).update(input).digest("base64url")}`;
 }
 
-export function serviceHostReplicationRoute(input: {workspaceId: string; method: string; pathname: string}): boolean {
+type RouteInput = {workspaceId: string; method: string; pathname: string};
+// The decoded route under `/sync/:workspaceId/`, or null for another workspace.
+function workspaceRoute(input: RouteInput): string[] | null {
   let parts: string[];
-  try {parts = input.pathname.split("/").slice(1).map(decodeURIComponent);} catch {return false;}
-  if (parts[0] !== "sync" || parts[1] !== input.workspaceId) return false;
-  const suffix = parts.slice(2);
-  if (suffix.length === 1) return (suffix[0] === "bootstrap" && input.method === "GET") ||
-    (suffix[0] === "log" && (input.method === "GET" || input.method === "POST"));
-  if (suffix.length === 2 && suffix[0] === "blobs") return suffix[1] === "have" ? input.method === "POST" :
-    /^[0-9a-f]{64}$/.test(suffix[1]!) && (input.method === "GET" || input.method === "PUT");
+  try {parts = input.pathname.split("/").slice(1).map(decodeURIComponent);} catch {return null;}
+  return parts[0] === "sync" && parts[1] === input.workspaceId ? parts.slice(2) : null;
+}
+function replicationShape(suffix: readonly string[], method: string): boolean {
+  if (suffix.length === 1) return (suffix[0] === "bootstrap" && method === "GET") ||
+    (suffix[0] === "log" && (method === "GET" || method === "POST"));
+  if (suffix.length === 2 && suffix[0] === "blobs") return suffix[1] === "have" ? method === "POST" :
+    /^[0-9a-f]{64}$/.test(suffix[1]!) && (method === "GET" || method === "PUT");
   return suffix.length === 3 && suffix[0] === "log" && !!suffix[1] && !/[\u0000-\u001f\u007f]/.test(suffix[1]) &&
-    /^\d+$/.test(suffix[2]!) && Number.isSafeInteger(Number(suffix[2])) && input.method === "GET";
+    /^\d+$/.test(suffix[2]!) && Number.isSafeInteger(Number(suffix[2])) && method === "GET";
 }
 
-/** The same replication routes, under `/sync/:workspaceId/hosted/`: the service host's scoped feed. */
-export function serviceHostFeedRoute(input: {workspaceId: string; method: string; pathname: string}): boolean {
-  const parts = input.pathname.split("/");
-  return parts[3] === "hosted" && serviceHostReplicationRoute({...input, pathname: [...parts.slice(0, 3), ...parts.slice(4)].join("/")});
+export function serviceHostReplicationRoute(input: RouteInput): boolean {
+  const suffix = workspaceRoute(input);
+  return suffix !== null && replicationShape(suffix, input.method);
+}
+
+/**
+ * The same replication routes, under `/sync/:workspaceId/hosted/`: the service
+ * host's scoped feed. Only the service host asks for a document's first live
+ * base, so that route is here and never among the shapes other credentials share.
+ */
+export function serviceHostFeedRoute(input: RouteInput): boolean {
+  const suffix = workspaceRoute(input);
+  if (suffix?.[0] !== "hosted" || input.pathname.split("/")[3] !== "hosted") return false;
+  return (suffix.length === 2 && suffix[1] === "first-open" && input.method === "POST") || replicationShape(suffix.slice(1), input.method);
 }
 
 /**

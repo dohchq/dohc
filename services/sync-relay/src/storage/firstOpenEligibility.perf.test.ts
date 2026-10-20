@@ -6,8 +6,8 @@ import {sha256Hex} from "@dohc/workspace-core/hash";
 import {closeTestStorages, inspectDatabase, storagePath, testStorage} from "../testing";
 import {createLiveValidationExecutor} from "../liveValidation";
 import type {StorageContext} from "./context";
-import {appendLogBatchInTransaction} from "./log";
-import {readFirstOpenHistory, type FirstOpenEligibility, type FirstOpenHistoryReader, type FirstOpenProof, type FirstOpenSource} from "./firstOpenEligibility";
+import {readFirstOpenHistory, type FirstOpenEligibility, type FirstOpenHistoryReader, type FirstOpenSource} from "./firstOpenHistory";
+import type {FirstOpenProof} from "./firstOpenEligibility";
 
 // Run: DOHC_FIRST_OPEN_MEASURE=1 pnpm --filter @dohc/sync-relay exec vitest run src/storage/firstOpenEligibility.perf.test.ts --silent=false --reporter=verbose
 const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
@@ -94,8 +94,9 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
   for (const {workspaceId} of scenarios.slice(0, 2)) {
     const batch = append(workspaceId, ["target"]);
     storage.appendLogBatch(batch);
-    const payload = JSON.parse(batch.ops[0]!.payloadJson) as {momentId: string; path: string};
-    sources.set(workspaceId, {workspaceId, objectId: "target", path: payload.path, sourceMomentId: payload.momentId, sourceDigest: SHA});
+    const payload = JSON.parse(batch.ops[0]!.payloadJson) as {momentId: string; path: string; payloadAfterByteLength: number};
+    sources.set(workspaceId, {workspaceId, objectId: "target", path: payload.path, sourceMomentId: payload.momentId, sourceDigest: SHA,
+      sourceByteLength: payload.payloadAfterByteLength});
   }
   const buildMs = performance.now() - buildStart;
   const size = db.prepare("SELECT page_count*page_size AS bytes, (SELECT avg(length(payload_json)) FROM sync_relay_log) AS payload FROM pragma_page_count(), pragma_page_size()").get()!;
@@ -113,12 +114,13 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     const [whole] = await timed(() => storage.appendLogBatch(append("writer", ["plain"])));
     return {whole, hold: ended - began};
   };
-  const guarded = async (proof: FirstOpenProof) => {
+  // A real publication: the base's blob and row in the target's workspace. Each is removed after it is timed, so the target stays eligible.
+  const cleanup = inspectDatabase(storagePath(storage));
+  const guarded = async (proof: FirstOpenProof, workspaceId: string) => {
     let publishing = 0;
-    const [whole, written] = await timed(() => storage.writeFirstOpen(proof, () => {
-      publishing = performance.now();
-      return appendLogBatchInTransaction(context, append("writer", ["guarded"]));
-    }));
+    const base = {namespace: "namespace", bytes: TEXT, recordedAtMs: storage.readFirstOpenMoment(workspaceId, "target")!.recordedAtMs};
+    const [whole, written] = await timed(() => storage.writeFirstOpen(proof, base, () => { publishing = performance.now(); }));
+    if (written.kind === "published") cleanup.prepare("DELETE FROM sync_relay_log WHERE relay_seq=?").run(written.receipt.relaySeq);
     return {whole, hold: ended - began, eligibility: (written.kind === "published" ? publishing : ending) - began, kind: written.kind};
   };
 
@@ -133,7 +135,8 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     reader = worker;
     if (prepared.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(prepared)}.`);
     const spy = vi.spyOn(db, "prepare");
-    storage.writeFirstOpen(prepared.proof, () => undefined);
+    // Refused after the recheck, before it publishes: nothing to remove.
+    expect(() => storage.writeFirstOpen(prepared.proof, {namespace: "namespace", bytes: TEXT, recordedAtMs: -1}, () => undefined)).toThrow("timestamp");
     const guard = spy.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("WITH RECURSIVE"))!;
     spy.mockRestore();
     const plan = (query: string) => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));
@@ -143,7 +146,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
 
   const results: Record<string, unknown> = {}, acceptance: Record<string, {pass: boolean; [measure: string]: number | boolean | undefined}> = {};
   for (const {workspaceId, expected} of scenarios) {
-    const source = sources.get(workspaceId) ?? {workspaceId, objectId: "target", path: "docs/target.md", sourceMomentId: "moment-target", sourceDigest: SHA};
+    const source = sources.get(workspaceId) ?? {workspaceId, objectId: "target", path: "docs/target.md", sourceMomentId: "moment-target", sourceDigest: SHA, sourceByteLength: 78};
     const result: Record<string, unknown> = {expected};
     results[workspaceId] = result;
     // A fresh read-only connection on the first-open worker for every preparation.
@@ -175,12 +178,12 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     // The writer: a plain append and the same append behind the first-open recheck, interleaved.
     // Each publication uses up its proof, so each guarded append gets a new one, prepared before either append.
     const plainWhole: number[] = [], plainHold: number[] = [], guardedWhole: number[] = [], guardedHold: number[] = [], eligibility: number[] = [];
-    for (let i = 0; i < 3; i++) { await plain(); await guarded(await prepare()); }
+    for (let i = 0; i < 3; i++) { await plain(); await guarded(await prepare(), workspaceId); }
     for (let i = 0; i < WRITES; i++) {
       const proof = await prepare();
       // Alternate which append goes first, so neither always follows the other.
       const first = i % 2 === 0 ? await plain() : undefined;
-      const checked = await guarded(proof);
+      const checked = await guarded(proof, workspaceId);
       const bare = first ?? await plain();
       expect(checked.kind).toBe("published");
       plainWhole.push(bare.whole); plainHold.push(bare.hold);
@@ -218,7 +221,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     const retryHold: number[] = [], retryEligibility: number[] = [], catchUp: number[] = [];
     for (let i = 0; i < CATCH_UPS; i++) {
       storage.appendLogBatch(append(workspaceId, Array.from({length: CATCH_UP_ROWS}, (_, index) => `object-${index}`)));
-      const checked = await guarded(proof);
+      const checked = await guarded(proof, workspaceId);
       expect(checked.kind).toBe("retry");
       retries++;
       retryHold.push(checked.hold); retryEligibility.push(checked.eligibility);
@@ -227,7 +230,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       catchUp.push(ms);
       proof = caught.proof;
     }
-    expect((await guarded(proof)).kind).toBe("published");
+    expect((await guarded(proof, workspaceId)).kind).toBe("published");
     result.catchUp = {rowsPerRound: CATCH_UP_ROWS, retries, freshWorkerCatchUpMs: stats(catchUp), retryHoldMs: stats(retryHold), retryEligibilityInWriterMs: stats(retryEligibility)};
 
     // A stale proof: the source changed, so the writer refuses without publishing.
@@ -235,7 +238,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     storage.appendLogBatch(append(workspaceId, ["target"]));
     const staleHold: number[] = [], staleEligibility: number[] = [];
     for (let i = 0; i < WRITES; i++) {
-      const checked = await guarded(proof);
+      const checked = await guarded(proof, workspaceId);
       expect(checked.kind).toBe("refused");
       staleHold.push(checked.hold); staleEligibility.push(checked.eligibility);
     }

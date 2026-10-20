@@ -113,6 +113,7 @@ export interface InspectionStatement {
 
 export interface InspectionDatabase {
   readonly isOpen: boolean;
+  readonly isTransaction: boolean;
   prepare(sql: string): InspectionStatement;
   exec(sql: string): void;
   close(): void;

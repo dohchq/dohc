@@ -51,6 +51,7 @@ export function putBlob(storage: StorageContext, input: PutBlobInput): PutBlobRe
   }
 
 export function putBlobInTransaction(storage: StorageContext, input: PutBlobInput): PutBlobResult {
+    if (!storage.db.isTransaction) throw new Error("A transactional blob write requires the relay write transaction.");
     const byteLength = input.content.byteLength;
     const createdAtMs = Math.trunc(input.createdAtMs);
     // A repeated upload restarts the grace window, so collection cannot take

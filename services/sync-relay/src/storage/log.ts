@@ -61,6 +61,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   guard?: (context: AppendLogBatchGuardContext) => void;
   admit?: (ops: SyncRelayLogInput[]) => void;
 }): AppendLogBatchResult {
+      // Code that resumes after a caller's transaction ended must not append on its own.
+      if (!storage.db.isTransaction) throw new Error("A transactional log append requires the relay write transaction.");
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
       }

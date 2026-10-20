@@ -4,7 +4,7 @@ import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helpe
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
-import {hostedRowDecision, hostedWriteAllowed} from "./serviceHostFeed";
+import {hostedPublication, hostedRowDecision} from "./serviceHostFeed";
 import {assertClientLogProvenance, FIRST_OPEN_ORIGIN_PREFIX, parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
 import {stableJsonStringify} from "./canonicalJson";
@@ -346,8 +346,6 @@ it("refuses a hosted base at its coordinate before preparation, whatever its blo
   f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
   // Valid but for being bases: one the host uploaded, one only the owner holds, and one nobody holds.
   const bases = [...hostedBases(own), hostedBases(P)[0]!, hostedBases({sha256: "a".repeat(64)})[0]!];
-  const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
-  for (const [opKind, payload] of bases) expect(hostedWriteAllowed(hostedScope, opKind, payload)).toBe(false);
   const first = await (await f.push(bases)).json() as PushAnswer;
   expect(first).toMatchObject({inserted: 7, currentMaxOriginSeq: 6});
   expect(first.refusals).toEqual(bases.map((_, originSeq) => ({originId: HOST_ORIGIN, originSeq, opKind: "ydoc.update", reason: "base-state-from-host"})));
@@ -596,10 +594,8 @@ it("fails a write naming a blob the host never fetched or uploaded as missing, a
     return [response.status, (await response.text()).replaceAll(sha256, "named")];
   };
   const absentSha256 = "e".repeat(64);
-  const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
   for (const [index, op] of named(P.sha256).entries()) {
-    // Only the blob stops it: the document, path and operation are the host's to write.
-    expect(hostedWriteAllowed(hostedScope, op[0], op[1]), op[0]).toBe(true);
+    // Only the blob stops it: a document, path or operation outside the host's would be refused at its coordinate.
     const missing = await answer(op, P.sha256);
     expect(missing[0], op[0]).toBe(422);
     expect(JSON.parse(String(missing[1])), op[0]).toMatchObject({code: "blob_missing"});
@@ -1037,16 +1033,19 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   const held = new Map([[document.objectId, document.currentPath]]);
   const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held,
     departed: new Set<string>(), shared: held, token: "token"};
+  // The decision the hosted log's screen and admission make, with every blob within reach.
+  const decide = (scope: typeof hosted, op: (typeof nativeAuthoredSettlement)[number]) =>
+    hostedPublication(scope, () => true, {originSeq: 0, opKind: op.opKind, payloadJson: JSON.stringify(op.payload), recordedAtMs: op.recordedAtMs});
   for (const op of nativeAuthoredSettlement) {
-    expect(hostedWriteAllowed(hosted, op.opKind, op.payload), op.opKind).toBe(true);
+    expect(decide(hosted, op), op.opKind).toBe("accepted");
     const row = {opKind: op.opKind, payloadJson: JSON.stringify(op.payload), recordedAtMs: op.recordedAtMs};
     expect(hostedRowDecision(hosted, row), op.opKind).toEqual({allowed: true, objectId: document.objectId,
       blobSha256s: referencedBlobShas(op.opKind, row.payloadJson, {workspaceId: document.workspaceId, recordedAtMs: op.recordedAtMs})});
   }
   const other = {...hosted, workspaceId: "other-workspace"};
-  expect(hostedWriteAllowed(other, settlement.opKind, settlement.payload)).toBe(false);
+  expect(decide(other, settlement)).toBe("outside-hosted-documents");
   const unhosted = {...hosted, hosted: new Map<string, string>(), shared: new Map<string, string>()};
-  for (const op of nativeAuthoredSettlement) expect(hostedWriteAllowed(unhosted, op.opKind, op.payload), op.opKind).toBe(false);
+  for (const op of nativeAuthoredSettlement) expect(decide(unhosted, op), op.opKind).toBe("outside-hosted-documents");
 });
 
 it("authorizes the hosted routes only for the replication shapes", () => {

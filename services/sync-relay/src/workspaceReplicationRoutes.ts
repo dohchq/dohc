@@ -363,7 +363,7 @@ interface OptionalWorkspaceIdentity {
   streamIdentity: string;
 }
 
-function parseOptionalWorkspaceIdentity(
+export function parseOptionalWorkspaceIdentity(
   input: Record<string, unknown>,
 ): OptionalWorkspaceIdentity | null {
   return parseOptionalWorkspaceIdentityValues(

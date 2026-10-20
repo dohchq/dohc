@@ -43,7 +43,7 @@ export function parseServiceActivationConfig(value:unknown){
   const policy=configRecord(row.validation,["maxStructVisits","maxValueNodeVisits","maxDecodedPayloadByteVisits","maxStructClientGroupVisits","maxDeleteClientGroupVisits","maxDeleteIntervalVisits","maxIndexOperations"]);
   for(const value of Object.values(policy))positive(value);
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
-  return Object.freeze({targets:Object.freeze(targets),validateBaseline:createLiveMarkdownRegistrationValidator(validation),
+  return Object.freeze({targets:Object.freeze(targets),validation,validateBaseline:createLiveMarkdownRegistrationValidator(validation),
     validateJournal:createLiveMarkdownJournalValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),

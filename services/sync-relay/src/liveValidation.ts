@@ -5,7 +5,7 @@ import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-jour
 import type { FirstOpenBaseInput, FirstOpenBaseResult } from "./firstOpenBase.js";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
-import type { FirstOpenHistory, FirstOpenHistoryRead } from "./storage/firstOpenEligibility.js";
+import type { FirstOpenHistory, FirstOpenHistoryRead } from "./storage/firstOpenHistory.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;

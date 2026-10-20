@@ -1,6 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
-import {existsSync} from "node:fs";
-import {join} from "node:path";
+import {existsSync, readFileSync} from "node:fs";
+import {dirname, join, resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 import {DatabaseSync} from "node:sqlite";
 import {sha256Hex} from "@dohc/workspace-core/hash";
 import {closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, storagePath, tempRoot, testStorage} from "../testing";
@@ -11,8 +12,10 @@ import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
 import {refuseOp} from "./relayAdmission";
 import {appendLogBatchInTransaction} from "./log";
+import {putBlobInTransaction} from "./blobs";
 import {readFirstOpenHistory, readFirstOpenHistoryFile, type FirstOpenHistory, type FirstOpenHistoryRead, type FirstOpenHistoryReader,
-  type FirstOpenProof, type FirstOpenSource} from "./firstOpenEligibility";
+  type FirstOpenSource} from "./firstOpenHistory";
+import {firstOpenOrigin, writeFirstOpen, type FirstOpenProof, type FirstOpenPublication} from "./firstOpenEligibility";
 
 const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
 afterEach(async () => {
@@ -23,7 +26,9 @@ afterEach(async () => {
 const WS = "workspace-1", OTHER_WS = "workspace-2", OBJECT = "object-1", OTHER = "object-2";
 const LINEAGE = "a".repeat(64), OTHER_LINEAGE = "c".repeat(64);
 const TEXT = new TextEncoder().encode("ordinary text"), SHA = sha256Hex(TEXT);
-const SOURCE = {workspaceId: WS, objectId: OBJECT, path: "docs/a.md", sourceMomentId: `write-${OBJECT}-docs/a.md`, sourceDigest: SHA};
+const SOURCE = {workspaceId: WS, objectId: OBJECT, path: "docs/a.md", sourceMomentId: `write-${OBJECT}-docs/a.md`, sourceDigest: SHA, sourceByteLength: TEXT.byteLength};
+// Storage commits these bytes as given; the route builds real ones.
+const BASE = {namespace: "namespace-test", bytes: new Uint8Array([1, 2, 3]), recordedAtMs: 1};
 
 const write = (objectId: string, path: string, versionId = "main") => ({momentId: `write-${objectId}-${path}`, objectId, versionId,
   operation: "write", path, payloadAfterPath: path, payloadAfterBlobSha256: SHA, payloadAfterByteLength: TEXT.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1});
@@ -88,11 +93,10 @@ async function fixture({defaultReader = false} = {}) {
     append(workspaceId, "moment.append", write(OBJECT, "docs/a.md"));
     expect(storage.getEpochLogFloor(workspaceId)).toBeGreaterThan(0);
   };
-  // What a first-open publication would append, and how many such rows the log holds.
-  const publish = vi.fn((source: FirstOpenSource) => appendLogBatchInTransaction(storage as StorageContext, {workspaceId: source.workspaceId,
-    originId: "service-host:first-open:test",
-    ops: [{originSeq: 0, opKind: "ydoc.update", payloadJson: JSON.stringify(ydoc(source.objectId, {isBaseState: true, path: source.path})), recordedAtMs: 1}]}));
-  const published = () => Number(raw.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE origin_id='service-host:first-open:test'").get()!.n);
+  // A first-open publication, its append's guard, and how many first-open rows the log holds.
+  const guard = vi.fn();
+  const writeBase = (proof: FirstOpenProof) => storage.writeFirstOpen(proof, BASE, guard);
+  const published = () => Number(raw.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").get()!.n);
 
   for (const workspaceId of [WS, OTHER_WS]) {
     expect(storage.claimWorkspace({workspaceId, ownerUserId: "owner-1", createdAtMs: 0})).toBe("created");
@@ -112,7 +116,7 @@ async function fixture({defaultReader = false} = {}) {
     activation(workspaceId, objectId);
     restore(workspaceId, objectId, "namespace-1");
   }
-  return {storage, raw, append, stored, liveDocument, ordinaryBase, activation, restore, reenroll, publish, published, readWith};
+  return {storage, raw, append, stored, liveDocument, ordinaryBase, activation, restore, reenroll, guard, write: writeBase, published, readWith};
 }
 
 /** Reads history on its own read-only connection, as the first-open worker does, but in this thread. */
@@ -137,7 +141,7 @@ async function prepare(f: Fixture, reader = local): Promise<FirstOpenProof> {
 it("lets a document with only ordinary text history open live, whatever other objects and workspaces hold", async () => {
   const f = await fixture();
   expect(read(f)).toBe("eligible");
-  expect(f.storage.writeFirstOpen(await prepare(f), f.publish)).toMatchObject({kind: "published"});
+  expect(f.write(await prepare(f))).toMatchObject({kind: "published"});
   expect(f.published()).toBe(1);
 });
 
@@ -257,23 +261,23 @@ it("does not count relay refusals or refused settlements as history", async () =
 it.each(priorAuthority)("never publishes when %s is committed after preparation", async (_, add) => {
   const f = await fixture(), proof = await prepare(f);
   add(f);
-  expect(f.storage.writeFirstOpen(proof, f.publish).kind).not.toBe("published");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(f.write(proof).kind).not.toBe("published");
+  expect(f.guard).not.toHaveBeenCalled();
   expect(await catchUpWith(f, proof)).toEqual({kind: "refused", reason: "prior-authority"});
   expect(f.published()).toBe(0);
 });
 it.each(deletion)("never publishes when %s is committed after preparation", async (_, add) => {
   const f = await fixture(), proof = await prepare(f);
   add(f);
-  expect(f.storage.writeFirstOpen(proof, f.publish).kind).not.toBe("published");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(f.write(proof).kind).not.toBe("published");
+  expect(f.guard).not.toHaveBeenCalled();
   expect(await catchUpWith(f, proof)).toEqual({kind: "refused", reason: "deletion"});
   expect(f.published()).toBe(0);
 });
 it.each(authorityTables)("refuses in the writer itself after %s", async (_, add) => {
   const f = await fixture(), proof = await prepare(f);
   add(f);
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "refused", reason: "prior-authority"});
+  expect(f.write(proof)).toEqual({kind: "refused", reason: "prior-authority"});
   expect(f.published()).toBe(0);
 });
 
@@ -284,7 +288,7 @@ it("ignores everything another workspace commits after preparation", async () =>
   f.append(OTHER_WS, "moment.append", replace(OBJECT, "object-4"));
   for (const [opKind, payload] of audits(OBJECT)) f.stored(OTHER_WS, opKind, payload);
   f.restore(OTHER_WS, OBJECT, "namespace-3");
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toMatchObject({kind: "published"});
+  expect(f.write(proof)).toMatchObject({kind: "published"});
   expect(f.published()).toBe(1);
 });
 
@@ -298,7 +302,7 @@ it("catches up from the cutoff after unrelated rows, however often the log moves
   let proof = await prepare(f, recording);
   for (let round = 0; round < 2; round++) {
     f.append(WS, "moment.append", write(OTHER, `docs/other-${round}.md`));
-    expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "retry"});
+    expect(f.write(proof)).toEqual({kind: "retry"});
     expect(f.published()).toBe(0);
     const caught = await catchUpWith(f, proof, recording);
     if (caught.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(caught)}.`);
@@ -306,8 +310,8 @@ it("catches up from the cutoff after unrelated rows, however often the log moves
   }
   expect(reads.map(([request]) => request.afterRelaySeq)).toEqual([0, reads[0]![1].head, reads[1]![1].head]);
   expect(reads[2]![1].head).toBeGreaterThan(reads[1]![1].head!);
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toMatchObject({kind: "published"});
-  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(f.write(proof)).toMatchObject({kind: "published"});
+  expect(f.guard).toHaveBeenCalledTimes(1);
   expect(f.published()).toBe(1);
 });
 
@@ -334,7 +338,7 @@ it("takes the head from the same snapshot as the history", async () => {
   };
   const proof = await prepare(f, barrier);
   expect(commit).toBeUndefined();
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "retry"});
+  expect(f.write(proof)).toEqual({kind: "retry"});
   expect(await catchUpWith(f, proof)).toEqual({kind: "refused", reason: "prior-authority"});
   expect(f.published()).toBe(0);
 });
@@ -356,7 +360,7 @@ const staleAfterPreparation: Array<[string, (f: Fixture) => void]> = [
 it.each(staleAfterPreparation)("discards a preparation once %s", async (_, change) => {
   const f = await fixture(), proof = await prepare(f);
   change(f);
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "refused", reason: "stale-source"});
+  expect(f.write(proof)).toEqual({kind: "refused", reason: "stale-source"});
   expect(await catchUpWith(f, proof)).toEqual({kind: "refused", reason: "stale-source"});
   expect(f.published()).toBe(0);
 });
@@ -365,18 +369,18 @@ it("does not carry a preparation past its storage's close or into a reopened dat
   const f = await fixture(), proof = await prepare(f), path = storagePath(f.storage);
   f.raw.close();
   closeTestStorage(f.storage);
-  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow();
+  expect(() => f.write(proof)).toThrow();
   const reopened = reopenTestStorage(path, {firstOpenHistory: local});
-  expect(() => reopened.writeFirstOpen(proof, f.publish)).toThrow("another relay storage");
+  expect(() => reopened.writeFirstOpen(proof, BASE, f.guard)).toThrow("another relay storage");
   await expect(reopened.catchUpFirstOpen(proof)).rejects.toThrow("another relay storage");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(f.guard).not.toHaveBeenCalled();
 });
 
 it("does not publish after its storage is invalidated", async () => {
   const f = await fixture(), proof = await prepare(f);
   f.storage.invalidate();
-  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("unavailable");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(() => f.write(proof)).toThrow("unavailable");
+  expect(f.guard).not.toHaveBeenCalled();
 });
 
 it("does not prepare when its storage closes during the read", async () => {
@@ -408,17 +412,121 @@ it("never prepares from a failed read", async () => {
 
 it("refuses a workspace the relay no longer holds, and a proof storage did not make", async () => {
   const f = await fixture(), proof = await prepare(f);
-  expect(() => f.storage.writeFirstOpen({} as FirstOpenProof, f.publish)).toThrow("another relay storage");
+  expect(() => f.write({} as FirstOpenProof)).toThrow("another relay storage");
   f.raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id=?").run(WS);
-  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("no history");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(() => f.write(proof)).toThrow("no history");
+  expect(f.guard).not.toHaveBeenCalled();
 });
 
-it("leaves no first-open rows when publication fails in the writer", async () => {
+const baseBlobs = (f: Fixture) => Number(f.raw.prepare("SELECT count(*) AS n FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(WS, sha256Hex(BASE.bytes))!.n);
+
+it("leaves neither the base's row nor its blob when publication fails in the writer", async () => {
   const f = await fixture(), proof = await prepare(f);
-  expect(() => f.storage.writeFirstOpen(proof, source => { f.publish(source); throw new Error("publication failed"); })).toThrow("publication failed");
-  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(() => f.storage.writeFirstOpen(proof, BASE, () => { throw new Error("publication failed"); })).toThrow("publication failed");
   expect(f.published()).toBe(0);
+  expect(baseBlobs(f)).toBe(0);
+  expect(f.write(proof)).toMatchObject({kind: "published"});
+  expect(baseBlobs(f)).toBe(1);
+});
+
+it("commits the blob and one ordinary unauthored base at the source's reserved coordinate", async () => {
+  const f = await fixture(), written = f.write(await prepare(f));
+  if (written.kind !== "published") throw new Error(JSON.stringify(written));
+  const rows = f.raw.prepare("SELECT * FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").all();
+  const digest = sha256Hex(BASE.bytes);
+  expect(rows).toEqual([expect.objectContaining({workspace_id: WS, origin_id: written.receipt.originId, origin_seq: 0, relay_seq: written.receipt.relaySeq,
+    op_kind: "ydoc.update", recorded_at_ms: BASE.recordedAtMs, admitted_author_snapshot_json: null, settlement_admission_json: null, relay_admission: null,
+    payload_json: JSON.stringify({contentKind: "richdoc", isBaseState: true, lineageClaimId: digest, objectId: OBJECT, path: "docs/a.md",
+      updateBlobSha256: digest, versionId: "main"})})]);
+  expect(written.receipt.originId).toMatch(/^service-host:first-open:[0-9a-f]{64}$/);
+  // No replacement moment, no live journal event.
+  expect(f.raw.prepare("SELECT count(*) AS n FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=?").get(WS, OBJECT)!.n).toBe(2);
+  expect(f.raw.prepare("SELECT count(*) AS n FROM sync_relay_live_update_journal").get()!.n).toBe(0);
+});
+
+it("derives each source's reserved origin from every part of its identity", () => {
+  const identity = {replicationEpoch: "epoch-1", streamIdentity: "stream-1"}, origin = firstOpenOrigin("namespace", SOURCE, identity);
+  const changed = [firstOpenOrigin("namespace-2", SOURCE, identity), firstOpenOrigin("namespace", SOURCE, {...identity, replicationEpoch: "epoch-2"}),
+    firstOpenOrigin("namespace", SOURCE, {...identity, streamIdentity: "stream-2"}),
+    ...(["workspaceId", "objectId", "path", "sourceMomentId", "sourceDigest"] as const).map(field => firstOpenOrigin("namespace", {...SOURCE, [field]: `${SOURCE[field]}x`}, identity)),
+    // Moving a boundary between neighbouring fields changes the origin too.
+    firstOpenOrigin("namespace", {...SOURCE, workspaceId: `${WS}"`, objectId: OBJECT.slice(1)}, identity)];
+  expect(new Set([origin, ...changed]).size).toBe(changed.length + 1);
+  expect(firstOpenOrigin("namespace", {...SOURCE, sourceByteLength: 99}, identity)).toBe(origin);
+});
+
+/** Runs the module's writer with a publisher of the test's own. */
+const writeWith = (f: Fixture, proof: FirstOpenProof, publish: (publication: FirstOpenPublication) => unknown) =>
+  writeFirstOpen(f.storage as StorageContext, proof, BASE, publish as (publication: FirstOpenPublication) => void);
+const appendBase = (f: Fixture, publication: FirstOpenPublication, change: {originId?: string; op?: Partial<FirstOpenPublication["op"]>} = {}) => {
+  const context = f.storage as StorageContext;
+  putBlobInTransaction(context, {workspaceId: WS, sha256: publication.blob.sha256, content: publication.blob.content, createdAtMs: 1});
+  return appendLogBatchInTransaction(context, {workspaceId: WS, originId: change.originId ?? publication.originId, ops: [{...publication.op, ...change.op}]});
+};
+
+const wrongPublishers: Array<[string, (f: Fixture) => (publication: FirstOpenPublication) => unknown]> = [
+  ["writes nothing", () => () => undefined],
+  ["writes another document's base", f => publication => appendBase(f, publication, {op: {payloadJson: publication.op.payloadJson.replace(OBJECT, OTHER)}})],
+  ["writes the base under another origin", f => publication => appendBase(f, publication, {originId: "service-host:first-open:other"})],
+  ["writes other bytes", f => publication => appendBase(f, {...publication, blob: {sha256: SHA, content: TEXT}},
+    {op: {payloadJson: publication.op.payloadJson.replaceAll(publication.blob.sha256, SHA)}})],
+  ["writes another timestamp", f => publication => appendBase(f, publication, {op: {recordedAtMs: 2}})],
+  ["writes another row as well", f => publication => {
+    appendBase(f, publication);
+    appendLogBatchInTransaction(f.storage as StorageContext, {workspaceId: WS, originId: "owner-device", ops: [{originSeq: f.storage.maxOriginSeq(WS, "owner-device") + 1,
+      opKind: "moment.append", payloadJson: JSON.stringify(write(OTHER, "docs/other.md")), recordedAtMs: 1}]});
+  }],
+];
+it.each(wrongPublishers)("rolls back a publisher that %s", async (_, publisher) => {
+  const f = await fixture(), proof = await prepare(f), head = () => f.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head;
+  const before = head();
+  expect(() => writeWith(f, proof, publisher(f))).toThrow("did not write its proven base");
+  expect(head()).toBe(before);
+  expect(baseBlobs(f)).toBe(0);
+  // The proof survives a refused publication.
+  expect(f.write(proof)).toMatchObject({kind: "published"});
+});
+
+it("never commits a blob or append that resumes after the writer's transaction ends", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  let resumed!: Promise<unknown>;
+  expect(() => writeWith(f, proof, publication => {
+    resumed = Promise.resolve().then(() => appendBase(f, publication));
+    return resumed;
+  })).toThrow("synchronous");
+  await expect(resumed).rejects.toThrow("requires the relay write transaction");
+  expect(f.published()).toBe(0);
+  expect(baseBlobs(f)).toBe(0);
+  // An append that would otherwise succeed, from a fresh origin.
+  const context = f.storage as StorageContext, op = {originSeq: 0, opKind: "moment.append", payloadJson: JSON.stringify(write(OTHER, "docs/late.md")), recordedAtMs: 1};
+  expect(() => appendLogBatchInTransaction(context, {workspaceId: WS, originId: "late-device", ops: [op]})).toThrow("requires the relay write transaction");
+  expect(f.storage.maxOriginSeq(WS, "late-device")).toBe(-1);
+});
+
+it("refuses to publish over rows already at the reserved origin", async () => {
+  const f = await fixture(), proof = await prepare(f);
+  // A relay refusal names no document, so history still allows publication; the writer still never writes over it.
+  const originId = firstOpenOrigin(BASE.namespace, SOURCE, {replicationEpoch: "epoch-1", streamIdentity: "stream-1"});
+  f.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_admission) VALUES (?,?,0,'relay.refused','{}',1,'refused')`).run(WS, originId);
+  const caught = await catchUpWith(f, proof);
+  if (caught.kind !== "prepared") throw new Error(JSON.stringify(caught));
+  expect(f.write(caught.proof)).toEqual({kind: "occupied"});
+  expect(f.guard).not.toHaveBeenCalled();
+});
+
+it("keeps account deletion out of the first-open worker's modules", () => {
+  const seen = new Set<string>(), pending = [fileURLToPath(new URL("../liveValidationWorker.ts", import.meta.url))];
+  while (pending.length) {
+    const file = pending.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const [, specifier] of readFileSync(file, "utf8").matchAll(/^import(?!\s+type\b)[^;]*?from\s+"(\.[^"]+)"/gm)) {
+      pending.push(resolve(dirname(file), specifier!.replace(/\.js$/, "")) + ".ts");
+    }
+  }
+  const modules = [...seen].map(file => file.replaceAll("\\", "/"));
+  expect(modules.some(file => file.endsWith("storage/firstOpenHistory.ts"))).toBe(true);
+  expect(modules.filter(file => /storage\/(accountDeletion|firstOpenEligibility)\.ts$/.test(file))).toEqual([]);
 });
 
 it("reads history through indexes, and only after the cutoff when catching up", async () => {
@@ -433,7 +541,7 @@ it("reads history through indexes, and only after the cutoff when catching up", 
   };
   const proof = await prepare(f, capture);
   const db = (f.storage as StorageContext).db, spy = vi.spyOn(db, "prepare");
-  f.storage.writeFirstOpen(proof, () => undefined);
+  f.write(proof);
   const guard = spy.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("WITH RECURSIVE"))!;
   spy.mockRestore();
   const plan = (query: string) => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));
@@ -515,7 +623,7 @@ it("prepares nothing from a read cancelled after its snapshot", async () => {
   const catching = cancelledOnReturn();
   await expect(catchUpWith(f, proof, catching.reader, catching.signal)).rejects.toThrow("cancelled");
   // The proof still stops at its old cutoff.
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toEqual({kind: "retry"});
+  expect(f.write(proof)).toEqual({kind: "retry"});
   expect(f.published()).toBe(0);
 });
 
@@ -547,29 +655,29 @@ it.each(closings)("never publishes into a workspace once %s before preparation",
   const f = await fixture();
   close(f);
   const proof = await prepare(f);
-  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("no history");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(() => f.write(proof)).toThrow("no history");
+  expect(f.guard).not.toHaveBeenCalled();
   expect(f.published()).toBe(0);
 });
 it.each(closings)("never publishes into a workspace once %s after preparation", async (_, close) => {
   const f = await fixture(), proof = await prepare(f);
   close(f);
-  expect(() => f.storage.writeFirstOpen(proof, f.publish)).toThrow("no history");
-  expect(f.publish).not.toHaveBeenCalled();
+  expect(() => f.write(proof)).toThrow("no history");
+  expect(f.guard).not.toHaveBeenCalled();
   expect(f.published()).toBe(0);
 });
 
 it("refuses an asynchronous publication, and rolls back one that returns a thenable", async () => {
-  const f = await fixture(), proof = await prepare(f);
-  expect(() => f.storage.writeFirstOpen(proof, async source => f.publish(source))).toThrow("synchronous");
-  expect(f.publish).not.toHaveBeenCalled();
+  const f = await fixture(), proof = await prepare(f), publish = vi.fn((publication: FirstOpenPublication) => appendBase(f, publication));
+  expect(() => writeWith(f, proof, async publication => publish(publication))).toThrow("synchronous");
+  expect(publish).not.toHaveBeenCalled();
   for (const pending of [{then() {}}, Promise.resolve()]) {
-    expect(() => f.storage.writeFirstOpen(proof, source => { f.publish(source); return pending; })).toThrow("synchronous");
+    expect(() => writeWith(f, proof, publication => { publish(publication); return pending; })).toThrow("synchronous");
   }
-  expect(f.publish).toHaveBeenCalledTimes(2);
+  expect(publish).toHaveBeenCalledTimes(2);
   expect(f.published()).toBe(0);
   // A refused publication leaves the proof unused.
-  expect(f.storage.writeFirstOpen(proof, f.publish)).toMatchObject({kind: "published"});
+  expect(f.write(proof)).toMatchObject({kind: "published"});
   expect(f.published()).toBe(1);
 });
 
@@ -577,12 +685,13 @@ it("publishes only the proven source, and only once", async () => {
   const f = await fixture(), offered = {...SOURCE, note: "not part of the source"};
   const proof = (await prepareWith(f, offered));
   if (proof.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(proof)}.`);
-  expect(f.storage.writeFirstOpen(proof.proof, f.publish)).toMatchObject({kind: "published"});
-  const [published] = f.publish.mock.calls[0]!;
-  expect(published).toStrictEqual(SOURCE);
-  expect(Object.isFrozen(published)).toBe(true);
-  expect(() => f.storage.writeFirstOpen(proof.proof, f.publish)).toThrow("was used");
+  const publish = vi.fn((publication: FirstOpenPublication) => appendBase(f, publication));
+  expect(writeWith(f, proof.proof, publish)).toMatchObject({kind: "published"});
+  const [publication] = publish.mock.calls[0]!;
+  expect(publication.source).toStrictEqual(SOURCE);
+  expect(Object.isFrozen(publication.source) && Object.isFrozen(publication) && Object.isFrozen(publication.op)).toBe(true);
+  expect(() => f.write(proof.proof)).toThrow("was used");
   await expect(catchUpWith(f, proof.proof)).rejects.toThrow("was used");
-  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(publish).toHaveBeenCalledTimes(1);
   expect(f.published()).toBe(1);
 });

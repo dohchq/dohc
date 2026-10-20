@@ -44,8 +44,10 @@ export interface FirstOpenBaseInput {
   bounds: FirstOpenBaseBounds;
 }
 export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget";
+export interface FirstOpenBaseSizes { baseBytes: number; stateUpdateBytes: number; nativeGrowthBytes: number }
 export type FirstOpenBaseResult =
-  | { kind: "built"; base: Uint8Array; lineageClaimId: string }
+  /** `sizes` lets a publisher check the base against bounds that changed since. */
+  | { kind: "built"; base: Uint8Array; lineageClaimId: string; sizes: FirstOpenBaseSizes }
   | {
       kind: "refused";
       /**
@@ -103,7 +105,7 @@ export function nativeFullStateGrowth(base: Uint8Array): number | undefined {
  * the larger of the base and the validated state, plus what re-encoding adds.
  */
 export function firstOpenBaseExceeds(
-  sizes: { baseBytes: number; stateUpdateBytes: number; nativeGrowthBytes: number },
+  sizes: FirstOpenBaseSizes,
   bounds: FirstOpenBaseBounds,
 ): FirstOpenBaseBound | undefined {
   const { baseBytes } = sizes;
@@ -176,9 +178,7 @@ export function buildFirstOpenBase(
   ) {
     return refused("unsupported-source");
   }
-  const exceeded = firstOpenBaseExceeds(
-    { baseBytes: base.byteLength, stateUpdateBytes: evidence.stateUpdateByteLength, nativeGrowthBytes },
-    bounds,
-  );
-  return exceeded ? refused(exceeded) : { kind: "built", base, lineageClaimId };
+  const sizes = { baseBytes: base.byteLength, stateUpdateBytes: evidence.stateUpdateByteLength, nativeGrowthBytes };
+  const exceeded = firstOpenBaseExceeds(sizes, bounds);
+  return exceeded ? refused(exceeded) : { kind: "built", base, lineageClaimId, sizes };
 }

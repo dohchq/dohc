@@ -11,6 +11,7 @@ import { logBlobsMissing } from "./storage/errors";
 import { readRefusal, refuseOp } from "./storage/relayAdmission";
 import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import { MAX_BLOB_BYTES } from "./wireLimits";
+import { parseFirstOpenRequest, type FirstOpenPublisher } from "./firstOpenPublication";
 import {
   createWorkspaceReplicationRoutes,
   enforceWorkspaceIdentity,
@@ -107,10 +108,6 @@ function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unkn
 /** A `ydoc.update` not explicitly a delta. A host continues lineages; it never starts one. */
 const hostedBase = (opKind: string, payload: unknown) => opKind === "ydoc.update" && asRecord(payload)?.isBaseState !== false;
 
-export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
-  return hostedWriter(scope, opKind, payload) !== null && !hostedBase(opKind, payload);
-}
-
 /** Why the relay refused one of the host's ops. `base-state-from-host`: see `hostedBase`. */
 export type HostedRefusalReason = "outside-hosted-documents" | "base-state-from-host";
 
@@ -121,7 +118,7 @@ export type HostedRefusalReason = "outside-hosted-documents" | "base-state-from-
  * whether or not the relay holds it: `blobs/have` reports it missing too, so
  * the host uploads it and retries. A document out of the share settles that way.
  */
-function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): "accepted" | "departed" | HostedRefusalReason {
+export function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): "accepted" | "departed" | HostedRefusalReason {
   const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
   const objectId = hostedWriter(scope, op.opKind, payload);
   if (objectId === null) return "outside-hosted-documents";
@@ -221,7 +218,7 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  * service host credential for the workspace owner; this decides scope.
  * A row or blob outside the scope answers exactly as an absent one.
  */
-export function createServiceHostFeed(storage: SyncRelayStorage) {
+export function createServiceHostFeed(storage: SyncRelayStorage, firstOpen?: FirstOpenPublisher) {
   // It passes no session reauthentication, so a held log read answers at once.
   const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false });
   const blobReach = createBlobReach(storage);
@@ -321,6 +318,11 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const row = storage.fetchLogCoordinate({ workspaceId, originId: second, originSeq });
       const scope = currentScope(workspaceId);
       return jsonResponse(logCoordinateAnswer(row && hostedRowDecision(scope, row).allowed ? row : null, epochLogFloor));
+    }
+
+    if (head === "first-open" && route.length === 1 && request.method === "POST" && firstOpen) {
+      const body = parseFirstOpenRequest(await readJsonObject(request));
+      return jsonResponse({ ok: true, outcome: await firstOpen({ workspaceId, ownerUserId: input.actor.userId, request: body, guard, signal: request.signal }) });
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {
