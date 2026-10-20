@@ -87,30 +87,13 @@ async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId
   return result;
 }
 
-export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number, path: string, recordId?: string): Promise<LiveDraftRecoveryRecord[]> {
-  const rows = await recoveryRecords(directory);
-  const before = await readableRecoveryRecords(rows, workspaceId, {objectId, path});
-  const removed = new Set<string>();
-  for (const row of rows) {
-    if (row.record.version !== 1) continue;
-    if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
-    if (recordId !== undefined && basename(row.file).slice(0, 64) !== recordId) continue;
-    if (createHash("sha256").update(Buffer.from(row.record.updateBase64, "base64")).digest("hex") !== snapshotSha256) continue;
-    const modified = await stat(row.file).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
-    if (modified && modified.mtimeMs <= throughMs) {
-      await rm(row.file, {force: true});
-      removed.add(basename(row.file).slice(0, 64));
-    }
-  }
-  try {return await listLiveDraftRecovery(directory, workspaceId, {objectId, path});}
-  catch {return before.filter(record => !removed.has(record.recordId));}
-}
-
 // A draft's file name is the hash of its content, so writing the same text
-// again writes the same file. Each write of a file here gets a number, and its
-// handle names both. A removal deletes the file only while no later write has
-// happened, so an old handle never deletes text written again. Writes and
-// removals of one file wait for each other.
+// again writes the same file. Each write gets a number this process never
+// gives again, and its handle names the file and the number. A removal
+// deletes the file only while it holds that write, so an old handle never
+// deletes text written again. Writes and removals of one file, a dismissal's
+// included, wait for each other.
+let writesSoFar = 0;
 const draftWrites = new Map<string, number>();
 const draftFileWork = new Map<string, Promise<unknown>>();
 
@@ -122,6 +105,30 @@ function onDraftFile<T>(file: string, work: () => Promise<T>): Promise<T> {
     if (draftFileWork.get(file) === settled) draftFileWork.delete(file);
   });
   return result;
+}
+
+export async function removeLiveDraftCopies(directory: string, workspaceId: string, objectId: string, snapshotSha256: string, throughMs: number, path: string, recordId?: string): Promise<LiveDraftRecoveryRecord[]> {
+  const rows = await recoveryRecords(directory);
+  const before = await readableRecoveryRecords(rows, workspaceId, {objectId, path});
+  const removed = new Set<string>();
+  for (const row of rows) {
+    if (row.record.version !== 1) continue;
+    if (row.record.workspaceId !== workspaceId || row.record.objectId !== objectId || typeof row.record.updateBase64 !== "string" || activeTemporaryDrafts.has(row.file)) continue;
+    if (recordId !== undefined && basename(row.file).slice(0, 64) !== recordId) continue;
+    if (createHash("sha256").update(Buffer.from(row.record.updateBase64, "base64")).digest("hex") !== snapshotSha256) continue;
+    // The check and the removal run as one step, so a draft written again
+    // after the person saw it stays.
+    await onDraftFile(row.file, async () => {
+      const modified = await stat(row.file).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
+      if (modified && modified.mtimeMs <= throughMs) {
+        await rm(row.file, {force: true});
+        draftWrites.delete(row.file);
+        removed.add(basename(row.file).slice(0, 64));
+      }
+    });
+  }
+  try {return await listLiveDraftRecovery(directory, workspaceId, {objectId, path});}
+  catch {return before.filter(record => !removed.has(record.recordId));}
 }
 
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. Answers a handle to this write. */
@@ -143,7 +150,7 @@ export async function preserveLiveDraft(directory: string, workspaceId: string, 
       await rm(temporary, { force: true }).catch(() => {});
       activeTemporaryDrafts.delete(temporary);
     }
-    const write = (draftWrites.get(file) ?? 0) + 1;
+    const write = ++writesSoFar;
     draftWrites.set(file, write);
     return `${digest}:${write}`;
   });

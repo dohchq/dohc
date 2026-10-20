@@ -600,9 +600,23 @@ it("keeps a draft written again while an older write's removal waits", async () 
   await reached.promise;
   const removing = removeLiveDraft(directory, older);
   held.resolve();
-  await expect(writing).resolves.toMatch(/:2$/);
+  expect(await writing).not.toBe(older);
   await expect(removing).resolves.toBe(false);
   expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["kept"]);
+});
+
+// A removal frees nothing for reuse: a write after it gets a handle no queued
+// removal still holds.
+it("keeps a draft written again after a removal, when an older removal of it comes later", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-draft-reuse-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", contentKind: "plaintext" as const, text: "kept", update: new Uint8Array([0, 0])};
+  const first = await preserveLiveDraft(directory, "workspace", draft);
+  await expect(removeLiveDraft(directory, first)).resolves.toBe(true);
+  const second = await preserveLiveDraft(directory, "workspace", draft);
+  expect(second).not.toBe(first);
+  await expect(removeLiveDraft(directory, first)).resolves.toBe(false);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["kept"]);
+  await expect(removeLiveDraft(directory, second)).resolves.toBe(true);
 });
 
 function deferredVoid() {
