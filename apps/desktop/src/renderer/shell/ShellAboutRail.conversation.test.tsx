@@ -21,6 +21,8 @@ const bridgeMock = {
   listChatReactions: vi.fn(),
   markChatThreadRead: vi.fn(),
   listEngineMoments: vi.fn(),
+  linksIn: vi.fn(async () => null),
+  chatFileMentionsPage: vi.fn(async () => null),
 };
 const notices = { report: vi.fn(), clear: vi.fn() };
 const accessContext = {
@@ -87,6 +89,9 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         reportFailureMessage={() => undefined}
         historyRevision={0}
         openMoment={() => undefined}
+        linksRevision={0}
+        openPathAtLine={() => undefined}
+        openChatMention={() => undefined}
         aboutNotices={notices}
         accessContext={accessContext}
         {...props}

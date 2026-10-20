@@ -55,7 +55,8 @@ function stubAnimationFrames() {
 }
 
 // History stands in as the file it was given: these tests pin what the panel
-// hands it, not what History then reads.
+// hands it, not what History then reads. Links reads its own query, which
+// About.test.tsx pins.
 vi.mock("./About", async (importOriginal) => {
   const { createElement } = await import("react");
   return {
@@ -66,6 +67,7 @@ vi.mock("./About", async (importOriginal) => {
         { "data-testid": "about-history-file" },
         file.status === "ready" ? `ready:${file.objectId}` : file.status,
       ),
+    AboutLinks: () => null,
   };
 });
 
@@ -79,12 +81,13 @@ const accessContext: AccessContext = {
 };
 
 type PanelProps = ComponentProps<typeof ProductionLinkedChatsPanel>;
+const links: PanelProps["links"] = { revision: 0, onOpenLink: vi.fn() };
 
 // The workspace shell provides the reaction store in production.
-function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext"> & Partial<Pick<PanelProps, "notices">>) {
+function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext" | "links"> & Partial<Pick<PanelProps, "notices">>) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} {...props} />
+      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} links={links} {...props} />
     </ReactionStoreProvider>
   );
 }
@@ -1092,6 +1095,7 @@ describe("LinkedChats reactions through the workspace store", () => {
           onError={onError}
           notices={notices}
           accessContext={accessContext}
+          links={links}
         />
       </div>
     );

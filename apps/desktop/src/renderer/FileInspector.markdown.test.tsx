@@ -14,7 +14,6 @@ import {
   it,
   vi,
 } from "vitest";
-import { linkQueryPage } from "../testing/linkQueryPage.fixture";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
@@ -95,7 +94,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     openFileExternally: vi.fn(async () => undefined),
-    linksIn: vi.fn(async () => linkQueryPage({ sources: [] })),
+    linksIn: vi.fn(async () => null),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
       folders: [],
@@ -150,22 +149,6 @@ describe("FileInspector renders markdown through the shared component map", () =
       text: "# Large document\n\nThis is the bounded prefix.\n",
       truncated: true,
     });
-    bridgeMock.linksIn.mockResolvedValueOnce(linkQueryPage({
-      sources: [
-        {
-          sourcePath: "notes/launch.md",
-          sourceTitle: "Launch",
-          snippets: [
-            {
-              text: "Review [[Large document]].",
-              line: 3,
-              highlightStart: 7,
-              highlightEnd: 25,
-            },
-          ],
-        },
-      ],
-    }));
     const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
 
     const source = await screen.findByTestId("markdown-source-view");
@@ -180,7 +163,8 @@ describe("FileInspector renders markdown through the shared component map", () =
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(view.container.querySelector(".dohc-readable-text")).toBeNull();
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
-    expect(await screen.findByText("Linked mentions")).toBeTruthy();
+    // About lists the links into a document, so the document asks for none.
+    expect(bridgeMock.linksIn).not.toHaveBeenCalled();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Open the full file externally" }),

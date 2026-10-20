@@ -30,6 +30,10 @@ The stable version must match the committed desktop package version.
 
 ## Run the workflow
 
+Nightlies publish on a schedule from the Mac mini. See "Publish nightlies on a schedule" in the release procedure.
+While that job is installed, do not dispatch a nightly by hand unless Ice asks.
+Read the job's reports on #2281 before starting any nightly work.
+To test the workflow without publishing, run `node scripts/release-nightly.mjs run --dry-run` on the Mac mini.
 Check the live workflow and its inputs before dispatching.
 Confirm that the required self-hosted runners are online and owned by the release operator.
 If a selected Windows runner is offline, start its registered `run.cmd` for this release.
@@ -49,6 +53,7 @@ If a run fails, inspect its failed steps before starting another run.
 ## Add the macOS files
 
 Add the macOS files right after every run that publishes. Until then, Macs on that channel receive no update and show no error.
+The scheduled nightly job adds them itself. If its report says that failed, run the command the report names.
 A release is not finished until `pnpm release:macos` reports that the release holds the macOS files.
 Do not report a release as done before that, because no Mac shows that the step was missed.
 Follow "Add the macOS files" in the release procedure on the Apple silicon Mac that holds the release keychain.
