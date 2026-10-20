@@ -107,6 +107,11 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
+// A failed automation run, or an agent run that says why it didn't start,
+// carries Copy beside its text.
+const copiesFailure = (notice: NoticeRow): boolean =>
+  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
 // What Copy puts on the clipboard for a failed run's notice.
 const failureDetails = (notice: NoticeRow): string =>
   errorDetails([
@@ -1411,7 +1416,7 @@ export function NoticeCenter(props: {
                   Try again
                 </button>
               ) : null}
-              {sentToast.notice.kind === "automation-failed" ? (
+              {copiesFailure(sentToast.notice) ? (
                 <CopyButton
                   key={sentToastKey}
                   iconOnly
@@ -1773,7 +1778,7 @@ export function NoticeCenter(props: {
                       const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
                         ? () => props.onRetrySentNotice?.(notice)
                         : undefined;
-                      const copies = notice.kind === "automation-failed";
+                      const copies = copiesFailure(notice);
                       const running = runningKey === key;
                       // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
                       const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"

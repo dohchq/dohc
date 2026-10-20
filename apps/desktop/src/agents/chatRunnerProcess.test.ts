@@ -38,7 +38,7 @@ async function runnerFixture(platform: NodeJS.Platform) {
       command,
       prompt: "",
     });
-  return { calls, spawn };
+  return { calls, root, spawn };
 }
 
 describe("chat runner process", () => {
@@ -65,13 +65,40 @@ describe("chat runner process", () => {
     expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd(), spaced]);
   });
 
-  it("refuses a runner Windows can't find on PATH instead of searching the workspace", async () => {
-    const { calls, spawn } = await runnerFixture("win32");
-    expect(() => spawn("dohc-missing-runner --print")).toThrow(
-      "Couldn't find dohc-missing-runner on PATH. Use its full path in the runner command.",
-    );
-    expect(calls).toEqual([]);
+  it("drops a quoted PATH entry elsewhere, where the quote is part of its name", async () => {
+    vi.stubEnv("PATH", [`"${join(process.cwd(), "agents")}"`, process.cwd()].join(delimiter));
+    const { calls, spawn } = await runnerFixture("linux");
+    spawn("dohc-missing-runner");
+    expect(calls[0]!.options.env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd()]);
   });
+
+  it("refuses a runner Windows can't find on PATH instead of searching the workspace", async () => {
+    const { calls, root, spawn } = await runnerFixture("win32");
+    const reason = "Couldn't find dohc-missing-runner on PATH. Use its full path in the runner command.";
+    expect(() => spawn("dohc-missing-runner --print")).toThrow(reason);
+    expect(calls).toEqual([]);
+    expect(readFileSync(join(root, "logs", "run.log"), "utf8")).toBe(`${reason}\n`);
+  });
+
+  it("says a relative runner path that doesn't exist doesn't exist", async () => {
+    const { spawn } = await runnerFixture("win32");
+    expect(() => spawn(String.raw`.\tools\agent.cmd`)).toThrow(
+      String.raw`.\tools\agent.cmd doesn't exist. Use its full path in the runner command.`,
+    );
+  });
+
+  it.runIf(process.platform === "win32")(
+    "says ComSpec isn't a full path when a shim needs cmd.exe",
+    async () => {
+      vi.stubEnv("ComSpec", "cmd.exe");
+      const { root, spawn } = await runnerFixture("win32");
+      const shim = join(root, "agent.cmd");
+      writeFileSync(shim, "@echo off\r\n");
+      expect(() => spawn(`"${shim}"`)).toThrow(
+        "Windows' command interpreter (ComSpec) isn't set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc.",
+      );
+    },
+  );
 
   it("passes a bare runner name to the system elsewhere", async () => {
     const { calls, spawn } = await runnerFixture("linux");

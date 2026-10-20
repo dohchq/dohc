@@ -1967,6 +1967,23 @@ describe("notices sent to you", () => {
     expect(screen.getByTestId("sent-notice-agent").textContent).toContain("From an agent");
   });
 
+  it("puts Copy beside why an agent run didn't start, and not on other agent runs", async () => {
+    const reason = "Couldn't find claude on PATH. Use its full path in the runner command.";
+    const notStarted = sentRow("s", {
+      senderKind: "agent", kind: "agent-run", title: "Your agent's run failed to start", body: reason,
+    });
+    renderNotices({
+      sentNotices: [notStarted, sentRow("f", { senderKind: "agent", kind: "agent-run", title: "Your agent finished", body: "" })],
+      sentNoticeToast: notStarted,
+    });
+    expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-s").textContent).toContain(reason);
+    await userEvent.click(screen.getByTestId("sent-notice-s-copy"));
+    expect(await navigator.clipboard.readText()).toContain(`Details: ${reason}`);
+    expect(screen.queryByTestId("sent-notice-f-copy")).toBeNull();
+  });
+
   it("names the Collection folder of a notice from another workspace", async () => {
     renderNotices({ sentNotices: [sentRow("elsewhere", {}, "Japan"), sentRow("here")] });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
