@@ -575,17 +575,50 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_does_not_write_through_another_undos_internal_lease() {
     let f = Fixture::new(1,1);
+    let before = format!("{BODY} [[other-old]]");
+    let after = format!("{BODY} [[other-new]]");
+    f.edit("source-0000","source-0000.md",&before).await;
+    let (ws,body,root) = (f.ws.clone(),after.clone(),f.root.to_path_buf());
+    f.actor.run(move |store,_| {
+        let mut versions = VersionedTextStore::new(store);
+        versions.write_text(&write(&ws,"other-target","other-old.md","other","other-seed"),&NoFaults)?;
+        versions.rename_text_file(&RenameTextFile {
+            workspace_id:ws.clone(),version_id:"main".into(),from_path:"other-old.md".into(),
+            to_path:"other-new.md".into(),moment_id:"other-rename".into(),request_id:None,
+            metadata_origin:"api".into(),metadata_summary:None,metadata_correlation_id:Some("dohc-operation:other".into()),
+            author_json:None,now_ms:3,
+        },&NoFaults)?;
+        let mut input=write(&ws,"source-0000","source-0000.md",&body,"other-links");
+        input.metadata_correlation_id=Some("dohc-operation:other".into());
+        versions.write_text(&input,&NoFaults)?;
+        std::fs::write(root.join("other-new.md"),"other").unwrap();
+        std::fs::write(root.join("source-0000.md"),body).unwrap();
+        Ok(())
+    }).await.unwrap();
     let (session,_) = f.open_document("source-0000").await;
     f.settle_document("source-0000").await;
     drop(session);
-    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
-    let lease = f.leases.acquire_internal(&key).unwrap();
-    let before = f.document("source-0000").await.encode_state_vector();
-    let result = f.pass("other-undo-lease",Arc::new(NoFaults)).await.unwrap();
+    let key=DocKey::new(&f.ws,"main","source-0000").unwrap();
+    let lease=f.leases.acquire_internal(&key).unwrap();
+    let request=format!("{}-other-undo",f.ws);
+    let (receive,barrier)=undo_probe::pause_inverse(&request);
+    let (actor,ws,root,serial,leases)=(f.actor.clone(),f.ws.clone(),f.root.to_path_buf(),f.serial.clone(),f.leases.clone());
+    let capture: Arc<tokio::sync::Mutex<()>> = Arc::default();
+    let undo_capture = capture.clone();
+    let undo=tokio::spawn(async move {
+        actor.history_undo_in_turns(ws,"dohc-operation:other".into(),request,None,root,Arc::new(NoFaults),10,
+            [undo_capture,serial],Arc::new(()),
+            Some((Arc::new(move |k| leases.is_held_by_session(k)),Arc::new(|_| {}))),CancellationToken::new()).await
+    });
+    tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
+    let held = capture.lock_owned().await;
+    tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
+    let result=f.pass("other-undo-lease",Arc::new(NoFaults)).await.unwrap();
+    drop(held);
     assert_eq!(result["documents"],0);
     assert_eq!(result["unchecked"],json!(["source-0000.md"]));
-    assert_eq!(f.document("source-0000").await.encode_state_vector(),before);
-    assert_eq!(f.text("source-0000.md").await,BODY);
+    assert!(undo.await.unwrap().unwrap().not_restored.is_empty());
+    assert_eq!(f.text("source-0000.md").await,before);
     drop(lease);
     f.close().await;
 }
@@ -649,4 +682,34 @@ async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
     assert!(f.text("source-0000.md").await.contains("[[new#part"));
     drop(lease);
     f.close().await;
+}
+
+#[derive(Default)]
+struct BaselineWrites(std::sync::atomic::AtomicUsize);
+impl super::super::super::materialization::SelfWriteRecorder for BaselineWrites {
+    fn record(&self,_workspace:&str,_path:&str,_sha:&str) { self.0.fetch_add(1,Ordering::SeqCst); }
+    fn retract(&self,_workspace:&str,_path:&str,_sha:&str) {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled() {
+    for relevant in [false,true] {
+        let f=Fixture::new(1,1);
+        let (lease,_) = f.open_document("source-0000").await;
+        let body=if relevant { "typing [[old]]" } else { "typing [[elsewhere]]" };
+        f.type_document("source-0000",body).await;
+        let key=DocKey::new(&f.ws,"main","source-0000").unwrap();
+        let root=f.root.to_path_buf();
+        let recorder=Arc::new(BaselineWrites::default());
+        let writes=recorder.clone();
+        let usable=f.actor.run(move |store,cache| {
+            super::super::super::link_documents::baseline(store,cache,&root,&key,"source-0000.md",
+                &CancellationToken::new(),writes.as_ref(),|text| text.contains("[[old]]"))
+        }).await.unwrap();
+        assert_eq!(usable,relevant);
+        assert_eq!(recorder.0.load(Ordering::SeqCst)>0,relevant);
+        assert_eq!(f.text("source-0000.md").await,if relevant {body} else {BODY});
+        drop(lease);
+        f.close().await;
+    }
 }

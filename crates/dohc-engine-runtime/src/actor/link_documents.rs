@@ -157,6 +157,7 @@ pub(super) fn settled(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn baseline(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -190,7 +191,7 @@ pub(super) fn baseline(
     let head = dohc_engine_domain::VersionedTextStore::new(store)
         .read_text(&key.workspace_id, &key.version_id, path)?
         .ok_or(DomainError::FileNotFound)?;
-    super::ydoc::ydoc_settle_on_store(
+    let outcome = super::ydoc::ydoc_settle_on_store(
         store,
         cache,
         root,
@@ -211,7 +212,13 @@ pub(super) fn baseline(
         None,
         super::ydoc::SettlementKind::Document,
         false,
-    )?;
+    );
+    match outcome {
+        Ok(_) => {}
+        Err(RuntimeError::Collab(_)) => return Ok(false),
+        Err(RuntimeError::Domain(DomainError::InvalidInput {reason:"ydoc-remote-updates-pending"})) => return Ok(false),
+        Err(error) => return Err(error),
+    }
     Ok(true)
 }
 

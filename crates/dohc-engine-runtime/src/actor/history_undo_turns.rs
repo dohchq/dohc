@@ -32,7 +32,8 @@ struct Prepared {
 }
 fn inverse_input(
     conn: &rusqlite::Connection,
-    plan: &Plan,
+    ws: &str,
+    version: &str,
     member: &Member,
     open: Option<&(
         super::super::link_documents::DocumentIsOpen,
@@ -40,11 +41,11 @@ fn inverse_input(
     )>,
 ) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
-        let text = link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect)?;
-        let key = DocKey::new(&plan.workspace, &plan.version, &member.effect.object_id)?;
+        let text = link_inverse_input(conn, ws, version, &member.effect)?;
+        let key = DocKey::new(ws, version, &member.effect.object_id)?;
         let live = if open.is_some_and(|(is_open, _)| is_open(&key)) {
             let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                params![plan.workspace,plan.version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+                params![ws,version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
             let before = dohc_engine_storage::text::read(conn, &head)
                 .map_err(StorageError::corrupt_public)?;
             Some(
@@ -487,9 +488,7 @@ impl ActorHandle {
                 author.clone(),
             );
             let read_db = db.clone();
-            let disk_root = root.clone();
-            let prepare_token = token.clone();
-            let (mut prepared, _, mut prepared_inputs) = tokio::task::spawn_blocking(move || {
+            let mut prepared = tokio::task::spawn_blocking(move || {
                 let mut store = EngineStore::open_read_only(&read_db)?;
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
@@ -498,8 +497,7 @@ impl ActorHandle {
                 if let Some((plan, _, _)) =
                     store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref()))?
                 {
-                    let body = serde_json::to_string(&plan).map_err(|_| corrupt())?;
-                    return Ok::<_, RuntimeError>((plan, body, std::collections::VecDeque::new()));
+                    return Ok::<_, RuntimeError>(plan);
                 }
                 let version = VersionedTextStore::new(&mut store)
                     .get_active_version(&w)?
@@ -537,58 +535,51 @@ impl ActorHandle {
                     author: a,
                     members,
                 };
-                drop(store);
-                let reader = EngineStore::open_read_only(&read_db)?;
-                let mut inputs = std::collections::VecDeque::new();
-                for member in &prepared.members {
-                    if prepare_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                    let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member, None));
-                    let inverse = match inverse {
-                        value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason: "link diff budget exceeded", ..}))) => value,
-                        Err(error) => return Err(error),
-                    };
-                    inputs.push_back(Prepared { inverse, disk: Ok(disk_check(&disk_root, member)?) });
-                }
-                let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
-                Ok::<_, RuntimeError>((prepared, body, inputs))
+                Ok::<_, RuntimeError>(prepared)
             }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
-            for index in 0..prepared.members.len() {
-                let member = &mut prepared.members[index];
-                if member.effect.operation != "write" { continue; }
-                let capture = gates[0].clone().lock_owned().await;
-                let sessions = tokio::select! {
-                    () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                    guard = gates[1].clone().lock_owned() => guard,
-                };
+            for member in &mut prepared.members {
+                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                let guards = if member.effect.operation == "write" {
+                    let capture = gates[0].clone().lock_owned().await;
+                    let sessions = tokio::select! {
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        guard = gates[1].clone().lock_owned() => guard,
+                    };
+                    Some((capture, sessions))
+                } else { None };
                 let key = DocKey::new(&prepared.workspace, &prepared.version, &member.effect.object_id)?;
-                if !open_documents.as_ref().is_some_and(|(is_open,_)| is_open(&key)) { continue; }
-                let (key2, path, root2, recorder2, token2) = (key.clone(), member.effect.path.clone(), root.clone(), recorder.clone(), token.clone());
-                let (usable, head, sha) = self.run(move |store,cache| {
-                    let usable = super::super::link_documents::baseline(store,cache,&root2,&key2,&path,&token2,recorder2.as_ref(), |_| true)?;
-                    let head = store.read_with(|c| signature(c,&key2.workspace_id,&key2.version_id,&key2.object_id))?;
-                    let sha = store.read_with(|c| rename_head_sha(c, &key2.workspace_id, &key2.version_id, &key2.object_id))?;
-                    Ok((usable,head,sha))
-                }).await?;
-                member.head = head;
-                member.sha = Some(sha);
-                let mut single = prepared.clone();
-                let member = single.members.remove(index);
+                let live = member.effect.operation == "write" && open_documents.as_ref().is_some_and(|(is_open,_)| is_open(&key));
+                let usable = if live {
+                    let (path, root2, recorder2, token2) = (member.effect.path.clone(), root.clone(), recorder.clone(), token.clone());
+                    let (usable, head, sha) = self.run(move |store,cache| {
+                        let usable = super::super::link_documents::baseline(store,cache,&root2,&key,&path,&token2,recorder2.as_ref(), |_| true)?;
+                        let head = store.read_with(|c| signature(c,&key.workspace_id,&key.version_id,&key.object_id))?;
+                        let sha = store.read_with(|c| rename_head_sha(c,&key.workspace_id,&key.version_id,&key.object_id))?;
+                        Ok((usable,head,sha))
+                    }).await?;
+                    member.head = head;
+                    member.sha = Some(sha);
+                    usable
+                } else { true };
+                let (w, v, member) = (prepared.workspace.clone(),prepared.version.clone(),member.clone());
                 let open = open_documents.clone();
                 let read_db = db.clone();
                 let disk_root = root.clone();
                 let input = tokio::task::spawn_blocking(move || {
-                    let _guards = (capture, sessions);
+                    let _guards = guards;
                     let reader = EngineStore::open_read_only(&read_db)?;
                     let inverse = if usable {
-                        reader.read_with(|c| inverse_input(c,&single,&member,open.as_ref()))
+                        reader.read_with(|c| inverse_input(c,&w,&v,&member,open.as_ref()))
                     } else { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"document projection unavailable"}.into()) };
-                    if let Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link changed after rename",..})) = &inverse { return inverse.map(|_| unreachable!()); }
+                    let inverse = match inverse {
+                        value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link diff budget exceeded" | "wikilink element unavailable" | "document projection unavailable",..}))) => value,
+                        Err(error) => return Err(error),
+                    };
                     Ok(Prepared {inverse,disk:disk_check(&disk_root,&member)})
                 }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
-                prepared_inputs[index] = input;
+                inputs.push_back(input);
             }
             let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
-            inputs = prepared_inputs;
             let prepared = Arc::new(prepared);
             let body = Arc::new(body);
             loop {
@@ -729,7 +720,7 @@ impl ActorHandle {
                             let member = &p.members[prepared_cursor + offset];
                             Prepared {
                                 inverse: inverse_store.read_with(|conn| {
-                                    inverse_input(conn, &p, member, None)
+                                    inverse_input(conn, &p.workspace, &p.version, member, None)
                                 }),
                                 disk: disk_check(&disk_root, member),
                             }
@@ -797,7 +788,7 @@ impl ActorHandle {
                                 let mut inverse = inverse?;
                                 let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
                                 if member.effect.operation == "write" {
-                                    inverse = inverse_input(tx,&p,member,turn_open.as_ref())?;
+                                    inverse = inverse_input(tx,&p.workspace,&p.version,member,turn_open.as_ref())?;
                                 }
                                 let live = inverse.as_ref().and_then(|i| i.live.as_ref());
                                 let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;

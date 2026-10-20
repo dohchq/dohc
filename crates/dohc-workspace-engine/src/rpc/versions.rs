@@ -1,49 +1,3 @@
-#[allow(clippy::too_many_arguments)]
-async fn settle_fence_session(
-    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
-    self_writes: &SelfWriteSuppression,
-    events: &EngineEvents,
-    open: &OpenWorkspace,
-    handle: &WorkspaceHandle,
-    session_id: &str,
-    token: &CancellationToken,
-) -> Result<(), WireError> {
-    let session = version_fence_session_view(sessions, handle, session_id)?;
-    // Mirrors ydoc.close's default-settle rule: only an untouched
-    // absent-lineage session (nothing to settle) skips the settling sweep.
-    let settle = !(session.lineage_absent && session.first_update_pending);
-    if settle {
-        let first = settle_ydoc_session_for_version_fence(
-            sessions,
-            self_writes,
-            events,
-            open,
-            session_id,
-            &session,
-            token,
-        )
-        .await;
-        match first {
-            Ok(()) => {}
-            Err(error) if error.message == "ydoc-remote-updates-pending" => {
-                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
-                settle_ydoc_session_for_version_fence(
-                    sessions,
-                    self_writes,
-                    events,
-                    open,
-                    session_id,
-                    &refreshed,
-                    token,
-                )
-                .await?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
 use crate::EngineService;
 use crate::SelfWriteSuppression;
 use crate::capture_driver;
@@ -126,6 +80,52 @@ pub(super) enum VersionFenceOutcome {
     AlreadyActive,
     CreateReplay(VersionRecord),
     Committed(VersionRecord),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_fence_session(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    events: &EngineEvents,
+    open: &OpenWorkspace,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    // Mirrors ydoc.close's default-settle rule: only an untouched
+    // absent-lineage session (nothing to settle) skips the settling sweep.
+    let settle = !(session.lineage_absent && session.first_update_pending);
+    if settle {
+        let first = settle_ydoc_session_for_version_fence(
+            sessions,
+            self_writes,
+            events,
+            open,
+            session_id,
+            &session,
+            token,
+        )
+        .await;
+        match first {
+            Ok(()) => {}
+            Err(error) if error.message == "ydoc-remote-updates-pending" => {
+                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
+                settle_ydoc_session_for_version_fence(
+                    sessions,
+                    self_writes,
+                    events,
+                    open,
+                    session_id,
+                    &refreshed,
+                    token,
+                )
+                .await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
