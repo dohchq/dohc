@@ -19,7 +19,6 @@ struct Position {
     subject: String,
     scope: String,
     revision: i64,
-    generation: i64,
     uncovered: i64,
     time: i64,
     id: String,
@@ -47,9 +46,9 @@ pub(super) fn read(
     cursor: Option<String>,
     token: &CancellationToken,
 ) -> Result<Value, RuntimeError> {
-    let (revision,generation,scanning,legacy): (i64,i64,bool,bool) = c.query_row(
-        "SELECT revision,generation,seed_phase<>'ready',legacy FROM chat_conversation_file_link_state WHERE workspace_id=?1 AND channel_id=?2",
-        params![ws,channel],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql)?;
+    let (revision,scanning,legacy): (i64,bool,bool) = c.query_row(
+        "SELECT revision,seed_phase<>'ready',legacy FROM chat_conversation_file_link_state WHERE workspace_id=?1 AND channel_id=?2",
+        params![ws,channel],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql)?;
     let mut pos = if let Some(cursor) = cursor {
         unseal_cursor::<Position>(ws, PURPOSE, &cursor)?
     } else {
@@ -59,7 +58,6 @@ pub(super) fn read(
             subject: wire.into(),
             scope: scope.into(),
             revision,
-            generation,
             uncovered,
             time: i64::MAX,
             id: String::new(),
@@ -75,7 +73,7 @@ pub(super) fn read(
     if pos.version != version {
         return Err(RuntimeError::ChatMentionVersionChanged);
     }
-    if pos.revision != revision || pos.generation != generation {
+    if pos.revision != revision {
         return Err(RuntimeError::ChatConversationLinksChanged);
     }
     let (pending,barrier): (bool,bool) = c.query_row(
@@ -141,41 +139,16 @@ pub(super) fn read(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let path: Option<String>=c.query_row(
-            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1",
-            params![ws,version,key],|r| r.get(0)).optional().map_err(sql)?;
-        if let Some(path) = path {
-            let author: Option<Value>=c.query_row(
-                "SELECT m.author_kind,substr(m.author_display_name,1,100),m.author_owner_display_name,m.author_user_id,m.author_actor_key
-                 FROM chat_messages m JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id
-                 JOIN chat_channels ch ON ch.workspace_id=t.workspace_id AND ch.channel_id=t.channel_id
-                 WHERE m.workspace_id=?1 AND m.message_id=?2 AND m.thread_id=?3 AND t.channel_id=?4",
-                params![ws,message,thread,channel],|r| {
-                    let mut author=json!({"authorKind":r.get::<_,String>(0)?,"authorDisplayName":r.get::<_,String>(1)?});
-                    for (index,name) in [(2,"authorOwnerDisplayName"),(3,"authorUserId"),(4,"authorActorKey")] {
-                        if let Some(value)=r.get::<_,Option<String>>(index)? { author[name]=json!(value); }
-                    }
-                    Ok(author)
-                }).optional().map_err(sql)?;
-            if let Some(author) = author {
-                let folder = path
-                    .rsplit_once('/')
-                    .map(|(folder, _)| folder)
-                    .unwrap_or("");
-                let entry = json!({"file":{"objectId":key,"path":path,"folder":folder},
-                    "attachmentId":id,"threadId":thread,"messageId":message,"mentionedAtMs":time,"author":author});
-                let size = entry.to_string().len() + 1;
-                if bytes + size > BYTES {
-                    if count == 0 {
-                        return Err(invalid());
-                    }
-                    more = true;
-                    break;
-                }
-                page["entries"].as_array_mut().expect("entries").push(entry);
-                bytes += size;
-                count += 1;
+        if let Some(entry) = hydrate(c,ws,channel,version,&key,&id,&thread,&message,time)? {
+            let size = entry.to_string().len() + 1;
+            if bytes + size > BYTES {
+                if count == 0 { return Err(invalid()); }
+                more = true;
+                break;
             }
+            page["entries"].as_array_mut().expect("entries").push(entry);
+            bytes += size;
+            count += 1;
         }
         pos.time = time;
         pos.id = id;
@@ -188,6 +161,36 @@ pub(super) fn read(
         return Err(invalid());
     }
     Ok(page)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn hydrate(c: &Connection, ws: &str, channel: &str, version: &str, key: &str, id: &str, thread: &str, message: &str, time: i64) -> Result<Option<Value>,RuntimeError> {
+let path: Option<String>=c.prepare_cached(
+    "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1").map_err(sql)?.query_row(
+    params![ws,version,key],|r| r.get(0)).optional().map_err(sql)?;
+if let Some(path) = path {
+    let author: Option<Value>=c.prepare_cached(
+        "SELECT m.author_kind,substr(m.author_display_name,1,100),m.author_owner_display_name,m.author_user_id,m.author_actor_key
+         FROM chat_messages m JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id
+         JOIN chat_channels ch ON ch.workspace_id=t.workspace_id AND ch.channel_id=t.channel_id
+         WHERE m.workspace_id=?1 AND m.message_id=?2 AND m.thread_id=?3 AND t.channel_id=?4").map_err(sql)?.query_row(
+        params![ws,message,thread,channel],|r| {
+            let mut author=json!({"authorKind":r.get::<_,String>(0)?,"authorDisplayName":r.get::<_,String>(1)?});
+            for (index,name) in [(2,"authorOwnerDisplayName"),(3,"authorUserId"),(4,"authorActorKey")] {
+                if let Some(value)=r.get::<_,Option<String>>(index)? { author[name]=json!(value); }
+            }
+            Ok(author)
+        }).optional().map_err(sql)?;
+    if let Some(author) = author {
+        let folder = path
+            .rsplit_once('/')
+            .map(|(folder, _)| folder)
+            .unwrap_or("");
+        return Ok(Some(json!({"file":{"objectId":key,"path":path,"folder":folder},
+            "attachmentId":id,"threadId":thread,"messageId":message,"mentionedAtMs":time,"author":author})));
+    }
+}
+Ok(None)
 }
 
 impl ActorHandle {

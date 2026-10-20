@@ -13,12 +13,12 @@ pub(super) fn sql(error: rusqlite::Error) -> StorageError {
 
 fn publish(c: &Connection, ws: &str, channel: &str, id: &str) -> Result<(), StorageError> {
     c.prepare_cached(
-        "INSERT INTO chat_conversation_file_links(workspace_id,channel_id,file_key,attachment_id,thread_id,message_id,object_id,path_hint,mentioned_at_ms)
-         SELECT workspace_id,channel_id,object_id,attachment_id,thread_id,message_id,object_id,path_hint,created_at_ms
+        "INSERT INTO chat_conversation_file_links(workspace_id,channel_id,file_key,attachment_id,thread_id,message_id,mentioned_at_ms)
+         SELECT workspace_id,channel_id,object_id,attachment_id,thread_id,message_id,created_at_ms
          FROM chat_conversation_file_link_candidates WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3 AND object_id IS NOT NULL
          ON CONFLICT(workspace_id,channel_id,file_key) DO UPDATE SET
          attachment_id=excluded.attachment_id,thread_id=excluded.thread_id,message_id=excluded.message_id,
-         object_id=excluded.object_id,path_hint=excluded.path_hint,mentioned_at_ms=excluded.mentioned_at_ms,invalid=0
+         mentioned_at_ms=excluded.mentioned_at_ms,invalid=0
          WHERE (excluded.mentioned_at_ms,excluded.attachment_id)>(chat_conversation_file_links.mentioned_at_ms,chat_conversation_file_links.attachment_id)",
     ).map_err(sql)?.execute(params![ws,channel,id]).map_err(sql)?;
     c.prepare_cached("UPDATE chat_conversation_file_link_state SET legacy=1 WHERE workspace_id=?1 AND channel_id=?2 AND EXISTS(
@@ -27,6 +27,7 @@ fn publish(c: &Connection, ws: &str, channel: &str, id: &str) -> Result<(), Stor
     Ok(())
 }
 
+#[derive(Clone)]
 struct Work {
     id: i64,
     ws: String,
@@ -38,18 +39,19 @@ struct Work {
     message: String,
     time: i64,
     after: String,
+    failures: u32,
 }
 
 fn enqueue(c: &Connection, work: &Work, object: &str) -> Result<(), StorageError> {
-    c.execute("INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES(?1,?2,'file',?3)
-        ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,after_time=9223372036854775807,after_id=''",
+    c.prepare_cached("INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES(?1,?2,'file',?3)
+        ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,after_time=9223372036854775807,after_id=''").map_err(sql)?.execute(
         params![work.ws,work.channel,object]).map_err(sql)?;
     Ok(())
 }
 
 fn finish(c: &Connection, work: &Work) -> Result<(), StorageError> {
-    c.execute(
-        "DELETE FROM chat_conversation_file_link_work WHERE work_id=?1 AND revision=?2",
+    c.prepare_cached(
+        "DELETE FROM chat_conversation_file_link_work WHERE work_id=?1 AND revision=?2").map_err(sql)?.execute(
         params![work.id, work.revision],
     )
     .map_err(sql)?;
@@ -79,46 +81,29 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             .map_err(sql)?;
         for (id, _) in &rows {
             let eligible: bool = c
-                .query_row(
+                .prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_candidates
-                WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3)",
+                WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3)").map_err(sql)?.query_row(
                     params![w.ws, w.channel, id],
                     |r| r.get(0),
                 )
                 .map_err(sql)?;
             if eligible {
-                c.execute("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3",params![w.ws,w.channel,w.key]).map_err(sql)?;
+                c.prepare_cached("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3").map_err(sql)?.execute(params![w.ws,w.channel,w.key]).map_err(sql)?;
                 publish(c, &w.ws, &w.channel, id)?;
                 return finish(c, w);
             }
         }
         if rows.len() < BATCH as usize {
-            c.execute("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3",params![w.ws,w.channel,w.key]).map_err(sql)?;
+            c.prepare_cached("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3").map_err(sql)?.execute(params![w.ws,w.channel,w.key]).map_err(sql)?;
             finish(c, w)?;
         } else if let Some((id, time)) = rows.last() {
             // Strictly exclude the consumed row on the next bounded slice.
-            c.execute("UPDATE chat_conversation_file_link_work SET after_time=?2,after_id=?3 WHERE work_id=?1 AND revision=?4",
+            c.prepare_cached("UPDATE chat_conversation_file_link_work SET after_time=?2,after_id=?3 WHERE work_id=?1 AND revision=?4").map_err(sql)?.execute(
                 params![w.id,time,id,w.revision]).map_err(sql)?;
         }
     } else if w.kind == "thread" && w.phase == 0 {
-        let mut stmt = c.prepare_cached("SELECT message_id,created_at_ms,attachment_id,object_id FROM chat_attachments
-            WHERE workspace_id=?1 AND thread_id=?2 AND (message_id,created_at_ms,attachment_id)>(?3,?4,?5)
-            ORDER BY message_id,created_at_ms,attachment_id LIMIT ?6").map_err(sql)?;
-        let rows = stmt
-            .query_map(
-                params![w.ws, w.key, w.message, w.time, w.after, BATCH],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .map_err(sql)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sql)?;
+        let rows = thread_slice(c, w)?;
         for (_, _, id, object) in &rows {
             if let Some(object) = object {
                 enqueue(c, w, object)?;
@@ -127,11 +112,11 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             }
         }
         if let Some((message, time, id, _)) = rows.last() {
-            c.execute("UPDATE chat_conversation_file_link_work SET after_message=?2,after_time=?3,after_id=?4 WHERE work_id=?1 AND revision=?5",
+            c.prepare_cached("UPDATE chat_conversation_file_link_work SET after_message=?2,after_time=?3,after_id=?4 WHERE work_id=?1 AND revision=?5").map_err(sql)?.execute(
                 params![w.id,message,time,id,w.revision]).map_err(sql)?;
         }
         if rows.len() < BATCH as usize {
-            c.execute("UPDATE chat_conversation_file_link_work SET phase=1,after_id='' WHERE work_id=?1 AND revision=?2",params![w.id,w.revision]).map_err(sql)?;
+            c.prepare_cached("UPDATE chat_conversation_file_link_work SET phase=1,after_id='' WHERE work_id=?1 AND revision=?2").map_err(sql)?.execute(params![w.id,w.revision]).map_err(sql)?;
         }
     } else {
         let (query, limit) = if w.kind == "reset" {
@@ -162,7 +147,7 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             .map_err(sql)?;
         for key in &keys {
             if w.kind == "reset" {
-                c.execute("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3",params![w.ws,w.channel,key]).map_err(sql)?;
+                c.prepare_cached("DELETE FROM chat_conversation_file_links WHERE workspace_id=?1 AND channel_id=?2 AND file_key=?3").map_err(sql)?.execute(params![w.ws,w.channel,key]).map_err(sql)?;
             } else {
                 enqueue(c, w, key)?;
             }
@@ -171,41 +156,111 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             if w.kind == "reset" {
                 finish(c, w)?;
             } else {
-                c.execute("UPDATE chat_conversation_file_link_work SET phase=2 WHERE work_id=?1 AND revision=?2",params![w.id,w.revision]).map_err(sql)?;
+                c.prepare_cached("UPDATE chat_conversation_file_link_work SET phase=2 WHERE work_id=?1 AND revision=?2").map_err(sql)?.execute(params![w.id,w.revision]).map_err(sql)?;
             }
         } else if let Some(key) = keys.last() {
-            c.execute("UPDATE chat_conversation_file_link_work SET after_id=?2 WHERE work_id=?1 AND revision=?3",params![w.id,key,w.revision]).map_err(sql)?;
+            c.prepare_cached("UPDATE chat_conversation_file_link_work SET after_id=?2 WHERE work_id=?1 AND revision=?3").map_err(sql)?.execute(params![w.id,key,w.revision]).map_err(sql)?;
         }
     }
     Ok(())
 }
 
-/// One transaction processes at most 100 raw coordinates. Only demand enables the actor's scheduler.
-pub(crate) fn tick(store: &mut EngineStore) -> Result<bool, StorageError> {
-    let work = store.read_with(|c| c.query_row("SELECT work_id,workspace_id,channel_id,kind,key,revision,phase,after_message,after_time,after_id
-        FROM chat_conversation_file_link_work ORDER BY phase,work_id LIMIT 1", [], |r| Ok(Work {
+
+type AttachmentCoordinate = (String, i64, String, Option<String>);
+fn thread_slice(c: &Connection, w: &Work) -> Result<Vec<AttachmentCoordinate>, StorageError> {
+    c.prepare_cached("SELECT message_id,created_at_ms,attachment_id,object_id FROM chat_attachments
+        WHERE workspace_id=?1 AND thread_id=?2 AND (message_id,created_at_ms,attachment_id)>(?3,?4,?5)
+        ORDER BY message_id,created_at_ms,attachment_id LIMIT ?6").map_err(sql)?
+        .query_map(params![w.ws,w.key,w.message,w.time,w.after,BATCH], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+        .map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)
+}
+
+fn seed(c: &Connection, w: &Work) -> Result<(), StorageError> {
+    let thread: Option<String> = c.prepare_cached(
+        "SELECT thread_id FROM chat_threads WHERE workspace_id=?1 AND channel_id=?2
+         AND thread_id>=?3 AND (?4=0 OR thread_id>?3) ORDER BY thread_id LIMIT 1"
+    ).map_err(sql)?.query_row(params![w.ws,w.channel,w.key,w.phase], |r| r.get(0)).optional().map_err(sql)?;
+    let Some(thread) = thread else {
+        c.prepare_cached("UPDATE chat_conversation_file_link_state SET seed_phase='ready',failures=0,retry_at_ms=0 WHERE request_id=?1")
+            .map_err(sql)?.execute([w.id]).map_err(sql)?;
+        return Ok(());
+    };
+    let same = thread == w.key && w.phase == 0;
+    let scan = Work {key:thread.clone(),message:if same {w.message.clone()} else {String::new()},
+        time:if same {w.time} else {i64::MAX},after:if same {w.after.clone()} else {String::new()}, ..w.clone()};
+    let rows = thread_slice(c, &scan)?;
+    for (_,_,id,_) in &rows { publish(c,&w.ws,&w.channel,id)?; }
+    let done = rows.len() < BATCH as usize;
+    let (message,time,id) = if !done {
+        let (m,t,id,_) = rows.last().expect("full slice");
+        (m.as_str(),*t,id.as_str())
+    } else {("",i64::MAX,"")};
+    c.prepare_cached("UPDATE chat_conversation_file_link_state SET seed_thread=?2,seed_message=?3,seed_time=?4,seed_after=?5,seed_done=?6,failures=0,retry_at_ms=0 WHERE request_id=?1")
+        .map_err(sql)?.execute(params![w.id,thread,message,time,id,done]).map_err(sql)?;
+    Ok(())
+}
+
+/// Retain the failed item and its barrier, but let other conversations advance.
+fn backoff(store: &mut EngineStore, w: &Work, now: i64, seed: bool, error: StorageError) -> Result<(), StorageError> {
+    let delay = (250_i64 * (1_i64 << w.failures.min(8))).min(60_000);
+    eprintln!("conversation links {} item {} retained, attempt {}, retry in {delay}ms: {error}",
+        if seed {"seed"} else {"repair"},w.id,w.failures.saturating_add(1));
+    store.write_background_with(&NoFaults, |c| {
+        let query = if seed {
+            "UPDATE chat_conversation_file_link_state SET failures=failures+1,retry_at_ms=?2 WHERE request_id=?1"
+        } else {
+            "UPDATE chat_conversation_file_link_work SET failures=failures+1,retry_at_ms=?2 WHERE work_id=?1"
+        };
+        c.prepare_cached(query).map_err(sql)?.execute(params![w.id,now.saturating_add(delay)]).map_err(sql)
+    })?;
+    Ok(())
+}
+
+/// One transaction consumes at most 100 coordinates; demand alone enables scheduling.
+fn tick_at(store: &mut EngineStore, now: i64) -> Result<std::time::Duration, StorageError> {
+    use std::time::Duration;
+    let work = store.read_with(|c| c.prepare_cached("SELECT work_id,workspace_id,channel_id,kind,key,revision,phase,after_message,after_time,after_id,failures
+        FROM chat_conversation_file_link_work w WHERE retry_at_ms<=?1
+        AND (phase<>2 OR NOT EXISTS(SELECT 1 FROM chat_conversation_file_link_work other
+            WHERE other.workspace_id=w.workspace_id AND other.channel_id=w.channel_id AND other.phase<>2))
+        ORDER BY phase,work_id LIMIT 1").map_err(sql)?.query_row([now], |r| Ok(Work {
             id:r.get(0)?,ws:r.get(1)?,channel:r.get(2)?,kind:r.get(3)?,key:r.get(4)?,revision:r.get(5)?,
-            phase:r.get(6)?,message:r.get(7)?,time:r.get(8)?,after:r.get(9)?,
+            phase:r.get(6)?,message:r.get(7)?,time:r.get(8)?,after:r.get(9)?,failures:r.get(10)?,
         })).optional().map_err(sql))?;
     if let Some(work) = work {
-        store.write_background_with(&NoFaults, |c| repair(c, &work))?;
-        return Ok(true);
+        if let Err(error) = store.write_background_with(&NoFaults, |c| repair(c, &work)) {
+            backoff(store,&work,now,false,error)?;
+        }
+        return Ok(Duration::ZERO);
     }
-    let seed: Option<(String,String,String)> = store.read_with(|c| c.query_row(
-        "SELECT workspace_id,channel_id,seed_after FROM chat_conversation_file_link_state WHERE seed_phase='scan' ORDER BY workspace_id,channel_id LIMIT 1",
-        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql))?;
-    let Some((ws, channel, after)) = seed else {
-        return Ok(false);
-    };
-    store.write_background_with(&NoFaults, |c| -> Result<_,StorageError> {
-        let mut stmt = c.prepare_cached("SELECT attachment_id FROM chat_attachments WHERE workspace_id=?1 AND attachment_id>?2 ORDER BY attachment_id LIMIT ?3").map_err(sql)?;
-        let ids = stmt.query_map(params![ws,after,BATCH], |r| r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
-        for id in &ids { publish(c,&ws,&channel,id)?; }
-        c.execute("UPDATE chat_conversation_file_link_state SET seed_after=?3,seed_phase=?4 WHERE workspace_id=?1 AND channel_id=?2",
-            params![ws,channel,ids.last().unwrap_or(&after),if ids.len()<BATCH as usize {"ready"} else {"scan"}]).map_err(sql)?;
-        Ok(())
-    })?;
-    Ok(true)
+    let requested = store.read_with(|c| c.prepare_cached(
+        "SELECT request_id,workspace_id,channel_id,seed_thread,seed_done,seed_message,seed_time,seed_after,failures
+         FROM chat_conversation_file_link_state WHERE seed_phase='scan' AND retry_at_ms<=?1 ORDER BY request_id LIMIT 1"
+    ).map_err(sql)?.query_row([now], |r| Ok(Work {
+        id:r.get(0)?,ws:r.get(1)?,channel:r.get(2)?,key:r.get(3)?,phase:r.get(4)?,message:r.get(5)?,
+        time:r.get(6)?,after:r.get(7)?,failures:r.get(8)?,kind:String::new(),revision:0,
+    })).optional().map_err(sql))?;
+    if let Some(requested) = requested {
+        if let Err(error) = store.write_background_with(&NoFaults, |c| seed(c,&requested)) {
+            backoff(store,&requested,now,true,error)?;
+        }
+        return Ok(Duration::ZERO);
+    }
+    let pending: bool = store.read_with(|c| c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_work) OR EXISTS(SELECT 1 FROM chat_conversation_file_link_state WHERE seed_phase='scan')",
+        [], |r| r.get(0)).map_err(sql))?;
+    Ok(if pending {Duration::from_millis(250)} else {Duration::MAX})
+}
+
+pub(crate) fn tick_delay(store: &mut EngineStore) -> Result<std::time::Duration, StorageError> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
+    tick_at(store,now)
+}
+
+#[cfg(test)]
+fn tick(store: &mut EngineStore) -> Result<bool, StorageError> {
+    tick_delay(store).map(|delay| delay != std::time::Duration::MAX)
 }
 
 impl ActorHandle {

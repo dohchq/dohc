@@ -907,17 +907,12 @@ fn worker_main(
                     && link_drain_holds.load(Ordering::Acquire) == 0
                 {
                     links_started = true;
+                    timer = tokio::runtime::Builder::new_current_thread().enable_time().build().ok();
+                    #[cfg(test)]
+                    if timer.is_some() { link_metrics.lock().unwrap().timer_starts += 1; }
                     match DrainWorker::new(Arc::clone(&link_metrics)) {
                         Ok(worker) => {
                             links = Some(worker);
-                            timer = tokio::runtime::Builder::new_current_thread()
-                                .enable_time()
-                                .build()
-                                .ok();
-                            #[cfg(test)]
-                            if timer.is_some() {
-                                link_metrics.lock().unwrap().timer_starts += 1;
-                            }
                         }
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
                     }
@@ -932,9 +927,8 @@ fn worker_main(
                     && matches!(mode, ActorOpenMode::ReadWrite)
                     && link_drain_holds.load(Ordering::Acquire) == 0
                 {
-                    match crate::conversation_links::tick(&mut store) {
-                        Ok(true) => std::time::Duration::ZERO,
-                        Ok(false) => std::time::Duration::MAX,
+                    match crate::conversation_links::tick_delay(&mut store) {
+                        Ok(delay) => delay,
                         Err(error) => {
                             eprintln!("conversation links repair retained: {error}");
                             std::time::Duration::from_millis(250)
@@ -981,6 +975,9 @@ fn worker_main(
                         }
                     }
                     _ if conversation_delay.is_zero() => continue,
+                    (_, Some(timer)) if conversation_delay != std::time::Duration::MAX => {
+                        timer.block_on(wait_for_conversation_retry(&mut rx, conversation_delay))
+                    }
                     _ => rx.blocking_recv(),
                 }
             }
@@ -1032,6 +1029,10 @@ fn worker_main(
     // guarantees on a panic unwind).
     drop(links);
     drop(store);
+}
+
+async fn wait_for_conversation_retry(rx: &mut mpsc::Receiver<Command>, delay: std::time::Duration) -> Option<Command> {
+    tokio::select! { biased; cmd = rx.recv() => cmd, () = tokio::time::sleep(delay) => None }
 }
 
 /// Pay the drain that barrier flushes left owed before a result leaves the
@@ -1195,6 +1196,14 @@ mod saturation_tests {
             .unwrap();
         assert!(!actor.store_freshly_created, "exercise a reopened store");
         actor
+    }
+
+    #[tokio::test]
+    async fn conversation_retry_wakes_without_a_parser_and_keeps_command_priority() {
+        let (tx,mut rx)=mpsc::channel(2);
+        tx.send(Command::WakeLinks).await.unwrap();
+        assert!(matches!(wait_for_conversation_retry(&mut rx,Duration::ZERO).await,Some(Command::WakeLinks)));
+        assert!(wait_for_conversation_retry(&mut rx,Duration::ZERO).await.is_none());
     }
 
     #[test]
