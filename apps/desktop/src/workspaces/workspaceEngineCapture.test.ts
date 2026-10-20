@@ -1946,16 +1946,18 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
       openRustYDocProviderSession: async options => {
         const doc = new Y.Doc();
-        doc.getText("plainText").insert(0, "typed");
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
           path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
-          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
           settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
           close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
         } as EngineYdocProviderSession;
       },
     });
     const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, "typed");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
     await expect(session.settleNow()).rejects.toBe(stale);
     await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
     if (store === "kept") {
@@ -2192,8 +2194,8 @@ describe("workspaceEngineCapture batch capture", () => {
     };
   }
 
-  // Open a session on note.md, let its close settle, and report the save
-  // states that settle produced.
+  // Open a session on note.md, type the editor text, let the close settle it,
+  // and report the save states that settle produced.
   async function settleOnClose(
     root: string,
     settled: { sha256: string; content: string | null },
@@ -2209,6 +2211,9 @@ describe("workspaceEngineCapture batch capture", () => {
       onRemoteUpdate: () => undefined,
       onSaveState: (state) => states.push(state),
     });
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, EDITOR_TEXT);
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
     await session.close();
     await engine.stop();
     return states;

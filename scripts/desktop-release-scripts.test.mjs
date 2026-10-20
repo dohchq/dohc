@@ -1578,6 +1578,31 @@ test("every release job lets checkout remove an earlier build's read-only reader
   await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
 });
 
+// Deleting node_modules takes the Windows runner over 15 minutes, so a job
+// there keeps it and the Rust target folder between jobs.
+test("every release job on Windows keeps node_modules and target, and removes every other untracked file", async () => {
+  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
+    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
+    assert.equal(job.steps[checkout].with.clean, "${{ runner.os != 'Windows' }}", `${name} lets checkout clean everywhere but Windows`);
+    const clean = job.steps[checkout + 1];
+    assert.equal(clean.if, "runner.os == 'Windows'", `${name} cleans its Windows workspace after checkout`);
+    assert.equal(clean.run, "git clean -ffdx --exclude=node_modules --exclude=target");
+  }
+  // Run the command against a workspace an earlier job left behind.
+  const workspace = await mkdtemp(join(tmpdir(), "dohc-release-workspace-"));
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: workspace });
+  const kept = ["node_modules/electron/index.js", "apps/desktop/node_modules/.bin/vite", "target/release/engine"];
+  const removed = ["apps/desktop/release/dohc-setup.exe", "release-history.jsonl"];
+  for (const file of [...kept, ...removed]) {
+    await mkdir(join(workspace, file, ".."), { recursive: true });
+    await writeFile(join(workspace, file), "");
+  }
+  const [command, ...args] = releaseWorkflow.jobs.build.steps.find(step => step.name === "Remove leftover files but keep node_modules and target").run.split(" ");
+  await promisify(execFile)(command, args, { cwd: workspace });
+  for (const file of kept) assert.equal(existsSync(join(workspace, file)), true, `${file} stays`);
+  for (const file of removed) assert.equal(existsSync(join(workspace, file)), false, `${file} is removed`);
+});
+
 const NIGHTLY_HEAD = "a".repeat(40);
 const ONLINE_RUNNERS = [
   { name: "dohc-windows", status: "online", labels: ["self-hosted", "Windows", "X64", "desktop-release"] },

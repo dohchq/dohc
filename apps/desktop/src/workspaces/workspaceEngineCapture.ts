@@ -478,9 +478,11 @@ export type WorkspaceEngineYDocProviderSession = Omit<
 // `setTextAside` puts the text of a document whose file was deleted outside
 // dohc in Notices and answers a handle to that write, or null without a draft
 // store.
+// `releaseIf` is asked as the daemon release starts; false refuses the close.
 type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   evict(): Promise<void>;
   setTextAside(): Promise<string | null>;
+  close(options?: WorkspaceEngineYDocCloseOptions & { releaseIf?: () => boolean }): Promise<void>;
 };
 
 export interface WorkspaceEngineCapture {
@@ -3557,9 +3559,13 @@ export function createWorkspaceEngineCapture(
           clearDeadYDocSession(deadSessionToken);
         });
       },
-      close(closeOptions) {
+      close(closeOptions?: WorkspaceEngineYDocCloseOptions & { releaseIf?: () => boolean }) {
         const closeCheckpoint = () => flushCheckpoint().then(() => {closed = true; unregisterCheckpoint(); clearDeadYDocSession(deadSessionToken);});
         if (closeOptions?.shuttingDown && checkpointBase && !sessions.hasAvailableClient()) return closeCheckpoint();
+        // No await between this check and the release that ends the session's updates.
+        const assertReleasable = (): void => {
+          if (closeOptions?.releaseIf?.() === false) throw new Error(`${input.path} changed before its release.`);
+        };
         const closing = append(async () => {
           if (closed) return;
           // The quit path closes with a settle and nobody types again, so this
@@ -3577,6 +3583,7 @@ export function createWorkspaceEngineCapture(
             }
           }
           if (current === null) {
+            assertReleasable();
             if (releaseObligation !== null) {
               await releaseGeneration(releaseObligation);
               releaseObligation = null;
@@ -3598,6 +3605,7 @@ export function createWorkspaceEngineCapture(
             // still hold unjournaled text is the dead-session revive above.
             await executeWithReconnect(
               async (session) => {
+                assertReleasable();
                 await session.close(closeOptions);
               },
               { retryTransportErrors: closeOptions?.shuttingDown !== true },
@@ -5324,6 +5332,16 @@ export function createWorkspaceEngineCapture(
           });
           return closing;
         };
+        // A settle over a deleted file is refused and reads as a failed save, so
+        // a document History fully holds closes without one (dohc#2366).
+        const releasedRecordedDeletedDocument = async (
+          opts?: WorkspaceEngineYDocCloseOptions,
+        ): Promise<boolean> => {
+          const recorded = (): boolean => updatesSeen === updatesSettled &&
+            (lastSettledSha !== null || (!unsettled && (head === "present" || lineage === "absent")));
+          if (opts?.settle === false || !recorded() || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return false;
+          return session.close({ ...opts, settle: false, settleOnRefusal: false, releaseIf: recorded }).then(() => true, () => false);
+        };
         const attemptCloseEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
@@ -5350,7 +5368,7 @@ export function createWorkspaceEngineCapture(
               : opts;
           try {
             if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
-            await session.close(effective);
+            if (!(await releasedRecordedDeletedDocument(effective))) await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A transient settle failure under a succeeded release is the
