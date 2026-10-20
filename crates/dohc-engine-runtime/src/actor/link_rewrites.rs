@@ -766,11 +766,7 @@ impl ActorHandle {
         loop {
             #[cfg(test)]
             let reply_ws = workspace.clone();
-            let (receipt, result, faults) = (
-                receipt.clone(),
-                result.clone(),
-                faults.clone(),
-            );
+            let (receipt, result, faults) = (receipt.clone(), result.clone(), faults.clone());
             let serial = tokio::select! {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
