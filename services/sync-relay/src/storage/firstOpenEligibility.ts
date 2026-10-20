@@ -1,4 +1,5 @@
 import {DatabaseSync} from "node:sqlite";
+import {isAsyncFunction} from "node:util/types";
 import type {StorageContext} from "./context";
 import type {SqliteDb} from "./types";
 import {hostedDocumentRows} from "./hostedDocumentIndex";
@@ -40,7 +41,7 @@ export interface FirstOpenHistory {
   readonly head: number | null;
 }
 
-/** Runs a history read off the relay writer, normally on the first-open worker. */
+/** Runs a history read off the relay writer. Storage gets one when it opens: the first-open worker's, unless a test injects its own. */
 export type FirstOpenHistoryReader = (read: FirstOpenHistoryRead, signal: AbortSignal) => Promise<FirstOpenHistory | {kind: "busy"}>;
 
 const target = (table: string) => `${table} WHERE workspace_id=t.workspace_id AND main_version_id='main' AND object_id=t.object_id`;
@@ -79,7 +80,7 @@ SELECT CASE WHEN h.history=2 OR ${AUTHORITY} THEN 'prior-authority'
     AND json_extract(payload_json,'$.objectId') NOT IN (t.object_id,'') AND ${settled})
   THEN 'deletion' ELSE 'eligible' END AS eligibility, ${STATE}, h`;
 // Inside the writer: indexed lookups only, whatever the log's length.
-const GUARD = `${REQUEST} SELECT ${AUTHORITY} AS authority, ${STATE}`;
+const GUARD = `${REQUEST} SELECT ${AUTHORITY} AS authority, w.owner_user_id AS owner, ${STATE}`;
 
 const parameters = (source: FirstOpenSource, after: number) =>
   [source.workspaceId, source.objectId, source.path, source.sourceMomentId, source.sourceDigest, after];
@@ -107,7 +108,10 @@ export function readFirstOpenHistoryFile(read: FirstOpenHistoryRead): FirstOpenH
 }
 
 declare const proven: unique symbol;
-/** Storage's evidence that a source was eligible against its workspace log up to a cutoff. Only storage makes one. */
+/**
+ * Storage's evidence that a source was eligible against its workspace log up to a cutoff.
+ * Only storage makes one, from the history reader it was opened with, and a publication uses it once.
+ */
 export interface FirstOpenProof {readonly [proven]: true}
 interface Prepared {
   /** The storage owner's lifetime; a reopened or replaced database has another. */
@@ -130,17 +134,19 @@ export type FirstOpenWrite<T> =
 
 function prepared(storage: StorageContext, proof: FirstOpenProof): Prepared {
   const state = proofs.get(proof);
-  if (!state || state.lifetime !== storage.unavailable) throw new Error("This first-open preparation belongs to another relay storage.");
+  if (!state || state.lifetime !== storage.unavailable) throw new Error("This first-open preparation was used or belongs to another relay storage.");
   return state;
 }
 
 async function readHistory(storage: StorageContext, source: FirstOpenSource, previous: Prepared | null,
   read: FirstOpenHistoryReader, signal?: AbortSignal): Promise<FirstOpenPreparation> {
-  const lifetime = storage.unavailable;
+  const lifetime = storage.unavailable, cancelled = signal ? AbortSignal.any([signal, lifetime]) : lifetime;
   storage.captureStanding();
-  const history = await read({...source, database: storage.databasePath, afterRelaySeq: previous?.cutoff ?? 0},
-    signal ? AbortSignal.any([signal, lifetime]) : lifetime);
+  cancelled.throwIfAborted();
+  const history = await read({...source, database: storage.databasePath, afterRelaySeq: previous?.cutoff ?? 0}, cancelled);
   storage.captureStanding();
+  // A read that finished just before cancellation still prepares nothing.
+  cancelled.throwIfAborted();
   if (history.kind === "busy") return history;
   if (history.eligibility !== "eligible") return {kind: "refused", reason: history.eligibility};
   if (!history.current || (previous && history.identity !== previous.identity)) return {kind: "refused", reason: "stale-source"};
@@ -163,17 +169,32 @@ export async function catchUpFirstOpen(storage: StorageContext, proof: FirstOpen
 
 const guards = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
-/** Publishes in the writer only while the proof still holds; otherwise appends nothing. Never retries itself. */
-export function writeFirstOpen<T>(storage: StorageContext, proof: FirstOpenProof, publish: () => T): FirstOpenWrite<T> {
+/** Whether account deletion has closed the workspace or its owner's account. */
+export type FirstOpenClosed = (workspaceId: string, ownerUserId: string) => boolean;
+const asynchronous = () => new TypeError("First-open publication must be synchronous.");
+
+/**
+ * Publishes the proven source in the writer only while the proof still holds; otherwise appends nothing.
+ * A closed workspace is one the relay no longer holds. Never retries itself.
+ */
+export function writeFirstOpen<T>(storage: StorageContext, proof: FirstOpenProof, publish: (source: FirstOpenSource) => T,
+  closed: FirstOpenClosed): FirstOpenWrite<T> {
+  // The transaction would commit before an asynchronous publication settled.
+  if (isAsyncFunction(publish)) throw asynchronous();
   const state = prepared(storage, proof);
-  return storage.tx(() => {
+  const written = storage.tx((): FirstOpenWrite<T> => {
     let guard = guards.get(storage.db);
     if (!guard) guards.set(storage.db, guard = storage.db.prepare(GUARD));
     const row = guard.get(...parameters(state.source, 0));
-    if (!row) throw unknownWorkspace();
+    if (!row || closed(state.source.workspaceId, String(row.owner))) throw unknownWorkspace();
     if (row.authority === 1) return {kind: "refused", reason: "prior-authority"};
     if (row.current !== 1 || row.identity !== state.identity) return {kind: "refused", reason: "stale-source"};
     if (head(row) !== state.cutoff) return {kind: "retry"};
-    return {kind: "published", result: publish()};
+    const result = publish(state.source);
+    if (result !== null && (typeof result === "object" || typeof result === "function") &&
+      typeof (result as {then?: unknown}).then === "function") throw asynchronous();
+    return {kind: "published", result};
   });
+  if (written.kind === "published") proofs.delete(proof);
+  return written;
 }

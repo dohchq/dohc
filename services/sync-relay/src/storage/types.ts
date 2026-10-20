@@ -624,13 +624,14 @@ export interface SyncRelayStorage {
   /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
   latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
   /** Whether durable history lets the relay give the source's document a first live base, read off the relay writer. */
-  prepareFirstOpen(source: import("./firstOpenEligibility").FirstOpenSource, read: import("./firstOpenEligibility").FirstOpenHistoryReader,
+  prepareFirstOpen(source: import("./firstOpenEligibility").FirstOpenSource,
     signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
   /** Extends a preparation over the workspace log rows committed after it. */
-  catchUpFirstOpen(proof: import("./firstOpenEligibility").FirstOpenProof, read: import("./firstOpenEligibility").FirstOpenHistoryReader,
+  catchUpFirstOpen(proof: import("./firstOpenEligibility").FirstOpenProof,
     signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
-  /** Runs `publish` in the relay writer only if the preparation still holds there. */
-  writeFirstOpen<T>(proof: import("./firstOpenEligibility").FirstOpenProof, publish: () => T): import("./firstOpenEligibility").FirstOpenWrite<T>;
+  /** Runs `publish` synchronously in the relay writer, with the proven source, only if the preparation still holds there. */
+  writeFirstOpen<T>(proof: import("./firstOpenEligibility").FirstOpenProof,
+    publish: (source: import("./firstOpenEligibility").FirstOpenSource) => T): import("./firstOpenEligibility").FirstOpenWrite<T>;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
@@ -1271,6 +1272,8 @@ export interface OpenSyncRelayStorageOptions {
   discussionLifetimeMessageLimit?: number;
   discussionNonOwnerShareRowLimit?: number;
   newDiscussionId?: () => string;
+  /** Reads first-open history off the writer. Defaults to the first-open worker. */
+  firstOpenHistory?: import("./firstOpenEligibility").FirstOpenHistoryReader;
 }
 
 export type DeviceHostCredentialResult = LiveHostControlResult |

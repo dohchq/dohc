@@ -1,4 +1,5 @@
-import {accountIsFenced} from "./storage/accountDeletion";
+import {accountIsFenced, workspaceIsDeleted} from "./storage/accountDeletion";
+import {liveValidation} from "./liveValidation";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import * as replicaHistoryReads from "./replicaHistoryReads";
@@ -342,6 +343,7 @@ export function openSyncRelayStorage(
       },
       liveTickets as unknown as LiveTicketStoragePolicy | undefined,
       owner,
+      options.firstOpenHistory ?? liveValidation.readFirstOpenHistory,
     );
     storage.purgeExpiredShareRemovals(Date.now());
     return storage;
@@ -360,9 +362,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   constructor(
     readonly db: SqliteDb,
     readonly databasePath: string,
-    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "firstOpenHistory">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
     private readonly owner: RelayWriteOwner,
+    private readonly firstOpenHistory: firstOpenStorage.FirstOpenHistoryReader,
   ) {
     this.newDiscussionId = options.newDiscussionId;
   }
@@ -414,14 +417,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
   }
-  prepareFirstOpen(source: firstOpenStorage.FirstOpenSource, read: firstOpenStorage.FirstOpenHistoryReader, signal?: AbortSignal) {
-    return firstOpenStorage.prepareFirstOpen(this, source, read, signal);
+  prepareFirstOpen(source: firstOpenStorage.FirstOpenSource, signal?: AbortSignal) {
+    return firstOpenStorage.prepareFirstOpen(this, source, this.firstOpenHistory, signal);
   }
-  catchUpFirstOpen(proof: firstOpenStorage.FirstOpenProof, read: firstOpenStorage.FirstOpenHistoryReader, signal?: AbortSignal) {
-    return firstOpenStorage.catchUpFirstOpen(this, proof, read, signal);
+  catchUpFirstOpen(proof: firstOpenStorage.FirstOpenProof, signal?: AbortSignal) {
+    return firstOpenStorage.catchUpFirstOpen(this, proof, this.firstOpenHistory, signal);
   }
-  writeFirstOpen<T>(proof: firstOpenStorage.FirstOpenProof, publish: () => T): firstOpenStorage.FirstOpenWrite<T> {
-    return firstOpenStorage.writeFirstOpen(this, proof, publish);
+  writeFirstOpen<T>(proof: firstOpenStorage.FirstOpenProof, publish: (source: firstOpenStorage.FirstOpenSource) => T): firstOpenStorage.FirstOpenWrite<T> {
+    // Account deletion keeps a closed workspace's rows until purge; it holds no first-open publication.
+    return firstOpenStorage.writeFirstOpen(this, proof, publish,
+      (workspaceId, ownerUserId) => workspaceIsDeleted(this, workspaceId) || accountIsFenced(this, ownerUserId));
   }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);

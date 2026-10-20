@@ -16,7 +16,7 @@ afterEach(async () => {
   await closeTestStorages();
 });
 
-const ROWS = 100_000, BATCH = 5_000, FRESH = 10, WARM = 100, WRITES = 100, CATCH_UPS = 10, CATCH_UP_ROWS = 100, OBJECTS = 2_000, NAMESPACES = 8;
+const ROWS = 100_000, BATCH = 5_000, FRESH = 10, WARM = 100, WRITES = 100, CATCH_UPS = 100, CATCH_UP_ROWS = 100, OBJECTS = 2_000, NAMESPACES = 8;
 const TEXT = new TextEncoder().encode("ordinary text"), SHA = sha256Hex(TEXT);
 const hex = (seed: string) => seed.padEnd(64, "0").slice(0, 64);
 // The shape and size of a native write moment, which names its own object as its before state.
@@ -46,9 +46,11 @@ function stats(samples: number[]) {
 const timed = async <T>(run: () => T | Promise<T>): Promise<[number, T]> => { const start = performance.now(); const value = await run(); return [performance.now() - start, value]; };
 
 it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open preparation off the writer and its recheck inside it", async () => {
-  const storage = await testStorage(), context = storage as StorageContext, db = context.db, pool = createLiveValidationExecutor();
+  const pool = createLiveValidationExecutor();
   pools.push(pool);
   const worker: FirstOpenHistoryReader = (request, signal) => pool.readFirstOpenHistory(request, signal);
+  let reader = worker;
+  const storage = await testStorage({firstOpenHistory: (request, signal) => reader(request, signal)}), context = storage as StorageContext, db = context.db;
   const workspaces = [...scenarios.map(s => s.workspaceId), "writer", "unrelated"];
   for (const workspaceId of workspaces) {
     storage.claimWorkspace({workspaceId, ownerUserId: "owner-1", createdAtMs: 0});
@@ -123,11 +125,12 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
   const plans: Record<string, string[]> = {};
   {
     const source = sources.get("long-history")!, queries: string[] = [];
-    const capture: FirstOpenHistoryReader = async request => {
-      const reader = new DatabaseSync(request.database, {readOnly: true});
-      try { return readFirstOpenHistory({prepare: sql => { queries.push(sql); return reader.prepare(sql); }}, request); } finally { reader.close(); }
+    reader = async request => {
+      const connection = new DatabaseSync(request.database, {readOnly: true});
+      try { return readFirstOpenHistory({prepare: sql => { queries.push(sql); return connection.prepare(sql); }}, request); } finally { connection.close(); }
     };
-    const prepared = await storage.prepareFirstOpen(source, capture);
+    const prepared = await storage.prepareFirstOpen(source);
+    reader = worker;
     if (prepared.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(prepared)}.`);
     const spy = vi.spyOn(db, "prepare");
     storage.writeFirstOpen(prepared.proof, () => undefined);
@@ -138,19 +141,18 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     plans.writer = plan(guard);
   }
 
-  const results: Record<string, unknown> = {};
-  const writer = {plainHold: [] as number[], guardedHold: [] as number[], eligibility: [] as number[]};
+  const results: Record<string, unknown> = {}, acceptance: Record<string, {pass: boolean; [measure: string]: number | boolean | undefined}> = {};
   for (const {workspaceId, expected} of scenarios) {
     const source = sources.get(workspaceId) ?? {workspaceId, objectId: "target", path: "docs/target.md", sourceMomentId: "moment-target", sourceDigest: SHA};
     const result: Record<string, unknown> = {expected};
     results[workspaceId] = result;
     // A fresh read-only connection on the first-open worker for every preparation.
     const fresh: number[] = [];
-    let proof: FirstOpenProof | undefined;
+    let eligible = false;
     for (let i = 0; i < FRESH + 1; i++) {
-      const [ms, prepared] = await timed(() => storage.prepareFirstOpen(source, worker));
+      const [ms, prepared] = await timed(() => storage.prepareFirstOpen(source));
       expect(prepared.kind === "prepared" ? "eligible" : prepared.kind === "refused" ? prepared.reason : prepared.kind).toBe(expected);
-      if (prepared.kind === "prepared") proof = prepared.proof;
+      eligible = prepared.kind === "prepared";
       if (i > 0) fresh.push(ms);
     }
     result.freshWorkerPreparationMs = stats(fresh);
@@ -163,26 +165,34 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     }
     reader.close();
     result.warmQueryMs = stats(warm);
-    if (!proof) continue;
+    if (!eligible) continue;
+    const prepare = async () => {
+      const prepared = await storage.prepareFirstOpen(source);
+      if (prepared.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(prepared)}.`);
+      return prepared.proof;
+    };
 
     // The writer: a plain append and the same append behind the first-open recheck, interleaved.
+    // Each publication uses up its proof, so each guarded append gets a new one, prepared before either append.
     const plainWhole: number[] = [], plainHold: number[] = [], guardedWhole: number[] = [], guardedHold: number[] = [], eligibility: number[] = [];
-    for (let i = 0; i < 3; i++) { await plain(); await guarded(proof); }
+    for (let i = 0; i < 3; i++) { await plain(); await guarded(await prepare()); }
     for (let i = 0; i < WRITES; i++) {
-      const bare = await plain();
-      plainWhole.push(bare.whole); plainHold.push(bare.hold);
+      const proof = await prepare();
+      // Alternate which append goes first, so neither always follows the other.
+      const first = i % 2 === 0 ? await plain() : undefined;
       const checked = await guarded(proof);
+      const bare = first ?? await plain();
       expect(checked.kind).toBe("published");
+      plainWhole.push(bare.whole); plainHold.push(bare.hold);
       guardedWhole.push(checked.whole); guardedHold.push(checked.hold); eligibility.push(checked.eligibility);
     }
-    writer.plainHold.push(...plainHold); writer.guardedHold.push(...guardedHold); writer.eligibility.push(...eligibility);
     Object.assign(result, {plainAppendMs: stats(plainWhole), plainHoldMs: stats(plainHold), guardedAppendMs: stats(guardedWhole),
       guardedHoldMs: stats(guardedHold), eligibilityInWriterMs: stats(eligibility)});
 
     // The event loop while the worker prepares, alone and with unrelated workspace writes in the main thread.
     const idle = monitorEventLoopDelay({resolution: 1});
     idle.enable();
-    for (let i = 0; i < FRESH; i++) expect((await storage.prepareFirstOpen(source, worker)).kind).toBe("prepared");
+    for (let i = 0; i < FRESH; i++) expect((await storage.prepareFirstOpen(source)).kind).toBe("prepared");
     idle.disable();
     result.preparationAloneEventLoopDelayMs = {p50: idle.percentile(50) / 1e6, p99: idle.percentile(99) / 1e6, max: idle.max / 1e6};
     const overlapped: number[] = [], loop = monitorEventLoopDelay({resolution: 1});
@@ -190,7 +200,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     loop.enable();
     for (let i = 0; i < FRESH; i++) {
       let done = false;
-      const preparing = storage.prepareFirstOpen(source, worker).finally(() => { done = true; });
+      const preparing = storage.prepareFirstOpen(source).finally(() => { done = true; });
       while (!done) {
         const [ms] = await timed(() => storage.appendLogBatch(append("unrelated", ["unrelated"])));
         overlapped.push(ms);
@@ -204,7 +214,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       eventLoopDelayMs: {p50: loop.percentile(50) / 1e6, p99: loop.percentile(99) / 1e6, max: loop.max / 1e6}};
 
     // Catch-up: rows land in the target's workspace after preparation; the writer retries and the worker reads only the suffix.
-    let retries = 0;
+    let retries = 0, proof = await prepare();
     const retryHold: number[] = [], retryEligibility: number[] = [], catchUp: number[] = [];
     for (let i = 0; i < CATCH_UPS; i++) {
       storage.appendLogBatch(append(workspaceId, Array.from({length: CATCH_UP_ROWS}, (_, index) => `object-${index}`)));
@@ -212,16 +222,16 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       expect(checked.kind).toBe("retry");
       retries++;
       retryHold.push(checked.hold); retryEligibility.push(checked.eligibility);
-      const [ms, caught] = await timed(() => storage.catchUpFirstOpen(proof!, worker));
+      const [ms, caught] = await timed(() => storage.catchUpFirstOpen(proof));
       if (caught.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(caught)}.`);
       catchUp.push(ms);
       proof = caught.proof;
     }
     expect((await guarded(proof)).kind).toBe("published");
-    writer.eligibility.push(...retryEligibility);
     result.catchUp = {rowsPerRound: CATCH_UP_ROWS, retries, freshWorkerCatchUpMs: stats(catchUp), retryHoldMs: stats(retryHold), retryEligibilityInWriterMs: stats(retryEligibility)};
 
     // A stale proof: the source changed, so the writer refuses without publishing.
+    proof = await prepare();
     storage.appendLogBatch(append(workspaceId, ["target"]));
     const staleHold: number[] = [], staleEligibility: number[] = [];
     for (let i = 0; i < WRITES; i++) {
@@ -229,18 +239,21 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       expect(checked.kind).toBe("refused");
       staleHold.push(checked.hold); staleEligibility.push(checked.eligibility);
     }
-    writer.eligibility.push(...staleEligibility);
     result.staleProof = {holdMs: stats(staleHold), eligibilityInWriterMs: stats(staleEligibility)};
+
+    // Judged per scenario: eligibility work over every writer outcome, and hold against this scenario's plain appends.
+    const work = stats([...eligibility, ...retryEligibility, ...staleEligibility]), plainP95 = stats(plainHold).p95Ms!, guardedP95 = stats(guardedHold).p95Ms!;
+    acceptance[workspaceId] = {eligibilityP95Ms: work.p95Ms, eligibilityMaxMs: work.maxMs, plainHoldP95Ms: plainP95, guardedHoldP95Ms: guardedP95,
+      holdP95DifferenceMs: Number((guardedP95 - plainP95).toFixed(3)), plainAppendP95Ms: stats(plainWhole).p95Ms, guardedAppendP95Ms: stats(guardedWhole).p95Ms,
+      pass: work.p95Ms! <= 5 && work.maxMs! <= 20 && guardedP95 - plainP95 <= 10};
   }
   vi.restoreAllMocks();
 
-  const eligibility = stats(writer.eligibility), plainHold = stats(writer.plainHold), guardedHold = stats(writer.guardedHold);
-  const acceptance = {eligibilityP95Ms: eligibility.p95Ms, eligibilityMaxMs: eligibility.maxMs, plainHoldP95Ms: plainHold.p95Ms, guardedHoldP95Ms: guardedHold.p95Ms,
-    pass: eligibility.p95Ms! <= 5 && eligibility.maxMs! <= 20 && guardedHold.p95Ms! - plainHold.p95Ms! <= 10};
   const sqlite = db.prepare("SELECT sqlite_version() AS version").get()!;
   console.log(JSON.stringify({environment: {node: process.version, os: `${platform()} ${release()}`, cpu: cpus()[0]?.model, cpus: cpus().length,
     sqlite: sqlite.version, cacheSize: db.prepare("PRAGMA cache_size").get()!.cache_size, journalMode: db.prepare("PRAGMA journal_mode").get()!.journal_mode},
   fixture: {workspaces: scenarios.length, rowsPerWorkspace: ROWS, authorityRowsPerTablePerWorkspace: OBJECTS, restoreNamespaces: NAMESPACES,
     databaseBytes: size.bytes, meanPayloadBytes: Math.round(Number(size.payload)), buildMs: Math.round(buildMs)},
-  samples: {fresh: FRESH, warm: WARM, writes: WRITES, catchUps: CATCH_UPS}, plans, results, acceptance}, null, 2));
+  samples: {fresh: FRESH, warm: WARM, writes: WRITES, catchUps: CATCH_UPS}, plans, results,
+  acceptance: {pass: Object.values(acceptance).every(scenario => scenario.pass), byScenario: acceptance}}, null, 2));
 }, 3_600_000);
