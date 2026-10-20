@@ -103,13 +103,54 @@ impl Ydoc {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Ydoc {
+    /// Build the editor's native inline nodes for single-paragraph fixtures.
+    pub fn richdoc_wikilinks_for_test(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
+        assert!(!markdown.contains(['\n', '\r']));
+        self.stage_source_preserving_edit(markdown, |staged| {
+            let body = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            let meta = staged.doc.get_or_insert_map(ROOT_META);
+            let mut txn = staged.doc.transact_mut();
+            meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+            let len = body.len(&txn);
+            body.remove_range(&mut txn, 0, len);
+            let paragraph = body.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+            let mut rest = markdown;
+            while let Some(start) = rest.find("[[") {
+                if start > 0 {
+                    let index = paragraph.len(&txn);
+                    paragraph.insert(&mut txn, index, XmlTextPrelim::new(&rest[..start]));
+                }
+                let end = rest[start + 2..].find("]]").unwrap() + start + 2;
+                let (target, label) = rest[start + 2..end]
+                    .split_once('|')
+                    .map_or((&rest[start + 2..end], None), |(t, l)| (t, Some(l)));
+                let index = paragraph.len(&txn);
+                let element =
+                    paragraph.insert(&mut txn, index, XmlElementPrelim::empty("wikilink"));
+                element.insert_attribute(&mut txn, "target", target);
+                if let Some(label) = label {
+                    element.insert_attribute(&mut txn, "label", label);
+                }
+                rest = &rest[end + 2..];
+            }
+            if !rest.is_empty() {
+                let index = paragraph.len(&txn);
+                paragraph.insert(&mut txn, index, XmlTextPrelim::new(rest));
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn target_edit_preserves_the_existing_xml_element_and_concurrent_edits() {
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "[[old#part|label]]")
+        doc.richdoc_wikilinks_for_test("[[old#part|label]]")
             .unwrap();
         let element = doc.wikilink_elements()[0].clone();
         let peer = Ydoc::wire();

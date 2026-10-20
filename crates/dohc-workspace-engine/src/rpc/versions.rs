@@ -1026,6 +1026,14 @@ impl VersionFence {
                                 .map_err(|e| map_runtime(e.into()))
                         })
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
+                    let live_sessions = sessions.clone();
+                    let live_handle = handle.clone();
+                    let is_open: dohc_engine_runtime::actor::DocumentIsOpen =
+                        Arc::new(move |key| {
+                            lock(&live_sessions).values().any(|session| {
+                                session.workspace == live_handle && session.key == *key
+                            })
+                        });
                     let placement_now = now_ms()?;
                     drop(_barriers);
                     let result = Box::pin(open.actor.history_undo_in_turns(
@@ -1038,7 +1046,7 @@ impl VersionFence {
                         placement_now,
                         [open.capture_apply_gate.clone(), open.session_ops.clone()],
                         Arc::new(self_writes.scoped(&open.root)),
-                        Some((capture_leases.clone(), resync)),
+                        Some((is_open, resync)),
                         token,
                     ))
                     .await

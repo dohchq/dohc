@@ -12,6 +12,7 @@ use rusqlite::params;
 #[cfg(test)]
 thread_local! { pub(super) static CRASH_AFTER_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
+pub type DocumentIsOpen = Arc<dyn Fn(&DocKey) -> bool + Send + Sync>;
 pub type DocumentResync = Arc<dyn Fn(&DocKey) + Send + Sync>;
 
 pub(super) struct Edit {

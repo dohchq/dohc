@@ -38,7 +38,7 @@ mod history_operations;
 mod link_documents;
 mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
-pub use link_documents::DocumentResync;
+pub use link_documents::{DocumentIsOpen, DocumentResync};
 mod journal;
 mod live_application;
 mod materialization;

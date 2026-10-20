@@ -106,9 +106,7 @@ impl OpenFixture {
         let doc = Ydoc::wire();
         doc.apply(&blob.bytes).unwrap();
         if let Some(seed) = session["seedContent"].as_str() {
-            let update = doc
-                .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, seed)
-                .unwrap();
+            let update = doc.richdoc_wikilinks_for_test(seed).unwrap();
             self.service
                 .ydoc_record_update(
                     &RequestContext::unbounded(),
@@ -129,9 +127,7 @@ impl OpenFixture {
         let doc = reader
             .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
             .unwrap();
-        let update = doc
-            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, text)
-            .unwrap();
+        let update = doc.richdoc_wikilinks_for_test(text).unwrap();
         let claim = lock(&self.service.sessions)
             .get(sid)
             .unwrap()

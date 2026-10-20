@@ -35,14 +35,14 @@ fn inverse_input(
     plan: &Plan,
     member: &Member,
     open: Option<&(
-        dohc_engine_collab::LeaseRegistry,
+        super::super::link_documents::DocumentIsOpen,
         super::super::link_documents::DocumentResync,
     )>,
 ) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
         let text = link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect)?;
         let key = DocKey::new(&plan.workspace, &plan.version, &member.effect.object_id)?;
-        let live = if open.is_some_and(|(leases, _)| leases.is_held(&key)) {
+        let live = if open.is_some_and(|(is_open, _)| is_open(&key)) {
             let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![plan.workspace,plan.version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
             let before = dohc_engine_storage::text::read(conn, &head)
@@ -370,7 +370,7 @@ impl ActorHandle {
         gates: [Arc<tokio::sync::Mutex<()>>; 2],
         recorder: Arc<dyn SelfWriteRecorder>,
         open_documents: Option<(
-            dohc_engine_collab::LeaseRegistry,
+            super::super::link_documents::DocumentIsOpen,
             super::super::link_documents::DocumentResync,
         )>,
         token: crate::CancellationToken,
@@ -784,7 +784,7 @@ impl ActorHandle {
                             match outcome {
                                 Ok(_) => {
                                     tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?;
-                                    if turn_open.as_ref().is_some_and(|(leases,_)| DocKey::new(&p.workspace,&p.version,&member.effect.object_id).is_ok_and(|key| leases.is_held(&key))) {
+                                    if turn_open.as_ref().is_some_and(|(is_open,_)| DocKey::new(&p.workspace,&p.version,&member.effect.object_id).is_ok_and(|key| is_open(&key))) {
                                         resyncs.push(DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?);
                                     }
                                 },

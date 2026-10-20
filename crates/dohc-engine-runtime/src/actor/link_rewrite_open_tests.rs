@@ -3,6 +3,9 @@ use dohc_engine_collab::{ContentKind, Lease, LocalAppend, Regime, Ydoc};
 
 impl Fixture {
     async fn open_document(&self, object: &str) -> (Lease, Ydoc) {
+        self.open_document_with_elements(object, true).await
+    }
+    async fn open_document_with_elements(&self, object: &str, elements: bool) -> (Lease, Ydoc) {
         let key = DocKey::new(&self.ws, "main", object).unwrap();
         let lease = self.leases.acquire(&key).unwrap();
         let object = object.to_owned();
@@ -14,10 +17,14 @@ impl Fixture {
                     .read_text(&ws, "main", &format!("{object}.md"))?
                     .unwrap();
                 let doc = Ydoc::wire();
-                let seed = doc.rewrite_content_to_markdown_preserving_source(
-                    ContentKind::Richdoc,
-                    &head.text,
-                )?;
+                let seed = if elements {
+                    doc.richdoc_wikilinks_for_test(&head.text)?
+                } else {
+                    doc.rewrite_content_to_markdown_preserving_source(
+                        ContentKind::Richdoc,
+                        &head.text,
+                    )?
+                };
                 dohc_engine_collab::ensure_marker(
                     store,
                     &key,
@@ -65,9 +72,7 @@ impl Fixture {
     }
     async fn type_document(&self, object: &str, text: &str) {
         let doc = self.document(object).await;
-        let update = doc
-            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, text)
-            .unwrap();
+        let update = doc.richdoc_wikilinks_for_test(text).unwrap();
         let key = DocKey::new(&self.ws, "main", object).unwrap();
         self.actor
             .run(move |store, cache| {
@@ -108,6 +113,7 @@ impl Fixture {
     async fn undo_open(
         &self,
     ) -> Result<super::super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        let leases = self.leases.clone();
         self.actor
             .history_undo_in_turns(
                 self.ws.clone(),
@@ -119,7 +125,7 @@ impl Fixture {
                 10,
                 [Arc::default(), self.serial.clone()],
                 Arc::new(()),
-                Some((self.leases.clone(), Arc::new(|_| {}))),
+                Some((Arc::new(move |key| leases.is_held(key)), Arc::new(|_| {}))),
                 CancellationToken::new(),
             )
             .await
@@ -370,7 +376,15 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
-    let f = Fixture::new(2000, 5000);
+    let f = Fixture::new(2000, 4999);
+    let _index_hold = f.actor.hold_link_drain();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+        ).map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
     let (lease, doc) = f.open_document("source-0000").await;
     let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
     let update = doc.richdoc_append_paragraph("forward typing");
@@ -486,5 +500,58 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
         .unwrap();
     }
     drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn literal_wikilinks_without_editor_elements_stay_unchecked() {
+    let f = Fixture::new(1, 1);
+    let (lease, doc) = f.open_document_with_elements("source-0000", false).await;
+    let before = doc.encode_state_vector();
+    let result = f.pass("literal-open", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 0);
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
+    assert_eq!(f.text("source-0000.md").await, BODY);
+    assert_eq!(
+        f.document("source-0000").await.encode_state_vector(),
+        before
+    );
+    assert!(
+        f.leases
+            .is_held(&DocKey::new(&f.ws, "main", "source-0000").unwrap())
+    );
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_editor_opened_after_read_uses_its_ydoc_and_stays_open() {
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    drop(lease);
+    let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
+    let leases = f.leases.clone();
+    let held = Arc::new(Mutex::new(None));
+    let owned = held.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
+        if object == "source-0000" {
+            *owned.lock().unwrap() = Some(leases.acquire(&key).unwrap());
+        }
+    }));
+    let result = f.pass("late-editor", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 1);
+    assert!(
+        f.document("source-0000")
+            .await
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("[[new#part|label]]")
+    );
+    assert!(
+        f.leases
+            .is_held(&DocKey::new(&f.ws, "main", "source-0000").unwrap())
+    );
+    drop(held.lock().unwrap().take());
     f.close().await;
 }
