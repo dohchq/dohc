@@ -130,6 +130,8 @@ Landlock does not mediate path metadata, so as on macOS a confined worker can le
 It cannot read `/proc`, so unlike on macOS it cannot read other processes' arguments.
 Landlock cannot refuse an executable mapping of a file the worker wrote, as Seatbelt does, so a worker that gains code execution can load native code from its build directory.
 Through the dynamic loader it can also run any program it can read, and through a memory file any code it writes. Each still runs under the same rules and inside the owner's tree.
+The memory bound counts pages a process maps. Data written to a memory file it never maps, or to a build directory on a tmpfs `/tmp` as on Fedora and Arch, is RAM the bound does not see.
+Nothing bounds it, as nothing bounds disk use in the build directory on macOS.
 That still needs a memory-safety exploit in V8 or esbuild first.
 Node stops at startup when the system's OpenSSL configuration exists but stays unreadable, so the owner sets `OPENSSL_CONF` to `/dev/null`. The compiler needs no OpenSSL configuration.
 
