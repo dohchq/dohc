@@ -648,7 +648,7 @@ describe("share-web Node request adapter", () => {
 
   it.each([
     ["meta", "/api/view/meta"],
-    ["log", "/api/view/log?since=0&limit=500"],
+    ["log", "/api/view/log?since=0&limit=500&current=true"],
   ] as const)(
     "streams %s bytes before the relay finishes its body",
     async (_route, path) => {

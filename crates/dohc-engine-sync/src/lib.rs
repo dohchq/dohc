@@ -45,6 +45,7 @@ mod share_grant;
 mod version_apply;
 mod ydoc_apply;
 mod ydoc_projection;
+pub use ydoc_apply::project_ydoc_with_reader;
 pub use ydoc_projection::{UpdateProjectionError, project_ydoc_updates};
 mod ydoc_origination;
 mod ydoc_recovery;

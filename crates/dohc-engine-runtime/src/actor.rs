@@ -517,6 +517,48 @@ impl Drop for LinkDrainHold {
 }
 
 impl ActorHandle {
+    pub async fn configure_reader_resolver(
+        &self,
+        resolver: std::sync::Arc<dohc_engine_collab::reader_resolver::ReaderResolver>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |_, cache| {
+            cache.reader_resolver = Some(resolver);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn run_with_reader_retry<R: Send + 'static>(
+        &self,
+        work: impl Fn(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
+        + Clone
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        for attempt in 0..=2 {
+            let result = self.run(work.clone()).await;
+            let pending = match &result {
+                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(
+                    pending,
+                )))
+                | Err(RuntimeError::Collab(
+                    dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
+                )) => Some(pending.clone()),
+                _ => None,
+            };
+            if let Some(pending) = pending {
+                if attempt < 2 {
+                    pending.resolve().await;
+                } else {
+                    tokio::spawn(async move { pending.resolve().await });
+                    return result;
+                }
+            } else {
+                return result;
+            }
+        }
+        unreachable!()
+    }
     pub fn hold_link_drain(&self) -> LinkDrainHold {
         self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
         LinkDrainHold {
@@ -1054,6 +1096,10 @@ fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeE
         Ok(file)
     }
 }
+
+#[cfg(test)]
+#[path = "actor/reader_tests.rs"]
+mod reader_tests;
 
 #[cfg(test)]
 mod saturation_tests {

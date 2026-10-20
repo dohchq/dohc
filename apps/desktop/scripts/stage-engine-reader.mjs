@@ -45,7 +45,13 @@ async function discard(path) {
 }
 async function prune(base, generation, selfHost) {
   for (const entry of await readdir(base)) {
-    if (![generation, "selection.json", ...(selfHost ? ["startup.json"] : [])].includes(entry)) await discard(join(base, entry));
+    if ([generation, "selection.json", ...(selfHost ? ["startup.json"] : [])].includes(entry)) continue;
+    const path = join(base, entry);
+    // A concurrent preparation owns recent files, including a generation it has not selected yet.
+    const metadata = await lstat(path).catch(() => null);
+    if (!metadata || Date.now() - metadata.mtimeMs < 24 * 60 * 60 * 1000) continue;
+    // Windows keeps executable generations locked while a reader is running.
+    await discard(path).catch(() => {});
   }
 }
 

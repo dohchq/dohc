@@ -468,6 +468,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
             reason: "operation kind is not supported by this client".to_owned(),
         }),
         SyncError::Storage(_)
+        | SyncError::MarkdownReaderPending(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }

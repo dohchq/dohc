@@ -235,12 +235,30 @@ it('handles zero-length source and checkpoint blobs', async () => {
   try {
     await hello(host)
     request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
-    expect(await host.json()).toEqual({id: 2, kind: 'refused', reason: 'invalid-schema'})
+    const result = await success(host, 2)
+    expect(result.result).toMatchObject({kind: 'constructed', sourceSha256: hash(source), sourceByteLength: 0})
+    Y.applyUpdate(base, result.delta)
     request(host.child, 3, 'construct', source, Buffer.alloc(0))
     expect(await host.json()).toEqual({id: 3, kind: 'refused', reason: 'invalid-update'})
     request(host.child, 4, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
     expect((await success(host, 4)).result.kind).toBe('constructed')
     await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+})
+it('ends the child on an allocation RangeError without sending a document verdict', async () => {
+  const preload = join(directory, 'allocation-failure.cjs')
+  await writeFile(preload, `const decode = TextDecoder.prototype.decode;
+TextDecoder.prototype.decode = function(input, ...args) {
+  if (input?.length === 19 && input[0] === 97) throw new RangeError('allocation failed');
+  return Reflect.apply(decode, this, [input, ...args]);
+};\n`)
+  const host = await start(bundle, preload), base = markdownToYDoc('Earlier')
+  try {
+    await hello(host)
+    request(host.child, 2, 'construct', Buffer.from('allocation tripwire'), Y.encodeStateAsUpdate(base))
+    await expect(host.json()).rejects.toThrow('Reader EOF')
+    expect((await host.closed)[0]).toBe(1)
+    expect(Buffer.concat(host.diagnostics).length).toBe(0)
   } finally {base.destroy(); await host.close()}
 })
 it('chunks source and returned delta above 64 KiB', async () => {

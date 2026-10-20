@@ -4,7 +4,7 @@ pub(crate) mod cache;
 mod edges;
 mod incoming;
 mod parser;
-mod query;
+pub(crate) mod query;
 mod resolver;
 #[cfg(test)]
 #[path = "link_tests.rs"]

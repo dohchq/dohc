@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod actor;
+mod chat_mentions;
 pub mod error;
 pub mod identity;
 pub(crate) mod links;

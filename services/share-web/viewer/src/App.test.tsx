@@ -25,17 +25,50 @@ const SECOND_HANDOFF_CODE = "B".repeat(43);
 const PUBLIC_RELAY_URL = "https://relay.example.test";
 let exposeHeldLogQuery = false;
 
+// Legacy replay fixtures use Edit; current-only access has explicit coverage.
 const DEFAULT_META: ViewMeta = {
-  access: "view",
+  access: "edit",
   subjectName: "Trip plans",
   effectiveSelector: {
     paths: [],
     versionId: null,
-    access: "view",
+    access: "edit",
   },
   lastSettledAtMs: null,
   lastSettledKnown: true,
 };
+
+it.each(["view", "comment"] as const)("current-only %s loading needs no History replay", async access => {
+  const file = {path:"current.md",blobSha256:"a".repeat(64),contentKind:"text" as const};
+  const fetcher = vi.spyOn(globalThis,"fetch").mockImplementation(async input => {
+    expect(fullRequestPath(input)).toBe("/api/view/current");
+    return currentPage([file],9,0,{...DEFAULT_META,access,effectiveSelector:{...DEFAULT_META.effectiveSelector,access}});
+  });
+  try {
+    expect((await loadCurrentState(SESSION)).fileAccumulator.get(file.path)).toEqual(file);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  } finally {fetcher.mockRestore();}
+});
+
+it("retries current state if Edit narrows during the initial raw catch-up", async () => {
+  const file: SharedFile = { path: "current.md", blobSha256: "a".repeat(64), contentKind: "text" };
+  const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+  const paths: string[] = [];
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+    const path = fullRequestPath(input);
+    paths.push(path);
+    if (path === "/api/view/current") return currentPage([file], 9, 0, paths.length === 1 ? DEFAULT_META : viewMeta);
+    if (path === "/api/view/log?since=9&limit=500") return new Response(null, { status: 404 });
+    if (path === "/api/view/meta") return jsonResponse(viewMeta);
+    throw new Error(path);
+  });
+  try {
+    const loaded = await loadCurrentState(SESSION);
+    expect(loaded.meta.access).toBe("view");
+    expect(loaded.fileAccumulator.get(file.path)).toEqual(file);
+    expect(paths).toEqual(["/api/view/current", "/api/view/log?since=9&limit=500", "/api/view/meta", "/api/view/current"]);
+  } finally { fetcher.mockRestore(); }
+});
 
 // Follower log requests carry `&hold=30000`; most suites match the held-log
 // path without it, so strip the suffix unless a test opts into the full path.
@@ -241,6 +274,136 @@ describe("App", () => {
     });
   }
 
+  it.each(["view", "comment"] as const)(
+    "follows current-only %s notifications without reloading the inventory",
+    async (access) => {
+      const objectId = "share-object:v1:" + "a".repeat(64);
+      const file: SharedFile = {
+        path: "note.md",
+        objectId,
+        blobSha256: "a".repeat(64),
+        contentKind: "text",
+      };
+      const meta: ViewMeta = {
+        ...DEFAULT_META,
+        access,
+        effectiveSelector: { ...DEFAULT_META.effectiveSelector, access },
+      };
+      let inventories = 0;
+      let deliver: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const path = fullRequestPath(input);
+          if (path === "/api/view/current") {
+            inventories++;
+            return currentPage([file], 7, 0, meta);
+          }
+          if (path === "/api/view/meta") return jsonResponse(meta);
+          if (
+            path === "/api/view/log?since=7&limit=500&current=true&hold=30000"
+          ) {
+            return new Promise<Response>((resolve) => {
+              deliver = resolve;
+            });
+          }
+          if (path === "/api/view/blob/" + file.blobSha256)
+            return new Response("# Original");
+          if (path === "/api/view/blob/" + "b".repeat(64))
+            return new Response("# Changed");
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }),
+      );
+      await renderApp();
+      await settle(
+        () =>
+          deliver !== undefined && container.textContent.includes("Original"),
+      );
+      await act(async () =>
+        deliver?.(
+          logOpsPage(
+            [
+              {
+                relaySeq: 8,
+                opKind: "file.current",
+                payload: {
+                  objectId,
+                  file: { ...file, blobSha256: "b".repeat(64) },
+                },
+              },
+            ],
+            8,
+          ),
+        ),
+      );
+      await settle(
+        () =>
+          container
+            .querySelector("main.content")
+            ?.textContent?.includes("Changed") === true,
+      );
+      expect(inventories).toBe(1);
+    },
+  );
+
+  it.each(["downgrade", "reset"] as const)("refreshes current state after a follower %s and keeps following", async (reason) => {
+    const objectId = "share-object:v1:" + "a".repeat(64);
+    const file: SharedFile = { path: "note.md", objectId, blobSha256: "a".repeat(64), contentKind: "text" };
+    const meta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+    const paths: string[] = [];
+    let inventories = 0;
+    let deliver: ((response: Response) => void) | undefined;
+    let following: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = fullRequestPath(input);
+      paths.push(path);
+      if (path === "/api/view/current") {
+        inventories++;
+        return inventories === 1
+          ? currentPage([file], 7, 0, reason === "downgrade" ? DEFAULT_META : meta)
+          : currentPage([{ ...file, blobSha256: "b".repeat(64) }], 8, 0, meta);
+      }
+      if (path === "/api/view/meta") return jsonResponse(meta);
+      if (path === "/api/view/log?since=7&limit=500") return logOpsPage([], 7);
+      if (path === `/api/view/log?since=7&limit=500${reason === "reset" ? "&current=true" : ""}&hold=30000`) {
+        return new Promise<Response>(resolve => { deliver = resolve; });
+      }
+      if (path === "/api/view/log?since=8&limit=500&current=true&hold=30000") {
+        return new Promise<Response>(resolve => { following = resolve; });
+      }
+      if (path === "/api/view/blob/" + file.blobSha256) return new Response("# Original");
+      if (path === "/api/view/blob/" + "b".repeat(64)) return new Response("# Refreshed");
+      if (path === "/api/view/blob/" + "c".repeat(64)) return new Response("# Changed again");
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    }));
+    await renderApp();
+    await settle(() => deliver !== undefined && container.textContent.includes("Original"));
+    await act(async () => deliver?.(reason === "downgrade"
+      ? new Response(null, { status: 404 })
+      : logOpsPage([{ relaySeq: 8, opKind: "files.reset", payload: {} }], 8)));
+    await settle(() => following !== undefined && container.textContent.includes("Refreshed"));
+    expect(inventories).toBe(2);
+    if (reason === "downgrade") {
+      expect(paths.indexOf("/api/view/meta")).toBeLessThan(paths.lastIndexOf("/api/view/current"));
+      expect(paths.filter(path => path.includes("/api/view/log") && !path.includes("current=true")))
+        .toEqual(["/api/view/log?since=7&limit=500", "/api/view/log?since=7&limit=500&hold=30000"]);
+    }
+    await act(async () => following?.(logOpsPage([{
+      relaySeq: 9, opKind: "file.current", payload: { objectId, file: { ...file, blobSha256: "c".repeat(64) } },
+    }], 9)));
+    await settle(() => container.textContent.includes("Changed again"));
+    expect(inventories).toBe(2);
+    expect(container.querySelector("main.state")).toBeNull();
+  });
+
   it.each([
     ["view", null, "doc.md"],
     ["comment", null, "doc.md"],
@@ -268,8 +431,7 @@ describe("App", () => {
     expect(copy).toContain(access === "view" ? "You can read files and comments." :
       access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
     expect(copy).toContain("Included paths: docs.");
-    expect(copy).toContain("retained history of files that remain in this share");
-    expect(copy).toContain("Deleted files and files moved out lose their readable history.");
+    expect(copy).toContain(access === "edit" ? "retained History of files that remain in this share" : "History is unavailable with view or comment access.");
     expect(copy).toContain("Open in dohc");
     expect(copy.includes("Choose a file in Files")).toBe(path !== null);
     expect(copy.includes("Choose Edit file")).toBe(access === "edit" && versionId === null && (path === "doc.md" || path === "trip/packing/collection.yaml"));
@@ -801,7 +963,7 @@ describe("App", () => {
     expect(container.querySelector("header")?.textContent).toContain(
       "Trip plans",
     );
-    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector(".badge")?.textContent).toBe("Edit");
     expect(container.querySelector(".freshness")?.textContent).toBe(
       "No settled changes",
     );
@@ -1233,7 +1395,7 @@ describe("App", () => {
       "Trip plans",
     );
     expect(container.querySelector("h1")?.textContent).toBe(staleFile.path);
-    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector(".badge")?.textContent).toBe("Edit");
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(staleFile.path);
     expect(metaRequests).toBe(0);
@@ -2889,7 +3051,7 @@ describe("App", () => {
     ["an unsupported access level", {
       ...DEFAULT_META,
       ok: true,
-      access: "edit",
+      access: "owner",
       files: [],
       nextCursor: 0,
       epochLogFloor: 0,
@@ -4145,7 +4307,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
-      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
       if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({
           ok: true,
@@ -4218,7 +4380,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
-      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
       if (path === "/api/view/meta") {
         metaCalls += 1;
         return jsonResponse(commentMeta);
@@ -4287,7 +4449,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
-      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
       if (path === "/api/view/discussion" && init?.method === "POST") {
         return jsonResponse({ ok: false, state: writeState, activityRevision: 7 }, 403);
       }

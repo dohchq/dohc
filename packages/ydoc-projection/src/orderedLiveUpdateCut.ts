@@ -328,7 +328,11 @@ class ValidationBudget {
     measuredStateByteVisits: 0,
   }
 
-  constructor(readonly policy: OrderedLiveUpdateCutPolicy) {}
+  constructor(readonly policy: OrderedLiveUpdateCutPolicy, readonly fatalUnexpectedErrors = false) {}
+
+  unexpected(error: unknown): void {
+    if (this.fatalUnexpectedErrors && !(error instanceof CutFailure)) throw error
+  }
 
   chargeRawInputBytes(length: number, stage: OrderedLiveUpdateCutFailureStage): void {
     this.counters.rawInputBytes = checkedPlainAdd(
@@ -534,6 +538,7 @@ function snapshotPolicy(value: unknown): OrderedLiveUpdateCutPolicy {
 function localOwnedView(
   value: unknown,
   stage: OrderedLiveUpdateCutFailureStage,
+  budget: ValidationBudget,
 ): Uint8Array {
   try {
     if (
@@ -576,6 +581,7 @@ function localOwnedView(
     }
     return view
   } catch (error) {
+    budget.unexpected(error)
     if (error instanceof CutFailure) throw error
     return fail('invalid-input', stage)
   }
@@ -623,7 +629,7 @@ function snapshotSuffix(
     ) {
       fail('invalid-input', { kind: 'call' })
     }
-    const bytes = localOwnedView(descriptor.value, stage)
+    const bytes = localOwnedView(descriptor.value, stage, budget)
     if (bytes.byteLength >= MAX_UPDATE_BYTES - total) {
       fail('capacity-refused', stage)
     }
@@ -654,7 +660,7 @@ function snapshotInput(
   if (modeDescriptor.value === 'registration') {
     const record = exactRecord(inputValue, REGISTRATION_FIELDS)
     const stage = { kind: 'input', role: 'checkpoint' } as const
-    const checkpoint = localOwnedView(record.checkpoint, stage)
+    const checkpoint = localOwnedView(record.checkpoint, stage, budget)
     budget.chargeRawInputBytes(checkpoint.byteLength, stage)
     return {
       mode: 'registration',
@@ -664,11 +670,11 @@ function snapshotInput(
   if (modeDescriptor.value === 'journal-candidate') {
     const record = exactRecord(inputValue, JOURNAL_FIELDS)
     const checkpointStage = { kind: 'input', role: 'checkpoint' } as const
-    const checkpoint = localOwnedView(record.checkpoint, checkpointStage)
+    const checkpoint = localOwnedView(record.checkpoint, checkpointStage, budget)
     budget.chargeRawInputBytes(checkpoint.byteLength, checkpointStage)
     const suffix = snapshotSuffix(record.suffix, budget)
     const candidateStage = { kind: 'input', role: 'candidate' } as const
-    const candidate = localOwnedView(record.candidate, candidateStage)
+    const candidate = localOwnedView(record.candidate, candidateStage, budget)
     budget.chargeRawInputBytes(candidate.byteLength, candidateStage)
     const total = budget.snapshot().rawInputBytes
     if (total > MAX_TOTAL_CUT_BYTES) fail('capacity-refused', candidateStage)
@@ -763,10 +769,11 @@ function utf8Length(value: string): number {
   return measureExtendedUtf8(value).byteLength
 }
 
-function decodeUtf8(bytes: Uint8Array, stage: OrderedLiveUpdateCutFailureStage): string {
+function decodeUtf8(bytes: Uint8Array, stage: OrderedLiveUpdateCutFailureStage, budget: ValidationBudget): string {
   try {
     return string.decodeUtf8(bytes)
-  } catch {
+  } catch (error) {
+    budget.unexpected(error)
     return fail('invalid-update', stage)
   }
 }
@@ -1069,7 +1076,7 @@ function readBoundedString(
 ): string {
   const bytes = decoding.readVarUint8Array(decoder)
   budget.visitDecodedPayloadBytes(bytes.byteLength, stage)
-  return decodeUtf8(bytes, stage)
+  return decodeUtf8(bytes, stage, budget)
 }
 
 function readBoundedText(
@@ -1079,7 +1086,7 @@ function readBoundedText(
 ): { readonly value: string; readonly bytes: Uint8Array } {
   const bytes = decoding.readVarUint8Array(decoder)
   budget.visitDecodedPayloadBytes(bytes.byteLength, stage)
-  return { value: decodeUtf8(bytes, stage), bytes }
+  return { value: decodeUtf8(bytes, stage, budget), bytes }
 }
 
 function readAnyValue(
@@ -1373,7 +1380,8 @@ class StrictUpdateDecoderV1 extends Y.UpdateDecoderV1 {
     let client: number
     try {
       client = decoding.readVarUint(clone)
-    } catch {
+    } catch (error) {
+      this.budget.unexpected(error)
       return fail('invalid-update', this.stage)
     }
     this.budget.visitDeleteClientGroup(this.stage)
@@ -1439,6 +1447,7 @@ class StrictUpdateDecoderV1 extends Y.UpdateDecoderV1 {
     try {
       value = parseBoundedV1Json(view, scannerBudget, nativeJsonParse)
     } catch (error) {
+      this.budget.unexpected(error)
       if (error instanceof CutFailure) throw error
       return fail('invalid-update', this.stage)
     }
@@ -2030,6 +2039,7 @@ function decodeOwnedInput(
       fail('invalid-update', entry.stage)
     }
   } catch (error) {
+    budget.unexpected(error)
     if (error instanceof CutFailure) throw error
     return fail('invalid-update', entry.stage)
   }
@@ -3154,7 +3164,8 @@ function verifyStateVector(
   let decoded: Map<number, number>
   try {
     decoded = Y.decodeStateVector(vector)
-  } catch {
+  } catch (error) {
+    budget.unexpected(error)
     return fail('invalid-update', stage)
   }
   if (decoded.size !== ends.size) fail('invalid-update', stage)
@@ -3377,6 +3388,7 @@ function decodeCompleteState(
       fail('invalid-update', stage)
     }
   } catch (error) {
+    budget.unexpected(error)
     if (error instanceof CutFailure) throw error
     return fail('invalid-update', stage)
   }
@@ -3445,6 +3457,7 @@ function applyOwnedInput(
     Y.readUpdateV2(rawDecoder, document, null, strictDecoder)
     if (decoding.hasContent(rawDecoder)) fail('invalid-update', entry.stage)
   } catch (error) {
+    budget.unexpected(error)
     if (error instanceof CutFailure) throw error
     return fail('invalid-update', entry.stage)
   }
@@ -3567,6 +3580,7 @@ function createFinalizer(
         usage: lastUsage,
       })
     } catch (error) {
+      state.budget.unexpected(error)
       const failure = error instanceof CutFailure
         ? error.reason === 'capacity-refused'
           ? error
@@ -3596,14 +3610,16 @@ export function validateRegistrationCutForProjection(
 export function validateJournalCutForProjection(
   input: Extract<OwnedLiveUpdateCutInput, { mode: 'journal-candidate' }>,
   policy: OrderedLiveUpdateCutPolicy,
+  fatalUnexpectedErrors = false,
 ): JournalCutForProjectionResult {
-  return validateCut(input, policy, 'journal-candidate') as JournalCutForProjectionResult
+  return validateCut(input, policy, 'journal-candidate', fatalUnexpectedErrors) as JournalCutForProjectionResult
 }
 
 function validateCut(
   input: OwnedLiveUpdateCutInput,
   policy: OrderedLiveUpdateCutPolicy,
   projectionMode?: OwnedLiveUpdateCutInput['mode'],
+  fatalUnexpectedErrors = false,
 ): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult | JournalCutForProjectionResult {
   const hostileInput: unknown = input
   const hostilePolicy: unknown = policy
@@ -3611,7 +3627,7 @@ function validateCut(
   let projectionDocument: Y.Doc | undefined
   try {
     const ownedPolicy = snapshotPolicy(hostilePolicy)
-    budget = new ValidationBudget(ownedPolicy)
+    budget = new ValidationBudget(ownedPolicy, fatalUnexpectedErrors)
     const snapshot = snapshotInput(hostileInput, budget, projectionMode)
     const preEvidenceUsage = budget.cappedSnapshot()
     let projectedUsage = { ...preEvidenceUsage }
@@ -3749,6 +3765,7 @@ function validateCut(
     return Object.freeze({ kind: 'accepted', cut })
   } catch (error) {
     projectionDocument?.destroy()
+    if (fatalUnexpectedErrors && !(error instanceof CutFailure)) throw error
     const failure = error instanceof CutFailure
       ? error
       : new CutFailure('invalid-input', { kind: 'call' })

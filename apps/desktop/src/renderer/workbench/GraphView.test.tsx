@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "../../ipc/errorWords";
+import * as graphData from "./graphData";
 import {
   act,
   cleanup,
@@ -674,20 +677,20 @@ describe("GraphView", () => {
   });
 
   it("keeps file edges usable after chat failure and ignores a late disabled chat answer", async () => {
-    const chat = deferred<{mentions:ChatFileMentionRecord[]}>();
+    const chat = deferred<{entries:ChatFileMentionRecord[]}>();
     const linksEdges=vi.fn(async()=>page("a.md"));
-    const listChatFileMentions=vi.fn(()=>chat.promise);
+    const chatFileMentionsPage=vi.fn(()=>chat.promise);
     const onError=vi.fn();
-    vi.stubGlobal("dohcDesktop",{linksEdges,listChatFileMentions});
+    vi.stubGlobal("dohcDesktop",{linksEdges,chatFileMentionsPage});
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} chatMentionsAvailable/>);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
-    await waitFor(()=>expect(listChatFileMentions).toHaveBeenCalled());
+    await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
     await act(async()=>chat.reject(new Error("chat offline")));
     expect(onError).not.toHaveBeenCalled();
     expect(screen.getAllByText("a.md")).toBeTruthy();
-    listChatFileMentions.mockRejectedValue(new Error("chat offline"));
+    chatFileMentionsPage.mockRejectedValue(new Error("chat offline"));
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
     await waitFor(()=>expect(onError).toHaveBeenCalledOnce());
     expect(screen.getAllByText("a.md")).toBeTruthy();
@@ -741,30 +744,30 @@ describe("GraphView", () => {
     const linksEdges = vi.fn(async () => ({ ...page("a.md"), entries: [
       { source: "a.md", target: "picture.svg", kind: "markdown" as const, ordinal: 0 },
     ] }));
-    const listChatFileMentions = vi.fn(async () => ({ mentions: [mention] }));
-    vi.stubGlobal("dohcDesktop", { linksEdges, listChatFileMentions });
+    const chatFileMentionsPage = vi.fn(async () => ({ entries: [mention] }));
+    vi.stubGlobal("dohcDesktop", { linksEdges, chatFileMentionsPage });
     const { rerender } = render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
     await screen.findAllByText("a.md");
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
     await screen.findAllByText("Picture discussion");
-    expect(listChatFileMentions).toHaveBeenCalledOnce();
-    expect(listChatFileMentions).toHaveBeenCalledWith({ workspaceId: "ws", paths: ["a.md", "picture.svg"] });
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
+    expect(chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "ws" });
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
     // Opening another file that draws the same files asks for nothing new.
     for (const activePath of ["a.md", "picture.svg"]) {
       rerender(<GraphView workspaceId="ws" activePath={activePath} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
       await screen.findAllByText("Picture discussion");
     }
-    expect(listChatFileMentions).toHaveBeenCalledOnce();
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
   });
 
   it("keeps the chat overlay while a refreshed file walk is pending", async () => {
     const held = deferred<LinksEdgesResult>();
     const linksEdges = vi.fn().mockResolvedValue(page("a.md"));
-    const listChatFileMentions = vi.fn(async () => ({ mentions: [{
+    const chatFileMentionsPage = vi.fn(async () => ({ entries: [{
       attachment: {objectId:"a.md",pathHint:"a.md"}, thread: {id:"thread",title:"Discussion"},
     } as ChatFileMentionRecord] }));
-    vi.stubGlobal("dohcDesktop",{linksEdges,listChatFileMentions});
+    vi.stubGlobal("dohcDesktop",{linksEdges,chatFileMentionsPage});
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
     await screen.findAllByText("a.md");
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
@@ -773,9 +776,9 @@ describe("GraphView", () => {
     fireEvent.click(screen.getByLabelText("Refresh graph"));
     await screen.findByText("Gathering linked mentions");
     expect(screen.getAllByText("Discussion")).toBeTruthy();
-    expect(listChatFileMentions).toHaveBeenCalledOnce();
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
     await act(async()=>held.resolve(page("a.md")));
-    await waitFor(()=>expect(listChatFileMentions).toHaveBeenCalledTimes(2));
+    await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
   });
 
 });
@@ -790,3 +793,64 @@ function stubFileGraph(mock: { linksEdges: (...args: never[]) => Promise<GraphFi
       entries:graph.edges.map((edge,ordinal)=>({...edge,ordinal}))};
   }});
 }
+
+it("paints the first chat page, continues once, and deduplicates attachments across pages", async()=>{
+  const overlay = vi.spyOn(graphData, "withChatMentions");
+  try {
+  const later=deferred<unknown>();
+  const row=(id:string,title:string)=>({attachment:{attachmentId:id,objectId:"a.md",pathHint:"a.md"},thread:{id,title}} as ChatFileMentionRecord);
+  const first=row("one","First discussion"), second=row("two","Second discussion");
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[first],nextCursor:"next"}).mockReturnValueOnce(later.promise);
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await screen.findAllByText("First discussion");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  expect(chatFileMentionsPage.mock.calls.map(([input])=>input)).toEqual([{workspaceId:"ws"},{workspaceId:"ws",cursor:"next"}]);
+  expect(screen.getByText("Gathering linked mentions")).toBeTruthy();
+  await act(async()=>later.resolve({entries:[first,second],nextCursor:null}));
+  await screen.findAllByText("Second discussion");
+  expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+  expect(overlay.mock.lastCall?.[1]).toHaveLength(2);
+  expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+  } finally {
+    overlay.mockRestore();
+  }
+});
+it("discards a continuation after the chat toggle is disabled",async()=>{
+  const later=deferred<unknown>();
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[],nextCursor:"next"}).mockReturnValueOnce(later.promise);
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await act(async()=>later.resolve({entries:[{attachment:{attachmentId:"late",objectId:"a.md",pathHint:"a.md"},thread:{id:"late",title:"Late discussion"}}],nextCursor:"third"}));
+  expect(screen.queryByText("Late discussion")).toBeNull();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(2);
+});
+
+it.each(["chat-mention-access-changed", "chat-mention-version-changed"])("clears chat rows for %s, restarts once, then reports a repeated change", async reason => {
+  const changed = deferred<unknown>(), restarted = deferred<unknown>();
+  const row = { attachment: { attachmentId: "old", objectId: "a.md", pathHint: "a.md" }, thread: { id: "old", title: "Old access" } };
+  const chatFileMentionsPage = vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"old-cursor"})
+    .mockReturnValueOnce(changed.promise).mockReturnValueOnce(restarted.promise);
+  const onError = vi.fn();
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await screen.findAllByText("Old access");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  await act(async()=>changed.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(3));
+  expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws"});
+  expect(screen.queryByText("Old access")).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+  await act(async()=>restarted.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
+  expect(onError).toHaveBeenCalledOnce();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
+  expect(screen.getAllByText("a.md").length).toBeGreaterThan(0);
+});

@@ -107,7 +107,7 @@
   "listChatBookmarks",
   "listChatChannelShares",
   "listChatChannels",
-  "listChatFileMentions",
+  "chatFileMentionsPage",
   "listChatFollows",
   "listChatMessages",
   "listChatReactions",

@@ -320,6 +320,7 @@ dependencies = [
  "base64 0.23.1",
  "dohc-engine-collab",
  "dohc-engine-domain",
+ "dohc-engine-reader",
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "dohc-test-scratch",
@@ -329,6 +330,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "yrs",
 ]
 
@@ -424,10 +426,12 @@ dependencies = [
 name = "dohc-engine-runtime"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dohc-engine-collab",
  "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-files",
+ "dohc-engine-reader",
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-sync-http",
@@ -476,6 +480,7 @@ dependencies = [
  "sha2",
  "syn 2.0.119",
  "thiserror",
+ "yrs",
 ]
 
 [[package]]

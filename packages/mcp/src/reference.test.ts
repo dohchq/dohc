@@ -102,7 +102,7 @@ describe("CLI, MCP, and app channel reference", () => {
             throw new Error("parsed");
           },
         });
-        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb });
+        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: verb === "file-mentions" ? "chatFileMentions" : verb });
       }
       for (const flag of spec.flags ?? []) {
         expect(examples.flat(), `${verb} examples`).toContain(flag.name);

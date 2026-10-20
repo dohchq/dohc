@@ -3040,6 +3040,10 @@ fn left_folder<E>(
 }
 
 #[cfg(test)]
+#[path = "scene_unload_tests.rs"]
+mod scene_unload_tests;
+
+#[cfg(test)]
 mod left_folder_tests {
     use super::{LeftFolder, left_folder};
     use std::io::{Error, ErrorKind, Result};

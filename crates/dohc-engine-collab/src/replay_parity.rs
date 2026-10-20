@@ -1974,6 +1974,30 @@ fn scan_v2(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     scan(bytes, ScanVersion::V2)
 }
 
+/// In-memory reader identity includes every clock, origin, payload and delete.
+/// Any map ordering can change on replay. This never replaces the raw checkpoint
+/// hash checked on the reader response, or the future fold's state-vector CAS.
+pub(crate) fn reader_checkpoint_content_digest(bytes: &[u8]) -> Result<String, CollabError> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    struct Hash(Sha256);
+    impl Write for Hash {
+        fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            self.0.update(value.as_bytes());
+            Ok(())
+        }
+    }
+    let mut hash = Hash(Sha256::new());
+    // The internal structure uses ordered maps and canonical payload fingerprints.
+    write!(&mut hash, "{:?}", scan_v2(bytes)?).expect("hash formatting cannot fail");
+    Ok(hash
+        .0
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError> {
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();

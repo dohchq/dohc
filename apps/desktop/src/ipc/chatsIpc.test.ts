@@ -74,7 +74,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     listMessages: vi.fn<DesktopLinkedChatStore["listMessages"]>(async () => [message]),
     listThreads: vi.fn<DesktopLinkedChatStore["listThreads"]>(async () => [thread]),
     listThreadsForFile: vi.fn<DesktopLinkedChatStore["listThreadsForFile"]>(async () => [thread]),
-    listFileMentions: vi.fn<DesktopLinkedChatStore["listFileMentions"]>(async () => []),
+    fileMentionsPage: vi.fn<DesktopLinkedChatStore["fileMentionsPage"]>(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     getThreadRevision: vi.fn<DesktopLinkedChatStore["getThreadRevision"]>(async () => 7),
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
     ensureGeneralChannel: vi.fn<DesktopLinkedChatStore["ensureGeneralChannel"]>(async () => ({ id: "general", workspaceId: "workspace", name: "General", slug: "general", kind: "channel", type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 1 })),
@@ -176,7 +176,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
-    readWorkspace: () => workspace,
+    readWorkspace: () => workspace, currentCredentialGeneration: () => 0,
     stateDir: () => stateDirectory,
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
@@ -252,8 +252,8 @@ describe("chat sender binding", () => {
   const cases = [
     ...mutations.map(({ channel, payload }) => ({ channel, payload })),
     { channel: chatOperations.listFileChats.channel, payload: { path: "notes/a.md" } },
-    { channel: chatOperations.listChatFileMentions.channel, payload: { path: "notes/a.md" } },
-    { channel: chatOperations.listChatFileMentions.channel, payload: { paths: ["notes/a.md", "image.svg"] } },
+    { channel: chatOperations.chatFileMentionsPage.channel, payload: { subject: { path: "notes/a.md" } } },
+    { channel: chatOperations.chatFileMentionsPage.channel, payload: {} },
     { channel: chatOperations.listChatBookmarks.channel, payload: {} },
     { channel: chatOperations.saveChatBookmark.channel, payload: { target: { kind: "thread", threadId: "thread" }, mode: "live" } },
     { channel: chatOperations.archiveChatBookmark.channel, payload: { bookmarkId: "bookmark" } },
@@ -584,43 +584,23 @@ describe("targeted file resolution", () => {
     });
   });
 
-  it("syncs shared channels once for a drawn-file batch and retains subject identity", async () => {
+  it("reads one all-files page and syncs once without resolving drawn paths", async () => {
     const test = fixture();
-    test.resolveEngineFiles.mockResolvedValue([
-      { status: "found", objectId: "a", path: "a.md" },
-      { status: "found", objectId: "image", path: "image.svg" },
-    ]);
-    test.storeMethods.listFileMentions.mockImplementation(async ({ objectId }) => [{
-      attachment: { attachmentId: objectId!, threadId: test.thread.id, messageId: test.message.id,
-        targetKind: "file", objectId, pathHint: "old.md", createdAtMs: 1 },
-      thread: test.thread, message: test.message,
-    }]);
-    const result = await test.invoke(chatOperations.listChatFileMentions.channel, {
-      workspaceId: "workspace", paths: ["a.md", "image.svg"],
+    const result = await test.invoke(chatOperations.chatFileMentionsPage.channel, { workspaceId: "workspace" });
+    expect(result).toMatchObject({ entries: [], nextCursor: null });
+    expect(test.storeMethods.fileMentionsPage).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace", scope: expect.any(String), sharedChannelRowsUncovered: 0,
     });
-    expect(result).toMatchObject({ mentions: [
-      { attachment: { objectId: "a", pathHint: "a.md" } },
-      { attachment: { objectId: "image", pathHint: "image.svg" } },
-    ] });
-    expect(test.syncWorkspaceSharedChannels).toHaveBeenCalledTimes(1);
-    expect(test.resolveEngineFiles).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({workspaceId:"workspace"}), [{path:"a.md"},{path:"image.svg"}]);
-  });
-
-  it("keeps mention attachment identity when a path is reused", async () => {
-    const test = fixture();
-    test.captureMethods.resolveFileForPath.mockResolvedValue({ objectId: "replacement", path: "notes/a.md" });
-    const attachment = { attachmentId: "attachment", threadId: test.thread.id, messageId: test.message.id, targetKind: "file" as const, objectId: "object", pathHint: "notes/a.md", createdAtMs: 1 };
-    test.storeMethods.listFileMentions.mockResolvedValue([
-      { attachment, thread: test.thread, message: test.message },
-      { attachment: { ...attachment, attachmentId: "replacement-attachment", objectId: "replacement" }, thread: test.thread, message: test.message },
-    ]);
-    expect(await test.invoke(chatOperations.listChatFileMentions.channel, { workspaceId: "workspace", path: "./notes//a.md" })).toMatchObject({ mentions: [
-      { attachment: { objectId: "replacement", pathHint: "notes/a.md" } },
-    ] });
-    expect(test.captureMethods.resolveFileForPath).toHaveBeenCalledExactlyOnceWith("./notes//a.md");
-    expect(test.storeMethods.listFileMentions).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "replacement" });
-    expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
+    expect(test.syncWorkspaceSharedChannels).toHaveBeenCalledOnce();
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
+  });
+  it("passes the optional subject and cursor through without draining", async () => {
+    const test = fixture();
+    await test.invoke(chatOperations.chatFileMentionsPage.channel, { workspaceId: "workspace", subject: { path: "notes/a.md" }, cursor: "sealed" });
+    expect(test.storeMethods.fileMentionsPage).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace", subject: { path: "notes/a.md" }, cursor: "sealed",
+      scope: expect.any(String), sharedChannelRowsUncovered: 0,
+    });
   });
   it("resolves distinct linked file ids and retains display hints for absent objects", async () => {
     const test = fixture();

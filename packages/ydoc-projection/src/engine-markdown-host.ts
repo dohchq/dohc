@@ -117,7 +117,7 @@ export async function runEngineMarkdownHost() {
       async function respond(result: EngineMarkdownProof, delta: Uint8Array) {
         if (result.kind === 'refused') return control({id, ...result})
         requireWire(result.sourceSha256 === sourceDeclaration.sha256 && result.sourceByteLength === sourceDeclaration.length)
-        await control({id, kind: r.method === 'construct' ? 'constructed' : 'proved', sourceSha256: result.sourceSha256,
+        await control({id, kind: result.kind === 'expired' ? 'expired' : r.method === 'construct' ? 'constructed' : 'proved', sourceSha256: result.sourceSha256,
           sourceByteLength: result.sourceByteLength, projectionSha256: result.projectionSha256,
           stateSha256: result.stateSha256,
           delta: {length: delta.length, sha256: sha(delta)}})

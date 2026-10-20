@@ -49,6 +49,8 @@ file-guard = "=0.2.0"
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
+base64 = "0.22"
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 yrs = "=0.27.3"
 tokio = { version = "1", features = [

@@ -23,6 +23,14 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
 ]};
 servedLog = logPage;
 
+it.each(["view", "comment"] as const)("current-only %s agents cannot enumerate History", async access => {
+  const f = fixture(access), client = await f.connect(await f.exchange());
+  expect((await client.listTools()).tools.map(tool => tool.name)).not.toContain("dohc_list_changes");
+  await expect(client.callTool({name:"dohc_list_changes",arguments:{since:0}})).rejects.toThrow("not found");
+  expect(f.calls.some(call=>new URL(call.url).pathname === "/sync/link/log")).toBe(false);
+  expect((await client.callTool({name:"dohc_share_status",arguments:{}})).structuredContent).toMatchObject({summary:expect.stringContaining("History is unavailable")});
+});
+
 it("returns identical opaque MCP refusals before and after evicting a revoked session", async () => {
   const f = fixture();
   const bearer = await f.exchange();
@@ -259,7 +267,7 @@ it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-c
 });
 
 it("lists the link log as changes through the browser's log route", async () => {
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {since: 7, limit: 50}})).structuredContent).toEqual({ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, changes: [
     {recordedAtMs: 8000, operation: "write", path: "doc.md", afterBlobSha256: first, contentKind: "text"},
     {recordedAtMs: 9000, operation: "write", path: "doc.md", afterBlobSha256: second, contentKind: "text", beforeBlobSha256: first},
@@ -279,7 +287,7 @@ it("lists the link log as changes through the browser's log route", async () => 
 it("shows a pinned version's fork snapshot as one version change", async () => {
   servedLog = {ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, ops: [{relaySeq: 5, originSeq: 5, opKind: "version.create", recordedAtMs: 5000,
     payload: {versionId: "v1", forkSnapshots: [{path: "doc.md", blobSha256: first}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md"}]}}]};
-  const f = fixture("view", false, "v1"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true, "v1"); const client = await f.connect(await f.exchange());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {}})).structuredContent).toEqual({ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, changes: [
     {recordedAtMs: 5000, operation: "version", versionId: "v1", files: [
       {path: "doc.md", blobSha256: first, contentKind: "text"}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md", contentKind: "text"},
@@ -289,14 +297,14 @@ it("shows a pinned version's fork snapshot as one version change", async () => {
 
 it("returns an error and no changes for a malformed log page", async () => {
   servedLog = {...logPage, ops: [...logPage.ops, moment(13, {operation: "write", payloadAfterPath: "doc.md", payloadAfterBlobSha256: "not-a-hash"})]};
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   const result = await client.callTool({name: "dohc_list_changes", arguments: {}});
   expect(result).toMatchObject({isError: true});
   expect(result.structuredContent).toBeUndefined();
 });
 
 it("refuses the log after the link is revoked", async () => {
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   f.revoke();
   await expect(client.callTool({name: "dohc_list_changes", arguments: {}})).rejects.toThrow();
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/log")).toBe(false);
@@ -321,8 +329,7 @@ it.each([
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");
   expect(summary).toContain("this share's comments");
-  expect(summary).toContain("retained history of files that remain in this share");
-  expect(summary).toContain("Deleted files and files moved out lose their readable history.");
+  expect(summary).toContain(access === "edit" ? "retained History of files that remain in this share" : "History is unavailable with view or comment access.");
   if (access !== "edit") expect(summary).toContain(access === "view" ? "does not let you comment or edit" : "does not let you edit files");
   if (versionId !== null) {
     expect(summary).toContain("pinned version");

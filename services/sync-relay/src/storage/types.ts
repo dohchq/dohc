@@ -898,6 +898,8 @@ export interface SyncRelayStorage {
     epochLogFloor: number;
   }): SyncRelayLogRow[];
   captureReadRevisionMatches(): () => boolean;
+  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null | "reset";
+  currentFileObjectId(input: { workspaceId: string; versionId: string; path: string }): string | undefined;
   currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null;
   currentObjectBlobByteLength(input: {
     workspaceId: string;

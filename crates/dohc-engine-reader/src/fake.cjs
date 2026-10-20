@@ -25,6 +25,8 @@ function answer(r) {
     sourceSha256:r.source.sha256, sourceByteLength:r.source.length,
     projectionSha256:hash('projection'), stateSha256:hash('state'),
     delta:{length:output.length, sha256:hash(output)}};
+  if (fault.startsWith('expired')) response.kind = 'expired';
+  if (fault === 'expired-delta') response.delta.length = 2;
   if (fault === 'sha') response.sourceSha256 = hash('wrong');
   if (fault === 'length') response.sourceByteLength++;
   if (fault === 'obsolete-flag') response.strictJournal = true;

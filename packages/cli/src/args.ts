@@ -1,3 +1,4 @@
+import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
@@ -20,6 +21,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
   | ({ verb: "linksIn" } & InInput)
   | ({ verb: "linksResolve" } & ResolveInput)
@@ -1124,7 +1126,19 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: CHAT_VERBS,
+    verbs: { ...CHAT_VERBS, "file-mentions": {
+      capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
+      operands: "", flags: [
+        { name: "--subject", value: "subject", text: "A file path or objectId as JSON." },
+        { name: "--cursor", value: "cursor", text: "Continue the previous page." },
+      ], parse: input => {
+        noExtraArgs(input.operands, "chat file-mentions");
+        const subject = lastValue(input, "--subject");
+        return { verb: "chatFileMentions", ...ChatFileMentionsInput.parse({
+          ...(subject ? { subject: JSON.parse(subject) } : {}), cursor: lastValue(input, "--cursor"),
+        }) };
+      },
+    } },
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
