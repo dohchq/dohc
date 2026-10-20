@@ -498,7 +498,7 @@ impl ActorHandle {
             pending = remaining;
             if locked {
                 #[cfg(test)]
-                tests::undo_probe::checkpoint_wait(&workspace).await;
+                super::history_operations::turns::tests::checkpoint_wait(&workspace).await;
                 Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone()).await?;
             } else {
                 locked_since = None;
