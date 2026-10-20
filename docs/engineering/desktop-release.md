@@ -44,8 +44,9 @@ Only the Windows package job receives the Windows signing secrets. Linux receive
 
 The macOS signing identity and notarization credentials stay in a release
 keychain on the release owner's Mac. They never enter GitHub, and no workflow
-can read them. The keychain stays locked between releases, so publishing the
-macOS files needs the release owner to unlock it.
+can read them. The keychain stays locked between releases. Publishing the
+macOS files needs the release owner to unlock it, or the password that the
+owner [saved for unattended releases](#let-releases-run-unattended).
 
 ## Provide self-hosted runners
 
@@ -218,7 +219,7 @@ The release is not finished until the command reports that the release holds the
    ```
 
 4. Update a clean checkout of `main`, then run the same command from it without `--dry-run`.
-5. The command asks for the release keychain's password twice: before it builds, and before it packages. Type it each time.
+5. If you [saved the release keychain's password](#let-releases-run-unattended), the command unlocks the keychain itself. Otherwise, it asks for the password twice: before it builds, and before it packages. Type it each time.
 
 A real run opens the release keychain for two short periods. Before it builds,
 the command unlocks the keychain, checks that the identity is valid and that the
@@ -233,9 +234,10 @@ packaging starts, someone opened it while the build ran. The command says so,
 locks it, and unlocks it again the usual way. The command also locks the
 keychain when it ends, however it ends.
 
-To unlock the keychain in a terminal, `security` asks for the password. Without
-a terminal, the command prints the `security unlock-keychain` command and waits
-up to 30 minutes for someone to run it.
+With a saved password, the command unlocks the keychain itself. Otherwise, in a
+terminal, `security` asks for the password. Without a terminal, the command
+prints the `security unlock-keychain` command and waits up to 30 minutes for
+someone to run it.
 
 While the release keychain is unlocked, any program running as you can sign
 with the Developer ID identity through `codesign` and notarize with the profile
@@ -343,8 +345,10 @@ already has a Mac update manifest, because Macs may already update from it.
 The Mac needs the repository's development tools, the Xcode command line
 tools, and `gh` signed in with write access to `dohchq/dohc`. The signing
 identity, the notarization credentials, and the PostHog key live only in a
-release keychain with its own password. Nothing goes in the login keychain or
-an environment variable, and no key file stays on the Mac. The release keychain
+release keychain with its own password. Nothing goes in an environment
+variable, and no key file stays on the Mac. Only the release keychain's own
+password can go in the login keychain, if you
+[let releases run unattended](#let-releases-run-unattended). The release keychain
 is not in the keychain search list, so programs that search your keychains do
 not find it.
 
@@ -370,8 +374,9 @@ not find it.
    The command locks the keychain itself, so this limit matters only if the
    command cannot. During a release, the longest time without use is one
    notarization wait.
-4. Import the Developer ID Application certificate. `-x` makes its private key
-   non-exportable, and `-T` lets `codesign` use the key without asking. While
+4. Import the Developer ID Application certificate. `-x` makes macOS refuse to
+   export its private key, though anyone with the keychain file and its
+   password can still decrypt it. `-T` lets `codesign` use the key without asking. While
    the keychain is unlocked, any program running as you can run `codesign`
    with this identity:
 
@@ -423,6 +428,50 @@ not find it.
 
 The first signed run can show a dialog that asks whether `codesign` may use
 the key. Enter the release keychain's password and choose **Always Allow**.
+
+### Let releases run unattended
+
+To run releases with nobody at the Mac, save the release keychain's password
+in your login keychain. `security` asks for the password twice:
+
+```sh
+security add-generic-password -U -a "$USER" -s dohc-release-keychain-password -w
+```
+
+The command then unlocks the release keychain itself at the same two points,
+and locks it again as before.
+
+This gives up what the release keychain's own password protects. While you
+are logged in, any program running as you can read the saved password with
+`security`. With it, a program can:
+
+- Unlock the release keychain at any time, sign with your Developer ID,
+  notarize, and read the PostHog key.
+- Copy the keychain file and decrypt it on another computer. That gives it the
+  Developer ID private key, the App Store Connect API key, and the PostHog key.
+  `-x` does not prevent this. Deleting the saved password afterwards does not
+  take the keys back.
+
+The 30-minute and sleep locks no longer limit this. Code that runs during a
+build can unlock the keychain, sign, and lock it again without the command
+noticing. Anyone with your login password can also open the release keychain,
+including from a backup of both keychain files. Without a saved password, a
+program can sign, notarize, and read the PostHog key only while a release has
+the keychain unlocked, and cannot take the Developer ID key or the App Store
+Connect API key.
+
+If you think a program took the keys, revoke the App Store Connect API key and the
+PostHog key, and email product-security@apple.com to ask Apple to revoke the
+Developer ID certificate. You cannot revoke it from your account. After Apple
+revokes it, Macs no longer install releases signed with it.
+
+If the saved password does not unlock the release keychain, the command stops
+before it signs anything. Save the right one with the same command, or delete
+it. To type the password again at each release, delete the saved one:
+
+```sh
+security delete-generic-password -s dohc-release-keychain-password
+```
 
 ## Choose an update feed
 
