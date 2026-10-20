@@ -4330,15 +4330,30 @@ async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went
     // desktop never learns either file existed. Both files are deleted
     // outside dohc while the engine is down, and capture retires them. The
     // replacements must not write them back: the engine's moments say they
-    // existed. A document that never had a file still gets one from its
-    // replacement, and a fresh open at a path whose file was deleted and
-    // retired is a new document, whose first save creates the file.
+    // existed. A drawing's retire keeps its Y.Doc rows, so even a fresh
+    // open resumes it, as a close debt's payment or a reopen does, and must
+    // not write it back either. A document that never had a file still gets
+    // one from its replacement, and a fresh open at a path whose file was
+    // deleted and retired is a new document, whose first save creates the
+    // file.
     const WS: &str = "ws-rpc-ydoc-unreported-write";
     const SETTLED: &str = "notes/settled.md";
     const CLOSED: &str = "notes/closed.md";
     const DRAFT: &str = "notes/draft.md";
     const RETIRED: &str = "notes/retired.md";
+    const DRAWING: &str = "drawings/kept.excalidraw";
     let scratch = ScratchDir::new().expect("scratch");
+    let drawing = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "box", "type": "rectangle", "version": 1, "versionNonce": 1,
+            "isDeleted": false, "x": 0, "y": 0, "width": 10, "height": 10, "index": "a0" }],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("scene");
+    write_file(scratch.path(), DRAWING, drawing.as_bytes());
+    let open_drawing = json!({ "versionId": "main", "path": DRAWING, "contentKind": "scene",
+        "seedFromArtifact": true });
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, WS, 1).await;
 
@@ -4397,9 +4412,19 @@ async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went
         )
         .await;
     }
-    call(&transport, &handle, 130, "workspace.close", json!({})).await;
+    let drawn = call(&transport, &handle, 130, "ydoc.open", open_drawing.clone()).await;
+    assert_eq!(drawn["head"], json!("present"));
+    call(
+        &transport,
+        &handle,
+        131,
+        "ydoc.evict",
+        json!({ "sessionId": drawn["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 140, "workspace.close", json!({})).await;
     drop(transport);
-    let written = [SETTLED, CLOSED, RETIRED];
+    let written = [SETTLED, CLOSED, RETIRED, DRAWING];
     for path in written {
         std::fs::remove_file(scratch.path().join(path)).expect("delete while dohc is down");
     }
@@ -4432,6 +4457,21 @@ async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went
         )
         .await;
     }
+
+    let resumed = call(&restarted, &handle, 450, "ydoc.open", open_drawing).await;
+    assert_eq!(resumed["head"], json!("absent"));
+    assert_eq!(resumed["lineage"], json!("existing"));
+    let resumed = resumed["sessionId"].as_str().expect("session id");
+    assert_settle_refuses_over_deleted_file(&restarted, &handle, &scratch, 451, DRAWING, resumed)
+        .await;
+    call(
+        &restarted,
+        &handle,
+        452,
+        "ydoc.evict",
+        json!({ "sessionId": resumed }),
+    )
+    .await;
 
     let draft = open_continuation_and_type(
         &restarted,
@@ -4488,6 +4528,144 @@ async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went
         .await;
     }
     call(&restarted, &handle, 600, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_document_at_a_retired_path_reopened_before_its_first_save_is_refused() {
+    // A known limit, pinned. With no head, a document's object comes from its
+    // path, so an earlier file's moments at the path count for a new document
+    // there. Journaled, then reopened before its first save, the new document
+    // is refused as if its file had been deleted outside dohc. Save it again
+    // then puts back an empty file, as for New File, and the save writes it.
+    const WS: &str = "ws-rpc-ydoc-retired-path-reused";
+    const PATH: &str = "notes/reused.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), PATH, b"an earlier file\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 1).await;
+    call(&transport, &handle, 2, "workspace.close", json!({})).await;
+    drop(transport);
+    std::fs::remove_file(scratch.path().join(PATH)).expect("delete while dohc is down");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 10).await;
+    assert_retired(&transport, &handle, 20, PATH).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        30,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    call(
+        &transport,
+        &handle,
+        31,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": opened["sessionId"],
+            "updateBase64": plaintext_update("a new document ")
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        32,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let reopened =
+        open_continuation_and_type(&transport, &handle, 40, PATH, &opened["objectId"]).await;
+    assert_settle_refuses_over_deleted_file(&transport, &handle, &scratch, 42, PATH, &reopened)
+        .await;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(scratch.path().join(PATH))
+        .expect("Save it again's empty file");
+    let saved = call(
+        &transport,
+        &handle,
+        50,
+        "ydoc.settle",
+        json!({ "sessionId": reopened, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(saved["materialized"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("saved file"),
+        saved["content"].as_str().expect("content")
+    );
+    call(
+        &transport,
+        &handle,
+        51,
+        "ydoc.close",
+        json!({ "sessionId": reopened }),
+    )
+    .await;
+    call(&transport, &handle, 52, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_under_another_spelling_of_a_files_name_does_not_record_it() {
+    // A case-insensitive volume, the default on macOS and Windows, opens
+    // notes/caseOnly.md for notes/CASEONLY.md. That file belongs to another
+    // document, so the open must not record it as this document's. New File's
+    // file, found under its own name, is recorded.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), "notes/caseOnly.md", b"another document\n");
+    let case_insensitive = scratch.path().join("notes/CASEONLY.md").exists();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-case-spelling", 1).await;
+    let (_, new_file) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "seen").await;
+    let respelled = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/CASEONLY.md", "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(respelled["head"], json!("absent"));
+    for (id, opened) in (3..).zip([&new_file, &respelled]) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+
+    let store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 6)
+        .expect("open store");
+    let seen = |object_id: &Value| -> bool {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_files_seen WHERE object_id = ?1)",
+                    [object_id.as_str().expect("object id")],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .expect("read the record")
+    };
+    assert!(seen(&new_file["objectId"]), "New File's file is recorded");
+    assert!(
+        !seen(&respelled["objectId"]),
+        "another spelling's file is not recorded (case-insensitive volume: {case_insensitive})"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

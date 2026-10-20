@@ -144,6 +144,21 @@ pub(super) struct YdocSessionView {
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
 }
 
+/// Whether each part of `path` is on disk under `root` with exactly that name.
+fn names_exactly(root: &std::path::Path, path: &str) -> bool {
+    let mut directory = root.to_path_buf();
+    for name in path.split('/') {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == name) {
+            return false;
+        }
+        directory.push(name);
+    }
+    true
+}
+
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
     match error {
         RuntimeError::YdocOpenConflict { .. } => {
@@ -1085,25 +1100,35 @@ impl EngineService {
         let open_head_sha = match state.head_blob_sha256.clone() {
             Some(head) => Some(head),
             None => {
-                let artifact_path = open.root.join(&params.path);
-                // Whether the file is there, and if so whether it is empty.
+                let root = open.root.clone();
+                let path = params.path.clone();
+                // Whether the file is there, whether it is empty, and whether
+                // it is there under exactly this path. A case-insensitive
+                // volume also finds it under another spelling, which names
+                // another document.
                 let file = tokio::task::spawn_blocking(move || {
-                    std::fs::symlink_metadata(artifact_path)
+                    let metadata = std::fs::symlink_metadata(root.join(&path))
                         .ok()
-                        .filter(|metadata| metadata.file_type().is_file())
-                        .map(|metadata| metadata.len() == 0)
+                        .filter(|metadata| metadata.file_type().is_file())?;
+                    Some((metadata.len() == 0, names_exactly(&root, &path)))
                 })
                 .await
                 .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                let empty = file.is_some_and(|(empty, _)| empty);
+                let seen = file.is_some_and(|(_, exact)| exact);
                 let continues = params.expected_object_id.is_some() || state.lineage_existing;
-                let existed = (file.is_some() || continues)
+                // A known limit: with no head, the object comes from the path,
+                // so an earlier file at this path counts for a new document
+                // there. Journaled and reopened before its first save, that
+                // document is refused like a deleted file, and Save it again
+                // writes it.
+                let existed = (seen || continues)
                     && open
                         .actor
-                        .ydoc_file_has_existed(state.key.clone(), file.is_some())
+                        .ydoc_file_has_existed(state.key.clone(), seen)
                         .await
                         .map_err(map_runtime)?;
-                (file == Some(true) || (continues && existed))
-                    .then(|| dohc_engine_storage::hex_sha256(b""))
+                (empty || (continues && existed)).then(|| dohc_engine_storage::hex_sha256(b""))
             }
         };
         // The read committed the document's pulled edits, so the open runs to
@@ -1649,13 +1674,16 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
-        self.ydoc_settle_inner(
-            &cancellation,
-            handle.as_ref(),
-            &params.session_id,
-            params.summary.as_deref(),
-        )
-        .await
+        let settled = self
+            .ydoc_settle_inner(
+                &cancellation,
+                handle.as_ref(),
+                &params.session_id,
+                params.summary.as_deref(),
+            )
+            .await?;
+        serde_json::to_value(settled)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     async fn ydoc_settle_inner(
@@ -1664,7 +1692,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
-    ) -> Result<Value, WireError> {
+    ) -> Result<YdocSettleResult, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
         let settled = open
             .actor
@@ -1707,7 +1735,7 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        serde_json::to_value(YdocSettleResult {
+        Ok(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
             content: settled.content,
@@ -1719,7 +1747,6 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -2083,6 +2110,17 @@ mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_matches_only_its_exact_spelling_on_disk() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        std::fs::create_dir(scratch.path().join("notes")).expect("folder");
+        std::fs::write(scratch.path().join("notes/caseOnly.md"), b"").expect("file");
+        assert!(super::names_exactly(scratch.path(), "notes/caseOnly.md"));
+        for other in ["notes/CASEONLY.md", "Notes/caseOnly.md", "notes/missing.md"] {
+            assert!(!super::names_exactly(scratch.path(), other), "{other}");
+        }
+    }
+
     #[test]
     fn desktop_automation_drafts_do_not_require_server_declarations() {
         let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
