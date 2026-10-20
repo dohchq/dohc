@@ -879,7 +879,7 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
             let queued: i64 = store.read_with(|c| {
                 c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
                     r.get(0)
-                })
+                }).map_err(StorageError::corrupt_public)
             })?;
             assert_eq!(queued, 1);
             Ok(())
@@ -894,7 +894,7 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
             let queued: i64 = store.read_with(|c| {
                 c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
                     r.get(0)
-                })
+                }).map_err(StorageError::corrupt_public)
             })?;
             let drained =
                 dohc_engine_sync::drain_deferred_ydoc_for_key(store, cache, &key, &NoFaults)?;
@@ -970,7 +970,7 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
                     "SELECT errors_json FROM history_undo_plans WHERE request_id=?1",
                     [request],
                     |r| r.get(0),
-                )
+                ).map_err(StorageError::corrupt_public)
             })?)
         })
         .await
