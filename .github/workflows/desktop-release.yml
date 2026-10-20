@@ -1,6 +1,6 @@
 name: Desktop Release
 # The scheduled nightly job finds its run by the commit it requested.
-run-name: Desktop Release${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
+run-name: Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
 
 # Releases start only by dispatch and run only on self-hosted runners.
 # Cloud runners stay off (AGENTS.md). This workflow builds Windows and Linux.

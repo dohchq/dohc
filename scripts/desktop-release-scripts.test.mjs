@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
@@ -18,7 +18,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { load } from "js-yaml";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
-import { NIGHTLY_AGENT_LABEL, acquireNightlyLock, nightlyAgentDefinition, nightlyDecision, runNightly, runTitle, verifiedNightly, waitForQueue, waitForRun } from "./release-nightly.mjs";
+import { NIGHTLY_AGENT_LABEL, nightlyAgentDefinition, nightlyDecision, runNightly, runTitle, verifiedNightly, waitForQueue, waitForRun } from "./release-nightly.mjs";
+import { LOCK_BUSY, releaseLockHeld } from "./release-lock.mjs";
 
 const temporaryDirectories = [];
 async function mkdtemp(prefix) {
@@ -1614,7 +1615,7 @@ test("only a full nightly verification of main counts as verified", () => {
 
 // Answers the commands the nightly job runs. The job's run is 9. Run 8 ran
 // earlier, and run 10 is someone else's dispatch that starts at the same time.
-function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical" } = {}) {
+function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical", dryRun = false } = {}) {
   const calls = [];
   const tag = "v0.1.1-nightly.20261020.42.1";
   let dispatched = false;
@@ -1634,8 +1635,9 @@ function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNight
     if (line.startsWith("gh api --paginate repos/dohchq/dohc/actions/runners")) return ok(ONLINE_RUNNERS.map(runner => JSON.stringify(runner)).join("\n"));
     if (line.startsWith("gh run list")) {
       const earlier = { databaseId: 8, headSha: YESTERDAY.commit, url: "https://github.com/dohchq/dohc/actions/runs/8", displayTitle: "Desktop Release" };
-      const others = { databaseId: 10, headSha: NIGHTLY_HEAD, url: "https://github.com/dohchq/dohc/actions/runs/10", displayTitle: "Desktop Release" };
-      const ours = { databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9", displayTitle: runTitle(NIGHTLY_HEAD) };
+      // Someone's stable release for the same commit, dispatched at the same time.
+      const others = { databaseId: 10, headSha: NIGHTLY_HEAD, url: "https://github.com/dohchq/dohc/actions/runs/10", displayTitle: `Desktop Release latest for ${NIGHTLY_HEAD}` };
+      const ours = { databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9", displayTitle: runTitle(NIGHTLY_HEAD, dryRun) };
       return ok(JSON.stringify(dispatched ? [others, ours, earlier] : [earlier]));
     }
     if (line.startsWith("gh workflow run")) { dispatched = true; return ok(""); }
@@ -1700,39 +1702,27 @@ test("a nightly publishes nothing on a quiet night, a busy queue, a moved main, 
   await assert.rejects(runNightly({}, nightlyHost(fakeNightly({ compare: "diverged" })).deps), /which is not on main/);
 });
 
-test("a nightly keeps following its run through gh errors, cancels one still waiting at the limit, and never cancels a publish", async () => {
-  const waiting = { status: "queued", jobs: [{ name: "Preflight", status: "queued" }] };
-  const publishing = { status: "in_progress", jobs: [{ name: "Publish", status: "in_progress" }] };
+test("a nightly keeps following its run through gh errors, and leaves a run still going at its limit to finish", async () => {
   let clock = 0;
   const options = { wait: async ms => { clock += ms; }, now: () => clock, limitMs: 3000, pollMs: 1000 };
-
-  const flaky = fakeNightly({ views: ["error", "error", { status: "completed", conclusion: "success", jobs: [] }] });
-  assert.deepEqual(await waitForRun(flaky.run, 9, options), { conclusion: "success", cancelled: false });
-
-  clock = 0;
-  const stuck = fakeNightly({ views: [waiting, waiting, waiting, waiting, { status: "completed", conclusion: "cancelled", jobs: [] }] });
-  assert.deepEqual(await waitForRun(stuck.run, 9, options), { conclusion: "cancelled", cancelled: true });
-  assert.equal(stuck.calls.filter(call => call.startsWith("gh run cancel 9")).length, 1);
+  const flaky = fakeNightly({ views: ["error", "error", { status: "completed", conclusion: "success" }] });
+  assert.equal(await waitForRun(flaky.run, 9, options), "success");
 
   clock = 0;
-  const late = fakeNightly({ views: [publishing, publishing, publishing, publishing, publishing, { status: "completed", conclusion: "success", jobs: [] }] });
-  assert.deepEqual(await waitForRun(late.run, 9, options), { conclusion: "success", cancelled: false });
-  assert.ok(!late.calls.some(call => call.startsWith("gh run cancel")), "a run that started publishing is never cancelled");
+  const going = fakeNightly({ views: [{ status: "queued" }] });
+  assert.equal(await waitForRun(going.run, 9, options), null);
+  assert.equal(clock, 3000);
+  assert.ok(!going.calls.some(call => call.startsWith("gh run cancel")), "cancelling could interrupt a publish, so the job never cancels");
 
   clock = 0;
   await assert.rejects(waitForRun(fakeNightly({ views: ["error"] }).run, 9, { ...options, failureLimit: 3 }), /could not read the run 3 times in a row: HTTP 502/);
 
-  clock = 0;
-  const neverStops = fakeNightly({ views: [waiting] });
-  await assert.rejects(waitForRun(neverStops.run, 9, { ...options, graceMs: 2000 }), /still not finished 0\.0\d+ minutes after the job's .+ limit, though the job cancelled it/);
-  assert.equal(neverStops.calls.filter(call => call.startsWith("gh run cancel 9")).length, 1);
-
   const lost = fakeNightly({ views: ["error"] });
   assert.match(await runNightly({}, nightlyHost(lost).deps), /lost track of \[Desktop Release\]\(.+\) for aaaaaaaaa: .+If it publishes, the next night adds its macOS files\./);
 
-  const stuckNight = fakeNightly({ views: [...Array(80).fill(waiting), { status: "completed", conclusion: "cancelled", jobs: [] }] });
-  const stuckHost = nightlyHost(stuckNight);
-  assert.match(await runNightly({}, stuckHost.deps), /still had not started publishing after 6 hours, so the job cancelled it\. Nothing was published\. Check that the runners on ICE-PC are online\./);
+  const stuck = fakeNightly({ views: [{ status: "queued" }] });
+  const stuckHost = nightlyHost(stuck);
+  assert.match(await runNightly({}, stuckHost.deps), /was still going after 6 hours\. Check that the runners on ICE-PC are online\. If it publishes, the next night adds its macOS files\./);
   assert.deepEqual(stuckHost.macs, []);
 });
 
@@ -1761,7 +1751,7 @@ test("a nightly whose macOS files fail reports the command that finishes them", 
 });
 
 test("a nightly dry run dispatches with dry_run=true, does not wait for verification, and adds no macOS files", async () => {
-  const fake = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
+  const fake = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD }, dryRun: true });
   const host = nightlyHost(fake, { queueIdle: async () => assert.fail("a dry run does not wait for the queue"), verifiedHead: () => assert.fail("a dry run needs no verification") });
   assert.match(await runNightly({ dryRun: true }, host.deps), /dry run of Desktop Release passed for aaaaaaaaa/);
   assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=true -f commit=${NIGHTLY_HEAD}`));
@@ -1779,19 +1769,30 @@ test("the nightly job waits for the verification queue to finish, up to its limi
   assert.equal(clock, 5000);
 });
 
-test("one nightly run holds the lock at a time, and a lock whose process is gone is taken over", async () => {
-  const lock = join(await mkdtemp(join(tmpdir(), "dohc-nightly-lock-")), "nightly.lock");
-  const release = acquireNightlyLock(lock);
-  assert.equal(readFileSync(lock, "utf8"), String(process.pid));
-  assert.throws(() => acquireNightlyLock(lock), new RegExp(`Another nightly run \\(pid ${process.pid}\\) is in progress`));
-  release();
-  assert.equal(existsSync(lock), false);
-  writeFileSync(lock, "2147483646");
-  const again = acquireNightlyLock(lock);
-  assert.equal(readFileSync(lock, "utf8"), String(process.pid), "a dead process's lock is replaced");
-  writeFileSync(lock, "2147483646");
-  again();
-  assert.equal(readFileSync(lock, "utf8"), "2147483646", "a run removes only its own lock");
+test("release commands on the Mac take one lock that the system releases with the last process holding it", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-release-lock-"));
+  const lock = join(dir, "release.lock");
+  const script = join(dir, "hold.mjs");
+  // Under the lock, the command starts a child that inherits it, then waits to be stopped.
+  await writeFile(script, `import { spawn } from "node:child_process";
+import { underReleaseLock } from ${JSON.stringify(pathToFileURL(fileURLToPath(new URL("./release-lock.mjs", import.meta.url))).href)};
+const locked = underReleaseLock(process.argv[2]);
+if (locked !== null) process.exit(locked);
+if (process.argv[3] === "child") spawn(process.execPath, [process.argv[1], process.argv[2]], { stdio: "inherit" });
+setInterval(() => {}, 1000);
+`);
+  const holder = spawn(process.execPath, [script, lock, "child"], { stdio: "ignore", env: { ...process.env, DOHC_RELEASE_LOCK_HELD: "" } });
+  for (const deadline = Date.now() + 10_000; !releaseLockHeld(lock); await new Promise(resolve => setTimeout(resolve, 50))) {
+    if (Date.now() > deadline) assert.fail("the first command never took the lock");
+  }
+  const second = await promisify(execFile)(process.execPath, [script, lock], { timeout: 10_000, env: { ...process.env, DOHC_RELEASE_LOCK_HELD: "" } }).then(() => 0, error => error.code);
+  assert.equal(second, LOCK_BUSY, "a second command does not run while the first holds the lock");
+  // Killed outright, the holder leaves no stale lock once its processes are gone.
+  spawnSync("pkill", ["-KILL", "-f", script]);
+  for (const deadline = Date.now() + 10_000; releaseLockHeld(lock); await new Promise(resolve => setTimeout(resolve, 50))) {
+    if (Date.now() > deadline) assert.fail("the lock outlived the commands that held it");
+  }
+  holder.kill("SIGKILL");
 });
 
 test("the nightly LaunchAgent runs at 04:00 in the login session from a clean checkout of main, and reports when it cannot update it", () => {
@@ -1807,8 +1808,9 @@ test("the nightly LaunchAgent runs at 04:00 in the login session from a clean ch
 });
 
 test("Desktop Release names the requested commit in its run title and builds nothing when main is elsewhere", async () => {
-  assert.equal(runTitle(NIGHTLY_HEAD), `Desktop Release for ${NIGHTLY_HEAD}`);
-  assert.equal(releaseWorkflow["run-name"], "Desktop Release${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}");
+  assert.equal(runTitle(NIGHTLY_HEAD, false), `Desktop Release nightly for ${NIGHTLY_HEAD}`);
+  assert.equal(runTitle(NIGHTLY_HEAD, true), `Desktop Release nightly dry run for ${NIGHTLY_HEAD}`);
+  assert.equal(releaseWorkflow["run-name"], "Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}");
   assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.commit.required, false);
   const [guard] = releaseWorkflow.jobs.preflight.steps;
   assert.equal(guard.name, "Check the requested commit", "the guard runs before anything else in preflight");

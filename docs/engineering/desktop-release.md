@@ -169,14 +169,18 @@ The job stops unless the clone is clean and on `main`. The job:
 3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
 4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
 5. Skips the night when no Windows or no Linux release runner is online.
-6. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`, and the run's title names it, so the job follows its own run.
-7. Follows the run for up to 6 hours. A run that still has not started publishing then is cancelled; a publish in progress never is. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release.
+6. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
+7. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
 
 The job comments on #2281 after each published nightly and each failure.
 It also comments when it skips for a reason someone must fix, such as an offline runner, and when launchd cannot update its clone.
 A night with nothing new posts nothing.
 The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
-Only one run happens at a time, and `install` and `uninstall` refuse while one runs, so the macOS command always locks the release keychain itself.
+The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.
+The system releases the lock when the last process holding it exits, so a crash leaves no stale lock.
+A command that finds it held stops at once, and the job reports that night on #2281.
+`install` and `uninstall` also refuse while the lock is held, so stopping the job through them never interrupts the macOS command.
+A logout, a shutdown, or a forced kill still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
 
 The job needs all of these:
 
@@ -269,6 +273,7 @@ GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
 Follow these steps for every published release, nightly or stable.
 Run the command as soon as the workflow publishes.
 The [scheduled nightly job](#publish-nightlies-on-a-schedule) runs it for each nightly it publishes.
+The command stops at once while another release command, such as the nightly job, runs on the Mac.
 A Mac updater reads `<channel>-mac.yml` from the newest release on its channel.
 Until this command uploads that file, a Mac on that channel shows no update and no error.
 It updates at its first check after the file arrives.

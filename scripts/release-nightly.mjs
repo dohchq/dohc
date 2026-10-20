@@ -9,10 +9,11 @@
 // nightlies on a schedule", describes it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
+import { RELEASE_LOCK, RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
+import { LOCK_BUSY, releaseLockHeld, underReleaseLock } from "./release-lock.mjs";
 import { repoRootFromScript } from "./resolve-desktop-release.mjs";
 import { LEGACY_NIGHTLIES } from "./select-upgrade-nightly.mjs";
 import { guiDomain, launchAgentsDir, launchPath, listRequests, plist, plistText, queueRoot, terminalStates } from "./verification/queue.mjs";
@@ -23,17 +24,15 @@ export const TRACKER_ISSUE = 2281;
 // The clean checkout of main that launchd runs the job from.
 export const DRIVER_CHECKOUT = join(WORK_ROOT, "driver");
 export const NIGHTLY_LOG = join(WORK_ROOT, "nightly.log");
-export const NIGHTLY_LOCK = join(WORK_ROOT, "nightly.lock");
 const WORKFLOW = "desktop-release.yml";
 // The labels of the jobs a windows-linux nightly runs (docs/engineering/desktop-release.md).
 const RUNNERS = { Windows: ["self-hosted", "windows", "x64"], Linux: ["self-hosted", "linux", "x64"] };
 const MAC_MANIFEST = macFileNames("", "nightly").manifest;
 // The Mac's nightly verification starts at 03:07 and takes about 40 minutes.
 const QUEUE_WAIT_MS = 3 * 60 * 60_000;
-// Runs that still wait for a runner after this are cancelled, unless Publish has started.
+// The longest the job follows a run. A run still going then is left to finish:
+// cancelling one could interrupt a publish and leave a release with only some of its files.
 const RUN_WAIT_MS = 6 * 60 * 60_000;
-// Publish times out in 20 minutes and a cancel takes effect in seconds, so a run is never followed longer than this past the limit.
-const RUN_GRACE_MS = 60 * 60_000;
 const NOTE = "> [!NOTE]\n> Posted by the nightly release job on the Mac mini (`scripts/release-nightly.mjs`).\n\n";
 
 const USAGE = "Usage: node scripts/release-nightly.mjs run [--dry-run] | install | uninstall";
@@ -53,8 +52,8 @@ function read(run, command, args) {
 const jsonLines = text => text.split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
 const utcDay = time => new Date(time).toISOString().slice(0, 10);
 const short = sha => sha.slice(0, 9);
-// A dispatch names its commit in the run's title, so the job finds its own run.
-export const runTitle = commit => `Desktop Release for ${commit}`;
+// A dispatch names its channel, dry run and commit in the run's title, so the job finds its own run.
+export const runTitle = (commit, dryRun) => `Desktop Release nightly${dryRun ? " dry run" : ""} for ${commit}`;
 
 /** The last nightly verification that ran every gate on main and passed. Narrower runs do not count. */
 export const verifiedNightly = requests => requests.findLast(({ request, status }) =>
@@ -111,37 +110,25 @@ export async function dispatchNightly(run, { commit, dryRun, repo = RELEASE_REPO
   const earlier = new Set(dispatchedRuns(run, repo).map(entry => entry.databaseId));
   read(run, "gh", ["workflow", "run", WORKFLOW, "-R", repo, "--ref", "main", "-f", "channel=nightly", "-f", "platforms=windows-linux", "-f", `dry_run=${dryRun}`, "-f", `commit=${commit}`]);
   for (const deadline = now() + findMs; now() < deadline; await wait(pollMs)) {
-    const started = dispatchedRuns(run, repo).find(entry => !earlier.has(entry.databaseId) && entry.displayTitle === runTitle(commit));
+    const started = dispatchedRuns(run, repo).find(entry => !earlier.has(entry.databaseId) && entry.displayTitle === runTitle(commit, dryRun));
     if (started) return started;
   }
-  throw new Error(`GitHub accepted the dispatch, but no run titled "${runTitle(commit)}" appeared within ${findMs / 60_000} minutes.`);
+  throw new Error(`GitHub accepted the dispatch, but no run titled "${runTitle(commit, dryRun)}" appeared within ${findMs / 60_000} minutes.`);
 }
 
-const publishStarted = jobs => jobs.some(job => job.name === "Publish" && ["in_progress", "completed"].includes(job.status));
-
-/**
- * Waits until a run completes and returns its conclusion. A run still waiting
- * at the limit is cancelled unless Publish has started, because cancelling a
- * publish could leave a release with only some of its files.
- */
-export async function waitForRun(run, id, { repo = RELEASE_REPOSITORY, wait = delay, now = Date.now, limitMs = RUN_WAIT_MS, graceMs = RUN_GRACE_MS, pollMs = 5 * 60_000, failureLimit = 6 }) {
+/** Waits until a run completes and returns its conclusion, or null when it is still going at the limit. */
+export async function waitForRun(run, id, { repo = RELEASE_REPOSITORY, wait = delay, now = Date.now, limitMs = RUN_WAIT_MS, pollMs = 5 * 60_000, failureLimit = 6 }) {
   let failures = 0;
-  let cancelled = false;
   for (const deadline = now() + limitMs; ; await wait(pollMs)) {
-    if (now() >= deadline + graceMs) throw new Error(`The run was still not finished ${graceMs / 60_000} minutes after the job's ${limitMs / 3_600_000}-hour limit${cancelled ? ", though the job cancelled it" : ""}.`);
-    const view = run("gh", ["run", "view", String(id), "-R", repo, "--json", "status,conclusion,jobs"]);
-    if (view.status !== 0) {
-      failures += 1;
-      if (failures >= failureLimit) throw new Error(`gh could not read the run ${failureLimit} times in a row: ${view.stderr.trim()}`);
-      continue;
+    const view = run("gh", ["run", "view", String(id), "-R", repo, "--json", "status,conclusion"]);
+    if (view.status === 0) {
+      failures = 0;
+      const state = JSON.parse(view.stdout);
+      if (state.status === "completed") return state.conclusion;
+    } else if (++failures >= failureLimit) {
+      throw new Error(`gh could not read the run ${failureLimit} times in a row: ${view.stderr.trim()}`);
     }
-    failures = 0;
-    const state = JSON.parse(view.stdout);
-    if (state.status === "completed") return { conclusion: state.conclusion, cancelled };
-    if (!cancelled && now() >= deadline && !publishStarted(state.jobs ?? [])) {
-      read(run, "gh", ["run", "cancel", String(id), "-R", repo]);
-      cancelled = true;
-    }
+    if (now() >= deadline) return null;
   }
 }
 
@@ -203,19 +190,21 @@ export async function runNightly({ dryRun = false }, {
   }
   const started = await dispatchNightly(run, { commit: github.head, dryRun, repo, wait, now });
   log(`Dispatched ${started.url} for ${short(started.headSha)}.`);
-  let outcome;
+  let conclusion;
   try {
-    outcome = await waitForRun(run, started.databaseId, { repo, wait, now });
+    conclusion = await waitForRun(run, started.databaseId, { repo, wait, now });
   } catch (error) {
     return finish(`The job lost track of [Desktop Release](${started.url}) for ${short(github.head)}: ${error instanceof Error ? error.message : String(error)} If it publishes, the next night adds its macOS files.`);
   }
-  if (outcome.conclusion !== "success") {
+  if (conclusion === null) {
+    return finish(`[Desktop Release](${started.url}) for ${short(github.head)} was still going after ${RUN_WAIT_MS / 3_600_000} hours. Check that the runners on ICE-PC are online. If it publishes, the next night adds its macOS files.`);
+  }
+  if (conclusion !== "success") {
     // The workflow refuses to build when main is no longer at the requested commit.
     if (started.headSha !== github.head) {
       return finish(`main moved to ${short(started.headSha)} after the checks passed on ${short(github.head)}, so [Desktop Release](${started.url}) refused to build it. Nothing was published.`);
     }
-    if (outcome.cancelled) return finish(`[Desktop Release](${started.url}) for ${short(github.head)} still had not started publishing after ${RUN_WAIT_MS / 3_600_000} hours, so the job cancelled it. Nothing was published. Check that the runners on ICE-PC are online.`);
-    return finish(`[Desktop Release](${started.url}) for ${short(github.head)} ended with "${outcome.conclusion}". ${dryRun ? "The dry run did not pass." : "Nothing was published."}`);
+    return finish(`[Desktop Release](${started.url}) for ${short(github.head)} ended with "${conclusion}". ${dryRun ? "The dry run did not pass." : "Nothing was published."}`);
   }
   if (dryRun) return finish(`The dry run of Desktop Release passed for ${short(github.head)}: [run](${started.url}). It published nothing.`);
   const release = publishedNightly(run, github.head, repo);
@@ -246,37 +235,9 @@ export function nightlyAgentDefinition({ checkout = DRIVER_CHECKOUT, queue, logP
   <key>StandardErrorPath</key>${plistText(logPath)}`);
 }
 
-const isAlive = pid => {
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
-};
-const lockHolder = (path = NIGHTLY_LOCK) => {
-  try { const pid = Number(readFileSync(path, "utf8")); return Number.isInteger(pid) && pid > 0 && isAlive(pid) ? pid : null; } catch { return null; }
-};
-
-/**
- * Takes the lock that keeps a run by hand and the scheduled run from both
- * dispatching. Exclusive creation makes taking it atomic; a lock whose process
- * is gone is replaced. Returns the release function.
- */
-export function acquireNightlyLock(path = NIGHTLY_LOCK) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      writeFileSync(path, String(process.pid), { flag: "wx" });
-      return () => { if (lockHolder(path) === process.pid) rmSync(path, { force: true }); };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      const pid = lockHolder(path);
-      if (pid) throw new Error(`Another nightly run (pid ${pid}) is in progress.`);
-      rmSync(path, { force: true });
-    }
-  }
-  throw new Error(`Could not take ${path}.`);
-}
-
 // Stopping the LaunchAgent mid-release would kill the macOS command before it locks the release keychain.
 function refuseDuringRun() {
-  const pid = lockHolder();
-  if (pid) throw new Error(`A nightly run (pid ${pid}) is in progress. Wait for it to finish; see ${NIGHTLY_LOG}.`);
+  if (releaseLockHeld(RELEASE_LOCK)) throw new Error(`A release command on this Mac is running. Wait for it to finish; see ${NIGHTLY_LOG}.`);
 }
 
 function install({ run = capture } = {}) {
@@ -317,16 +278,17 @@ async function main() {
   if (command === "uninstall") return uninstall();
   if (command === "report" && rest.length === 1) return post(rest[0]);
   if (command !== "run" || rest.some(arg => arg !== "--dry-run")) throw new Error(USAGE);
+  // The whole run, including the macOS command it starts, holds the release lock.
+  const locked = underReleaseLock(RELEASE_LOCK);
+  if (locked === LOCK_BUSY) post("Another release command on the Mac mini was running, so the nightly job did not run tonight.");
+  if (locked !== null) {
+    process.exitCode = locked;
+    return;
+  }
   const dryRun = rest.includes("--dry-run");
   console.log(`\n[${new Date().toISOString()}] Nightly ${dryRun ? "dry run" : "release"} starting.`);
-  mkdirSync(WORK_ROOT, { recursive: true });
-  const release = acquireNightlyLock();
-  try {
-    const report = await runNightly({ dryRun }).catch(error => `The nightly job stopped: ${error instanceof Error ? error.message : String(error)}`);
-    if (report !== null) post(report);
-  } finally {
-    release();
-  }
+  const report = await runNightly({ dryRun }).catch(error => `The nightly job stopped: ${error instanceof Error ? error.message : String(error)}`);
+  if (report !== null) post(report);
 }
 
 if (import.meta.main) {
