@@ -64,6 +64,21 @@ vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, createReadStream: vi.fn(fs.createReadStream) };
 });
+// Holds one `lstat` of `path` until the test releases it.
+const lstatGate = vi.hoisted(() => ({ held: null as { path: string; entered: () => void; release: Promise<void> } | null }));
+vi.mock("node:fs/promises", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  const lstat: typeof fs.lstat = (async (path: Parameters<typeof fs.lstat>[0], ...rest: unknown[]) => {
+    const held = lstatGate.held;
+    if (held && String(path) === held.path) {
+      lstatGate.held = null;
+      held.entered();
+      await held.release;
+    }
+    return await (fs.lstat as (...args: unknown[]) => ReturnType<typeof fs.lstat>)(path, ...rest);
+  }) as typeof fs.lstat;
+  return { ...fs, lstat };
+});
 
 let root = "";
 // Milliseconds the loopback daemon takes to answer one journal RPC. A busy
@@ -1164,6 +1179,41 @@ it.each(["local-only", "synced"] as const)(
   },
 );
 
+// A synced engine releases over unsettled text, so an edit made while the
+// close reads the disk must keep the ordinary close and its failed save.
+it("keeps a synced document's edit made while its close checks the deleted file", async () => {
+  claimedLineage = true;
+  const drafts: string[] = [];
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    onError: (context) => captureErrors.push(context),
+    preserveUnsentState: async ({ doc }) => { drafts.push(documentMarkdown(Y.encodeStateAsUpdate(doc))); return "draft"; },
+    discardUnsentState: async () => undefined,
+  });
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+  const editor = mirrorEditor(session);
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  const checking = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  lstatGate.held = { path: join(root, PATH), entered: checking.resolve, release: release.promise };
+  const closing = session.close();
+  await checking.promise;
+  typeIntoBody(editor, "Typed during the close.");
+  release.resolve();
+  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  await vi.waitFor(() => expect(drafts).toEqual([expect.stringContaining("Typed during the close.")]));
+  editor.destroy();
+});
+
 // The engine refuses that release while it holds text History lacks. Then the
 // ordinary close runs, and its refused settle is the failed save it reports.
 it("closes as before when the engine refuses to release a deleted file's document without a save", async () => {
@@ -1284,11 +1334,18 @@ it.each([
   await session.close({settle: false});
 });
 
+// A close reads the disk before its first retry, so real I/O gets a turn
+// between steps of the faked retry delays.
+const realSetImmediate = setImmediate;
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
   vi.useFakeTimers();
   try {
-    const assertion = expect(operation()).rejects.toThrow(message);
-    await vi.advanceTimersByTimeAsync(10_000);
+    let settled = false;
+    const assertion = expect(operation().finally(() => { settled = true; })).rejects.toThrow(message);
+    while (!settled) {
+      await new Promise((resolve) => realSetImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(100);
+    }
     await assertion;
   } finally { vi.useRealTimers(); }
 }
