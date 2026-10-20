@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -27,7 +27,11 @@ function scheduledPrune(root: string): () => Promise<void> {
   }
   if (!run) throw new Error("Prune was not scheduled");
   const scheduled = run;
-  return async () => { await scheduled(); };
+  return async () => {
+    const pruning = scheduled();
+    expect(pruning).toBeInstanceOf(Promise);
+    await pruning;
+  };
 }
 
 const expiredName = `delete-${"a".repeat(64)}.json`;
@@ -72,6 +76,34 @@ describe("recovery pruning", () => {
     await mkdir(join(root, ".dohc"));
     await scheduledPrune(root)();
     await expect(access(join(root, ".dohc", "trash"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps linked metadata and its expired recovery records untouched", async () => {
+    const root = await createTestScratch("prune-linked-metadata-");
+    const target = join(root, "metadata-target");
+    const trash = join(target, "trash");
+    await mkdir(trash, { recursive: true });
+    const record = join(trash, expiredName);
+    await writeFile(record, "keep");
+    await utimes(record, old, old);
+    const metadata = join(root, ".dohc");
+    await symlink(target, metadata, process.platform === "win32" ? "junction" : "dir");
+    await scheduledPrune(root)();
+    expect((await lstat(metadata)).isSymbolicLink()).toBe(true);
+    expect(await readFile(record, "utf8")).toBe("keep");
+    expect((await readdir(root)).sort()).toEqual([".dohc", "metadata-target"]);
+    expect(await readdir(target)).toEqual(["trash"]);
+    expect(await readdir(trash)).toEqual([expiredName]);
+  });
+
+  it("keeps a metadata file without replacing it with recovery storage", async () => {
+    const root = await createTestScratch("prune-metadata-file-");
+    const metadata = join(root, ".dohc");
+    await writeFile(metadata, "keep");
+    await scheduledPrune(root)();
+    expect((await lstat(metadata)).isFile()).toBe(true);
+    expect(await readFile(metadata, "utf8")).toBe("keep");
+    expect(await readdir(root)).toEqual([".dohc"]);
   });
 
   it("removes expired recovery records while keeping recent records and staged contents", async () => {
