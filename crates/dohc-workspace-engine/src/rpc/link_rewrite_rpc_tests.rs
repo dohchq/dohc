@@ -142,32 +142,18 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     assert_eq!(forward["documents"], sources);
     assert_eq!(forward["complete"], true);
     if later_edit {
-        let rewritten = open
-            .actor
-            .run(|store, _| {
-                let text = VersionedTextStore::new(store)
-                    .read_text(WS, "main", "source-0000.md")?
-                    .unwrap()
-                    .text;
-                let mut input = write(
-                    "source-0000",
-                    "source-0000.md",
-                    &format!("{text} later typing"),
-                    "later-edit",
-                );
-                input.now_ms = now_ms().unwrap() + 1;
-                store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
-                    let result = write_text_in_tx(tx, &input)?;
-                    let preimage = dohc_engine_storage::Preimage::Present(
-                        result.moment.before_blob_sha256.clone().unwrap(),
-                    );
-                    dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
-                    Ok(())
-                })?;
-                Ok(())
-            })
-            .await;
-        rewritten.unwrap();
+        let text = open.actor.versioned_text_read(WS.into(),"main".into(),
+            "source-0000.md".into(),CancellationToken::new()).await.unwrap().unwrap().text;
+        let mut input = write("source-0000","source-0000.md",&format!("{text} later typing"),"later-edit");
+        input.now_ms = now_ms().unwrap()+1;
+        let crash = dohc_engine_testkit::ScriptedFaults::crash_at(
+            dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck);
+        let result = open.actor.versioned_text_publish(input,open.root.clone(),
+            dohc_engine_runtime::WriteConditions::default(),None,
+            Arc::new(service.self_writes.scoped(&open.root)),crash.clone(),
+            CancellationToken::new()).await;
+        assert!(crash.fired());
+        assert!(matches!(result,Err(RuntimeError::OperationCrashed)));
     }
     let jobs = open
         .actor
@@ -202,16 +188,8 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         vec!["cancelled"; jobs.len()],
         "RPC must cancel the whole unpublished chain without publishing or false conflicts"
     );
-    let restored = open
-        .actor
-        .run(|store, _| {
-            Ok(VersionedTextStore::new(store)
-                .read_text(WS, "main", "source-0000.md")?
-                .unwrap()
-                .text)
-        })
-        .await
-        .unwrap();
+    let restored = open.actor.versioned_text_read(WS.into(),"main".into(),
+        "source-0000.md".into(),CancellationToken::new()).await.unwrap().unwrap().text;
     assert_eq!(
         restored,
         format!("{BODY}{}", if later_edit { " later typing" } else { "" })
