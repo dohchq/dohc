@@ -386,6 +386,8 @@ async fn refuses_every_member_before_any_compensation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
     let (root, supervisor, actor) = setup(6);
+    // One member per turn, so a fast host cannot finish the plan before the crash.
+    set_turn_budget("turn-crash", Duration::ZERO);
     assert!(matches!(
         run(
             &actor,
@@ -414,7 +416,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
         })
         .await
         .unwrap();
-    assert!((2..=6).contains(&first.len()));
+    assert_eq!(first.len(), 2);
     assert_eq!(first.last().unwrap().operation, "rename");
     assert!(
         actor

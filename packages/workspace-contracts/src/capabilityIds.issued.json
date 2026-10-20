@@ -246,5 +246,8 @@
   "links.in",
   "links.resolve",
   "links.edges",
+  "workspace.trust.read",
+  "workspace.trust.request",
+  "workspace.trust.restrict",
   "file.duplicate"
 ]

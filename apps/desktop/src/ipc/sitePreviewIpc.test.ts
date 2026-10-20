@@ -7,6 +7,7 @@ import {
   createStartSitePreviewHandler,
   type StartSitePreviewDependencies,
 } from "./sitePreviewIpc";
+import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 interface TestSender {
   id: number;
@@ -51,6 +52,8 @@ function harness(input: {
   catalogSite?: SitePackageInfo | null;
   sharedView?: boolean;
   activeWorkspaceId?: string;
+  // Whether this computer trusts the workspace. Trusted unless a test says.
+  trusted?: boolean;
 } = {}) {
   const workspace: TestWorkspace = {
     workspaceId: "workspace-1",
@@ -84,6 +87,9 @@ function harness(input: {
   }));
   const lifecycle = createSitePreviewLifecycle<SitePreviewResultBody>({
     allowOrigin: () => () => undefined,
+  });
+  const assertMayRunAppCode = vi.fn(async (_workspace: TestWorkspace) => {
+    if (!(input.trusted ?? true)) throw new WorkspaceRestrictedError();
   });
   const dependencies: StartSitePreviewDependencies<
     TestEvent,
@@ -121,6 +127,7 @@ function harness(input: {
     catalog: { list: async () => [], get },
     lifecycle,
     isSharedView: () => input.sharedView ?? false,
+    assertMayRunAppCode,
     execute,
   };
   return {
@@ -129,6 +136,7 @@ function harness(input: {
     subjects,
     get,
     execute,
+    assertMayRunAppCode,
     handle,
     lifecycle,
     handler: createStartSitePreviewHandler(dependencies),
@@ -257,6 +265,48 @@ describe("start site preview IPC", () => {
       expect.objectContaining({ sharedView: true }),
     );
     await test.lifecycle.stopAll();
+  });
+
+  describe("in Restricted Mode", () => {
+    function scripted(): SitePackageInfo {
+      return { ...site(), kind: "package", scripts: { dev: "vite", build: "vite build" }, buildOutputs: ["site/dist"] };
+    }
+    const start = (mode: "static" | "dev" | "build", restart = false) => ({
+      workspaceId: "workspace-1", siteRoot: "site", mode, holderId: "tab", restart,
+    });
+
+    it.each(["dev", "build"] as const)("refuses %s before execution and keeps the preview that shows", async (mode) => {
+      const test = harness({ catalogSite: scripted(), trusted: false });
+      await test.handler(test.event, start("static"));
+      expect(test.execute).toHaveBeenCalledTimes(1);
+
+      await expect(test.handler(test.event, start(mode, true))).rejects.toThrow(WorkspaceRestrictedError);
+
+      expect(test.assertMayRunAppCode).toHaveBeenCalledWith(test.workspace);
+      expect(test.execute).toHaveBeenCalledTimes(1);
+      expect(test.handle.stop).not.toHaveBeenCalled();
+      await test.lifecycle.stopAll();
+    });
+
+    it("still serves the static preview, and a build output without a build script", async () => {
+      const test = harness({
+        catalogSite: { ...site(), scripts: {}, buildOutputs: ["site/dist"] },
+        trusted: false,
+      });
+      await expect(test.handler(test.event, start("static"))).resolves.toMatchObject({ mode: "static" });
+      await expect(test.handler(test.event, start("build", true))).resolves.toMatchObject({ mode: "build" });
+      expect(test.assertMayRunAppCode).not.toHaveBeenCalled();
+      await test.lifecycle.stopAll();
+    });
+
+    it("refuses a command a dohc.json override names", async () => {
+      const test = harness({
+        catalogSite: { ...site(), configuredScripts: { dev: "node server.js" } },
+        trusted: false,
+      });
+      await expect(test.handler(test.event, start("dev"))).rejects.toThrow(WorkspaceRestrictedError);
+      expect(test.execute).not.toHaveBeenCalled();
+    });
   });
 
   it("rejects an inactive workspace before catalog lookup", async () => {

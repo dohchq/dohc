@@ -3262,6 +3262,17 @@ export type ListSitesResult = z.infer<typeof ListSitesResult>;
 export const SitePreviewMode = z.enum(["static", "dev", "build"]);
 export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
 
+// Whether a preview runs the app's own commands: Dev always does, and Build
+// does when the app has a build script. A Build without one serves its
+// existing output through dohc's static file server, as Static does.
+export function previewRunsAppCode(
+  site: Pick<SitePackageInfo, "configuredScripts" | "scripts">,
+  mode: SitePreviewMode,
+): boolean {
+  if (mode === "dev") return true;
+  return mode === "build" && !!(site.configuredScripts.build || site.scripts.build);
+}
+
 export const SitePackagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
@@ -6102,6 +6113,45 @@ export const crashReportOperations = {
   },
 } satisfies OperationTable;
 
+// Workspace trust. A trusted workspace runs its apps' own commands on this
+// computer; one in Restricted Mode shows apps only through dohc's static file
+// server. Main keeps trust in this computer's dohc profile and checks it
+// before it runs any app command. The renderer can read it, open main's trust
+// dialog, and put the workspace back in Restricted Mode. Only the person's
+// answer in that dialog trusts a workspace.
+export const WorkspaceTrustAnswer = z.object({
+  workspaceId: WORKSPACE_ID,
+  trusted: z.boolean(),
+});
+export type WorkspaceTrustAnswer = z.infer<typeof WorkspaceTrustAnswer>;
+export const WorkspaceTrustChangedEvent = WorkspaceTrustAnswer;
+export const workspaceTrustOperations = {
+  readWorkspaceTrust: {
+    capabilityId: "workspace.trust.read",
+    channel: "desktop:read-workspace-trust",
+    payload: WorkspaceIdPayload, result: WorkspaceTrustAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to see whether it is trusted.",
+  },
+  // Opens main's dialog. Trusted is true only when the person chose Trust
+  // workspace there.
+  requestWorkspaceTrust: {
+    capabilityId: "workspace.trust.request",
+    channel: "desktop:request-workspace-trust",
+    payload: WorkspaceIdPayload, result: WorkspaceTrustAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to trust it.",
+  },
+  // Stops the workspace's app commands as well.
+  restrictWorkspace: {
+    capabilityId: "workspace.trust.restrict",
+    channel: "desktop:restrict-workspace",
+    payload: WorkspaceIdPayload, result: WorkspaceTrustAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to put it in Restricted Mode.",
+  },
+} as const satisfies OperationTable;
+
 // Reports and diagnostics. Only main sends usage and error reports, and
 // only when this build names a report service and the person's switches in
 // Privacy allow it. Diagnostics stay on this computer unless the person
@@ -6926,6 +6976,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
+    OperationBridge<typeof workspaceTrustOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
@@ -7143,6 +7194,9 @@ export interface DohcDesktopBridge
   // Live push: the crash report changed. A poke, not the report; the
   // subscriber reads it again. Returns an unsubscribe function.
   onCrashReportChanged(listener: () => void): () => void;
+  onWorkspaceTrustChanged(
+    listener: (event: WorkspaceTrustAnswer) => void,
+  ): () => void;
   // Live push: a timed save stopped counting, because the usage record
   // changed outside dohc. A poke; readUsageRecord reads the file again.
   onUsageRecordStopped(listener: () => void): () => void;
