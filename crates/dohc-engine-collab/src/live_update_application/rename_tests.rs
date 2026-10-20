@@ -83,6 +83,11 @@ fn a_successor_covers_its_predecessors_outbox_across_a_rename() {
 /// registers there. Returns S2's expected coverage, ordered by outbox and
 /// sequence.
 fn carried_across_two_renames() -> (Fixture, Vec<(String, i64, Disposition)>) {
+    carried_across_renames_to("second.md")
+}
+
+/// [`carried_across_two_renames`], with the second rename to `second`.
+fn carried_across_renames_to(second: &str) -> (Fixture, Vec<(String, i64, Disposition)>) {
     let (mut f, covered, c1, _) = covered_and_carried();
     host_document(&mut f, true, true);
     retirement_settle(&mut f, 10, Some(covered.clone())).unwrap();
@@ -107,7 +112,7 @@ fn carried_across_two_renames() -> (Fixture, Vec<(String, i64, Disposition)>) {
     returned(&mut f);
     file_matches_local(&mut f, "first-released");
     let earlier = outbox_at(&f, "first.md");
-    rename(&mut f, "second.md", "second-renamed");
+    rename(&mut f, second, "second-renamed");
     successor(&mut f);
     let mut coverage = vec![
         (original.clone(), 1, Disposition::Receipt { receipt: covered }),
@@ -237,6 +242,14 @@ fn coverage_refuses_unproved_bindings_without_writes() {
 /// P applies a collaborator's update at 3, settles there and releases with
 /// nothing Carried, and S registers at the same binding.
 fn released_with_nothing_carried() -> Fixture {
+    let mut f = released_unregistered();
+    successor(&mut f);
+    f
+}
+
+/// [`released_with_nothing_carried`] before S captures. P never queued
+/// anything, so it left no outbox.
+fn released_unregistered() -> Fixture {
     let mut f = Fixture::new();
     f.adopt().unwrap();
     let remote = remote_event(&mut f, 3);
@@ -247,7 +260,6 @@ fn released_with_nothing_carried() -> Fixture {
     release_parked(&mut f);
     importable(&mut f);
     returned(&mut f);
-    successor(&mut f);
     f
 }
 
@@ -272,7 +284,7 @@ fn another_restore_generation_needs_its_restore() {
 /// document held before it.
 fn proves(f: &Fixture, binding: &LiveObjectBinding) -> Result<(), ApplicationError> {
     let held = f.handle.registration.lock().unwrap();
-    f.store.read_with(|conn| require_historical(conn, &held, &f.key, binding, 100))
+    f.store.read_with(|conn| require_historical(conn, &held, &f.key, &[binding], 100))
 }
 
 /// A real restore proves the generation it fenced. P adopts at generation 0;
@@ -281,6 +293,20 @@ fn proves(f: &Fixture, binding: &LiveObjectBinding) -> Result<(), ApplicationErr
 /// led from, nor P's binding at a path the document never had.
 #[test]
 fn a_resumed_restore_proves_the_generation_it_fenced() {
+    let (f, original) = resumed_at_one();
+    proves(&f, &original).unwrap();
+    let mut unrestored = original.clone();
+    unrestored.restore_fence_generation = 5;
+    assert!(matches!(proves(&f, &unrestored), Err(ApplicationError::Conflict)));
+    let mut elsewhere = original;
+    elsewhere.current_path = "elsewhere.md".into();
+    elsewhere.selector_paths = vec!["elsewhere.md".into()];
+    assert!(matches!(proves(&f, &elsewhere), Err(ApplicationError::Conflict)));
+}
+
+/// P adopts at generation 0, and a real restore fences it and resumes it at
+/// 1, where the fixture registers. Returns P's binding.
+fn resumed_at_one() -> (Fixture, LiveObjectBinding) {
     let mut f = Fixture::new();
     f.adopt().unwrap();
     let original = f.binding.clone();
@@ -336,12 +362,5 @@ fn a_resumed_restore_proves_the_generation_it_fenced() {
         .unwrap();
     f.binding = binding.clone();
     f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate, binding).unwrap();
-    proves(&f, &original).unwrap();
-    let mut unrestored = original.clone();
-    unrestored.restore_fence_generation = 5;
-    assert!(matches!(proves(&f, &unrestored), Err(ApplicationError::Conflict)));
-    let mut elsewhere = original;
-    elsewhere.current_path = "elsewhere.md".into();
-    elsewhere.selector_paths = vec!["elsewhere.md".into()];
-    assert!(matches!(proves(&f, &elsewhere), Err(ApplicationError::Conflict)));
+    (f, original)
 }

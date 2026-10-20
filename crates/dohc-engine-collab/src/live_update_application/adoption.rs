@@ -41,6 +41,7 @@ mod tests {
     include!("inherited_tests.rs");
     include!("resume_tests.rs");
     include!("rename_tests.rs");
+    include!("retired_outbox_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1554,7 +1555,7 @@ pub fn adopt_owner_committed(
         if local.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
-        let (coverage,covered_sequence,seed,current_outbox) = match &succession {
+        let (coverage,covered_sequence,seed,current_outbox,retired) = match &succession {
             None => {
                 let journal = Ydoc::wire();
                 journal.apply(&cut.baseline_bytes)?;
@@ -1573,7 +1574,7 @@ pub fn adopt_owner_committed(
                         return Err(invalid("owner adoption journal does not account for durable state"));
                     }
                 }
-                (coverage,covered_sequence,seed,None)
+                (coverage,covered_sequence,seed,None,Vec::new())
             }
             Some(succession) => {
                 // The accepted state at B, which local state must contain:
@@ -1590,7 +1591,7 @@ pub fn adopt_owner_committed(
                     return Err(ApplicationError::Conflict);
                 }
                 let retained = retained_outbox_coverage(tx, &held, &key, succession, max_events)?;
-                (retained.digest,retained.covered_sequence,!crate::replay_parity::structurally_equal_v2(&local, &accepted)?,retained.current)
+                (retained.digest,retained.covered_sequence,!crate::replay_parity::structurally_equal_v2(&local, &accepted)?,retained.current,retained.retired)
             }
         };
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
@@ -1620,6 +1621,9 @@ pub fn adopt_owner_committed(
         }
         tx.execute("UPDATE live_device_application_bindings SET activation_id=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,cut.adoption_id]).map_err(write_sql)?;
+        for outbox in &retired {
+            retire_outbox(tx, outbox, b)?;
+        }
         match &current_outbox {
             Some(CurrentOutbox::Reopen(outbox)) => reopen_outbox(tx, outbox)?,
             Some(CurrentOutbox::Open) => crate::owner_outbox::open_successor_outbox_in_tx(tx, b, now_ms)
@@ -1726,9 +1730,11 @@ fn outbox_coverage(
     replay_sequence: Option<i64>,
 ) -> Result<(String, i64), ApplicationError> {
     let b = &held.binding;
+    let selectors =
+        serde_json::to_string(&b.selector_paths).map_err(|_| ApplicationError::Corrupt)?;
     let parent: Option<(String,String,String,i64,i64)> = conn.query_row(
-        "SELECT outbox_id,state,base_update_digest,pending_bytes,next_sequence FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND restore_fence_generation=?6",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,b.restore_fence_generation],
+        "SELECT outbox_id,state,base_update_digest,pending_bytes,next_sequence FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,selectors,b.restore_fence_generation],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?;
     let receipts: std::collections::HashMap<_, _> = events
         .iter()
@@ -1882,16 +1888,23 @@ fn require_succession(
     })
 }
 
-/// The quarantine a successor may end: its predecessor's seed failed
+/// A quarantine a successor may end: its predecessor's seed failed
 /// provenance and was strictly abandoned.
 const PROVENANCE_REFUSED: &str = "provenance-refused";
+
+/// The quarantine a successor's adoption gives each outbox its coverage
+/// proved at an earlier binding of its restore generation, so the outbox at
+/// its own binding is the generation's one writable outbox. The observed
+/// binding names that successor.
+pub(crate) const SUCCESSION_RETIRED: &str = "succession-retired";
 
 /// What a successor's adoption does to the outbox at its binding.
 #[derive(Debug, PartialEq, Eq)]
 enum CurrentOutbox {
-    /// Reopen the one a seed's provenance refusal quarantined.
+    /// Reopen the one a seed's provenance refusal or an earlier succession
+    /// quarantined.
     Reopen(String),
-    /// Open it beside the outboxes the chain left at earlier paths of this
+    /// Open it beside the outboxes the chain left at earlier bindings of this
     /// restore generation, so the successor's own deliveries have one.
     Open,
 }
@@ -1903,19 +1916,27 @@ struct RetainedOutboxes {
     /// The high-water mark of the outbox at the successor's binding.
     covered_sequence: i64,
     current: Option<CurrentOutbox>,
+    /// Covered outboxes at earlier bindings that are still open, which the
+    /// adoption retires.
+    retired: Vec<String>,
 }
 
 /// A successor's coverage of every outbox its released chain left in the
-/// document's lineage, under one budget: the outbox at its binding, and each
-/// at a binding an adopted activation of the chain held at this restore
+/// document's lineage, under one budget: the outbox at its exact binding, and
+/// each at a binding an adopted activation of the chain held at this restore
 /// generation. Each binding the chain held must be one this document held
 /// before, so an arbitrary one refuses. The coverage takes no outbox at an
-/// earlier generation, which stays behind its restore fence, and none that no
-/// activation of the chain held, so a Carried delivery in either refuses.
-/// A quarantined outbox counts only when a seed's provenance refusal
-/// quarantined it at its own binding and base, with nothing pending and the
-/// seed strictly abandoned; the successor reopens the one at its binding.
-/// Every other quarantine refuses the succession.
+/// earlier generation, which stays behind its restore fence. Any other
+/// outbox in this generation refuses the succession, even an empty one.
+/// A quarantined outbox counts only when nothing is pending in it and
+/// - a seed's provenance refusal quarantined it, at its own binding, and the
+///   seed was strictly abandoned; or
+/// - an earlier succession retired it, and the binding it names is one an
+///   adopted activation of the chain held after this outbox's.
+///
+/// The successor reopens either at its binding. Every other quarantine
+/// refuses the succession. Each open outbox at an earlier binding, drained,
+/// is retired.
 fn retained_outbox_coverage(
     tx: &Transaction<'_>,
     held: &Registration,
@@ -1924,7 +1945,6 @@ fn retained_outbox_coverage(
     max_events: usize,
 ) -> Result<RetainedOutboxes, ApplicationError> {
     let b = &held.binding;
-    let over_budget = || invalid("owner adoption retained outbox coverage exceeds its budget");
     let chain = chain_bindings(
         tx,
         &held.namespace,
@@ -1933,9 +1953,7 @@ fn retained_outbox_coverage(
         &succession.prefix.predecessor_activation_id,
         max_events,
     )?;
-    for binding in &chain {
-        require_historical(tx, held, key, binding, max_events)?;
-    }
+    require_historical(tx, held, key, &chain.bindings(), max_events)?;
     type Row = (
         String,
         String,
@@ -1945,11 +1963,13 @@ fn retained_outbox_coverage(
         String,
         Option<String>,
         Option<String>,
+        i64,
+        Option<i64>,
     );
     let rows: Vec<Row> = {
         let mut query = tx.prepare(
             "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,state,base_update_digest,
-                quarantine_reason,observed_binding_json
+                quarantine_reason,observed_binding_json,pending_bytes,oldest_entry_at_ms
              FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
              ORDER BY outbox_id LIMIT ?5",
         ).map_err(read_sql)?;
@@ -1975,6 +1995,8 @@ fn retained_outbox_coverage(
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
                     ))
                 },
             )
@@ -1986,11 +2008,15 @@ fn retained_outbox_coverage(
     if rows.len() > max_events {
         return Err(over_budget());
     }
-    let (mut current, mut retained, mut quarantined) = (None, Vec::new(), Vec::new());
-    // Whether the chain left an outbox at an earlier path of this generation,
-    // and whether an unrelated one shares the generation.
-    let (mut moved, mut unrelated) = (false, false);
-    for (id, path, selectors, generation, state, base, reason, observed) in rows {
+    let (mut current, mut retained, mut abandoning, mut retired) =
+        (None, Vec::new(), Vec::new(), Vec::new());
+    // Whether the chain left an outbox at an earlier binding of this
+    // generation.
+    let mut moved = false;
+    for (id, path, selectors, generation, state, base, reason, observed, pending, oldest) in rows {
+        if generation != b.restore_fence_generation {
+            continue;
+        }
         let binding = LiveObjectBinding {
             workspace_id: b.workspace_id.clone(),
             main_version_id: b.main_version_id.clone(),
@@ -2001,37 +2027,42 @@ fn retained_outbox_coverage(
                 .map_err(|_| ApplicationError::Corrupt)?,
             restore_fence_generation: generation,
         };
-        let same_generation = generation == b.restore_fence_generation;
-        let at_binding = same_generation && binding.current_path == b.current_path;
-        let chained = same_generation && chain.contains(&binding);
-        if !(at_binding || chained) {
-            unrelated |= same_generation;
-            continue;
-        }
-        if base != b.lineage_claim_id {
+        let at_binding = binding == *b;
+        if (!at_binding && !chain.contains(&binding)) || base != b.lineage_claim_id {
             return Err(ApplicationError::Conflict);
         }
-        match state.as_str() {
-            "active" | "sealed" => {}
-            "quarantined" => {
-                let own = if at_binding { b } else { &binding };
-                let observed = observed
-                    .map(|json| serde_json::from_str::<LiveObjectBinding>(&json))
-                    .transpose()
-                    .map_err(|_| ApplicationError::Corrupt)?;
-                if reason.as_deref() != Some(PROVENANCE_REFUSED)
-                    || observed.is_some_and(|observed| observed != *own)
-                    || binding.selector_paths != own.selector_paths
-                {
-                    return Err(ApplicationError::Conflict);
-                }
-                quarantined.push(id.clone());
+        let drained = pending == 0 && oldest.is_none();
+        let observed = observed
+            .map(|json| serde_json::from_str::<LiveObjectBinding>(&json))
+            .transpose()
+            .map_err(|_| ApplicationError::Corrupt)?;
+        let quarantined = match (state.as_str(), reason.as_deref()) {
+            ("active" | "sealed", _) if at_binding => false,
+            ("active" | "sealed", _) if drained => {
+                retired.push(id.clone());
+                false
+            }
+            ("quarantined", Some(PROVENANCE_REFUSED))
+                if observed
+                    .as_ref()
+                    .is_none_or(|observed| *observed == binding) =>
+            {
+                abandoning.push(id.clone());
+                true
+            }
+            ("quarantined", Some(SUCCESSION_RETIRED))
+                if drained
+                    && observed
+                        .as_ref()
+                        .is_some_and(|observed| chain.followed(&binding, observed)) =>
+            {
+                true
             }
             _ => return Err(ApplicationError::Conflict),
-        }
+        };
         if !at_binding {
             moved = true;
-        } else if current.replace(id.clone()).is_some() {
+        } else if current.replace((id.clone(), quarantined)).is_some() {
             return Err(ApplicationError::Conflict);
         }
         retained.push(id);
@@ -2051,28 +2082,60 @@ fn retained_outbox_coverage(
             id == outbox && *disposition == retirement::Disposition::Abandoned
         })
     };
-    if !quarantined.iter().all(abandoned) {
+    if !abandoning.iter().all(abandoned) {
         return Err(ApplicationError::Conflict);
     }
     let covered_sequence = coverage
         .iter()
-        .filter(|(id, ..)| current.as_ref() == Some(id))
+        .filter(|(id, ..)| current.as_ref().is_some_and(|(current, _)| current == id))
         .count() as i64;
     let current = match current {
-        Some(id) => quarantined
-            .contains(&id)
-            .then_some(CurrentOutbox::Reopen(id)),
-        None => (moved && !unrelated).then_some(CurrentOutbox::Open),
+        Some((id, quarantined)) => quarantined.then_some(CurrentOutbox::Reopen(id)),
+        None => moved.then_some(CurrentOutbox::Open),
     };
     Ok(RetainedOutboxes {
         digest: hex_sha256(&serde_json::to_vec(&coverage).map_err(|_| ApplicationError::Corrupt)?),
         covered_sequence,
         current,
+        retired,
     })
 }
 
-/// The distinct bindings the adopted activations of the released chain
-/// ending at `tail` held in this document's lineage.
+/// The bindings the adopted activations of a released chain held, each with
+/// the nearest and farthest distance from the chain's tail an activation
+/// held it at.
+struct ChainBindings {
+    bindings: Vec<(LiveObjectBinding, usize, usize)>,
+    index: std::collections::HashMap<LiveObjectBinding, usize>,
+}
+
+impl ChainBindings {
+    fn bindings(&self) -> Vec<&LiveObjectBinding> {
+        self.bindings.iter().map(|(binding, ..)| binding).collect()
+    }
+
+    fn contains(&self, binding: &LiveObjectBinding) -> bool {
+        self.index.contains_key(binding)
+    }
+
+    /// Whether an activation holding `later` followed one holding `earlier`.
+    fn followed(&self, earlier: &LiveObjectBinding, later: &LiveObjectBinding) -> bool {
+        match (self.index.get(earlier), self.index.get(later)) {
+            (Some(&earlier), Some(&later)) => self.bindings[later].1 < self.bindings[earlier].2,
+            _ => false,
+        }
+    }
+}
+
+/// The error for coverage, or the proof it rests on, past its budget.
+fn over_budget() -> ApplicationError {
+    invalid("owner adoption retained outbox coverage exceeds its budget")
+}
+
+/// The bindings the adopted activations of the released chain ending at
+/// `tail` held in this document's lineage. The walk counts every activation
+/// it visits, however many held one binding, and refuses past `max_events`
+/// rather than take a cut-off chain as whole.
 fn chain_bindings(
     conn: &Connection,
     namespace: &str,
@@ -2080,18 +2143,18 @@ fn chain_bindings(
     lineage: &str,
     tail: &str,
     max_events: usize,
-) -> Result<Vec<LiveObjectBinding>, ApplicationError> {
+) -> Result<ChainBindings, ApplicationError> {
     let mut query = conn
         .prepare(
-            "WITH RECURSIVE chain(activation_id) AS (SELECT ?2 UNION
-               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
+            "WITH RECURSIVE chain(activation_id,depth) AS (SELECT ?2,0 UNION ALL
+               SELECT v.predecessor_activation_id,c.depth+1 FROM chain c JOIN live_owner_activations v
                  ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
-               WHERE v.predecessor_activation_id IS NOT NULL)
-             SELECT DISTINCT v.binding_json FROM chain c JOIN live_owner_activations v
+               WHERE v.predecessor_activation_id IS NOT NULL LIMIT ?7)
+             SELECT c.depth,v.binding_json FROM chain c LEFT JOIN live_owner_activations v
                ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
-             WHERE v.workspace_id=?3 AND v.main_version_id=?4 AND v.object_id=?5 AND v.lineage_claim_id=?6
+               AND v.workspace_id=?3 AND v.main_version_id=?4 AND v.object_id=?5 AND v.lineage_claim_id=?6
                AND v.released_at_ms IS NOT NULL AND v.evidence_digest IS NOT NULL
-             LIMIT ?7",
+             ORDER BY c.depth",
         )
         .map_err(read_sql)?;
     let limit = i64::try_from(max_events)
@@ -2108,99 +2171,144 @@ fn chain_bindings(
                 lineage,
                 limit
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .map_err(read_sql)?;
-    let mut bindings: Vec<LiveObjectBinding> = Vec::new();
-    for json in rows {
-        let binding = serde_json::from_str(&json.map_err(read_sql)?)
-            .map_err(|_| ApplicationError::Corrupt)?;
-        if !bindings.contains(&binding) {
-            bindings.push(binding);
+    let mut chain = ChainBindings {
+        bindings: Vec::new(),
+        index: std::collections::HashMap::new(),
+    };
+    for (visited, row) in rows.enumerate() {
+        let (depth, json) = row.map_err(read_sql)?;
+        if visited >= max_events {
+            return Err(over_budget());
+        }
+        let Some(json) = json else { continue };
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        let depth = usize::try_from(depth).map_err(|_| ApplicationError::Corrupt)?;
+        match chain.index.get(&binding) {
+            Some(&at) => chain.bindings[at].2 = depth,
+            None => {
+                chain.index.insert(binding.clone(), chain.bindings.len());
+                chain.bindings.push((binding, depth, depth));
+            }
         }
     }
-    if bindings.len() > max_events {
-        return Err(invalid(
-            "owner adoption retained outbox coverage exceeds its budget",
-        ));
-    }
-    Ok(bindings)
+    Ok(chain)
 }
 
-/// `historical`, a binding the released chain held, must be one this document
-/// held before the registration's: at its path, or one lineage-preserving
-/// renames moved it from, and at its restore generation, or one that resumed
-/// restores led from to it.
+/// Each binding the released chain held must be one this document held
+/// before the registration's: at its path, or one lineage-preserving renames
+/// moved it from, and at its restore generation, or one that resumed restores
+/// led from to it. Rename and restore history are each walked once, for
+/// every binding.
 fn require_historical(
     conn: &Connection,
     held: &Registration,
     key: &DocKey,
-    historical: &LiveObjectBinding,
+    chain: &[&LiveObjectBinding],
     max_events: usize,
 ) -> Result<(), ApplicationError> {
-    settlement::validate_historical_binding(historical, historical)?;
     let b = &held.binding;
-    let mut moved = historical.clone();
-    if historical.current_path != b.current_path {
-        if !renamed(
-            conn,
-            key,
-            &historical.current_path,
-            &b.current_path,
-            max_events,
-        )? {
+    for historical in chain {
+        settlement::validate_historical_binding(historical, historical)?;
+    }
+    let moved_from: std::collections::HashSet<&str> = chain
+        .iter()
+        .map(|historical| historical.current_path.as_str())
+        .filter(|path| *path != b.current_path)
+        .collect();
+    let renamed = renamed_from(conn, key, &b.current_path, &moved_from, max_events)?;
+    let resumed = if chain
+        .iter()
+        .any(|historical| historical.restore_fence_generation != b.restore_fence_generation)
+    {
+        resumed_generations(conn, held, max_events)?
+    } else {
+        std::collections::HashSet::new()
+    };
+    for historical in chain {
+        let mut moved = (*historical).clone();
+        if historical.current_path != b.current_path {
+            if !renamed.contains(&historical.current_path) {
+                return Err(ApplicationError::Conflict);
+            }
+            moved.current_path = b.current_path.clone();
+            moved.selector_paths = b.selector_paths.clone();
+        }
+        restore_resume::validate_origin_binding(conn, held, &moved)?;
+        if !resumed.contains(&historical.restore_fence_generation)
+            && historical.restore_fence_generation != b.restore_fence_generation
+        {
             return Err(ApplicationError::Conflict);
         }
-        moved.current_path = b.current_path.clone();
-        moved.selector_paths = b.selector_paths.clone();
-    }
-    restore_resume::validate_origin_binding(conn, held, &moved)?;
-    if historical.restore_fence_generation != b.restore_fence_generation
-        && !restored_from(conn, held, historical.restore_fence_generation)?
-    {
-        return Err(ApplicationError::Conflict);
     }
     Ok(())
 }
 
-/// Whether resumed restores of this document's lineage led from `generation`
-/// to the registration's.
-fn restored_from(
+/// The generations resumed restores of this document's lineage led from to
+/// the registration's, its own included. The walk counts every generation it
+/// visits and refuses past `max_events`.
+fn resumed_generations(
     conn: &Connection,
     held: &Registration,
-    generation: i64,
-) -> Result<bool, ApplicationError> {
+    max_events: usize,
+) -> Result<std::collections::HashSet<i64>, ApplicationError> {
     let b = &held.binding;
-    conn.query_row(
-        "WITH RECURSIVE resumed(generation) AS (SELECT ?6 UNION
-           SELECT f.old_generation FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
-           WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
-             AND f.lineage_claim_id=?5 AND f.resume_receipt_json IS NOT NULL)
-         SELECT EXISTS(SELECT 1 FROM resumed WHERE generation=?7)",
-        params![
-            held.namespace,
-            b.workspace_id,
-            b.main_version_id,
-            b.object_id,
-            b.lineage_claim_id,
-            b.restore_fence_generation,
-            generation
-        ],
-        |row| row.get(0),
-    )
-    .map_err(read_sql)
+    let mut query = conn
+        .prepare(
+            "WITH RECURSIVE resumed(generation) AS (SELECT ?6 UNION ALL
+               SELECT f.old_generation FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
+               WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
+                 AND f.lineage_claim_id=?5 AND f.resume_receipt_json IS NOT NULL LIMIT ?7)
+             SELECT generation FROM resumed",
+        )
+        .map_err(read_sql)?;
+    let limit = i64::try_from(max_events)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .saturating_add(1);
+    let rows = query
+        .query_map(
+            params![
+                held.namespace,
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                b.restore_fence_generation,
+                limit
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(read_sql)?;
+    let mut generations = std::collections::HashSet::new();
+    for (visited, generation) in rows.enumerate() {
+        let generation = generation.map_err(read_sql)?;
+        if visited >= max_events {
+            return Err(over_budget());
+        }
+        generations.insert(generation);
+    }
+    Ok(generations)
 }
 
-/// Whether renames of this document moved it from `from` to `to`, keeping its
+/// The paths renames of this document moved it from to `to`, keeping its
 /// object and its text. Walking back from `to`, each rename landed on the path
-/// the walk reached; any other move ends the proof.
-fn renamed(
+/// the walk reached; any other move ends the proof. The walk ends once it has
+/// proved each path in `needed`, and refuses rather than read more than
+/// `max_events` renames.
+fn renamed_from(
     conn: &Connection,
     key: &DocKey,
-    from: &str,
     to: &str,
+    needed: &std::collections::HashSet<&str>,
     max_events: usize,
-) -> Result<bool, ApplicationError> {
+) -> Result<std::collections::HashSet<String>, ApplicationError> {
+    let mut proved = std::collections::HashSet::new();
+    if needed.is_empty() {
+        return Ok(proved);
+    }
     let mut query = conn
         .prepare(
             "SELECT payload_before_path,path,after_content_kind='text' AND after_blob_sha256 IS before_blob_sha256
@@ -2208,7 +2316,9 @@ fn renamed(
              ORDER BY moment_order DESC LIMIT ?4",
         )
         .map_err(read_sql)?;
-    let limit = i64::try_from(max_events).map_err(|_| ApplicationError::Corrupt)?;
+    let limit = i64::try_from(max_events)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .saturating_add(1);
     let mut rows = query
         .query(params![
             key.workspace_id,
@@ -2217,22 +2327,29 @@ fn renamed(
             limit
         ])
         .map_err(read_sql)?;
-    let mut path = to.to_owned();
+    let (mut path, mut remaining, mut read) = (to.to_owned(), needed.len(), 0);
     while let Some(row) = rows.next().map_err(read_sql)? {
+        read += 1;
+        if read > max_events {
+            return Err(over_budget());
+        }
         let (before, after, kept): (Option<String>, String, bool) = (
             row.get(0).map_err(read_sql)?,
             row.get(1).map_err(read_sql)?,
             row.get(2).map_err(read_sql)?,
         );
         let Some(before) = before.filter(|_| kept && after == path) else {
-            return Ok(false);
+            break;
         };
-        if before == from {
-            return Ok(true);
+        if needed.contains(before.as_str()) && proved.insert(before.clone()) {
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
         }
         path = before;
     }
-    Ok(false)
+    Ok(proved)
 }
 
 /// Reopen the outbox a successor's coverage proved, keeping its entries,
@@ -2244,6 +2361,30 @@ fn reopen_outbox(tx: &Transaction<'_>, outbox_id: &str) -> Result<(), Applicatio
         [outbox_id],
     ).map_err(write_sql)?;
     if reopened != 1 {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
+/// Retire an outbox a successor's coverage proved at an earlier binding,
+/// keeping its entries, sequence, receipts and refusals. Nothing may be
+/// pending in it; the successor's binding is what it observed.
+fn retire_outbox(
+    tx: &Transaction<'_>,
+    outbox_id: &str,
+    successor: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let retired = tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,observed_binding_json=?3
+         WHERE outbox_id=?1 AND state IN ('active','sealed') AND pending_bytes=0 AND oldest_entry_at_ms IS NULL
+           AND pending_entry_count=0",
+        params![
+            outbox_id,
+            SUCCESSION_RETIRED,
+            serde_json::to_string(successor).map_err(|_| ApplicationError::Corrupt)?
+        ],
+    ).map_err(write_sql)?;
+    if retired != 1 {
         return Err(ApplicationError::Conflict);
     }
     Ok(())

@@ -213,6 +213,9 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});
     await peer!.sendRequest({id: 21,method: "liveApplication.readOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
+    singleton.sendRequest.mockResolvedValueOnce({result: {acknowledged: 0,pendingBytes: 0,oldestEntryAtMs: null}});
+    await peer!.sendRequest({id: 32,method: "liveApplication.acknowledgeOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,receipts: []}});
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.acknowledge",params: {outboxId: "outbox",receipts: []}});
     singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
     await peer!.sendRequest({id: 31,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "provenance-refused"}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "provenance-refused"}});

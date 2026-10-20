@@ -5130,7 +5130,9 @@ async fn resume_through_the_host(catch_up: bool) {
 /// the successor captures it at the new path. The successor adopts there:
 /// its coverage takes the root's outbox at the old path, C1 and C2 stay where
 /// the root queued them, with their receipts, and its seed opens the outbox
-/// at its own binding. Applying them at the new path is round 4b3b's.
+/// at its own binding while the root's is retired. A rename while it holds
+/// the document is refused, and its later edit is delivered from its own
+/// outbox. Applying C1 and C2 at the new path is round 4b3b's.
 #[tokio::test]
 async fn a_successor_adopts_across_a_rename_through_the_host() {
     let root = ScratchDir::new().unwrap();
@@ -5416,6 +5418,85 @@ async fn a_successor_adopts_across_a_rename_through_the_host() {
         covered_sequence, 0,
         "the new binding's outbox held nothing to cover"
     );
+    // The adoption retired the root's outbox, so the successor's is the
+    // generation's one open outbox.
+    let outboxes = || -> Vec<(String, String, Option<String>)> {
+        store
+            .read_with(|conn| {
+                conn.prepare("SELECT current_path,state,quarantine_reason FROM owner_ydoc_outboxes ORDER BY current_path")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+    };
+    let expected = vec![
+        (
+            path.to_owned(),
+            "quarantined".to_owned(),
+            Some("succession-retired".to_owned()),
+        ),
+        (renamed.to_owned(), "active".to_owned(), None),
+    ];
+    assert_eq!(outboxes(), expected);
+    // A rename while the successor holds the document changes nothing.
+    let moved_again = actor
+        .versioned_text_rename(
+            dohc_engine_domain::RenameTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                from_path: renamed.into(),
+                to_path: "notes/again.md".into(),
+                moment_id: "renamed-again".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 70,
+            },
+            root.path().to_owned(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(moved_again.is_err(), "{moved_again:?}");
+    assert_eq!(outboxes(), expected);
+    // The seed delivers, and a later native edit at the new path joins the
+    // successor's outbox, under the delivery ID the relay derives from it.
+    accept_latest(&actor, &store, 5).await;
+    actor
+        .ydoc_record_update(
+            key.clone(),
+            renamed.into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            owned.richdoc_append_paragraph("After adoption"),
+            Some("owner-origin".into()),
+            None,
+            Some(lineage.clone()),
+            false,
+            None,
+            Some("after-adoption".into()),
+            80,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let (outbox, delivery, digest) = latest_pending(&store);
+    assert_eq!(entry(&delivery), (renamed.to_owned(), 2, None));
+    assert_eq!(
+        delivery,
+        format!(
+            "owner-delivery-{}",
+            hex_sha256(format!("{outbox}\0{}\0{digest}", 2).as_bytes())
+        )
+    );
+    accept_latest(&actor, &store, 6).await;
+    assert_eq!(entry(&delivery), (renamed.to_owned(), 2, Some(6)));
+    assert_eq!(outboxes(), expected);
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
