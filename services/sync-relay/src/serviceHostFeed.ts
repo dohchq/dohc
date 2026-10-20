@@ -104,15 +104,14 @@ function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unkn
     (absent(record.beforeObjectId) || record.beforeObjectId === objectId) ? objectId : null;
 }
 
+/** A `ydoc.update` not explicitly a delta. A host continues lineages; it never starts one. */
+const hostedBase = (opKind: string, payload: unknown) => opKind === "ydoc.update" && asRecord(payload)?.isBaseState !== false;
+
 export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
-  return hostedWriter(scope, opKind, payload) !== null;
+  return hostedWriter(scope, opKind, payload) !== null && !hostedBase(opKind, payload);
 }
 
-/**
- * Why the relay refused one of the host's ops. `base-state-from-host`: a
- * `ydoc.update` not explicitly a delta. A host continues lineages; it never
- * starts one.
- */
+/** Why the relay refused one of the host's ops. `base-state-from-host`: see `hostedBase`. */
 export type HostedRefusalReason = "outside-hosted-documents" | "base-state-from-host";
 
 /**
@@ -126,7 +125,7 @@ function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: Sy
   const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
   const objectId = hostedWriter(scope, op.opKind, payload);
   if (objectId === null) return "outside-hosted-documents";
-  if (op.opKind === "ydoc.update" && payload.isBaseState !== false) return "base-state-from-host";
+  if (hostedBase(op.opKind, payload)) return "base-state-from-host";
   const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
   const unknown = blobs.filter(sha256 => !known(sha256));
   if (unknown.length) throw logBlobsMissing(unknown);

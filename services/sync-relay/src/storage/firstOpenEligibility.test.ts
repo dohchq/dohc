@@ -20,6 +20,16 @@ const remove = (objectId: string, path: string, versionId = "main") => ({momentI
 const ydoc = (objectId: string, change: {path?: string; isBaseState?: boolean; versionId?: string; lineageClaimId?: string} = {}) => ({
   versionId: change.versionId ?? "main", objectId, path: change.path ?? "docs/a.md", contentKind: "richdoc", updateBlobSha256: SHA,
   isBaseState: change.isBaseState ?? false, lineageClaimId: change.lineageClaimId ?? LINEAGE});
+/** A write of `objectId` at the path `displaced` held, as a conflict resolution records it, without its conflict. */
+const replace = (displaced: string, objectId: string, versionId = "main", path = "docs/a.md") => ({...write(objectId, path, versionId),
+  momentId: `replace-${displaced}-${objectId}`, beforePresent: "present", beforeObjectId: displaced, beforeVersionId: versionId, beforePath: path,
+  payloadBeforePath: path, payloadBeforeBlobSha256: SHA});
+const binding = (objectId: string) => ({workspaceId: WS, objectId, mainVersionId: "main", currentPath: "docs/a.md"});
+const audits = (objectId: string): Array<[string, object]> => [
+  ["live.audit.base", {record: {checkpoint: {binding: binding(objectId)}}}],
+  ["live.audit.application", {objectId, mainVersionId: "main", updateBlobSha256: SHA}],
+  ["live.audit.settlement", {record: {binding: binding(objectId)}}],
+];
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
@@ -37,6 +47,12 @@ async function fixture() {
     storage.appendLogBatch({workspaceId, originId, ops: [{originSeq, opKind, payloadJson: JSON.stringify(payload), recordedAtMs: 1}],
       ...(admit ? {admit: (ops: SyncRelayLogInput[]) => ops.forEach(admit)} : {})});
   };
+  // A row as stored, for shapes append would check further: audits, settlement refusals and departed rows.
+  let rawSeq = 0;
+  const stored = (workspaceId: string, opKind: string, payload: object, columns: {relayAdmission?: "departed"; settlement?: "refused"} = {}) =>
+    raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_admission,settlement_admission_json)
+      VALUES (?,'service-host:stored',?,?,?,1,?,?)`).run(workspaceId, rawSeq++, opKind, JSON.stringify(payload), columns.relayAdmission ?? null,
+      columns.settlement ? JSON.stringify({status: "refused", settlementId: "settlement-1", reason: "authorship-mismatch"}) : null);
   const liveDocument = (workspaceId: string, objectId: string, row: {lineage?: string; replaces?: string | null; path?: string; retired?: boolean} = {}) =>
     raw.prepare(`INSERT INTO sync_relay_live_documents VALUES (?,'main',?,?,?,?,1,?,1,?,?,?,?,0,0,?)`).run(workspaceId, objectId, row.lineage ?? LINEAGE,
       row.replaces ?? null, row.path ?? "docs/a.md", "b".repeat(64), row.lineage ?? LINEAGE, new Uint8Array([0, 0]),
@@ -68,12 +84,14 @@ async function fixture() {
     append(workspaceId, "moment.append", write(objectId, "docs/a.md"));
     append(workspaceId, "ydoc.update", ydoc(objectId, {isBaseState: true}));
     append(workspaceId, "moment.append", remove(objectId, "docs/a.md"));
+    append(workspaceId, "moment.append", replace(objectId, "object-3"));
+    for (const [opKind, payload] of audits(objectId)) stored(workspaceId, opKind, payload);
     liveDocument(workspaceId, objectId);
     ordinaryBase(workspaceId, objectId);
     activation(workspaceId, objectId);
     restore(workspaceId, objectId, "namespace-1");
   }
-  return {storage, raw, append, liveDocument, ordinaryBase, activation, restore, reenroll};
+  return {storage, raw, append, stored, liveDocument, ordinaryBase, activation, restore, reenroll};
 }
 
 const read = (storage: SyncRelayStorage) => storage.readFirstOpenEligibility(target);
@@ -110,6 +128,13 @@ const priorAuthority: Array<[string, (f: Fixture) => void]> = [
     f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"));
     f.append(WS, "moment.append", write(OBJECT, "docs/a.md"));
   }],
+  ["a live document replaced and returned", f => {
+    f.append(WS, "ydoc.update", ydoc(OBJECT, {isBaseState: true}));
+    f.append(WS, "moment.append", replace(OBJECT, "object-3"));
+    f.append(WS, "moment.append", write(OBJECT, "docs/a.md"));
+  }],
+  ...audits(OBJECT).map(([opKind, payload]): [string, (f: Fixture) => void] => [`an accepted ${opKind} alone`, f => f.stored(WS, opKind, payload)]),
+  ["a departed live audit", f => f.stored(WS, ...audits(OBJECT)[0]!, {relayAdmission: "departed"})],
 ];
 it.each(priorAuthority)("refuses a first live base after %s", async (_, add) => {
   const f = await fixture();
@@ -130,11 +155,39 @@ const deletion: Array<[string, (f: Fixture) => void]> = [
   ["a departed deletion", f => f.append(WS, "moment.append", remove(OBJECT, "docs/a.md"), {originId: "service-host:native", admit: departed})],
   ["a deletion at another path", f => f.append(WS, "moment.append", remove(OBJECT, "private/old.md"))],
   ["a deletion in another version", f => f.append(WS, "moment.append", remove(OBJECT, "docs/a.md", "version-2"))],
+  ["a replacement and the replaced document's return", f => {
+    f.append(WS, "moment.append", replace(OBJECT, "object-3"));
+    f.append(WS, "moment.append", write(OBJECT, "docs/a.md"));
+  }],
+  ["a departed replacement", f => f.append(WS, "moment.append", replace(OBJECT, "object-3"), {originId: "service-host:native", admit: departed})],
+  ["a replacement below the epoch floor", f => {
+    f.append(WS, "moment.append", replace(OBJECT, "object-3"));
+    f.reenroll(WS, {replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  }],
+  ["a replacement in another version", f => f.append(WS, "moment.append", replace(OBJECT, "object-3", "version-2"))],
+  ["a replacement at another path", f => f.append(WS, "moment.append", replace(OBJECT, "object-3", "main", "private/old.md"))],
 ];
 it.each(deletion)("refuses a first live base after %s", async (_, add) => {
   const f = await fixture();
   add(f);
   expect(read(f.storage)).toBe("deletion");
+});
+
+const notDeletion: Array<[string, (f: Fixture) => void]> = [
+  ["a write naming it before and after", f => f.append(WS, "moment.append", replace(OBJECT, OBJECT))],
+  ["a write naming no object after it", f => f.stored(WS, "moment.append", replace(OBJECT, ""))],
+  ["a refused replacement", f => f.stored(WS, "moment.append", replace(OBJECT, "object-3"), {settlement: "refused"})],
+  ["its replacement of another document", f => f.append(WS, "moment.append", replace(OTHER, OBJECT))],
+  ["another document's replacement", f => f.append(WS, "moment.append", replace(OTHER, "object-3"))],
+];
+it.each(notDeletion)("lets a document open live after %s", async (_, add) => {
+  const f = await fixture();
+  add(f);
+  expect(read(f.storage)).toBe("eligible");
+});
+
+it("lets a document with no history open live", async () => {
+  expect((await fixture()).storage.readFirstOpenEligibility({workspaceId: WS, objectId: "object-new"})).toBe("eligible");
 });
 
 it("does not count relay refusals or refused settlements as history", async () => {
@@ -164,9 +217,14 @@ it("reads every table through an existing index", async () => {
   read(f.storage);
   const query = prepare.mock.calls[0]![0]; prepare.mockRestore();
   const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));
-  expect(plan.filter(detail => /^SCAN (?!t\b|n\b|CONSTANT ROW)/.test(detail))).toEqual([]);
+  expect(plan.filter(detail => /^SCAN (?!t\b|n\b|h\b|CONSTANT ROW)/.test(detail))).toEqual([]);
+  // The object's own rows are read in one pass.
+  expect(plan.filter(detail => detail.includes("idx_sync_relay_log_hosted_documents"))).toHaveLength(1);
   for (const table of ["sync_relay_log", "sync_relay_live_documents", "sync_relay_live_document_ordinary_bases", "sync_relay_service_activations",
     "sync_relay_live_restore_operations"]) expect(plan.some(detail => detail.startsWith(`SEARCH ${table} USING`))).toBe(true);
+  for (const index of ["idx_sync_relay_log_hosted_documents", "idx_sync_relay_log_page"]) {
+    expect(plan.some(detail => detail.startsWith(`SEARCH sync_relay_log USING INDEX ${index} `))).toBe(true);
+  }
 });
 
 it("refuses to answer for a workspace the relay holds no history for", async () => {

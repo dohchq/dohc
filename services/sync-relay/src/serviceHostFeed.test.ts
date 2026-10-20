@@ -346,6 +346,8 @@ it("refuses a hosted base at its coordinate before preparation, whatever its blo
   f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
   // Valid but for being bases: one the host uploaded, one only the owner holds, and one nobody holds.
   const bases = [...hostedBases(own), hostedBases(P)[0]!, hostedBases({sha256: "a".repeat(64)})[0]!];
+  const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
+  for (const [opKind, payload] of bases) expect(hostedWriteAllowed(hostedScope, opKind, payload)).toBe(false);
   const first = await (await f.push(bases)).json() as PushAnswer;
   expect(first).toMatchObject({inserted: 7, currentMaxOriginSeq: 6});
   expect(first.refusals).toEqual(bases.map((_, originSeq) => ({originId: HOST_ORIGIN, originSeq, opKind: "ydoc.update", reason: "base-state-from-host"})));
