@@ -4431,7 +4431,7 @@ mod tests {
             for version in 0..10 {
                 for i in 0..50_000 {
                     alias
-                        .execute(params![
+                        .execute(rusqlite::params![
                             format!("v-{version}"),
                             format!("notes/{}/file-{i:06}.md", "long-label/".repeat(8)),
                             format!("f-{i:06}")
