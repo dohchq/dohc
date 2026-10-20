@@ -475,8 +475,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
 };
 
 // The session this layer holds, which keeps the evict the public one drops.
-// `setTextAside` puts the document's text in Notices and answers the draft's
-// id, or null without a draft store.
+// `setTextAside` puts the document's text in Notices and answers a handle to
+// that write, or null without a draft store.
 type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   evict(): Promise<void>;
   setTextAside(): Promise<string | null>;
@@ -807,8 +807,9 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
-  // Sets a document's text aside in Notices and answers the draft's id.
-  // `discardUnsentState` removes that draft once a save wrote the text.
+  // Sets a document's text aside in Notices and answers a handle to that
+  // write. `discardUnsentState` removes the draft by that handle once a save
+  // wrote the text, unless a later write wrote the same draft again.
   preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<string>;
   discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
@@ -1908,6 +1909,8 @@ export function createWorkspaceEngineCapture(
   // Set-aside drafts of a deleted file's text that a newer draft or a save
   // replaced, and that the draft store has not removed yet. Every later draft
   // step and the capture's stop try again, so none lingers as a duplicate.
+  // Each is a handle to one write: the store keeps a draft that a later write
+  // wrote again, so a removal here never deletes text that is current.
   const obsoleteDrafts = new Set<string>();
   const discardObsoleteDrafts = async (): Promise<void> => {
     for (const draft of [...obsoleteDrafts]) {
@@ -2625,8 +2628,8 @@ export function createWorkspaceEngineCapture(
       fileFact.existed = true;
     };
     const settleCovers = new Map<string, number>();
-    // Puts text in Notices through the app's draft store, and answers the
-    // draft's id. A refusal tells the person, since the text is then only in
+    // Puts text in Notices through the app's draft store, and answers a
+    // handle to the write. A refusal tells the person, since the text is then only in
     // the open document.
     const preserveText = async (doc: Y.Doc, contentKind: YdocContentKind | undefined): Promise<string> => {
       try {
@@ -4458,8 +4461,7 @@ export function createWorkspaceEngineCapture(
           // A draft the store refused has told the person.
           const draft = await entry.session.setTextAside().catch(() => null);
           if (draft === null) return;
-          obsoleteDrafts.delete(draft);
-          if (currentDraft !== null && currentDraft !== draft) obsoleteDrafts.add(currentDraft);
+          if (currentDraft !== null) obsoleteDrafts.add(currentDraft);
           currentDraft = draft;
         });
         const retireTextSetAside = (): void => draftStep(async () => {

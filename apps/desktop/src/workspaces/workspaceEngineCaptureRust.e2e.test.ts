@@ -38,7 +38,7 @@ import {
   REAL_DAEMON_DEADLINE_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
-import { listLiveDraftRecovery, preserveUnsentLiveDraft, removeLiveDraft } from "./liveDraftRecovery";
+import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
@@ -1271,6 +1271,9 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
+// No window shows these workspaces.
+const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
+
 // dohc#2308. An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until
 // the person chooses Save it again. `shape` is a file capture recorded and
@@ -1281,15 +1284,16 @@ async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0
   const root = await createTestScratch("dohc-deleted-file-");
   const draftStore = await createTestScratch("dohc-deleted-file-drafts-");
   const workspaceId = `deleted-file-${shape}`;
+  const store = workspaceDraftStore(draftStore, workspaceId, NO_WINDOWS);
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const capture = createWorkspaceEngineCapture({
     workspaceId, rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
-    preserveUnsentState: (draft) => preserveUnsentLiveDraft(draftStore, workspaceId, draft),
+    preserveUnsentState: store.preserveUnsentState,
     discardUnsentState: async (draftId) => {
       if (failedDiscards-- > 0) throw new Error("The draft store is busy.");
-      await removeLiveDraft(draftStore, draftId);
+      await store.discardUnsentState(draftId);
     },
   });
   const absolute = join(root, "note.md");
@@ -1438,10 +1442,11 @@ it.skipIf(engine.missing)("sets nothing aside for a document whose saves are not
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const preserve = vi.fn((draft: Parameters<typeof preserveUnsentLiveDraft>[2]) => preserveUnsentLiveDraft(draftStore, "no-draft", draft));
+  const store = workspaceDraftStore(draftStore, "no-draft", NO_WINDOWS);
+  const preserve = vi.fn(store.preserveUnsentState);
   const capture = createWorkspaceEngineCapture({
     workspaceId: "no-draft", rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
-    preserveUnsentState: preserve, discardUnsentState: (draftId) => removeLiveDraft(draftStore, draftId),
+    preserveUnsentState: preserve, discardUnsentState: store.discardUnsentState,
   });
   try {
     await writeFile(join(root, "note.md"), "base\n", "utf8");

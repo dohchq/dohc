@@ -22,7 +22,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraftCopies, preserveLiveDraft, removeWorkspaceLiveDrafts, workspaceDraftStore } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -2430,17 +2430,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
             if (row.checkpoint.objectId === checkpoint.objectId && row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
           }
         },
-        // Each write and removal tells the workspace's windows, so Notices
-        // shows the drafts main keeps as they change.
-        preserveUnsentState: async draft => {
-          const draftId = await preserveUnsentLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft);
-          sendToWorkspaceWindows(CHANNELS.liveDraftRecoveryChanged, { workspaceId: workspace.workspaceId });
-          return draftId;
-        },
-        discardUnsentState: async draftId => {
-          await removeLiveDraft(join(stateDir(), "live-draft-recovery"), draftId);
-          sendToWorkspaceWindows(CHANNELS.liveDraftRecoveryChanged, { workspaceId: workspace.workspaceId });
-        },
+        // Notices shows the drafts main keeps as they change.
+        ...workspaceDraftStore(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, {
+          all: () => BrowserWindow.getAllWindows(),
+          workspaceIdOf: (webContents) => rendererWorkspaceSessions.current(webContents)?.workspaceId,
+        }),
         hasRetainedLiveDraft: (path, objectId) => hasRetainedLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, path, objectId,
         ),

@@ -5,6 +5,8 @@ import * as Y from "yjs";
 import type { YdocContentKind } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
+import { CHANNELS } from "../ipc/channels";
+import { sendToWorkspaceWindows } from "../ipc/workspaceActivityBroadcast";
 
 export type LiveDraft = {
   path: string;
@@ -104,30 +106,84 @@ export async function removeLiveDraftCopies(directory: string, workspaceId: stri
   catch {return before.filter(record => !removed.has(record.recordId));}
 }
 
-/** Exact CRDT recovery complements the renderer's user-visible set-aside text. Answers the draft's id. */
+// A draft's file name is the hash of its content, so writing the same text
+// again writes the same file. Each write of a file here gets a number, and its
+// handle names both. A removal deletes the file only while no later write has
+// happened, so an old handle never deletes text written again. Writes and
+// removals of one file wait for each other.
+const draftWrites = new Map<string, number>();
+const draftFileWork = new Map<string, Promise<unknown>>();
+
+function onDraftFile<T>(file: string, work: () => Promise<T>): Promise<T> {
+  const result = (draftFileWork.get(file) ?? Promise.resolve()).then(work, work);
+  const settled = result.catch(() => undefined);
+  draftFileWork.set(file, settled);
+  void settled.then(() => {
+    if (draftFileWork.get(file) === settled) draftFileWork.delete(file);
+  });
+  return result;
+}
+
+/** Exact CRDT recovery complements the renderer's user-visible set-aside text. Answers a handle to this write. */
 export async function preserveLiveDraft(directory: string, workspaceId: string, draft: LiveDraft): Promise<string> {
   if (classifyEngineFilePathForRead(draft.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
   const content = JSON.stringify({ version: 1, workspaceId, path: draft.path, objectId: draft.objectId,
     ...(draft.remoteWorkspaceId !== undefined ? { remoteWorkspaceId: draft.remoteWorkspaceId } : { contentKind: draft.contentKind, text: draft.text }),
     updateBase64: Buffer.from(draft.update).toString("base64") });
   const digest = createHash("sha256").update(content).digest("hex");
-  await mkdir(directory, { recursive: true });
-  const temporary = join(directory, `${digest}.${randomUUID()}.tmp`);
-  activeTemporaryDrafts.add(temporary);
-  try {
-    await writeFile(temporary, content, { encoding: "utf8", flag: "wx", flush: true, mode: 0o600 });
-    await rename(temporary, join(directory, `${digest}.json`));
-  } finally {
-    await rm(temporary, { force: true }).catch(() => {});
-    activeTemporaryDrafts.delete(temporary);
-  }
-  return digest;
+  const file = join(directory, `${digest}.json`);
+  return await onDraftFile(file, async () => {
+    await mkdir(directory, { recursive: true });
+    const temporary = join(directory, `${digest}.${randomUUID()}.tmp`);
+    activeTemporaryDrafts.add(temporary);
+    try {
+      await writeFile(temporary, content, { encoding: "utf8", flag: "wx", flush: true, mode: 0o600 });
+      await rename(temporary, file);
+    } finally {
+      await rm(temporary, { force: true }).catch(() => {});
+      activeTemporaryDrafts.delete(temporary);
+    }
+    const write = (draftWrites.get(file) ?? 0) + 1;
+    draftWrites.set(file, write);
+    return `${digest}:${write}`;
+  });
 }
 
-/** Removes the draft `preserveLiveDraft` answered with this id. */
-export async function removeLiveDraft(directory: string, draftId: string): Promise<void> {
-  if (!/^[a-f0-9]{64}$/.test(draftId)) throw new Error("This is not a draft id.");
-  await rm(join(directory, `${draftId}.json`), { force: true });
+/** Removes the draft one write left, unless a later write wrote it again. Answers whether it removed it. */
+export async function removeLiveDraft(directory: string, handle: string): Promise<boolean> {
+  const parsed = /^([a-f0-9]{64}):([1-9][0-9]*)$/.exec(handle);
+  if (!parsed) throw new Error("This is not a draft handle.");
+  const file = join(directory, `${parsed[1]}.json`);
+  return await onDraftFile(file, async () => {
+    if (draftWrites.get(file) !== Number(parsed[2])) return false;
+    await rm(file, { force: true });
+    draftWrites.delete(file);
+    return true;
+  });
+}
+
+/**
+ * The draft calls a workspace's capture makes. After each write, and each
+ * removal that removed a draft, the windows showing the workspace hear of it.
+ */
+export function workspaceDraftStore<Contents extends { isDestroyed(): boolean; send(channel: string, payload: unknown): void }>(
+  directory: string,
+  workspaceId: string,
+  windows: { all(): Iterable<{ webContents: Contents }>; workspaceIdOf(webContents: Contents): string | undefined },
+) {
+  const changed = () => sendToWorkspaceWindows({
+    windows: windows.all(), workspaceIdOf: windows.workspaceIdOf, channel: CHANNELS.liveDraftRecoveryChanged, event: { workspaceId },
+  });
+  return {
+    preserveUnsentState: async (draft: Parameters<typeof preserveUnsentLiveDraft>[2]): Promise<string> => {
+      const handle = await preserveUnsentLiveDraft(directory, workspaceId, draft);
+      changed();
+      return handle;
+    },
+    discardUnsentState: async (handle: string): Promise<void> => {
+      if (await removeLiveDraft(directory, handle)) changed();
+    },
+  };
 }
 
 export async function preserveUnsentLiveDraft(directory: string, workspaceId: string, input: {
