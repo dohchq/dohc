@@ -2,6 +2,7 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
+import { flushSync } from "react-dom";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { bridge } from "./bridge";
@@ -39,7 +40,7 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
   return { dbPath: `${dir}${base}.sqlite`, tableName };
 }
 
-import { MAX_CSV_PREVIEW_ROWS, detectCsvBound, type CsvBoundOffer } from "./offers/csvBound";
+import { MAX_CSV_PREVIEW_ROWS, detectCsvBound } from "./offers/csvBound";
 
 // Imports running now, by workspace and file, so a header click and a stored
 // Try again never import one file twice at once, and every view of the file
@@ -94,24 +95,56 @@ function importCsv(workspaceId: string, path: string, join = false): Promise<Imp
 // why and what to do next (ipc/errorWords.ts).
 const importFailed = (path: string) =>
   `dohc could not import this file to ${deriveImportTarget(path).dbPath}.`;
+// Main's refusals start with these words and go on to say why.
+const UNDO_FAILED = "Cannot undo this import.";
+
+// The shell's hooks an import answers through. They outlive the CSV's view,
+// and the shell remounts for each workspace (DesktopRoot), so they never
+// reach another.
+interface ImportHooks {
+  onOpenPath?: (path: string) => void;
+  onNotice?: (message: string, undo: () => void) => void;
+  onClosePath?: (path: string) => void;
+  onError?: ReportButtonError;
+}
+
+// A finished import opens the database and says what it made, with Undo.
+function imported(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks) {
+  hooks.onOpenPath?.(result.path);
+  hooks.onNotice?.(
+    `Imported ${result.rowCount} ${result.rowCount === 1 ? "row" : "rows"} to ${result.path}.`,
+    undoImport(workspaceId, result, hooks),
+  );
+}
+
+// Undo on an import's notice. It closes every tab showing the database first,
+// and the views unmount before main is asked, so none holds the file open or
+// reads it while it goes. Main moves it to the trash only while it is
+// unchanged; a refusal says why, and its row offers Try again. Undo and Try
+// again run from a click, never while React renders.
+function undoImport(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks): () => void {
+  const run = async () => {
+    flushSync(() => hooks.onClosePath?.(result.path));
+    try {
+      await bridge().undoDatabaseImport({ workspaceId, operationId: result.operationId });
+    } catch (cause) {
+      hooks.onError?.(UNDO_FAILED, cause, () => void run());
+    }
+  };
+  return () => void run();
+}
 
 // Try again on a failed import's Notices row. The person asked for it, so it
 // answers through the shell's own hooks whether or not the CSV is still open:
 // success opens the database, and a failure files a new row. An import of the
-// file already running answers it. The shell remounts for each workspace
-// (DesktopRoot), so its hooks never reach another.
-function retryImport(
-  workspaceId: string,
-  path: string,
-  onOpenPath: ((path: string) => void) | undefined,
-  onError: ReportButtonError | undefined,
-): () => void {
+// file already running answers it.
+function retryImport(workspaceId: string, path: string, hooks: ImportHooks): () => void {
   const run = async () => {
     try {
       const result = await importCsv(workspaceId, path, true);
-      if (result) onOpenPath?.(result.path);
+      if (result) imported(workspaceId, result, hooks);
     } catch (cause) {
-      onError?.(importFailed(path), cause, () => void run());
+      hooks.onError?.(importFailed(path), cause, () => void run());
     }
   };
   return () => void run();
@@ -402,10 +435,11 @@ export function CsvView({
   onSaveStateChange,
   registerDraftFlush,
   localBuffer,
-  onCsvBoundOffer,
   csvSource,
   onShare,
   onError,
+  onNotice,
+  onClosePath,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -427,11 +461,15 @@ export function CsvView({
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   localBuffer: SharedLocalDocument;
-  onCsvBoundOffer?: (offer: CsvBoundOffer | null) => void;
+  // Where the file comes from. Only a workspace's own CSV is offered Import
+  // on its preview's bound.
   csvSource?: "workspace-file" | "received-share" | "dataset";
   onShare?: () => void;
-  // The shell's error hook: a failed import is a toast and a Notices row.
+  // The shell's hooks: a failed import is a toast and a Notices row, and a
+  // finished one a toast whose Undo closes the database's tabs.
   onError?: ReportButtonError;
+  onNotice?: (message: string, undo: () => void) => void;
+  onClosePath?: (path: string) => void;
 }) {
   const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
@@ -518,17 +556,11 @@ export function CsvView({
     showRows(nextRows);
   }, [delimiter, draft.draft, raw, showRows]);
 
-  const dataRowCount = Math.max(0, rows.length - 1);
-  useEffect(() => {
-    if (rows !== rowsRef.current || switchReadPending || switchUnresyncedRef.current) {
-      onCsvBoundOffer?.(null);
-      return;
-    }
-    onCsvBoundOffer?.(raw || !csvSource ? null : detectCsvBound({ workspaceId, path, totalRows: dataRowCount,
-      source: csvSource, complete: !truncated,
-    }));
-  }, [onCsvBoundOffer, csvSource, workspaceId, path, dataRowCount, rows, raw, truncated, switchReadPending, switchUnresyncedRef]);
-  useEffect(() => () => onCsvBoundOffer?.(null), [workspaceId, onCsvBoundOffer]);
+  // The import reads the file in main, not this preview, so the offer needs
+  // only its count, its source, and a way to open the database.
+  const offer = onOpenPath && csvSource
+    ? detectCsvBound({ workspaceId, path, totalRows: Math.max(0, rows.length - 1), source: csvSource, complete: !truncated })
+    : null;
 
   const columnName = useCallback(function columnName(index: number): string {
     return index === 0 ? "column" : `column_${index + 1}`;
@@ -637,15 +669,17 @@ export function CsvView({
     setRaw(false);
   }, [delimiter, raw, showRows]);
 
+  // The tab row's Import and the preview bound's run this one import.
   async function importToSqlite() {
     if (locked) return;
     const current = () =>
       target.current?.workspaceId === workspaceId && target.current.path === path;
+    const hooks = { onOpenPath, onNotice, onClosePath, onError };
     try {
       const result = await importCsv(workspaceId, path);
-      if (result && current()) onOpenPath?.(result.path);
+      if (result && current()) imported(workspaceId, result, hooks);
     } catch (cause) {
-      if (current()) onError?.(importFailed(path), cause, retryImport(workspaceId, path, onOpenPath, onError));
+      if (current()) onError?.(importFailed(path), cause, retryImport(workspaceId, path, hooks));
     }
   }
 
@@ -687,6 +721,8 @@ export function CsvView({
           onDeleteColumn={deleteColumn}
           onAddRow={addRow}
           onAddColumn={addColumn}
+          importing={importing}
+          onImport={offer ? () => void importToSqlite() : undefined}
         />
       )}
     </div>
@@ -705,6 +741,8 @@ export function CsvTable(props: {
   onDeleteColumn: (cellIndex: number) => void;
   onAddRow: () => void;
   onAddColumn: () => void;
+  importing?: boolean;
+  onImport?: () => void;
 }) {
   const { rows, columns, locked } = props;
   const header = rows[0];
@@ -775,19 +813,44 @@ export function CsvTable(props: {
           {!locked ? <CsvAddRow columnCount={columnCount} onAddRow={props.onAddRow} /> : null}
         </tbody>
       </DataGrid>
-      {dataRowCount > previewRows.length ? <CsvPreviewBound rowCount={dataRowCount} /> : null}
+      {dataRowCount > previewRows.length ? (
+        <CsvPreviewBound rowCount={dataRowCount} importing={props.importing} onImport={props.onImport} />
+      ) : null}
     </div>
   );
 }
 
-export function CsvPreviewBound(props: { rowCount: number }) {
+// How many rows the preview shows. With a CSV offer it ends in Import to
+// SQLite, which runs the tab row's import and is busy as that button is;
+// without one it names the way to the rest.
+export function CsvPreviewBound(props: { rowCount: number; importing?: boolean; onImport?: () => void }) {
+  if (!props.onImport) {
+    return (
+      <p
+        data-testid="csv-preview-bound"
+        className="mb-0 mt-2 text-[11px] text-subtle"
+      >
+        Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows —
+        import to SQLite to work with all of them.
+      </p>
+    );
+  }
   return (
-    <p
-      data-testid="csv-preview-bound"
-      className="mb-0 mt-2 text-[11px] text-subtle"
-    >
-      Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows —
-      import to SQLite to work with all of them.
+    <p data-testid="csv-preview-bound" className="mb-0 mt-2 flex items-center gap-2 text-[11px] text-subtle">
+      Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows.
+      <SecondaryButton
+        size="row"
+        data-testid="csv-bound-import"
+        aria-busy={props.importing || undefined}
+        onClick={props.onImport}
+      >
+        {props.importing ? (
+          <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
+        ) : (
+          <Database size={12} aria-hidden />
+        )}
+        Import to SQLite
+      </SecondaryButton>
     </p>
   );
 }

@@ -4,7 +4,7 @@ import {
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   link,
   mkdir,
@@ -242,7 +242,7 @@ export async function importToDatabase(
   databaseRelativePath: string,
   tableName: string,
   options: { worker?: WorkspaceDatabaseWorkerOwner; signal?: AbortSignal } = {},
-): Promise<{ path: string; tableName: string; rowCount: number }> {
+): Promise<{ path: string; tableName: string; rowCount: number; sha256: string; size: number }> {
   const mediaType = mediaTypeForPath(source.path) ?? "text/plain";
 
   const result = await (options.worker ?? workspaceDatabaseWorker).importData({
@@ -258,7 +258,8 @@ export async function importToDatabase(
     databaseRelativePath,
     Buffer.from(result.bytes.buffer, result.bytes.byteOffset, result.bytes.byteLength),
   );
-  return { path, tableName: result.tableName, rowCount: result.rowCount };
+  return { path, tableName: result.tableName, rowCount: result.rowCount,
+    sha256: createHash("sha256").update(result.bytes).digest("hex"), size: result.bytes.byteLength };
 }
 
 export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: WorkspaceDatabaseWorkerOwner) {
