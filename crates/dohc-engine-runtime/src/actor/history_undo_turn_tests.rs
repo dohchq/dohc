@@ -192,6 +192,76 @@ impl TurnProbe {
         }
     }
 }
+
+#[derive(Debug, serde::Serialize)]
+pub(in crate::actor) struct UpdateWait {
+    pub(in crate::actor) wait_ns: u128,
+    pub(in crate::actor) total_wait_ns: u128,
+    pub(in crate::actor) turn_gap: usize,
+    pub(in crate::actor) retries: usize,
+}
+
+pub(in crate::actor) async fn retry_ydoc_update<T, F>(
+    serial: &tokio::sync::Mutex<()>,
+    turn_count: impl Fn() -> usize,
+    mut operation: impl FnMut() -> F,
+) -> (T, UpdateWait, tokio::sync::MutexGuard<'_, ()>)
+where
+    F: std::future::Future<Output = Result<T, RuntimeError>>,
+{
+    let total_start = Instant::now();
+    let policy: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
+    ))
+    .unwrap();
+    let deadline =
+        total_start + Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
+    let mut backoff = Duration::from_millis(5);
+    let mut retries = 0;
+    loop {
+        let start = Instant::now();
+        let before = turn_count();
+        let admission = serial.lock().await;
+        let result = operation()
+            .await
+            .map(|value| (value, start.elapsed().as_nanos(), turn_count() - before));
+        match result {
+            Ok((value, wait_ns, turn_gap)) => {
+                let timing = UpdateWait {
+                    wait_ns,
+                    total_wait_ns: total_start.elapsed().as_nanos(),
+                    turn_gap,
+                    retries,
+                };
+                if retries > 0 {
+                    eprintln!("YDOC update retry evidence: {timing:?}");
+                }
+                // Keep admission until the caller records the commit position.
+                return (value, timing, admission);
+            }
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+            | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                StorageError::FileLocked,
+            ))) => {
+                drop(admission);
+                retries += 1;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "Y.Doc update stayed FileLocked until the client busy deadline; retries={retries}"
+                );
+                tokio::time::sleep(backoff.min(remaining)).await;
+                assert!(
+                    Instant::now() < deadline,
+                    "Y.Doc update stayed FileLocked until the client busy deadline; retries={retries}"
+                );
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            Err(error) => panic!("Y.Doc update failed: {error:?}"),
+        }
+    }
+}
+
 type DiskObserver = Arc<dyn Fn() + Send + Sync>;
 fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObserver>> {
     static OBSERVERS: OnceLock<Mutex<std::collections::HashMap<PathBuf, DiskObserver>>> =
@@ -1193,36 +1263,39 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         let mut claim = None;
         let mut waits = Vec::new();
         let mut gaps = Vec::new();
+        let mut retry_evidence = Vec::new();
         for i in 0..100 {
             let payload = doc.plaintext_insert(i, "x");
-            let before = probes().lock().unwrap()["turn-perf"].times.len();
-            let start = Instant::now();
-            let _guard = serial.lock().await;
-            let update = updates_actor
-                .ydoc_record_update(
-                    key.clone(),
-                    "typing.md".into(),
-                    dohc_engine_collab::ContentKind::Plaintext,
-                    dohc_engine_collab::Regime::LocalOnly,
-                    payload,
-                    None,
-                    None,
-                    claim,
-                    i == 0,
-                    None,
-                    Some(format!("typing-{i}")),
-                    5,
-                    Arc::new(NoFaults),
-                    tokio_util::sync::CancellationToken::new(),
-                    None,
-                )
-                .await
-                .unwrap();
+            let (update, timing, _admission) = retry_ydoc_update(
+                &serial,
+                || turn_count("turn-perf"),
+                || {
+                    updates_actor.ydoc_record_update(
+                        key.clone(),
+                        "typing.md".into(),
+                        dohc_engine_collab::ContentKind::Plaintext,
+                        dohc_engine_collab::Regime::LocalOnly,
+                        payload.clone(),
+                        None,
+                        None,
+                        claim.clone(),
+                        i == 0,
+                        None,
+                        Some(format!("typing-{i}")),
+                        5,
+                        Arc::new(NoFaults),
+                        tokio_util::sync::CancellationToken::new(),
+                        None,
+                    )
+                },
+            )
+            .await;
             claim = update.lineage_claim_id;
-            waits.push(start.elapsed().as_nanos());
-            gaps.push(probes().lock().unwrap()["turn-perf"].times.len() - before);
+            waits.push(timing.wait_ns);
+            gaps.push(timing.turn_gap);
+            retry_evidence.push(timing);
         }
-        (waits, gaps)
+        (waits, gaps, retry_evidence)
     });
     let start = Instant::now();
     let result = actor
@@ -1241,7 +1314,7 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         .await
         .unwrap();
     let total = start.elapsed();
-    let (waits, gaps) = updates.await.unwrap();
+    let (waits, gaps, retry_evidence) = updates.await.unwrap();
     assert_eq!(result.moments.len(), 2000);
     let phases = probes().lock().unwrap()["turn-perf"].phases.clone();
     let times: Vec<Duration> = phases
@@ -1297,7 +1370,7 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     );
     if let Ok(dir) = std::env::var("DOHC_HISTORY_UNDO_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
-        let evidence = serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"inverseTurnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"otherTurnNs":other_times,"phases":phases,"updateWaitNs":waits,"updateTurnGaps":gaps}).to_string();
+        let evidence = serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"inverseTurnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"otherTurnNs":other_times,"phases":phases,"updateWaitNs":waits,"updateTurnGaps":gaps,"updateRetries":retry_evidence}).to_string();
         let attempt = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1470,7 +1543,8 @@ async fn ydoc_update_retries_a_locked_writer() {
     let _hold = actor.hold_link_drain();
     actor
         .run(|store, _| {
-            store.read_with(|conn| conn.busy_timeout(Duration::ZERO))
+            store
+                .read_with(|conn| conn.busy_timeout(Duration::ZERO))
                 .map_err(StorageError::persist_public)?;
             Ok(())
         })
@@ -1480,27 +1554,47 @@ async fn ydoc_update_retries_a_locked_writer() {
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let key = dohc_engine_collab::DocKey::new(WS, "main", "typing").unwrap();
     let payload = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "x");
-    let update = actor
-        .ydoc_record_update(
-            key,
-            "typing.md".into(),
-            dohc_engine_collab::ContentKind::Plaintext,
-            dohc_engine_collab::Regime::LocalOnly,
-            payload,
-            None,
-            None,
-            None,
-            true,
-            None,
-            Some("locked-typing".into()),
-            5,
-            Arc::new(NoFaults),
-            crate::CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
-    writer.execute_batch("ROLLBACK").unwrap();
+    let serial = tokio::sync::Mutex::new(());
+    let refusals = AtomicUsize::new(0);
+    let (update, timing, _admission) = retry_ydoc_update(
+        &serial,
+        || 0,
+        || async {
+            let result = actor
+                .ydoc_record_update(
+                    key.clone(),
+                    "typing.md".into(),
+                    dohc_engine_collab::ContentKind::Plaintext,
+                    dohc_engine_collab::Regime::LocalOnly,
+                    payload.clone(),
+                    None,
+                    None,
+                    None,
+                    true,
+                    None,
+                    Some("locked-typing".into()),
+                    5,
+                    Arc::new(NoFaults),
+                    crate::CancellationToken::new(),
+                    None,
+                )
+                .await;
+            if matches!(
+                result,
+                Err(RuntimeError::Collab(
+                    dohc_engine_collab::CollabError::Storage(StorageError::FileLocked)
+                ))
+            ) {
+                assert_eq!(refusals.fetch_add(1, Ordering::SeqCst), 0);
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
+            result
+        },
+    )
+    .await;
+    assert_eq!(refusals.load(Ordering::SeqCst), 1);
+    assert_eq!(timing.retries, 1);
+    assert_eq!(timing.turn_gap, 0);
     assert_eq!(update.outcome.seq, 1);
     close(supervisor).await;
 }
