@@ -1,5 +1,6 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
+use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::OperationCancellation;
