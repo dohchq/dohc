@@ -30,7 +30,7 @@ export function appCompilerRefusal(platform: NodeJS.Platform, arch: string, kern
   if (platform === "linux" && arch === "x64") {
     if (before(5, 13)) return "Publishing and opening apps needs Linux 5.13 or later. Update Linux, then try again.";
     if (securityModules?.trim() && !securityModules.split(",").map(name => name.trim()).includes("landlock")) {
-      return "Publishing and opening apps needs Landlock, which this Linux kernel leaves off. Add landlock to the kernel's lsm boot option, then try again.";
+      return "Publishing and opening apps needs Landlock, which this Linux kernel leaves off. Add landlock to its lsm boot option and restart, or use a kernel that includes Landlock.";
     }
     return undefined;
   }

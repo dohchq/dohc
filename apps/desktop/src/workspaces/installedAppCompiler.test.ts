@@ -28,7 +28,7 @@ it("builds apps on Windows x64, Apple silicon Macs with macOS 13.5 or later, and
     expect(appCompilerRefusal("linux", "x64", "6.8.0-45-generic", modules)).toBeUndefined();
   }
   expect(appCompilerRefusal("linux", "x64", "6.8.0-45-generic", "lockdown,capability,yama,apparmor\n"))
-    .toBe("Publishing and opening apps needs Landlock, which this Linux kernel leaves off. Add landlock to the kernel's lsm boot option, then try again.");
+    .toBe("Publishing and opening apps needs Landlock, which this Linux kernel leaves off. Add landlock to its lsm boot option and restart, or use a kernel that includes Landlock.");
   // macOS 13.5 is Darwin 22.6, the oldest release the pinned Node runs on.
   for (const kernel of ["22.6.0", "22.10.0", "23.0.0", "27.0.0"]) expect(appCompilerRefusal("darwin", "arm64", kernel)).toBeUndefined();
   for (const kernel of ["21.6.0", "22.5.0"]) {
