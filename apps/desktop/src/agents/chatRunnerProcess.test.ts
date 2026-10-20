@@ -56,12 +56,13 @@ describe("chat runner process", () => {
   });
 
   it("keeps the workspace folder out of the runner's program search", async () => {
-    vi.stubEnv("PATH", ["", ".", "relative", process.cwd()].join(delimiter));
+    const spaced = join(process.cwd(), "Program Files");
+    vi.stubEnv("PATH", ["", ".", "relative", '"."', process.cwd(), `"${spaced}"`].join(delimiter));
     const { calls, spawn } = await runnerFixture("win32");
     spawn(`"${process.execPath}"`);
     const env = calls[0]!.options.env;
     expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
-    expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd()]);
+    expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd(), spaced]);
   });
 
   it("refuses a runner Windows can't find on PATH instead of searching the workspace", async () => {

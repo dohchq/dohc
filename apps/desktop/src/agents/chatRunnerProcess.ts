@@ -80,8 +80,12 @@ function validPid(pid: number | undefined): pid is number {
 
 // The runner starts in the workspace folder, so an empty or relative PATH
 // entry would let a program the workspace carries run in place of a real one.
+// Windows allows a quoted entry, such as "C:\Program Files\x"; keep it unquoted.
 function runnerSearchPath(prefix: string, current: string | undefined): string {
-  const entries = (current ?? "").split(delimiter).filter((entry) => isAbsolute(entry));
+  const entries = (current ?? "")
+    .split(delimiter)
+    .map((entry) => entry.replace(/^"(.*)"$/u, "$1"))
+    .filter((entry) => isAbsolute(entry));
   return [prefix, ...entries].join(delimiter);
 }
 
