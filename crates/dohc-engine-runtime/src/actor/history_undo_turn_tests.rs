@@ -1463,3 +1463,44 @@ pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::N
         .or_default()
         .notify = Some(notify);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ydoc_update_retries_a_locked_writer() {
+    let (root, supervisor, actor) = setup(1);
+    let _hold = actor.hold_link_drain();
+    actor
+        .run(|store, _| {
+            store.read_with(|conn| conn.busy_timeout(Duration::ZERO))
+                .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let writer = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let key = dohc_engine_collab::DocKey::new(WS, "main", "typing").unwrap();
+    let payload = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "x");
+    let update = actor
+        .ydoc_record_update(
+            key,
+            "typing.md".into(),
+            dohc_engine_collab::ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly,
+            payload,
+            None,
+            None,
+            None,
+            true,
+            None,
+            Some("locked-typing".into()),
+            5,
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(update.outcome.seq, 1);
+    close(supervisor).await;
+}
