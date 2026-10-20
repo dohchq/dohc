@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn inverse_handles_long_paragraphs_in_changed_and_unchanged_lines() {
-        for head in [
+        for (case, head) in [
             format!("[[new|label]] tail {}", "typed ".repeat(2000)),
             format!("{} [[new|label]] tail", "typed ".repeat(2000)),
             format!(
@@ -389,19 +389,23 @@ mod tests {
                 "typed ".repeat(2000),
                 "more ".repeat(2000)
             ),
-            format!("[[new|{}]] tail", "label ".repeat(300)),
+            format!("[[new|{}]] tail", "label ".repeat(60)),
             format!(
                 "{}[[new|label]] tail{}",
                 "before ".repeat(2000),
                 "after ".repeat(2000)
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert!(
-                parser::extract(&head).is_ok(),
-                "fixture must fit the parser bounds"
+                targets(&head).unwrap().len() == 1,
+                "case {case}: fixture must retain a parsed wikilink"
             );
             assert_eq!(
-                inverse("[[old|label]] tail", "[[new|label]] tail", &head).unwrap(),
+                inverse("[[old|label]] tail", "[[new|label]] tail", &head)
+                    .unwrap_or_else(|| panic!("long paragraph case {case}")),
                 head.replacen("[[new|", "[[old|", 1)
             );
         }
