@@ -1,6 +1,7 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import {createHash} from "node:crypto";
 import {afterEach, expect, it, vi} from "vitest";
+import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createNamedLiveFrameSession, type NamedFrameAppliedUpdate, type NamedFrameSubmissionResult} from "../../../../services/sync-relay/src/namedLiveFrameSession";
 import {OwnerYDocFrameDelivery, type OwnerAcceptedState, type OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
@@ -15,7 +16,7 @@ const envelope: OwnerYDocDeliveryEnvelope = {outboxId: "outbox", binding, baseUp
   personEdit: true, sequence: 4, appendKey: "append", deliveryId: "stable-delivery", update: new Uint8Array([1,2,3]), updateDigest: hash(new Uint8Array([1,2,3]))};
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 const disposals: (() => void)[] = [];
-afterEach(() => {for (const close of disposals.splice(0)) close();});
+afterEach(() => {for (const close of disposals.splice(0)) close(); vi.useRealTimers();});
 
 function fixture(overrides: {binding?: typeof binding; initialCursor?: number; initialResult?: "applied" | "retry"; retained?: boolean;
   accountId?: string | null; result?: NamedFrameSubmissionResult; state?: Partial<OwnerAcceptedState>; connect?: OwnerYDocFrameDeliveryOptions["connect"]} = {}) {
@@ -170,6 +171,72 @@ it("retains pending when native ordered application refuses", async () => {
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   const work = f.delivery.deliver(fresh.authority, envelope); await f.receiptChecked.promise; f.feed();
   expect(await work).toEqual({kind: "retry"});
+});
+
+const capacityRefusal = () => new EngineRequestError(1, {code: "OVERLOADED", message: "live-settlement-capacity", retry: "afterBackoff"});
+
+it("retries the received receipt proof without reconnecting or resubmitting", async () => {
+  vi.useFakeTimers();
+  const proof = vi.fn().mockRejectedValueOnce(capacityRefusal()).mockResolvedValue(true);
+  const f = fixture({state: {isReceiptApplied: proof}}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  let settled = false;
+  const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
+  await vi.advanceTimersByTimeAsync(0);
+  expect(proof).toHaveBeenCalledTimes(1);
+  expect(settled).toBe(false);
+  expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(proof).toHaveBeenCalledTimes(2);
+  expect(proof.mock.calls[1]![0]).toEqual(proof.mock.calls[0]![0]);
+  expect(f.connect).toHaveBeenCalledTimes(1); expect(f.submit).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a refused then false receipt pending until the accepted frame proves it", async () => {
+  vi.useFakeTimers();
+  let applied = false;
+  const checked = deferred<void>();
+  const proof = vi.fn().mockRejectedValueOnce(capacityRefusal()).mockImplementation(async () => {checked.resolve(); return applied;});
+  const f = fixture({state: {isReceiptApplied: proof, applyAcceptedFrame: async () => {applied = true; return "applied";}}});
+  const fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  let settled = false;
+  const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
+  await Promise.race([checked.promise, work]);
+  expect(proof).toHaveBeenCalledTimes(2); expect(settled).toBe(false);
+  f.feed();
+  expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(proof).toHaveBeenCalledTimes(3);
+});
+
+it.each(["deadline", "cancellation", "replacement"])("bounds repeated proof overloads by %s", async ending => {
+  vi.useFakeTimers();
+  const checked = deferred<void>();
+  const proof = vi.fn(async () => {if (proof.mock.calls.length > 1) checked.resolve(); throw capacityRefusal();});
+  const f = fixture({state: {isReceiptApplied: proof}}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  let settled = false;
+  const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
+  await Promise.race([checked.promise, work]);
+  expect(proof.mock.calls.length).toBeGreaterThan(1); expect(settled).toBe(false);
+  if (ending === "deadline") await vi.advanceTimersByTimeAsync(10_000);
+  else if (ending === "cancellation") f.controller.abort();
+  else await f.delivery.freshOwnerAuthority(binding);
+  expect(await work).toEqual({kind: "retry"});
+  const calls = proof.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(100);
+  expect(proof).toHaveBeenCalledTimes(calls); expect(f.submit).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  new Error("unclassified failure"),
+  new EngineRequestError(1, {code: "OVERLOADED", message: "capacity", retry: "no"}),
+  new EngineRequestError(1, {code: "DEADLINE_EXCEEDED", message: "deadline", retry: "afterBackoff"}),
+])("does not locally retry an undeclared receipt overload: %s", async error => {
+  const proof = vi.fn().mockRejectedValue(error), f = fixture({state: {isReceiptApplied: proof}});
+  const fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "retry"});
+  expect(proof).toHaveBeenCalledTimes(1);
 });
 
 it("owns Buffer-backed pending bytes before an asynchronous transport can observe caller mutation", async () => {
