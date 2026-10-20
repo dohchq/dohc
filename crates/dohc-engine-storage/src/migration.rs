@@ -4404,7 +4404,10 @@ mod tests {
     #[test]
     #[ignore = "scheduled migration 64 alias-index measurement"]
     fn conversation_links_measure_migration_alias_index_on_large_store() {
-        assert!(!std::hint::black_box(cfg!(debug_assertions)), "run with --release");
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run with --release"
+        );
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
