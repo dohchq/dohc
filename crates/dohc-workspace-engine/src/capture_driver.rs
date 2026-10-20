@@ -2697,8 +2697,8 @@ pub(crate) async fn reconcile_full_for_switch(
             // failure refreshes the manifest.
             let manifest_changed = has_ops || applied.retired_unread;
             let applied = applied.clean;
-            // A new file an editor still holds is not recorded yet, so the
-            // switch would leave it behind.
+            // A new file an editor still holds is not recorded yet, and a
+            // deleted one is not retired, so the switch would leave it behind.
             let deferred = match handle.stats().await {
                 Ok(stats) => stats.deferred > 0,
                 Err(_) => true,
@@ -3521,10 +3521,10 @@ async fn materialize_ydoc_recoveries(
 }
 
 /// Re-offer unrecorded paths when a document session releases its lease.
-/// Empty new files are deferred; outside writes to held new files are
-/// quarantined after repeated refusals. Both need a rescan even when nothing
-/// on disk changes after the session ends. The release must wake quarantined
-/// paths itself: once the WAL is reused in place, nothing else will.
+/// Empty new files and deleted files are deferred; outside writes to held new
+/// files are quarantined after repeated refusals. All need a rescan even when
+/// nothing on disk changes after the session ends. The release must wake
+/// quarantined paths itself: once the WAL is reused in place, nothing else will.
 async fn offer_unrecorded_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,

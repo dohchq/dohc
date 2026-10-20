@@ -2610,7 +2610,7 @@ fn ensure_capture_target_not_leased(
     Err(RuntimeError::Sync(
         dohc_engine_sync::SyncError::RetryableState {
             reason: if recorded {
-                "ydoc-session-live"
+                CAPTURE_RECORDED_FILE_LIVE
             } else {
                 CAPTURE_NEW_FILE_LIVE
             },
@@ -2621,6 +2621,9 @@ fn ensure_capture_target_not_leased(
 /// The capture refusal for a new file whose live session holds it before the
 /// store has a head for it.
 pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
+
+/// The capture refusal for a recorded file whose live session holds it.
+pub const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
 
 fn capture_secret_on_store(
     store: &mut EngineStore,
@@ -2833,7 +2836,7 @@ fn capture_retire_on_store(
             if leases.is_held(&key) {
                 return Err(RuntimeError::Sync(
                     dohc_engine_sync::SyncError::RetryableState {
-                        reason: "ydoc-session-live",
+                        reason: CAPTURE_RECORDED_FILE_LIVE,
                     },
                 ));
             }

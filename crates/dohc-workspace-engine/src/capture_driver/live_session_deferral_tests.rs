@@ -767,6 +767,65 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
     harness.close();
 }
 
+// dohc#2342. A file capture recorded is deleted outside dohc while its
+// document is open. The session still holds the head and refuses every save
+// over the missing file, so capture leaves the head alone. Capture is waiting,
+// not failing, so it stays clean. The release alone brings the delete back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+
+    std::fs::remove_file(harness.root.join(path)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the held delete is not a failed capture"
+    );
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert!(
+        !stats.dirty,
+        "the layer is quiescent while the session lasts"
+    );
+    assert_eq!(
+        head_count(&harness.db, path),
+        1,
+        "the session still holds it"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+
+    files.close().await;
+    harness.close();
+}
+
 // The held file carried typing the engine admitted but never settled. Once
 // the session lets go, the same capture pass records the outside edit as the
 // file, keeps the typing as an ordinary sibling, and writes that sibling to

@@ -50,7 +50,7 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    CAPTURE_NEW_FILE_LIVE, CapturePassSettlement, CapturePlacementPath,
+    CAPTURE_NEW_FILE_LIVE, CAPTURE_RECORDED_FILE_LIVE, CapturePassSettlement, CapturePlacementPath,
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};

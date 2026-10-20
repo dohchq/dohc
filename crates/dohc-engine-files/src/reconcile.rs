@@ -453,7 +453,7 @@ impl ReconcileController {
     }
 
     /// Paths the last acknowledged run deferred to a live document session.
-    /// Every full scan offers them again until one captures them.
+    /// Every full scan offers them again until one captures or retires them.
     pub fn deferred_paths(&self) -> &[String] {
         &self.deferred_paths
     }
@@ -618,6 +618,7 @@ impl ReconcileController {
         }
         let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
         let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
+        let deferred: BTreeSet<&str> = result.deferred_paths.iter().map(String::as_str).collect();
         let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
             .captured
             .iter()
@@ -659,6 +660,17 @@ impl ReconcileController {
             }
             if not_owned.contains(op.path()) {
                 next.remove(op.path());
+                continue;
+            }
+            if deferred.contains(op.path()) {
+                // A deferred ingest is not captured. An entry left from an
+                // earlier file at the path would make the next scan call it
+                // unchanged whenever the bytes match that file, and capture
+                // would never check them. A deferred retire keeps its entry,
+                // so the next scan retires the path again.
+                if matches!(op, CaptureOp::Ingest { .. }) {
+                    next.remove(op.path());
+                }
                 continue;
             }
             if !applied.contains(op.path()) {
@@ -711,12 +723,6 @@ impl ReconcileController {
         // is still tracked at content whose head has just been deleted — so a
         // later policy widen would diff clean and never re-ingest it.
         for path in &result.not_owned_paths {
-            next.remove(path);
-        }
-        // A deferred path is not captured. An entry left from an earlier file
-        // at the path would make the next scan call it unchanged whenever the
-        // bytes match that file, and capture would never check them.
-        for path in &result.deferred_paths {
             next.remove(path);
         }
         self.manifest = next;
@@ -884,8 +890,11 @@ mod ack_receipt_tests {
                 sha256: sha256.to_owned(),
             })
         }
-        fn retire(&mut self, _path: &str) -> Result<(), crate::capture::CaptureError> {
-            Ok(())
+        fn retire(
+            &mut self,
+            _path: &str,
+        ) -> Result<crate::capture::RetireOutcome, crate::capture::CaptureError> {
+            Ok(crate::capture::RetireOutcome::Retired)
         }
     }
 

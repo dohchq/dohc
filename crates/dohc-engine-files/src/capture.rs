@@ -108,7 +108,7 @@ pub trait CaptureSink {
         reason: IngestReason,
     ) -> Result<IngestOutcome, CaptureError>;
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError>;
 
     /// Retire `path`, a tracked spelling the reconcile proved respelled to
     /// `to`: the old spelling still opens the file, which is stored under the
@@ -122,7 +122,7 @@ pub trait CaptureSink {
         to: &Respelling,
     ) -> Result<RespelledRetire, CaptureError> {
         let _ = to;
-        self.retire(path).map(|()| RespelledRetire::Retired)
+        self.retire(path).map(RespelledRetire::from)
     }
 
     /// Try one bounded all-ingest prefix. `None` asks the capture loop to use
@@ -136,12 +136,34 @@ pub trait CaptureSink {
     }
 }
 
+/// How a sink disposed of a planned retire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetireOutcome {
+    Retired,
+    /// A live document session holds the file, so the store keeps it until
+    /// the session lets go. As with [`IngestOutcome::Deferred`], the op is
+    /// neither acknowledged nor failed and the run stays clean. The manifest
+    /// keeps the path, so the rescan the capture driver asks for once the
+    /// session releases its lease retires it.
+    Deferred,
+}
+
 /// How a sink disposed of a respelled path's retire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RespelledRetire {
     Retired,
     /// Refused for now. The path stays dirty for a later pass.
     Waits,
+}
+
+/// A retire that must wait for an editor makes the new spelling wait too.
+impl From<RetireOutcome> for RespelledRetire {
+    fn from(outcome: RetireOutcome) -> Self {
+        match outcome {
+            RetireOutcome::Retired => Self::Retired,
+            RetireOutcome::Deferred => Self::Waits,
+        }
+    }
 }
 
 const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
@@ -163,8 +185,9 @@ pub struct CaptureApplyResult {
     pub not_owned_paths: Vec<String>,
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
-    /// Ingests the sink deferred to a live document session, in plan order.
-    /// Their manifest entries are dropped, and they do not degrade the run.
+    /// Ops the sink deferred to a live document session, in plan order. They
+    /// do not degrade the run. A deferred ingest's manifest entry is dropped;
+    /// a deferred retire's stays.
     pub deferred_paths: Vec<String>,
     pub held_observations: Vec<HeldObservation>,
     /// The last path in the durable unit committed immediately before the
@@ -380,7 +403,7 @@ pub fn apply_reconcile_plan_cancellable(
                     }
                     Err(error) => Err(error),
                 },
-                None => sink.retire(path).map(|()| Applied::Retired),
+                None => sink.retire(path).map(Applied::from),
             },
         };
         if outcome.is_ok() && should_crash(faults) {
@@ -410,6 +433,15 @@ enum Applied {
     NotOwned,
     Deferred,
     Held { size: u64, sha256: String },
+}
+
+impl From<RetireOutcome> for Applied {
+    fn from(outcome: RetireOutcome) -> Self {
+        match outcome {
+            RetireOutcome::Retired => Self::Retired,
+            RetireOutcome::Deferred => Self::Deferred,
+        }
+    }
 }
 
 impl From<IngestOutcome> for Applied {
