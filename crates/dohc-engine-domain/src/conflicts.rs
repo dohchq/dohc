@@ -1030,8 +1030,7 @@ impl VersionedTextStore<'_> {
                 input.request_id.as_deref(),
                 &payload_hash,
                 0,
-                input.now_ms,
-            )?;
+                input.now_ms, "versioned")?;
             conflict.status = update.status;
             conflict.chosen_from = update.chosen_from;
             conflict.resolution = update.resolution;

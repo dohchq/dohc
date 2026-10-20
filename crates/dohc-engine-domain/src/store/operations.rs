@@ -244,13 +244,21 @@ pub fn undo_correlation_id(ws: &str, operation: &str, request: &str) -> String {
     )
 }
 
-pub fn undo_request_fingerprint(ws: &str, operation: &str, author: Option<&str>) -> String {
-    hash_fields(&[
-        b"history.undo",
-        ws.as_bytes(),
-        operation.as_bytes(),
-        author.unwrap_or("").as_bytes(),
-    ])
+pub fn undo_request_fingerprint(
+    conn: &Connection,
+    ws: &str,
+    operation: &str,
+    author: Option<&str>,
+) -> Result<String, DomainError> {
+    let duplicate: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3)",
+        params![format!("duplicate_{operation}"), ws, operation], |row| row.get(0),
+    ).map_err(DomainError::sql_corrupt)?;
+    Ok(if duplicate {
+        hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes()])
+    } else {
+        hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes(), author.unwrap_or("").as_bytes()])
+    })
 }
 
 fn checked_undo_request_in(
@@ -265,7 +273,7 @@ fn checked_undo_request_in(
     let Some(recorded) = lookup_request(conn, request)? else {
         return Ok(None);
     };
-    if recorded.payload_hash != undo_request_fingerprint(ws, operation, author) {
+    if recorded.payload_hash != undo_request_fingerprint(conn, ws, operation, author)? {
         return Err(DomainError::IdempotencyKeyReuseMismatch);
     }
     Ok(Some(recorded))

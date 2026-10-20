@@ -75,7 +75,7 @@ async function harness() {
     read: async () => { throw new Error("unexpected shared read"); },
   };
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
-    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: trusted,
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
       assertCurrent: () => operation.assertCurrent(),

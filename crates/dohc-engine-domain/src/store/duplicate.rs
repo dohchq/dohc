@@ -53,7 +53,7 @@ pub fn duplicate_file_in_tx(
         return Err(DomainError::TargetPathExists);
     }
     let source = alias_object_id(tx, ws, version, from)?.ok_or(DomainError::FileNotFound)?;
-    let head = get_snapshot_meta(tx, ws, version, &source)?.ok_or(DomainError::FileNotFound)?;
+    get_snapshot_meta(tx, ws, version, &source)?.ok_or(DomainError::FileNotFound)?;
     let object = format!(
         "duplicate_{}",
         hash_fields(&[ws.as_bytes(), operation.as_bytes()])
@@ -62,7 +62,7 @@ pub fn duplicate_file_in_tx(
         "duplicate-moment_{}",
         hash_fields(&[ws.as_bytes(), operation.as_bytes()])
     );
-    let summary = format!("Duplicated from moment {}", head.latest_moment_id);
+    let summary = format!("Duplicated {from}");
     let order = next_moment_order(tx)?;
     tx.execute(
         "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES(?1,?2,?3)",
@@ -80,12 +80,7 @@ pub fn duplicate_file_in_tx(
     tx.execute("INSERT INTO moments(workspace_id,version_id,object_id,path,moment_id,moment_order,recorded_at_ms,operation,after_blob_sha256,after_binary_sha256,after_content_kind,before_present,metadata_origin,metadata_summary,metadata_correlation_id,author_json,payload_after_path,payload_after_content_kind,payload_after_blob_sha256)
         SELECT workspace_id,version_id,object_id,path,latest_moment_id,?4,?5,'write',blob_sha256,binary_sha256,content_kind,0,'api',metadata_summary,metadata_correlation_id,?6,path,content_kind,coalesce(blob_sha256,binary_sha256) FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![ws,version,object,order,now,author]).map_err(DomainError::sql_persist)?;
-    record_request(tx, Some(&request), &fingerprint, order, *now)?;
-    tx.execute(
-        "UPDATE engine_requests SET kind='file-duplicate' WHERE request_id=?1",
-        [&request],
-    )
-    .map_err(DomainError::sql_persist)?;
+    record_request(tx, Some(&request), &fingerprint, order, *now, "file-duplicate")?;
     get_moment(tx, ws, &moment)?.ok_or(DomainError::FileNotFound)
 }
 

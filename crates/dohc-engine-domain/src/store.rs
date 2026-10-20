@@ -1147,7 +1147,7 @@ impl<'a> VersionedTextStore<'a> {
                 &input.from_version_id,
                 &input.new_version_id,
             )?;
-            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
+            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms, "versioned")?;
             after(tx, &record)?;
             Ok::<_, DomainError>(record.clone())
         })?;

@@ -27,6 +27,7 @@ use std::{
 
 #[derive(Debug)]
 pub struct HistoryOperation {
+    pub kind: Option<&'static str>,
     pub operation_id: String,
     pub version_id: String,
     pub moments: Vec<OperationMoment>,
@@ -90,6 +91,7 @@ impl ActorHandle {
                             )?;
                         }
                         Ok(HistoryOperation {
+                            kind: Some("file-duplicate"),
                             operation_id: input.operation_id.clone(),
                             version_id: input.version_id.clone(),
                             moments: dohc_engine_domain::operation_moments_in(
@@ -295,12 +297,18 @@ impl ActorHandle {
         operation: String,
     ) -> Result<HistoryOperation, RuntimeError> {
         self.run(move |store, _| {
-            let version_id = VersionedTextStore::new(store)
-                .get_active_version(&ws)?
-                .version_id;
+            let duplicate_version: Option<String> = store.read_with(|conn| conn.query_row(
+                "SELECT m.version_id FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3",
+                params![format!("duplicate_{operation}"),ws,operation], |r| r.get(0)).optional().map_err(StorageError::corrupt_public))?;
+            let kind = duplicate_version.as_ref().map(|_| "file-duplicate");
+            let version_id = match duplicate_version {
+                Some(version) => version,
+                None => VersionedTextStore::new(store).get_active_version(&ws)?.version_id,
+            };
             let moments =
                 store.read_with(|conn| operation_moments_in(conn, &ws, &version_id, &operation))?;
             Ok(HistoryOperation {
+                kind,
                 operation_id: operation,
                 version_id,
                 moments,
@@ -438,7 +446,12 @@ fn check_undo_ownership(
             }
             .into());
         }
-        dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
+        if let Err(error) = dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path) {
+            if matches!(error, dohc_engine_sync::SyncError::LiveDocumentBindingActive) && m.operation == "write" {
+                return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
+            }
+            return Err(error.into());
+        }
     }
     Ok(())
 }

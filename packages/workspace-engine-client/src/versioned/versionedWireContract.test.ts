@@ -288,7 +288,7 @@ describe("metadata-only History pages", () => {
 
 const operationResult = {operationId:"dohc-operation:minted", versionId:"main", momentCount:15000};
 it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as a bounded summary", method => {
-  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,notRestored: [], compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : operationResult;
+  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,notRestored: [], compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : {...operationResult,kind:null};
   expect(decodeVersionedResult(method,result)).toEqual(result);
   expect(()=>decodeVersionedResult(method,{...result,moments:[]})).toThrow(ProtocolShapeError);
 });

@@ -54,7 +54,7 @@ fn load(
     let Some((hash, cursor, kind)) = row else {
         return Ok(None);
     };
-    if hash != undo_request_fingerprint(ws, operation, author) {
+    if hash != undo_request_fingerprint(conn, ws, operation, author)? {
         return Err(DomainError::IdempotencyKeyReuseMismatch.into());
     }
     if !matches!(
@@ -75,7 +75,7 @@ fn load(
     if plan.workspace != ws
         || plan.operation != operation
         || plan.request != request
-        || plan.author.as_deref() != author
+        || hash != undo_request_fingerprint(conn, ws, operation, plan.author.as_deref())?
         || cursor > plan.members.len()
     {
         return Err(corrupt());
@@ -350,7 +350,7 @@ impl ActorHandle {
                 let existing = store.read_with(|conn| -> Result<_,RuntimeError> {
                     let row: Option<(String,i64)> = conn.query_row("SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",[&p.request],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StorageError::corrupt_public)?;
                     if let Some((hash,cursor))=row {
-                        if hash!=undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()) { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
+                        if hash!=undo_request_fingerprint(tx,&p.workspace,&p.operation,p.author.as_deref())? { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
                         return Ok(Some(usize::try_from(cursor).map_err(|_| corrupt())?));
                     }
                     Ok(None)
@@ -361,7 +361,7 @@ impl ActorHandle {
                     if active!=p.version { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"active version changed"}.into()); }
                     let prior: Option<String> = tx.query_row("SELECT r.kind FROM history_undo_plans p JOIN engine_requests r ON r.request_id=p.request_id WHERE p.workspace_id=?1 AND p.operation_id=?2",params![p.workspace,p.operation],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
                     if let Some(kind) = prior { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:if kind=="history-undo-complete" {"Operation already undone"} else {"Undo in progress"}}.into()); }
-                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()),now]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(tx,&p.workspace,&p.operation,p.author.as_deref())?,now]).map_err(StorageError::persist_public)?;
                     tx.execute("INSERT INTO history_undo_plans(request_id,workspace_id,version_id,operation_id,author_json,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",params![p.request,p.workspace,p.version,p.operation,p.author,body.as_str()]).map_err(StorageError::persist_public)?;
                     Ok(())
                 });

@@ -2179,11 +2179,11 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   const requests: Request[]=[];
   const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
     requests.push(request);
-    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{kind:"file-duplicate"})}};
   }};
   const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
   await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
-  await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"});
+  expect(await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"})).toMatchObject({kind:"file-duplicate"});
   await adapter.undoHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted",requestId:"retry"});
   expect(requests[0]?.params).toEqual({operationId:"dohc-operation:minted"});
   expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});

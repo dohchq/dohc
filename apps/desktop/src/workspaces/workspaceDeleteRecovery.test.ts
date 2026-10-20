@@ -50,7 +50,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   let placement: Promise<void> | undefined;
   let interrupted = false;
   let refuse: string | undefined;
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
+  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
     if (refuse) throw new Error(refuse);
     if (!committed) placement = placementGate.then(async () => { for (const path of tracked) await write(path, "tracked"); });
     committed ??= { operationId: input.operationId, versionId: "main", momentCount: tracked.length,

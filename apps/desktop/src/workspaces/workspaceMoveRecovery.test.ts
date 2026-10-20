@@ -33,7 +33,7 @@ async function fixture() {
   const capture: PathChangeOptions["capture"] & Pick<import("./workspaceEngineCapture").WorkspaceEngineCapture, "beginFileRename"> = { beginFileRename: async () => async () => undefined, changePathsAs: async (_paths, authored, work) => {
     activeOperationId = authored.operationId;
     return work({ policy: await readWorkspaceEnginePolicy(rootPath),
-      hasPath: async () => false,
+      readDuplicate: async () => null, hasPath: async () => false,
       duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
       recordDisk: async (_base, files) => files.filter(path => !path.endsWith("oversized.bin")),
       rename: async (from, to) => {
@@ -55,7 +55,7 @@ async function fixture() {
     }
     return { operationId: input.operationId, versionId: "main", notRestored: [], compensationOperationId: id, momentCount: members.length, deduped, materialized: !restoring };
   });
-  const history = { readHistoryPage, undoHistoryOperation };
+  const history = { readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation };
   const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn() };
   const logError = vi.fn();
   let afterMutation = () => {};

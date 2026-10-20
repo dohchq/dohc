@@ -7610,7 +7610,7 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   await capture.stop();
 }, 40_000);
 
-it("a rename after a terminal settle refusal refuses instead of saving stale content", async () => {
+it.each(["rename", "duplicate"] as const)("%s after a terminal settle refusal refuses instead of saving stale content", async action => {
   // #681, terminal-settle door (conflict-stale-target branch):
   // `standDownFromWrite` used to delete the debt entry here too, so a rename
   // right after this stand-down would have read the stale pre-lock disk
@@ -7645,9 +7645,9 @@ it("a rename after a terminal settle refusal refuses instead of saving stale con
   // RED against current main: absence read as landed, so this resolved and
   // recorded renamed.md from the stale pre-lock text instead of refusing.
   await expect(
-    capture.beginFileRename("note.md", "renamed.md"),
+    action === "rename" ? capture.beginFileRename("note.md", "renamed.md") : capture.changePathsAs(["note.md"], {operation: "duplicate", author: {kind: "human", humanId: "person"}, operationId: "dohc-operation:22222222-2222-4222-8222-222222222222"}, async () => {throw new Error("Duplicate must refuse before work");}, () => []),
   ).rejects.toThrow(
-    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
+    `dohc could not ${action} note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then ${action} note.md again.`,
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   expect(state.settledContents).toEqual([]);
@@ -8823,4 +8823,26 @@ it("retires the checkpoint actually stored by A when newer B fails", async () =>
  const stored=(await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text;expect(stored).toContain("STORED_A");expect(stored).not.toContain("FAILED_B");
  state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
  expect(state.diskMarkdown).toContain("FAILED_B");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
+});
+
+it("Duplicate settles the source and leaves its session and write admission intact", async () => {
+  const summaries: (string | undefined)[] = [];
+  const {capture, state} = await lockedRebindCapture("dohc-duplicate-live-", {wrapProvider: base => async opts => {
+    const session = await base(opts);
+    return {...session, settleNow: async options => {summaries.push(options?.summary); return session.settleNow(options);}};
+  }});
+  const {session, mirror} = await openWithOneEdit(capture, "first edit");
+  try {
+    await capture.changePathsAs(["note.md"], {operation:"duplicate",operationId:"dohc-operation:11111111-1111-4111-8111-111111111111",author:{kind:"human",humanId:"person"}}, async () => {
+      expect(state.closeCalls).toEqual([]);
+      expect(state.settledContents).toContain("first edit");
+      const before = Y.encodeStateVector(mirror);
+      mirror.getText("plainText").insert(0,"still typing ");
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror,before));
+    }, () => []);
+    expect(state.closeCalls).toEqual([]);
+    expect(state.generation).toBe(1);
+    expect(summaries).toContain("Saved latest edits before duplicating the file");
+    expect(summaries.join(" ")).not.toMatch(/moving|deleting|rename/);
+  } finally {mirror.destroy(); await capture.stop();}
 });

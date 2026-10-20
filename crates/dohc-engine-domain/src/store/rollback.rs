@@ -524,8 +524,7 @@ impl<'a> VersionedTextStore<'a> {
                 input.request_id.as_deref(),
                 &payload_hash,
                 0,
-                prep.moment.recorded_at_ms,
-            )?;
+                prep.moment.recorded_at_ms, "versioned")?;
             Ok::<_, DomainError>(false)
         })?;
         committed(outcome)

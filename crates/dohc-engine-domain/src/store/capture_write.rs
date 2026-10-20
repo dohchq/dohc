@@ -569,8 +569,7 @@ where
             input.request_id.as_deref(),
             &payload_hash,
             result.moment.moment_order,
-            input.now_ms,
-        )?;
+            input.now_ms, "versioned")?;
         return Ok(result);
     }
 
@@ -661,8 +660,7 @@ where
         input.request_id.as_deref(),
         &payload_hash,
         result.moment.moment_order,
-        input.now_ms,
-    )?;
+        input.now_ms, "versioned")?;
     Ok(result)
 }
 
@@ -802,8 +800,7 @@ pub fn capture_retire_in_tx(
             input.request_id.as_deref(),
             &payload_hash,
             0,
-            input.now_ms,
-        )?;
+            input.now_ms, "versioned")?;
         return Ok(CaptureRetireResult {
             pending_placement: false,
             released_capture_hold: false,
@@ -832,8 +829,7 @@ pub fn capture_retire_in_tx(
                 input.request_id.as_deref(),
                 &payload_hash,
                 0,
-                input.now_ms,
-            )?;
+                input.now_ms, "versioned")?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
                 released_capture_hold: false,
@@ -849,8 +845,7 @@ pub fn capture_retire_in_tx(
                 input.request_id.as_deref(),
                 &payload_hash,
                 0,
-                input.now_ms,
-            )?;
+                input.now_ms, "versioned")?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
                 released_capture_hold: false,
@@ -901,8 +896,7 @@ pub fn capture_retire_in_tx(
         input.request_id.as_deref(),
         &payload_hash,
         result.moment.moment_order,
-        input.now_ms,
-    )?;
+        input.now_ms, "versioned")?;
     Ok(CaptureRetireResult {
         pending_placement: false,
         released_capture_hold: false,
@@ -1131,8 +1125,7 @@ where
                 input.request_id.as_deref(),
                 &payload_hash,
                 result.moment_order,
-                input.now_ms,
-            )?;
+                input.now_ms, "versioned")?;
             return Ok(result);
         }
     }
@@ -1233,8 +1226,7 @@ where
         input.request_id.as_deref(),
         &payload_hash,
         moment_order,
-        input.now_ms,
-    )?;
+        input.now_ms, "versioned")?;
     Ok(CaptureIngestBinaryResult {
         pending_placement: false,
         released_capture_hold: false,
@@ -1800,8 +1792,7 @@ fn write_normalized_text_in_tx(
         input.request_id,
         &payload_hash,
         moment_order,
-        input.now_ms,
-    )?;
+        input.now_ms, "versioned")?;
 
     // A reused content-addressed row may be corrupt. Preserve the hydration
     // check that the prepared fast path replaces unless this write inserted

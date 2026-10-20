@@ -147,6 +147,8 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  readHistoryOperation: VersionedLiveAdapter["readHistoryOperation"];
+  readHistoryPage: VersionedLiveAdapter["readHistoryPage"];
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
   linkEdges: VersionedLiveAdapter["linkEdges"];
   incomingLinks: VersionedLiveAdapter["incomingLinks"];
@@ -1526,6 +1528,8 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
+    readHistoryOperation: input => runRead(adapter => adapter.readHistoryOperation(input)),
+    readHistoryPage: input => runRead(adapter => adapter.readHistoryPage(input)),
     duplicateFileUnderHold: input => runMutation(adapter => adapter.duplicateFileUnderHold(input)),
     holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
 

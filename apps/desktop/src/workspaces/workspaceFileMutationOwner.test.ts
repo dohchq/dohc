@@ -213,7 +213,7 @@ async function harness(options: {
   };
   let account = "account-alice";
   const deletedBy: string[] = [];
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
+  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
   const owner = createWorkspaceFileMutationOwner({
     historyFor: () => history,
     assertTrustedSender,
@@ -272,7 +272,7 @@ async function harness(options: {
           let gone = false;
           try {
             const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
-              hasPath: async () => false,
+              readDuplicate: async () => null, hasPath: async () => false,
       duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
       recordDisk: async (_path, files) => [...files], moveFile: async () => false,
               rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });

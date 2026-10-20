@@ -15,13 +15,14 @@ import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { waitForRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; signal?: AbortSignal; assertCurrent(): void };
-export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "undoHistoryOperation">;
+export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation">;
 export function createOperationHistory(withAdapter: <T>(work: (adapter: OperationHistory) => Promise<T>) => Promise<T | null>): OperationHistory {
   const requireResult = <T>(result: T | null): T => {
     if (result === null) throw new Error("The workspace engine is not running.");
     return result;
   };
   return {
+    readHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.readHistoryOperation(input))),
     readHistoryPage: async input => requireResult(await withAdapter(adapter => adapter.readHistoryPage(input))),
     undoHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.undoHistoryOperation(input))),
   };
@@ -192,9 +193,11 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         return result;
       } };
       if (move) return undoMoveRecovery(rootPath, move, author, history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
-      if (!record && members.length === 1 && members[0]!.operation === "write") {
+      if (!record && (await history.readHistoryOperation({workspaceId, operationId: input.operationId})).kind === "file-duplicate") {
         const duplicateFloor = await agentFloor(rootPath);
-        await duplicateFloor(members[0]!.path);
+        const member = members[0];
+        if (!member) throw new Error("This Duplicate is not in the active workspace version. Open its version to undo it.");
+        await duplicateFloor(member.path);
         const result = await history.undoHistoryOperation({workspaceId, operationId: input.operationId, requestId: `duplicate-undo:${input.operationId}`, author: {...author}});
         markChanged();
         return {ok: true as const, tracked: {state: result.materialized ? "restored" as const : "restoring" as const, momentCount: result.momentCount}, restored: [],

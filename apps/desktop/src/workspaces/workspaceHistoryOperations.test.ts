@@ -42,7 +42,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
     for (let start = 0; start < trackedPaths.length; start += 100) await Promise.all(trackedPaths.slice(start, start + 100).map(path => write(path)));
     return { operationId: input.operationId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: otherId, deduped: false, materialized: true };
   });
-  const history = { readHistoryPage, undoHistoryOperation };
+  const history = { readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation };
   const remove = async () => {
     const result = await deleteWorkspacePathByHand(operation, "folder", person, { capture, requestId: "delete", trashItem: async () => { throw new Error("OS refused"); }, markDeleted: vi.fn() });
     expect(result.undo).toEqual({ available: true }); return result.operationId!;
@@ -306,6 +306,7 @@ it("successfully undoes a saved file move through operation History", async () =
 
 it.each([false, true])("undoes Duplicate through the engine ledger with a stable request, agent=%s", async byAgent => {
   const f = await fixture();
+  f.history.readHistoryOperation.mockResolvedValue({operationId: otherId, versionId: "main", momentCount: 1, kind: "file-duplicate"} as never);
   f.history.readHistoryPage.mockResolvedValue({moments: [{momentId: "copy", operation: "write", path: "folder/tracked.txt"}], nextCursor: null} as never);
   f.history.undoHistoryOperation.mockResolvedValue({operationId: otherId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: otherId, deduped: false, materialized: true});
   expect(await f.undo(otherId, byAgent)).toMatchObject({ok: true, tracked: {state: "restored"}, remaining: []});
@@ -313,4 +314,11 @@ it.each([false, true])("undoes Duplicate through the engine ledger with a stable
   expect(f.history.undoHistoryOperation.mock.calls.map(([input]) => input.requestId)).toEqual(["duplicate-undo:" + otherId, "duplicate-undo:" + otherId]);
   f.history.undoHistoryOperation.mockRejectedValue(new Error("Cannot undo folder/tracked.txt: copy changed after Duplicate"));
   expect(await f.undo(otherId, byAgent)).toMatchObject({ok: false, reason: expect.stringContaining("folder/tracked.txt")});
+});
+
+it("does not treat an unrelated single write as Duplicate", async () => {
+  const f = await fixture();
+  f.history.readHistoryPage.mockResolvedValue({moments:[{operation:"write",path:"folder/tracked.txt"}],nextCursor:null} as never);
+  expect(await f.undo(otherId)).toMatchObject({ok:false,reason:"This operation is not in History."});
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
