@@ -9,6 +9,7 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatFileMentionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
@@ -83,10 +84,13 @@ import {
   AboutChatRow,
   AboutHeader,
   AboutHistoryView,
+  AboutLinksView,
   AboutSection,
   type AccessReason,
   type AccessSetup,
   type AccessView,
+  type ChatLinksView,
+  type LinksView,
 } from "../workbench/About";
 import type { AboutConversation } from "../workbench/aboutConversation";
 import type { PresencePeer } from "../collab/presenceChannel";
@@ -906,6 +910,43 @@ function ChatRunSpecimen() {
         </div>
       </AboutPanelSpecimen>
     </div>
+  );
+}
+
+// The drawing's document, linked from the meeting notes twice and from the
+// research, and named in #general.
+const aboutLink = (source: string, title: string, line: number, snippet: string, ordinal = 0) => {
+  const start = snippet.indexOf("[[");
+  const end = snippet.indexOf("]]") + 2;
+  return { source, title, ordinal, span: [start, end] as [number, number], line, snippet, highlightStart: start, highlightEnd: end };
+};
+const ABOUT_LINK_ROWS = [
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("research/competitors.md", "Competitor landscape", 7,
+    "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
+];
+const ABOUT_LINKS: Extract<LinksView, { status: "ready" }> = { status: "ready", rows: ABOUT_LINK_ROWS, next: "states-next", gathering: 0 };
+const ABOUT_CHAT_LINK: ChatFileMentionRecord = {
+  attachment: {
+    attachmentId: "states-attachment", threadId: "states-thread", messageId: "states-message", targetKind: "file",
+    objectId: "states-plan", pathHint: ABOUT_PATH, createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+  },
+  message: {
+    id: "states-message", authorDisplayName: "Sam Rivera", createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+    preview: "Can we get the launch checklist into shape before Friday? It's in product-plan.md.",
+  },
+  thread: { id: "states-thread", title: "Launch checklist", createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT },
+  channelKind: "channel", channelName: "general",
+};
+const ABOUT_CHAT_LINKS: Extract<ChatLinksView, { status: "ready" }> = { status: "ready", rows: [ABOUT_CHAT_LINK], next: null, gathering: 0 };
+
+function LinksSpecimen(props: { links: LinksView | null; chats?: ChatLinksView | null }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutLinksView links={props.links} chats={props.chats ?? null} expanded onToggle={noop} onOpenLink={noop}
+        onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+    </AboutPanelSpecimen>
   );
 }
 
@@ -2072,6 +2113,31 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Its rows' menus rest; the menu part draws an open one. */}
+      <Section part="about-links" title="About: Links">
+        <Specimen label="files that link here, a chat that does, and more to read">
+          <LinksSpecimen links={ABOUT_LINKS} chats={ABOUT_CHAT_LINKS} />
+        </Specimen>
+        <Specimen label="a link hovered, and keyboard focus on a chat's link">
+          <div data-force-state="hover" data-force-target='[data-line="12"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="chat-file-mention"]'>
+              <LinksSpecimen links={{ ...ABOUT_LINKS, next: null }} chats={ABOUT_CHAT_LINKS} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the workspace's link index builds">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: ABOUT_LINK_ROWS.slice(0, 1), next: null, gathering: 1 }} />
+        </Specimen>
+        <Specimen label="nothing links here yet">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: [], next: null }} chats={{ ...ABOUT_CHAT_LINKS, rows: [] }} />
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <LinksSpecimen links={{ status: "failed" }} />
+        </Specimen>
+        <Specimen label="a file shared with you">
+          <LinksSpecimen links={null} />
+        </Specimen>
+      </Section>
+
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />

@@ -4,18 +4,24 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
-import type { ActorPresentation, EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import type { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { LinksInResult } from "@dohc/workspace-contracts/links";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import type { ActorPresentation, ChatFileMentionRecord, DohcDesktopBridge, EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import { ipcWireError } from "../../ipc/errorWords";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
 import { setChosenColors } from "./chosenColors";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
   requestAccessRefresh: vi.fn<(input: { workspaceId: string; reason: string }) => Promise<void>>(),
   listEngineMoments: vi.fn<(input: { workspaceId: string; objectId?: string; limit?: number }) => Promise<ListEngineMomentsResponse>>(),
+  linksIn: vi.fn<DohcDesktopBridge["linksIn"]>(),
+  chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
 };
 
 // The shell's error hook: the same object every render, as the shell's is.
@@ -538,6 +544,447 @@ describe("About Access", () => {
     expect(screen.queryByTestId("about-access-unknown")).toBeNull();
   });
 });
+
+type LinksPage = NonNullable<LinksInResult>;
+type LinkRecord = LinksPage["entries"][number];
+
+// A link from `source` at `line`, its words marked in the line around them.
+function link(source: string, line: number, ordinal = 0): LinkRecord {
+  const title = source.split("/").at(-1)!.replace(/\.md$/, "");
+  const snippet = `${title} cites [[plan]] here.`;
+  const start = snippet.indexOf("[[");
+  return { source, title, ordinal, span: [start, start + 8], line, snippet, highlightStart: start, highlightEnd: start + 8 };
+}
+
+function linksPage(entries: LinkRecord[], overrides: Partial<LinksPage> = {}): LinksPage {
+  return {
+    versionId: "main", subject: { path: "docs/plan.md", objectId: "plan" }, entries, unchecked: [],
+    complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null, ...overrides,
+  };
+}
+
+function chatLink(id: string, overrides: Partial<ChatFileMentionRecord> = {}): ChatFileMentionRecord {
+  return {
+    attachment: {
+      attachmentId: `attachment-${id}`, threadId: `thread-${id}`, messageId: `message-${id}`, targetKind: "file",
+      objectId: "plan", pathHint: "docs/plan.md", createdAtMs: CHECKED_AT,
+    },
+    message: { id: `message-${id}`, authorDisplayName: "Sam", preview: `See docs/plan.md ${id}`, createdAtMs: CHECKED_AT },
+    thread: { id: `thread-${id}`, title: `Thread ${id}`, createdAtMs: CHECKED_AT, updatedAtMs: CHECKED_AT },
+    ...overrides,
+  };
+}
+
+function chatPage(entries: ChatFileMentionRecord[], nextCursor: string | null = null): NonNullable<ChatFileMentionsPage> {
+  return {
+    versionId: "main", subject: { objectId: "plan", path: "docs/plan.md" }, entries, unchecked: [], complete: true,
+    indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor,
+  };
+}
+
+const openLink = vi.fn<(path: string, line: number) => void>();
+const openChat = vi.fn<(mention: ChatFileMentionRecord) => void>();
+
+function Links(props: { workspaceId?: string; path?: string; revision?: number; open?: boolean; chats?: boolean }) {
+  const [open, setOpen] = useState(props.open ?? true);
+  return (
+    <AboutLinks
+      workspaceId={props.workspaceId ?? "workspace-a"}
+      path={props.path ?? "docs/plan.md"}
+      revision={props.revision ?? 0}
+      expanded={open}
+      onToggle={() => setOpen((current) => !current)}
+      onOpenLink={openLink}
+      {...(props.chats ? { onOpenChat: openChat } : {})}
+      notices={notices}
+    />
+  );
+}
+
+const linkRows = () => screen.queryAllByTestId("about-link");
+
+describe("About Links", () => {
+  beforeEach(() => {
+    openLink.mockReset();
+    openChat.mockReset();
+  });
+
+  it("reads one page of links, draws each with its file and line, and opens the file at the linking line", async () => {
+    bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2), link("notes/alpha.md", 9, 1), link("notes/beta.md", 5)]));
+    render(<Links />);
+
+    await waitFor(() => expect(linkRows()).toHaveLength(3));
+    expect(bridgeMock.linksIn).toHaveBeenCalledOnce();
+    expect(bridgeMock.linksIn).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
+    expect(screen.getByTestId("about-links-count").textContent).toBe("3");
+    // A file's next link leaves out its chip, and still names it to a screen reader.
+    const rows = linkRows();
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "alphanotesnotes/alpha.mdalpha cites [[plan]] here.",
+      "alpha notes/alpha.mdalpha cites [[plan]] here.",
+      "betanotesnotes/beta.mdbeta cites [[plan]] here.",
+    ]);
+    expect(rows[0]!.querySelector("mark")?.textContent).toBe("[[plan]]");
+
+    await userEvent.setup().click(rows[1]!);
+    expect(openLink).toHaveBeenCalledWith("notes/alpha.md", 9);
+  });
+
+  it("asks nothing while closed, reads when opened, and keeps its rows while it reads again on opening", async () => {
+    bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)]));
+    const user = userEvent.setup();
+    render(<Links open={false} />);
+    await act(async () => {});
+    expect(bridgeMock.linksIn).not.toHaveBeenCalled();
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(bridgeMock.linksIn).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("about-links-toggle"));
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    await user.click(screen.getByTestId("about-links-toggle"));
+    expect(screen.getByTestId("about-links-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(linkRows()).toHaveLength(0);
+
+    const again = deferred<LinksPage>();
+    bridgeMock.linksIn.mockReturnValueOnce(again.promise);
+    await user.click(screen.getByTestId("about-links-toggle"));
+    expect(linkRows()).toHaveLength(1);
+    await act(async () => again.resolve(linksPage([link("notes/beta.md", 4)])));
+    expect(linkRows()[0]!.dataset.path).toBe("notes/beta.md");
+    expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the next page on Show more and adds it below", async () => {
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "after-alpha" }))
+      .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
+    render(<Links />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    expect(screen.getByTestId("about-links-count").textContent).toBe("1+");
+
+    await userEvent.setup().click(screen.getByTestId("about-links-more"));
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(bridgeMock.linksIn).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" }, cursor: "after-alpha" });
+    expect(screen.getByTestId("about-links-count").textContent).toBe("2");
+    expect(screen.queryByTestId("about-links-more")).toBeNull();
+  });
+
+  it("reads the next page when Show more scrolls into view, and past a page with no rows", async () => {
+    const observers: Array<{ callback: IntersectionObserverCallback; target: Element | null; live: boolean }> = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      private readonly record: (typeof observers)[number];
+      constructor(callback: IntersectionObserverCallback) {
+        this.record = { callback, target: null, live: true };
+        observers.push(this.record);
+      }
+      observe(target: Element) { this.record.target = target; }
+      disconnect() { this.record.live = false; }
+    });
+    const seen = () => act(() => {
+      const observer = observers.filter((entry) => entry.live).at(-1)!;
+      observer.callback([{ isIntersecting: true, target: observer.target! } as IntersectionObserverEntry], {} as IntersectionObserver);
+    });
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+      .mockResolvedValueOnce(linksPage([], { nextCursor: "two" }))
+      .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
+    render(<Links />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+
+    seen();
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    // The empty page left Show more in view: the row for the next cursor
+    // reads on when it is seen, as a new observer's first report.
+    seen();
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", "two"]);
+  });
+
+  it("reads again from the start until it holds as many rows, as the workspace changes or the window returns", async () => {
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+      .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
+    const view = render(<Links revision={0} />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    await userEvent.setup().click(screen.getByTestId("about-links-more"));
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+
+    const last = deferred<LinksPage>();
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 3)], { nextCursor: "one" }))
+      .mockReturnValueOnce(last.promise);
+    view.rerender(<Links revision={1} />);
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(4));
+    // The rows stay until the read holds as many as they are.
+    expect(linkRows().map((row) => row.dataset.line)).toEqual(["2", "5"]);
+    await act(async () => last.resolve(linksPage([link("notes/gamma.md", 7)])));
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md", "notes/gamma.md"]);
+    expect(bridgeMock.linksIn.mock.calls.slice(2).map(([input]) => input.cursor)).toEqual([undefined, "one"]);
+
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 4)], { nextCursor: "one" }))
+      .mockResolvedValueOnce(linksPage([]));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(linkRows().map((row) => row.dataset.line)).toEqual(["4"]));
+    expect(bridgeMock.linksIn).toHaveBeenCalledTimes(6);
+  });
+
+  it("says Gathering links only while the index builds, reading again sooner first, then at most every eight seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)], { complete: false, indexBuilding: true }));
+      render(<Links />);
+      await act(async () => {});
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      expect(screen.getByTestId("about-links-count").textContent).toBe("1+");
+      for (const delay of [250, 500, 1000, 2000, 4000, 8000, 8000]) {
+        const count = bridgeMock.linksIn.mock.calls.length;
+        await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+        expect(bridgeMock.linksIn).toHaveBeenCalledTimes(count);
+        await act(async () => vi.advanceTimersByTimeAsync(1));
+        expect(bridgeMock.linksIn).toHaveBeenCalledTimes(count + 1);
+      }
+      bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2), link("notes/beta.md", 5)]));
+      await act(async () => vi.advanceTimersByTimeAsync(8000));
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.getByTestId("about-links-count").textContent).toBe("2");
+      const count = bridgeMock.linksIn.mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(16_000));
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(count);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads one page again once the index is built, though sparse pages grew the list while it built", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.linksIn
+        .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { complete: false, indexBuilding: true, nextCursor: "sparse" }))
+        .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)], { complete: false, indexBuilding: true }))
+        .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2), link("notes/beta.md", 5), link("notes/gamma.md", 7)], { nextCursor: "dense" }));
+      render(<Links />);
+      await act(async () => {});
+      fireClick(screen.getByTestId("about-links-more"));
+      await act(async () => {});
+      expect(linkRows()).toHaveLength(2);
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(3);
+      expect(bridgeMock.linksIn.mock.calls[2]![0]).not.toHaveProperty("cursor");
+      expect(linkRows()).toHaveLength(3);
+      expect(screen.getByTestId("about-links-count").textContent).toBe("3+");
+      expect(screen.queryByRole("status")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gathers while the engine still reads the workspace's files, for files and chats, and files no Notices row", async () => {
+    vi.useFakeTimers();
+    try {
+      const updating = (channel: string) => new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(new DaemonRefusalError(
+        { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, null)))}`);
+      bridgeMock.linksIn.mockRejectedValueOnce(updating("desktop:links-in")).mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)]));
+      bridgeMock.chatFileMentionsPage
+        .mockRejectedValueOnce(updating("desktop:chat-file-mentions-page")).mockResolvedValueOnce(chatPage([chatLink("general")]));
+      render(<Links chats />);
+      await act(async () => {});
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      expect(screen.getByTestId("about-links-count").textContent).toBe("0+");
+      expect(screen.queryByTestId("about-links-empty")).toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(linkRows()).toHaveLength(1);
+      expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(1);
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.getByTestId("about-links-count").textContent).toBe("2");
+      expect(notices.report).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not gather lasting omissions, such as files too large to read or uncovered shares", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)], { complete: false, mountsCovered: false, unchecked: ["large.md"] }));
+      render(<Links />);
+      await act(async () => {});
+      expect(linkRows()).toHaveLength(1);
+      expect(screen.queryByRole("status")).toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(bridgeMock.linksIn).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops gathering when the section closes", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.linksIn.mockResolvedValue(linksPage([], { complete: false, indexBuilding: true }));
+      render(<Links />);
+      await act(async () => {});
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      fireClick(screen.getByTestId("about-links-toggle"));
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(bridgeMock.linksIn).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says when nothing links here, and how to add a link", async () => {
+    bridgeMock.linksIn.mockResolvedValue(linksPage([]));
+    bridgeMock.chatFileMentionsPage.mockResolvedValue(chatPage([]));
+    render(<Links chats />);
+    expect((await screen.findByTestId("about-links-empty")).textContent).toBe(
+      "No links to this file yet. Type [[ in another file to add one.",
+    );
+    expect(screen.getByTestId("about-links-count").textContent).toBe("0");
+  });
+
+  it("reads nothing for a file under shared-with-me/, and says dohc does not list its links yet", async () => {
+    render(<Links path="shared-with-me/Sam/plan.md" chats />);
+    expect((await screen.findByTestId("about-links-shared")).textContent).toBe(
+      "dohc does not list links into files shared with you yet.",
+    );
+    await act(async () => {});
+    expect(bridgeMock.linksIn).not.toHaveBeenCalled();
+    expect(bridgeMock.chatFileMentionsPage).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("about-links-count")).toBeNull();
+  });
+
+  it("reports a failed read to the shell, shows only Try again, and clears the row once a read answers", async () => {
+    const error = new Error("engine unavailable");
+    bridgeMock.linksIn.mockRejectedValueOnce(error).mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)]));
+    render(<Links />);
+    await screen.findByTestId("about-links-failed");
+    expect(notices.report).toHaveBeenCalledOnce();
+    const report = notices.report.mock.calls[0]![0] as { identity: string; message: string; cause: unknown; retry: () => void };
+    expect(report).toMatchObject({ identity: "about-links:docs/plan.md", message: expect.stringContaining("engine unavailable"), cause: error });
+    expect(screen.getByTestId("about-links-failed").textContent).toBe("Try again");
+
+    await act(async () => report.retry());
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    expect(notices.clear).toHaveBeenCalledWith("about-links:docs/plan.md");
+  });
+
+  it("keeps its rows when a read again fails, and reports it", async () => {
+    bridgeMock.linksIn.mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)])).mockRejectedValueOnce(new Error("busy"));
+    const view = render(<Links revision={0} />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    view.rerender(<Links revision={1} />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledOnce());
+    expect(linkRows()).toHaveLength(1);
+    expect(screen.queryByTestId("about-links-failed")).toBeNull();
+  });
+
+  it("never shows a reply for a file or workspace it left, nor asks for its next page", async () => {
+    const old = deferred<LinksPage>();
+    bridgeMock.linksIn.mockReturnValueOnce(old.promise).mockResolvedValueOnce(linksPage([link("notes/current.md", 2)]));
+    const view = render(<Links workspaceId="workspace-a" path="docs/plan.md" />);
+    view.rerender(<Links workspaceId="workspace-b" path="docs/other.md" />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    await act(async () => old.resolve(linksPage([link("notes/stale.md", 2)], { nextCursor: "stale-next" })));
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/current.md"]);
+    expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.linksIn).toHaveBeenLastCalledWith({ workspaceId: "workspace-b", subject: { path: "docs/other.md" } });
+  });
+
+  it("neither reports nor clears when the file it left fails after the switch", async () => {
+    const old = deferred<LinksPage>();
+    bridgeMock.linksIn.mockReturnValueOnce(old.promise).mockResolvedValueOnce(linksPage([]));
+    const view = render(<Links path="docs/plan.md" />);
+    view.rerender(<Links path="docs/other.md" />);
+    await screen.findByTestId("about-links-empty");
+    notices.clear.mockReset();
+    await act(async () => old.reject(new Error("late")));
+    expect(notices.report).not.toHaveBeenCalled();
+    expect(notices.clear).not.toHaveBeenCalled();
+  });
+
+  it("lists the chats that link here as their own rows and opens one, only where chats are read", async () => {
+    bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)]));
+    bridgeMock.chatFileMentionsPage.mockResolvedValue(chatPage([
+      chatLink("general", { channelKind: "channel", channelName: "general" }),
+      chatLink("file-thread"),
+    ]));
+    render(<Links chats />);
+    const rows = await screen.findAllByTestId("chat-file-mention");
+    expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
+    // Where it was said, when, then who said what.
+    const when = formatShortTime(CHECKED_AT);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      `general${when}Sam See docs/plan.md general`,
+      `Thread file-thread${when}Sam See docs/plan.md file-thread`,
+    ]);
+    expect(rows[0]!.querySelector("time")?.getAttribute("title")).toBeTruthy();
+    expect(screen.getByTestId("about-links-count").textContent).toBe("3");
+
+    await userEvent.setup().click(rows[1]!);
+    expect(openChat).toHaveBeenCalledWith(expect.objectContaining({ attachment: expect.objectContaining({ attachmentId: "attachment-file-thread" }) }));
+
+    cleanup();
+    bridgeMock.chatFileMentionsPage.mockClear();
+    render(<Links />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    expect(bridgeMock.chatFileMentionsPage).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chat-file-mention")).toBeNull();
+  });
+
+  it("paints file links without waiting for the chats that link here", async () => {
+    const chats = deferred<NonNullable<ChatFileMentionsPage>>();
+    bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)]));
+    bridgeMock.chatFileMentionsPage.mockReturnValue(chats.promise);
+    render(<Links chats />);
+    await waitFor(() => expect(linkRows()).toHaveLength(1));
+    expect(screen.queryByTestId("about-links-count")).toBeNull();
+    await act(async () => chats.resolve(chatPage([chatLink("general")])));
+    expect(screen.getByTestId("about-links-count").textContent).toBe("2");
+  });
+
+  it("reads the next page of chats that link here, and shows a row repeated across pages once", async () => {
+    bridgeMock.linksIn.mockResolvedValue(linksPage([]));
+    bridgeMock.chatFileMentionsPage
+      .mockResolvedValueOnce(chatPage([chatLink("one")], "next"))
+      .mockResolvedValueOnce(chatPage([chatLink("one"), chatLink("two")]));
+    render(<Links chats />);
+    await userEvent.setup().click(await screen.findByTestId("about-chat-links-more"));
+    await waitFor(() => expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(2));
+    expect(bridgeMock.chatFileMentionsPage).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" }, cursor: "next" });
+  });
+
+  it.each(["chat-mention-access-changed", "chat-mention-version-changed"])(
+    "drops chat rows and reads once from the start when their cursor's %s",
+    async (reason) => {
+      const refusal = () => new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({ code: "CONFLICT", message: reason, retry: "no" }, null)))}`);
+      const restarted = deferred<NonNullable<ChatFileMentionsPage>>();
+      bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)]));
+      bridgeMock.chatFileMentionsPage
+        .mockResolvedValueOnce(chatPage([chatLink("old")], "next"))
+        .mockRejectedValueOnce(refusal())
+        .mockReturnValueOnce(restarted.promise);
+      render(<Links chats />);
+      await userEvent.setup().click(await screen.findByTestId("about-chat-links-more"));
+      await waitFor(() => expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(3));
+      expect(bridgeMock.chatFileMentionsPage.mock.calls[2]![0]).toEqual({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
+      expect(screen.queryByTestId("chat-file-mention")).toBeNull();
+      expect(notices.report).not.toHaveBeenCalled();
+
+      await act(async () => restarted.reject(refusal()));
+      expect(notices.report).toHaveBeenCalledOnce();
+      expect(notices.report.mock.calls[0]![0]).toMatchObject({ identity: "about-chat-links:docs/plan.md" });
+      expect(screen.getByTestId("about-chat-links-failed")).toBeTruthy();
+      expect(linkRows()).toHaveLength(1);
+      expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(3);
+    },
+  );
+});
+
+function fireClick(element: HTMLElement) {
+  act(() => element.click());
+}
 
 function moment(overrides: Partial<EngineMomentRecord> = {}): EngineMomentRecord {
   return {

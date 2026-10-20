@@ -1,5 +1,6 @@
 import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
+import type { LinksInResult } from "@dohc/workspace-contracts/links";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
   ChevronDown,
@@ -10,14 +11,18 @@ import {
   FileText,
   FileX,
   History,
+  Link,
+  Link2Off,
+  LoaderCircle,
   LogIn,
   MessageSquare,
   Pencil,
   Share2,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ChatFileMentionRecord, ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
+import { isChatMentionPageChanged, isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
@@ -25,6 +30,7 @@ import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
 import { RetryRow, SecondaryButton } from "../ui/controls";
 import { KindGlyph, ObjectGlyph } from "../ui/KindGlyph";
+import { Ref } from "../ui/Ref";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
@@ -39,7 +45,7 @@ import { historyHiddenWords } from "./HistoryPolicyStates";
 // the workspace and object it was asked for, so a slow answer for one never
 // lands under another.
 
-export type AboutSectionId = "chats" | "history" | "access";
+export type AboutSectionId = "links" | "chats" | "history" | "access";
 
 // The shell's error hook. A section read that fails is one Notices row per
 // section and file, with Try again. A read that succeeds clears it, and so
@@ -196,6 +202,36 @@ export function AboutNote(props: {
   );
 }
 
+// The row that reads a list's next page. With `onSeen`, the row coming into
+// view reads it too, so a caller keys the row by the cursor it continues
+// from: a page that leaves it in view mounts a new row, which reads the next.
+export function AboutMore(props: { testId: string; onMore: () => void; onSeen?: () => void }) {
+  const node = useRef<HTMLButtonElement>(null);
+  const onSeen = useRef(props.onSeen);
+  onSeen.current = props.onSeen;
+  const watches = props.onSeen !== undefined;
+  useEffect(() => {
+    const button = node.current;
+    if (!watches || !button || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onSeen.current?.();
+    });
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [watches]);
+  return (
+    <button
+      ref={node}
+      type="button"
+      data-testid={props.testId}
+      onClick={props.onMore}
+      className={`${ABOUT_ROW_BUTTON} h-7 text-[12px]`}
+    >
+      Show more
+    </button>
+  );
+}
+
 // One chat about the file: its title, then when it last changed.
 export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => void }) {
   const when = formatChatTime(props.thread.updatedAtMs);
@@ -258,6 +294,406 @@ export function useSectionRead<View>(key: string, identity: string, notices: Abo
     notices.clear(identity);
   }, [identity, key, notices]);
   return { view: state.key === key ? state.view : LOADING, begin, cancel };
+}
+
+// ---- Links ----
+
+type LinkEntry = NonNullable<LinksInResult>["entries"][number];
+
+// A list read a page at a time. A read again from the start reads on until it
+// holds as many rows as it showed, so the list never shrinks under the person
+// reading, and pages that came back sparse while the index built cost nothing
+// once it has. `gathering` counts the reads in a row that found the
+// workspace's files still being read, or its link index still building. Each
+// is read again from the start, soon at first. Nothing failed, so it files no
+// row.
+type PagedRows<Row> = { status: "ready"; rows: Row[]; next: string | null; gathering: number };
+type ReadyLinks = PagedRows<LinkEntry>;
+type ReadyChatLinks = PagedRows<ChatFileMentionRecord>;
+export type LinksView = typeof LOADING | { status: "failed" } | ReadyLinks;
+export type ChatLinksView = typeof LOADING | { status: "failed" } | ReadyChatLinks;
+
+const GATHER_FIRST_MS = 250;
+const GATHER_LAST_MS = 8_000;
+const gatherDelay = (reads: number) => Math.min(GATHER_FIRST_MS * 2 ** (reads - 1), GATHER_LAST_MS);
+// A read the engine refused while it reads the workspace's files keeps the
+// rows it would replace and gathers on.
+const gatheringOn = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> =>
+  ({ status: "ready", rows: kept?.rows ?? [], next: kept?.next ?? null, gathering: (kept?.gathering ?? 0) + 1 });
+
+const LINKS_FAILED = "dohc could not load the links to this file.";
+const CHAT_LINKS_FAILED = "dohc could not load the chats that link to this file.";
+// Without chats to open, no chat rows are drawn to press.
+const OPENS_NO_CHAT = () => undefined;
+
+export function AboutLinks(props: {
+  workspaceId: string;
+  path: string;
+  // Changes when the workspace's files change, so the rows follow edits.
+  revision: number;
+  expanded: boolean;
+  onToggle: () => void;
+  onOpenLink: (path: string, line: number) => void;
+  // Where this workspace's chats can be read: what opens a chat that links here.
+  onOpenChat?: (mention: ChatFileMentionRecord) => void;
+  notices: AboutNotices;
+}) {
+  const { workspaceId, path, revision, notices } = props;
+  // A file under shared-with-me/ is linked from its share's own workspace,
+  // which this one does not read yet.
+  const shared = isSharedWithMePath(path);
+  const reads = props.expanded && !shared;
+  const readsChats = reads && props.onOpenChat !== undefined;
+  const key = `${workspaceId}\0${path}`;
+  const links = useSectionRead<LinksView>(key, `about-links:${path}`, notices);
+  const chats = useSectionRead<ChatLinksView>(key, `about-chat-links:${path}`, notices);
+  const { begin: beginLinks, cancel: cancelLinks } = links;
+  const { begin: beginChats, cancel: cancelChats } = chats;
+  // What each list shows now, for a read that keeps or extends it, and
+  // whether a read of it runs, when a Show more row in view waits.
+  const shownLinks = useRef<ReadyLinks | null>(null);
+  shownLinks.current = links.view.status === "ready" ? links.view : null;
+  const shownChats = useRef<ReadyChatLinks | null>(null);
+  shownChats.current = chats.view.status === "ready" ? chats.view : null;
+  const linksReading = useRef(false);
+  const chatsReading = useRef(false);
+
+  // A read from the start, until it holds as many rows as `again` showed, or
+  // the page after `after`. A read that fails keeps the rows it would replace.
+  const loadLinks = useCallback(async (from: { after?: ReadyLinks; again?: ReadyLinks }) => {
+    const request = beginLinks();
+    linksReading.current = true;
+    const kept = from.after ?? from.again;
+    let rows = from.after?.rows ?? [];
+    let cursor = from.after?.next ?? undefined;
+    let building = false;
+    try {
+      do {
+        const page = await bridge().linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+        if (!request.current()) return;
+        rows = rows.concat(page?.entries ?? []);
+        building ||= page?.indexBuilding ?? false;
+        cursor = page?.nextCursor ?? undefined;
+      } while (cursor && rows.length < (from.again?.rows.length ?? 0));
+      request.settle({
+        status: "ready",
+        rows,
+        next: cursor ?? null,
+        // Rows read while the index built are read again, even when the
+        // index finished before the page after them.
+        gathering: building ? (kept?.gathering ?? 0) + 1 : (from.after?.gathering ?? 0),
+      });
+    } catch (error) {
+      if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
+      else request.fail(kept ? { ...kept, gathering: 0 } : { status: "failed" }, ipcErrorMessage(error, LINKS_FAILED), error,
+        () => void loadLinks({ again: shownLinks.current ?? undefined }));
+    } finally {
+      if (request.current()) linksReading.current = false;
+    }
+  }, [beginLinks, path, workspaceId]);
+
+  const loadChats = useCallback(async (from: { after?: ReadyChatLinks; again?: ReadyChatLinks; restarted?: boolean }) => {
+    const request = beginChats();
+    chatsReading.current = true;
+    // A row repeated across pages shows once.
+    const rows = new Map((from.after?.rows ?? []).map((row) => [row.attachment.attachmentId, row]));
+    let cursor = from.after?.next ?? undefined;
+    try {
+      do {
+        const page = await bridge().chatFileMentionsPage({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+        if (!request.current()) return;
+        for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
+        cursor = page?.nextCursor ?? undefined;
+      } while (cursor && rows.size < (from.again?.rows.length ?? 0));
+      request.settle({ status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 });
+    } catch (error) {
+      if (!request.current()) return;
+      // A cursor that lost the access or version its rows were read under
+      // takes those rows with it, and the list reads once from the start.
+      if (isChatMentionPageChanged(error) && !from.restarted) {
+        request.settle(LOADING);
+        void loadChats({ restarted: true });
+        return;
+      }
+      const kept = from.after ?? from.again;
+      if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
+      else request.fail(kept ?? { status: "failed" }, ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
+        () => void loadChats({ again: shownChats.current ?? undefined }));
+    } finally {
+      if (request.current()) chatsReading.current = false;
+    }
+  }, [beginChats, path, workspaceId]);
+
+  // Coming back to the window reads again: an edit in another app may have
+  // added or removed a link.
+  const [returns, setReturns] = useState(0);
+  useEffect(() => {
+    if (!reads) return;
+    const onFocus = () => setReturns((count) => count + 1);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reads]);
+
+  useEffect(() => {
+    if (!reads) return;
+    void loadLinks({ again: shownLinks.current ?? undefined });
+    return cancelLinks;
+  }, [cancelLinks, loadLinks, reads, returns, revision]);
+
+  useEffect(() => {
+    if (!readsChats) return;
+    void loadChats({ again: shownChats.current ?? undefined });
+    return cancelChats;
+  }, [cancelChats, loadChats, readsChats, returns, revision]);
+
+  const linksView = links.view;
+  useEffect(() => {
+    if (!reads || linksView.status !== "ready" || linksView.gathering === 0) return;
+    const timer = setTimeout(() => void loadLinks({ again: linksView }), gatherDelay(linksView.gathering));
+    return () => clearTimeout(timer);
+  }, [linksView, loadLinks, reads]);
+  const chatsView = chats.view;
+  useEffect(() => {
+    if (!readsChats || chatsView.status !== "ready" || chatsView.gathering === 0) return;
+    const timer = setTimeout(() => void loadChats({ again: chatsView }), gatherDelay(chatsView.gathering));
+    return () => clearTimeout(timer);
+  }, [chatsView, loadChats, readsChats]);
+
+  return (
+    <AboutLinksView
+      links={shared ? null : linksView}
+      chats={shared || props.onOpenChat === undefined ? null : chatsView}
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+      onOpenLink={props.onOpenLink}
+      onOpenChat={props.onOpenChat ?? OPENS_NO_CHAT}
+      onMoreLinks={(shown, seen) => {
+        if (!(seen && linksReading.current)) void loadLinks({ after: shown });
+      }}
+      onMoreChats={(shown, seen) => {
+        if (!(seen && chatsReading.current)) void loadChats({ after: shown });
+      }}
+      onRetryLinks={() => void loadLinks({})}
+      onRetryChats={() => void loadChats({})}
+    />
+  );
+}
+
+// About for a file where this workspace's chats cannot be read: its links,
+// which the engine's own index answers, then why the rest is missing.
+export function AboutFileChatsOff(props: {
+  workspaceId: string;
+  path: string;
+  revision: number;
+  onOpenLink: (path: string, line: number) => void;
+  notices: AboutNotices;
+  words: string;
+}) {
+  const [linksOpen, setLinksOpen] = useState(true);
+  return (
+    <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
+      <AboutHeader subject={{ path: props.path }} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
+        <AboutLinks
+          workspaceId={props.workspaceId}
+          path={props.path}
+          revision={props.revision}
+          expanded={linksOpen}
+          onToggle={() => setLinksOpen((open) => !open)}
+          onOpenLink={props.onOpenLink}
+          notices={props.notices}
+        />
+        <p data-testid="about-rail-off" className="m-0 px-4 py-6 text-center text-sm text-muted">
+          {props.words}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string {
+  const more = links.next !== null || links.gathering > 0 || (chats !== null && (chats.next !== null || chats.gathering > 0));
+  return `${links.rows.length + (chats?.rows.length ?? 0)}${more ? "+" : ""}`;
+}
+
+// The line around a link, with the link's own words marked. Main clamps the
+// range; this guards a range that drifted anyway, so it never throws.
+function LinkSnippet(props: { link: LinkEntry }) {
+  const { snippet } = props.link;
+  const start = Math.max(0, Math.min(props.link.highlightStart, snippet.length));
+  const end = Math.max(start, Math.min(props.link.highlightEnd, snippet.length));
+  return (
+    <span className="line-clamp-2 text-[12px] leading-4 [overflow-wrap:anywhere]">
+      {snippet.slice(0, start)}
+      <mark className="bg-transparent font-medium text-ink">{snippet.slice(start, end)}</mark>
+      {snippet.slice(end)}
+    </span>
+  );
+}
+
+// One link into the file: the file it is in, then the line around it. A
+// file's next links leave out its chip, so they read as one group, and say
+// the file only to a screen reader.
+function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void }) {
+  const { link } = props;
+  return (
+    <button
+      type="button"
+      data-testid="about-link"
+      data-path={link.source}
+      data-line={link.line}
+      onClick={props.onOpen}
+      className={`${ABOUT_ROW_BUTTON} py-1`}
+    >
+      <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
+        {props.first ? (
+          <Ref path={link.source} title={link.title} folder />
+        ) : (
+          <span className="sr-only">{`${link.title} ${link.source}`}</span>
+        )}
+        <LinkSnippet link={link} />
+      </span>
+    </button>
+  );
+}
+
+// The rows render again only when a read lands, not on every render of the
+// panel around them, so a long list costs nothing while someone types there.
+// A row out of the rail's view skips layout and paint until it scrolls in;
+// its focus ring and hover fill sit inside it, so nothing is clipped.
+const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
+
+const LinkList = memo(function LinkList(props: { rows: LinkEntry[]; onOpenLink: (path: string, line: number) => void }) {
+  return (
+    <ul data-testid="about-links-list" className="m-0 list-none p-0">
+      {props.rows.map((link, index) => {
+        const first = index === 0 || props.rows[index - 1]!.source !== link.source;
+        return (
+          <li key={`${link.source}\0${link.ordinal}`} className={`${OFFSCREEN_ROW} ${first && index > 0 ? "mt-1.5" : ""}`}>
+            <LinkRow link={link} first={first} onOpen={() => props.onOpenLink(link.source, link.line)} />
+          </li>
+        );
+      })}
+    </ul>
+  );
+});
+
+const ChatLinkList = memo(function ChatLinkList(props: {
+  rows: ChatFileMentionRecord[];
+  onOpenChat: (mention: ChatFileMentionRecord) => void;
+}) {
+  return (
+    <ul data-testid="chat-file-mentions" className="m-0 list-none p-0">
+      {props.rows.map((mention) => (
+        <li key={mention.attachment.attachmentId} className={OFFSCREEN_ROW}>
+          <ChatLinkRow mention={mention} onOpen={() => props.onOpenChat(mention)} />
+        </li>
+      ))}
+    </ul>
+  );
+});
+
+// A chat message that links to the file: where it was said and when, then
+// who said it and what. The record names no author kind, so no avatar
+// guesses one.
+function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void }) {
+  const { mention } = props;
+  const when = formatChatTime(mention.message.createdAtMs);
+  return (
+    <button
+      type="button"
+      data-testid="chat-file-mention"
+      data-thread-id={mention.thread.id}
+      onClick={props.onOpen}
+      className={`${ABOUT_ROW_BUTTON} py-1`}
+    >
+      <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} className="mt-px self-start text-subtle" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
+          <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">
+            {formatShortTime(mention.message.createdAtMs)}
+          </time>
+        </span>
+        <span className="line-clamp-2 text-[12px] leading-4 [overflow-wrap:anywhere]">
+          <span className="font-medium">{mention.message.authorDisplayName}</span> {mention.message.preview}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+// The Links section for answers already in hand. The states page draws it.
+export function AboutLinksView(props: {
+  // Null for a file under shared-with-me/, whose links dohc does not list yet.
+  links: LinksView | null;
+  // Null where this workspace's chats are not read.
+  chats: ChatLinksView | null;
+  expanded: boolean;
+  onToggle: () => void;
+  onOpenLink: (path: string, line: number) => void;
+  onOpenChat: (mention: ChatFileMentionRecord) => void;
+  // `seen` when a Show more row came into view rather than being pressed.
+  onMoreLinks: (shown: ReadyLinks, seen?: boolean) => void;
+  onMoreChats: (shown: ReadyChatLinks, seen?: boolean) => void;
+  onRetryLinks: () => void;
+  onRetryChats: () => void;
+}) {
+  const { links, chats } = props;
+  const linkRows = links?.status === "ready" ? links : null;
+  const chatRows = chats?.status === "ready" ? chats : null;
+  const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
+  return (
+    <AboutSection id="links" icon={Link} label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}>
+      {links === null ? (
+        <AboutNote testId="about-links-shared" icon={Link2Off}>
+          dohc does not list links into files shared with you yet.
+        </AboutNote>
+      ) : links.status === "loading" ? (
+        <SkeletonLines rows={2} className="px-2 py-1" />
+      ) : links.status === "failed" ? (
+        <RetryRow testId="about-links-failed" onRetry={props.onRetryLinks} />
+      ) : (
+        <>
+          {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? (
+            <p role="status" data-testid="about-links-gathering" className="m-0 flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted">
+              <LoaderCircle size={12} aria-hidden className="shrink-0 text-subtle motion-safe:animate-spin" />
+              Gathering links
+            </p>
+          ) : null}
+          {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
+          {links.next !== null ? (
+            <AboutMore key={links.next} testId="about-links-more"
+              onMore={() => props.onMoreLinks(links)} onSeen={() => props.onMoreLinks(links, true)} />
+          ) : null}
+        </>
+      )}
+      {chats === null ? null : chats.status === "loading" ? (
+        // Below rows already shown, chats that link here arrive without a
+        // placeholder. With none shown, the section is still loading.
+        linkRows !== null && linksCount(linkRows, null) === "0" ? (
+          <SkeletonLines rows={1} className="px-2 py-1" />
+        ) : null
+      ) : chats.status === "failed" ? (
+        <RetryRow testId="about-chat-links-failed" onRetry={props.onRetryChats} />
+      ) : (
+        <>
+          {chats.rows.length > 0 ? <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} /> : null}
+          {chats.next !== null ? (
+            <AboutMore key={chats.next} testId="about-chat-links-more"
+              onMore={() => props.onMoreChats(chats)} onSeen={() => props.onMoreChats(chats, true)} />
+          ) : null}
+        </>
+      )}
+      {count === "0" ? (
+        <AboutNote testId="about-links-empty">
+          No links to this file yet. Type{" "}
+          <kbd className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">[[</kbd> in another file
+          to add one.
+        </AboutNote>
+      ) : null}
+    </AboutSection>
+  );
 }
 
 // ---- History ----
@@ -734,14 +1170,7 @@ export function AboutAccessView(props: {
                     ))}
                   </ul>
                   {view.answer.nextCursor !== null ? (
-                    <button
-                      type="button"
-                      data-testid="about-access-more"
-                      onClick={() => props.onMore(view.answer)}
-                      className={`${ABOUT_ROW_BUTTON} h-7 text-[12px]`}
-                    >
-                      Show more
-                    </button>
+                    <AboutMore testId="about-access-more" onMore={() => props.onMore(view.answer)} />
                   ) : null}
                 </>
               )}

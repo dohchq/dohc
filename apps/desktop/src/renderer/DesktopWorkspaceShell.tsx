@@ -2889,6 +2889,20 @@ export function DesktopWorkspaceShell(props: {
     [openChatThreadInPanel, openFile],
   );
 
+  // Open a file and land at a line: a search result, or a link in About.
+  const openPathAtLine = useCallback(
+    (path: string, line: number) => {
+      // Landing at a line is a destination change openFile cannot see: the
+      // line may be in the file the user is already reading.
+      invalidateDmNavigation(dmNavigationRequest);
+      openFile(path, undefined, {
+        line,
+        nonce: ++scrollNonce.current,
+      });
+    },
+    [openFile],
+  );
+
   // Search-result click: open + land at the line (source mode this phase);
   // chat results open in About instead.
   const openSearchResult = useCallback(
@@ -2903,16 +2917,9 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
-      // Landing at a line is the same kind of destination change: openFile
-      // below cannot see it, because the result may be in the file the user is
-      // already reading.
-      invalidateDmNavigation(dmNavigationRequest);
-      openFile(path, undefined, {
-        line,
-        nonce: ++scrollNonce.current,
-      });
+      openPathAtLine(path, line);
     },
-    [openChatThreadInPanel, openFile],
+    [openChatThreadInPanel, openPathAtLine],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -5722,11 +5729,6 @@ export function DesktopWorkspaceShell(props: {
                 // not history growth (which must not churn the live session).
                 engineVersionKey={versionEpoch}
                 onOpenPath={openPathWithHeading}
-                onOpenChatMention={openChatMention}
-                // The linked-mentions panel asks main for chat mentions, which
-                // is a Chats call like any other — same gate as the
-                // panel, the tab and the graph's toggle.
-                chatMentionsAvailable={captureAvailable}
                 drawingCollaboration={chatCollaboration}
                 scrollTarget={groupScrollTarget}
                 headingTarget={
@@ -5813,6 +5815,9 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             historyRevision={historyRefreshCounter}
             openMoment={openMomentDiffTab}
+            linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
+            openPathAtLine={openPathAtLine}
+            openChatMention={openChatMention}
             aboutNotices={aboutNotices}
             accessContext={accessContext}
           />

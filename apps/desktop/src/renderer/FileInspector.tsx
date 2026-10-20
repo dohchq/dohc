@@ -32,7 +32,6 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
@@ -276,12 +275,6 @@ type FileInspectorProps = {
   fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
-  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
-  // Whether this workspace has the capture Chats calls need. The
-  // linked-mentions panel asks main for chat mentions, which goes through
-  // requireEngineCapture — so a shared view must not ask. Same name and same
-  // fact GraphView's chat-mentions toggle reads.
-  chatMentionsAvailable?: boolean;
   // A pending search-result jump. Consumed (onScrollConsumed)
   // once a mounted view applied it, so plain re-opens never re-jump.
   scrollTarget?: ScrollTarget;
@@ -745,8 +738,6 @@ export const FileInspector = memo(function FileInspector(
             scrollTarget={props.scrollTarget}
             headingTarget={props.headingTarget}
             onOpenPath={props.onOpenPath}
-            onOpenChatMention={props.onOpenChatMention}
-            chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             onLiveReadOnly={props.onLiveReadOnly}
@@ -758,7 +749,6 @@ export const FileInspector = memo(function FileInspector(
             reopenKey={props.engineVersionKey}
             switchReadPending={switchReadPending.current}
             switchUnresyncedRef={switchUnresyncedRef}
-            refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
             autoFocus={props.autoFocus}
             onPendingDraftChange={setPendingDraft}

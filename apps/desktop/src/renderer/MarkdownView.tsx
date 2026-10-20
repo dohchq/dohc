@@ -44,7 +44,6 @@ import {
   type LazyExoticComponent,
 } from "react";
 import * as Y from "yjs";
-import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
@@ -66,7 +65,6 @@ import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
-import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from "../workspaces/workspaceHeadings";
@@ -201,8 +199,6 @@ export function MarkdownView(props: {
   scrollTarget?: ScrollTarget;
   headingTarget?: HeadingTarget;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
-  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
-  chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
   // A live document became read-only while it was open.
@@ -220,9 +216,6 @@ export function MarkdownView(props: {
   reopenKey?: number;
   switchReadPending: boolean;
   switchUnresyncedRef: { current: boolean };
-  // Workspace-activity token: bumps after saves / external edits so the linked
-  // mentions section recomputes without polling.
-  refreshKey?: number;
   // Registers the mounted document's "view source" toggle with the shell so
   // the command palette can flip it (registerDraftFlush precedent). Engine
   // docs toggle the read-only source projection; the legacy autosave editor
@@ -1940,21 +1933,6 @@ export function MarkdownView(props: {
     </>
   );
 
-  // Linked mentions live at the bottom of the document, inside the reading
-  // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
-  // file has none, so it only ever adds chrome when there's something to show.
-  const backlinks = (
-    <BacklinksPanel
-      workspaceId={props.workspaceId}
-      path={props.path}
-      refreshKey={props.refreshKey}
-      onOpenPath={props.onOpenPath}
-      onOpenChatMention={props.onOpenChatMention}
-      onError={props.onButtonError}
-      chatMentionsAvailable={props.chatMentionsAvailable}
-    />
-  );
-
   // Engine mode: the engine-native rich Y.Doc drives Tiptap (recordUpdate +
   // debounced settle in main; engine.db + the .md are the durable artifact).
   // There is no read/source/Edit gate here — the CRDT is canonical the whole
@@ -2117,7 +2095,6 @@ export function MarkdownView(props: {
               <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </LazyMarkdownEditor>
           </EditorErrorBoundary>
-          {backlinks}
         </div>
       </div>
     );
@@ -2285,7 +2262,6 @@ export function MarkdownView(props: {
               <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </LazyMarkdownEditor>
           </EditorErrorBoundary>
-          {backlinks}
         </div>
       ) : props.truncated ? (
         // A truncated read is already a bounded prefix and is permanently
@@ -2310,7 +2286,6 @@ export function MarkdownView(props: {
             />
             <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
           </Suspense>
-          {backlinks}
         </div>
       ) : (
         <div
@@ -2343,7 +2318,6 @@ export function MarkdownView(props: {
           <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">
             {renderedDocument}
           </div>
-          {backlinks}
         </div>
       )}
     </div>

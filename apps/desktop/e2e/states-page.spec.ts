@@ -59,6 +59,7 @@ const PARTS = [
   "capture-recovery",
   "recovery-row",
   "about",
+  "about-links",
   "sharing",
   "usage-record",
   "word-diff",

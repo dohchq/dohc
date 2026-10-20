@@ -23,6 +23,12 @@ const LazyAboutConversationPanel = lazy(() =>
   })),
 );
 
+const LazyAboutFileChatsOff = lazy(() =>
+  import("../workbench/About").then((mod) => ({
+    default: mod.AboutFileChatsOff,
+  })),
+);
+
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
 // A file's chat opened from search, a mention or the graph. The shell mints
@@ -59,6 +65,11 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   reportFailureMessage: LinkedChatsPanelProps["onError"];
   historyRevision: number;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
+  // Changes whenever the open file re-reads: history growth, a version
+  // switch, or a share mount's pull.
+  linksRevision: number;
+  openPathAtLine: LinkedChatsPanelProps["links"]["onOpenLink"];
+  openChatMention: NonNullable<LinkedChatsPanelProps["links"]["onOpenChat"]>;
   aboutNotices: LinkedChatsPanelProps["notices"];
   accessContext: LinkedChatsPanelProps["accessContext"];
 }) {
@@ -81,6 +92,9 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     reportFailureMessage,
     historyRevision,
     openMoment,
+    linksRevision,
+    openPathAtLine,
+    openChatMention,
     aboutNotices,
     accessContext,
   } = props;
@@ -119,8 +133,22 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
           //
           // A shared view needs no capture and waits for no decision: main
           // answers its per-file chat from the share scope.
+          //
+          // A file's links come from the engine's own index, not from
+          // capture, so they stay above the fact.
           !captureDecided ? (
             loading
+          ) : activeDocumentPath ? (
+            <Suspense fallback={loading}>
+              <LazyAboutFileChatsOff
+                workspaceId={workspaceId}
+                path={activeDocumentPath}
+                revision={linksRevision}
+                onOpenLink={openPathAtLine}
+                notices={aboutNotices}
+                words={chatsOffCopy(syncStatus)}
+              />
+            </Suspense>
           ) : (
             <div
               data-testid="about-rail-off"
@@ -152,6 +180,12 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               {...(shareView
                 ? { shareReadOnly: true }
                 : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
+              // Chats that link here are a Chats call, refused without capture.
+              links={{
+                revision: linksRevision,
+                onOpenLink: openPathAtLine,
+                ...(captureAvailable ? { onOpenChat: openChatMention } : {}),
+              }}
               initialThread={pendingHit?.thread ?? null}
               initialFocusMessageId={pendingHit?.focusMessageId}
               onInitialThreadConsumed={onSearchHitRead}
