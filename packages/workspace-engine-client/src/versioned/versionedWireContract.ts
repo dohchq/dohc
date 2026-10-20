@@ -1027,8 +1027,9 @@ const HistoryMomentMetadataSchema = mutableStruct({
   authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
-const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int});
-const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
+const HistoryOperationFields = {operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int};
+const HistoryOperationSchema = mutableStruct({...HistoryOperationFields, kind: Schema.NullOr(Schema.Literal("file-duplicate"))});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationFields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
 const HistoryLinkRewriteSchema = mutableStruct({
   documents: Schema.Int,
   links: Schema.Int,

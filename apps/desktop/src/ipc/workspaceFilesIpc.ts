@@ -285,6 +285,7 @@ export function createWorkspaceFilesIpc<
 
     createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),
     createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
+    duplicateWorkspaceFile: (input, {event}) => workspaceFileMutations.duplicateFile(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
     undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),

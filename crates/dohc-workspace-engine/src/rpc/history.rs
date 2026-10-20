@@ -602,7 +602,7 @@ impl EngineService {
         )
         .await?;
         Ok(
-            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len()}),
+            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len(),"kind":result.kind}),
         )
     }
 

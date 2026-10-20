@@ -19,6 +19,7 @@
   "desktop:list-workspace-files": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-workspace-file": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
   "desktop:create-workspace-folder": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
+  "desktop:duplicate-workspace-file": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + duplicateWorkspaceFile/withExclusiveWorkspaceOperation" } },
   "desktop:move-workspace-path": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + moveWorkspacePathByHand/withExclusiveWorkspaceOperation" } },
   "desktop:delete-workspace-path": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + deleteWorkspacePathByHand/withExclusiveWorkspaceOperation" } },
   "desktop:undo-history-operation": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + undoWorkspaceHistoryOperation/withExclusiveWorkspaceOperation" } },

@@ -80,6 +80,7 @@ type CliCommandBody =
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
   | { verb: "historyUndo"; operationId: string }
+  | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationList"; collectionPath: string }
@@ -1150,6 +1151,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: [workspaceNote],
     verbs: APP_VERBS,
   },
+  file: {
+    summary: "Change workspace files.", notes: ["Undo removes the copy while it is unchanged."],
+    verbs: {duplicate: {capabilityId: "file.duplicate", summary: "Duplicate one file beside its source.", operands: "<path>",
+      parse: input => {const [path, ...extra] = input.operands; if (!path) fail("file duplicate requires a path"); noExtraArgs(extra, "file duplicate"); return {verb: "fileDuplicate", path};}}},
+  },
   history: {
     summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
@@ -1235,7 +1241,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

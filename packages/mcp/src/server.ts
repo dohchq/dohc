@@ -47,6 +47,7 @@ import {
   startGroupChat,
   startFileChat,
   createApp,
+  duplicateWorkspaceFile,
   deleteWorkspacePath,
   detectApps,
   editDocument,
@@ -168,6 +169,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
   register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
   register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
+  register("dohc_duplicate_file", {description: "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.", inputSchema: {path: z.string()}}, async args => text(await duplicateWorkspaceFile(ctx, args, agentName())));
   register("dohc_read_operation", {
     description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
     inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },

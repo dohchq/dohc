@@ -18,6 +18,8 @@ mod capture_write;
 mod delete_rename;
 mod file_resolution;
 pub use file_resolution::{FileResolution, FileResolveTarget};
+mod duplicate;
+pub use duplicate::{DuplicateFile, duplicate_file_in_tx, is_duplicate_in};
 mod operations;
 pub use operations::{
     OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
@@ -1145,7 +1147,7 @@ impl<'a> VersionedTextStore<'a> {
                 &input.from_version_id,
                 &input.new_version_id,
             )?;
-            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
+            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms, "versioned")?;
             after(tx, &record)?;
             Ok::<_, DomainError>(record.clone())
         })?;

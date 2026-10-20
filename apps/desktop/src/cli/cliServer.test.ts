@@ -781,7 +781,7 @@ describe("CLI socket server", () => {
     fixture.summary.path = fixture.detail.path = "folder/tracked.txt";
     let changes = [fixture.summary];
     let details = [fixture.detail];
-    const history = {
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),
       readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: fixture.summary.id, operation: "delete", path: "folder/tracked.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
         const compensation = momentFixtures(WORKSPACE_ID, "undo", SERVER_NOW_MS + 1);
@@ -825,13 +825,29 @@ describe("CLI socket server", () => {
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
   });
 
+  it("duplicates through CLI with agent authority, request replay, and path floors", async () => {
+    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    context.duplicateFile = duplicateFile;
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "source.md", requestId: "duplicate-once"};
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(duplicateFile).toHaveBeenCalledOnce();
+    expect(await executeCli({argv: ["file", "duplicate", "source.md", "--json"], cwd: workspaceRoot, request: request => invoke(request.verb, request.args)})).toMatchObject({exitCode: 0});
+    duplicateFile.mockClear();
+    expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
+    context.readOnly = true;
+    expect(await invoke("fileDuplicate", {...args, requestId: "readonly"})).toMatchObject({ok: false});
+    expect(duplicateFile).not.toHaveBeenCalled();
+  });
+
   it("undoes a move through socket, CLI and MCP with one compensation", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     await writeFile(join(workspaceRoot, "a.txt"), "move body");
     const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", ["a.txt"]);
     await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
     await finishMoveRecovery(workspaceRoot, plan, "a.txt", "b.txt", false);
-    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
         return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
@@ -865,7 +881,7 @@ describe("CLI socket server", () => {
   it("returns missing-delete recovery words through the socket, CLI and MCP", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." };

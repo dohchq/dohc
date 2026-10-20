@@ -28,6 +28,7 @@
     "fileChatStart",
     "fileChats",
     "fileDelete",
+    "fileDuplicate",
     "fileMove",
     "fileWrite",
     "grep",
@@ -88,6 +89,7 @@
     "export",
     "fileChatStart",
     "fileChats",
+    "fileDuplicate",
     "grep",
     "groups",
     "historyOperation",
@@ -116,6 +118,7 @@
     "chat",
     "dataset",
     "app",
+    "file",
     "history",
     "automation",
     "account"
@@ -191,6 +194,7 @@
     "app reviewReactivation",
     "app responses",
     "app undo-responses",
+    "file duplicate",
     "history operation",
     "history undo",
     "history list",
@@ -240,6 +244,10 @@
         {
           "group": "app",
           "block": "  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"
+        },
+        {
+          "group": "file",
+          "block": "  file         Change workspace files.\n               duplicate\n"
         },
         {
           "group": "history",
@@ -349,6 +357,8 @@
     "links in": "Usage: dohc links in <subject-json> [options]\n\nRead documents that link to a file.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
     "links resolve": "Usage: dohc links resolve <source> <literals-json> [options]\n\nResolve links from one document.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "links edges": "Usage: dohc links edges [options]\n\nRead a bounded page of file links.\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
-    "chat file-mentions": "Usage: dohc chat file-mentions [options]\n\nRead one bounded page of file mentions.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --subject <subject>   A file path or objectId as JSON.\n  --cursor <cursor>     Continue the previous page.\n  --as-agent            Post and read chat as an agent.\n  --json                Print the result as JSON.\n  --help                Show help. -h does the same.\n"
+    "chat file-mentions": "Usage: dohc chat file-mentions [options]\n\nRead one bounded page of file mentions.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --subject <subject>   A file path or objectId as JSON.\n  --cursor <cursor>     Continue the previous page.\n  --as-agent            Post and read chat as an agent.\n  --json                Print the result as JSON.\n  --help                Show help. -h does the same.\n",
+    "file": "Usage: dohc file <verb> [arguments] [options]\n\nChange workspace files.\n\nVerbs:\n  duplicate   Duplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc file <verb> --help to see its arguments and options.\n",
+    "file duplicate": "Usage: dohc file duplicate <path> [options]\n\nDuplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n"
   }
 }

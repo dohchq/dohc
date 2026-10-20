@@ -804,6 +804,9 @@ export type CreateWorkspaceFolderPayload = z.infer<
 >;
 
 // rename === move: one engine — F2, inline rename, and drag-drop all call it.
+export const DuplicateWorkspaceFilePayload = z.object({workspaceId: WORKSPACE_ID, relativePath: PATH_STRING}).strict();
+export const DuplicateWorkspaceFileResult = CreateWorkspaceFileResult.extend({...OperationRecovery.shape, materialized: z.boolean()});
+
 export const MoveWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   fromPath: PATH_STRING,

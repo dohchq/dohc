@@ -1,3 +1,4 @@
+import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
@@ -135,7 +136,7 @@ function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
 function liveDocumentMutationRefusal(
   error: unknown,
   path: string,
-  action: "move" | "delete" | "restore",
+  action: "move" | "delete" | "restore" | "duplicate",
 ): Error | null {
   if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
     return null;
@@ -328,7 +329,7 @@ export type WorkspaceGeneratedTextIdentityValidator = (text: string) => boolean;
 // the disk move succeeded, ok=false to roll the engine rename back.
 export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
 
-// What an authored move or delete records while capture is held. Every path
+// What an authored path change records while capture is held. Every path
 // is workspace-relative.
 export interface AuthoredPathChanges {
   // The workspace file policy, read once for this change after it left the
@@ -342,6 +343,9 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  readDuplicate(operationId: string, path: string): Promise<{path: string} | null>;
+  hasPath(path: string): Promise<boolean>;
+  duplicateFile(fromPath: string, toPath: string): Promise<{path: string; materialized: boolean}>;
   // Moves one visible regular file to an empty name in one rename that
   // refuses to replace. Answers false where this filesystem has no such
   // rename, and the caller moves the file another way. Throws when the
@@ -752,7 +756,7 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; operationId: string },
+    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
@@ -2234,6 +2238,7 @@ export function createWorkspaceEngineCapture(
     fromPath: string,
     endpointMatch: (path: string) => boolean,
     isSourceSide: (path: string) => boolean,
+    action: "rename" | "duplicate" = "rename",
   ): Promise<void> {
     for (const endpoint of [...detachedLockedDebts.keys()]) {
       if (!endpointMatch(endpoint)) continue;
@@ -2248,7 +2253,7 @@ export function createWorkspaceEngineCapture(
         // Explorer renders this verbatim (the dohc-interface skill): what
         // happened, why, then one instruction per sentence.
         throw new Error(
-          `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
+          `dohc could not ${action} ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then ${action} ${fromPath} again.`,
         );
       }
       // Why the payment did not land decides what the user is told. A
@@ -2258,8 +2263,8 @@ export function createWorkspaceEngineCapture(
       const removal = removalWindowFor(endpoint);
       throw new Error(
         removal
-          ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
-          : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+          ? `dohc could not ${action} ${fromPath}. ${removal.inProgress} Wait for that to finish. Then ${action} again.`
+          : `dohc could not ${action} ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then ${action} again.`,
       );
     }
   }
@@ -6069,15 +6074,22 @@ export function createWorkspaceEngineCapture(
         };
         // Validate the author once before settlement or disk changes.
         await ensureAllowed(authored.author);
-        await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
-        const source = paths[0];
-        if (authored.operation === "move" && source !== undefined) {
-          await payDebtsBeforeMove(source, match, candidate => pathIsAtOrUnder(candidate, source));
+        const duplicating = authored.operation === "duplicate";
+        if (duplicating) {
+          for (const entry of [...liveYDocSessions.values()]) {
+            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file"});
+          }
+        } else {
+          await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
         }
-        const suspended = suspendDetachedDebts(match);
-        const closeRemovalWindow = openRemovalWindow({
+        const source = paths[0];
+        if ((authored.operation === "move" || authored.operation === "duplicate") && source !== undefined) {
+          await payDebtsBeforeMove(source, match, candidate => pathIsAtOrUnder(candidate, source), duplicating ? "duplicate" : "rename");
+        }
+        const suspended = duplicating ? [] : suspendDetachedDebts(match);
+        const closeRemovalWindow = duplicating ? () => undefined : openRemovalWindow({
           match,
-          operation: authored.operation,
+          operation: authored.operation === "duplicate" ? "move" : authored.operation,
           inProgress: `dohc is still changing ${paths.join(", ")}.`,
         });
         let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
@@ -6105,7 +6117,7 @@ export function createWorkspaceEngineCapture(
                   if (disk.kind === "text" || disk.kind === "binary") return disk;
                   if (disk.kind === "absent") throw new Error(`${file} changed while dohc prepared the change. Try again.`);
                   if (disk.kind === "unreadable") throw new Error(`dohc could not read ${file}. Close any program using it, then try again.`);
-                  if (!disk.reason.startsWith("oversized") && disk.reason !== "non-utf8") throw new Error(`History cannot record ${file}. Move or delete it yourself.`);
+                  if (!disk.reason.startsWith("oversized") && disk.reason !== "non-utf8") throw new Error(duplicating ? `History cannot record ${file}. Choose another file to duplicate.` : `History cannot record ${file}. Move or delete it yourself.`);
                   return disk;
                 };
                 // Every file is checked before any is recorded, and only one
@@ -6116,7 +6128,7 @@ export function createWorkspaceEngineCapture(
                 for (const file of files) {
                   const disk = single ?? await readable(file);
                   if (disk.kind === "untracked-content") continue;
-                  await writeIfChanged(engine, versionId, file, disk, { origin: "local-file", summary: "Saved latest edits" });
+                  await writeIfChanged(engine, versionId, file, disk, { origin: "local-file", summary: duplicating ? "Saved latest edits before duplicating the file" : "Saved latest edits" });
                   held.push(file);
                 }
                 // A head for a file gone from disk, or for one now over the
@@ -6130,6 +6142,27 @@ export function createWorkspaceEngineCapture(
                     { origin: "local-file", summary: `Deleted ${pathBasename(headPath)}` }, undefined, !onDisk.has(headPath));
                 }
                 return held;
+              },
+              readDuplicate: async (operationId, path) => {
+                const operation = await engine.readHistoryOperation({workspaceId, operationId});
+                if (operation.kind !== "file-duplicate" || operation.versionId !== versionId || operation.momentCount !== 1) return null;
+                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path}]});
+                const current = resolved.results[0];
+                if (current?.status !== "found") return null;
+                // history.page flushes capture, so it cannot run inside this hold.
+                const latest = (await engine.listMoments({workspaceId, versionId, objectId: current.objectId, limit: 1})).moments[0];
+                if (latest?.objectId !== current.objectId || latest.path !== path || latest.operation !== "write" || latest.metadata.correlationId !== operationId) return null;
+                return {path};
+              },
+              hasPath: async path => {
+                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path}]});
+                return resolved.results[0]?.status === "found";
+              },
+              duplicateFile: async (fromPath, toPath) => {
+                assertEngineWritablePath(toPath, policy);
+                const duplicate = engine.duplicateFileUnderHold;
+                if (!duplicate) throw new Error("Restart dohc before duplicating this file.");
+                return duplicateWithRecovery(toPath, () => duplicate.call(engine, {holdId, fromPath, toPath, author: {...authored.author}}));
               },
               moveFile: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);

@@ -570,6 +570,7 @@ where
             &payload_hash,
             result.moment.moment_order,
             input.now_ms,
+            "versioned",
         )?;
         return Ok(result);
     }
@@ -662,6 +663,7 @@ where
         &payload_hash,
         result.moment.moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(result)
 }
@@ -803,6 +805,7 @@ pub fn capture_retire_in_tx(
             &payload_hash,
             0,
             input.now_ms,
+            "versioned",
         )?;
         return Ok(CaptureRetireResult {
             pending_placement: false,
@@ -833,6 +836,7 @@ pub fn capture_retire_in_tx(
                 &payload_hash,
                 0,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
@@ -850,6 +854,7 @@ pub fn capture_retire_in_tx(
                 &payload_hash,
                 0,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
@@ -902,6 +907,7 @@ pub fn capture_retire_in_tx(
         &payload_hash,
         result.moment.moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(CaptureRetireResult {
         pending_placement: false,
@@ -1132,6 +1138,7 @@ where
                 &payload_hash,
                 result.moment_order,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(result);
         }
@@ -1234,6 +1241,7 @@ where
         &payload_hash,
         moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(CaptureIngestBinaryResult {
         pending_placement: false,
@@ -1801,6 +1809,7 @@ fn write_normalized_text_in_tx(
         &payload_hash,
         moment_order,
         input.now_ms,
+        "versioned",
     )?;
 
     // A reused content-addressed row may be corrupt. Preserve the hydration

@@ -30,7 +30,14 @@ fn inverse_input(
     plan: &Plan,
     member: &Member,
 ) -> Result<Option<String>, RuntimeError> {
-    if member.effect.operation == "write" {
+    if member.effect.operation == "write"
+        && !dohc_engine_domain::is_duplicate_in(
+            conn,
+            &plan.workspace,
+            &plan.operation,
+            member.effect.moment_order,
+        )?
+    {
         link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect).map(Some)
     } else {
         Ok(None)
@@ -70,7 +77,7 @@ fn load(
     let Some((hash, cursor, kind)) = row else {
         return Ok(None);
     };
-    if hash != undo_request_fingerprint(ws, operation, author) {
+    if hash != undo_request_fingerprint(conn, ws, operation, author)? {
         return Err(DomainError::IdempotencyKeyReuseMismatch.into());
     }
     if !matches!(
@@ -91,7 +98,7 @@ fn load(
     if plan.workspace != ws
         || plan.operation != operation
         || plan.request != request
-        || plan.author.as_deref() != author
+        || hash != undo_request_fingerprint(conn, ws, operation, plan.author.as_deref())?
         || cursor > plan.members.len()
     {
         return Err(corrupt());
@@ -475,7 +482,7 @@ impl ActorHandle {
                 let members = store.read_with(|conn| -> Result<_, RuntimeError> {
                     // Capture holds take precedence over History and disk refusals.
                     for effect in operation_moments_in(conn, &w, &version, &o)? {
-                        check_undo_ownership(conn, &w, &version, &effect)?;
+                        check_undo_ownership(conn, &w, &version, &o, &effect)?;
                     }
                     let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
                     originals.sort_by_key(|m| m.operation != "rename");
@@ -483,7 +490,7 @@ impl ActorHandle {
                         .into_iter()
                         .map(|mut effect| {
                             let head = signature(conn, &w, &version, &effect.object_id)?;
-                            if effect.operation == "write" {
+                            if effect.operation == "write" && !dohc_engine_domain::is_duplicate_in(conn, &w, &o, effect.moment_order)? {
                                 effect.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w,version,effect.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                                 effect.before_path=None;
                             }
@@ -529,7 +536,7 @@ impl ActorHandle {
                 let existing = store.read_with(|conn| -> Result<_,RuntimeError> {
                     let row: Option<(String,i64)> = conn.query_row("SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",[&p.request],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StorageError::corrupt_public)?;
                     if let Some((hash,cursor))=row {
-                        if hash!=undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()) { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
+                        if hash!=undo_request_fingerprint(conn,&p.workspace,&p.operation,p.author.as_deref())? { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
                         return Ok(Some(usize::try_from(cursor).map_err(|_| corrupt())?));
                     }
                     Ok(None)
@@ -540,7 +547,7 @@ impl ActorHandle {
                     if active!=p.version { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"active version changed"}.into()); }
                     let prior: Option<String> = tx.query_row("SELECT r.kind FROM history_undo_plans p JOIN engine_requests r ON r.request_id=p.request_id WHERE p.workspace_id=?1 AND p.operation_id=?2",params![p.workspace,p.operation],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
                     if let Some(kind) = prior { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:if kind=="history-undo-complete" {"Operation already undone"} else {"Undo in progress"}}.into()); }
-                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()),now]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(tx,&p.workspace,&p.operation,p.author.as_deref())?,now]).map_err(StorageError::persist_public)?;
                     tx.execute("INSERT INTO history_undo_plans(request_id,workspace_id,version_id,operation_id,author_json,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",params![p.request,p.workspace,p.version,p.operation,p.author,body.as_str()]).map_err(StorageError::persist_public)?;
                     Ok(())
                 });
@@ -713,7 +720,7 @@ impl ActorHandle {
                                 let unchanged = signature(tx,&p.workspace,&p.version,&member.effect.object_id)? == member.head;
                                 let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
                                 let vacant: bool = member.effect.operation == "write" || tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-                                check_undo_ownership(tx,&p.workspace,&p.version,&member.effect)?;
+                                check_undo_ownership(tx,&p.workspace,&p.version,&p.operation,&member.effect)?;
                                 let (probe, source) = disk?;
                                 let disk_changed = (member.effect.operation != "write" && probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent) || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp);
                                 if !unchanged || !vacant || disk_changed { return Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"source changed"}.into()); }

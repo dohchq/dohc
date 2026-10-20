@@ -19,6 +19,7 @@ import {
   createWorkspaceDirectory,
   createApp,
   deleteWorkspacePath,
+  duplicateWorkspaceFile,
   detectApps,
   importData,
   listWorkspaceFiles,
@@ -2504,5 +2505,18 @@ it("does not blame the owner for an unconfirmed ended share or a group the recip
     ]}));
     expect(await workspaceStatus(ctx)).not.toHaveProperty("removedShares");
     expect((await listWorkspaces(ctx)).workspaces[0]).not.toHaveProperty("removedShares");
+  });
+});
+
+it("routes Duplicate to the owning socket and refuses secret and escaping paths", async () => {
+  await withWorkspace(async ctx => {
+    const request = vi.fn(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    ctx.request = request;
+    await writeFile(join(ctx.root, "source.md"), "Source");
+    expect(await duplicateWorkspaceFile(ctx, {path: "source.md"}, "agent-name")).toMatchObject({ok: true, path: "copy.md"});
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({verb: "fileDuplicate", args: expect.objectContaining({actor: "agent", path: "source.md", agent: "agent-name", requestId: expect.any(String)})}));
+    request.mockClear();
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await duplicateWorkspaceFile(ctx, {path})).toMatchObject({ok: false});
+    expect(request).not.toHaveBeenCalled();
   });
 });
