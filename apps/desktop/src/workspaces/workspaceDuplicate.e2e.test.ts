@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import {VersionedLiveAdapter} from "@dohc/workspace-engine-client";
-import {readFile, writeFile, unlink} from "node:fs/promises";
+import {lstat, readFile, writeFile, unlink} from "node:fs/promises";
 import {join} from "node:path";
 import {expect, it} from "vitest";
 import * as Y from "yjs";
@@ -51,7 +51,11 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
       const adapter = new VersionedLiveAdapter(binding.client,binding.workspace,{workspaceId});
       return adapter.undoHistoryOperation({workspaceId,operationId:interrupted.operationId,requestId:"undo-receipt-copy",author});
     });
-    expect(undone.materialized).toBe(true);
+    expect(undone.notRestored).toEqual([]);
+    await expect.poll(() => lstat(join(rootPath,interrupted.path)).then(() => true, error => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    })).toBe(false);
     await capture.changePathsAs(["source.md"],{operation:"duplicate",author,operationId:"dohc-operation:33333333-3333-4333-8333-333333333333"},async held=>{
       expect(await held.readDuplicate(interrupted.operationId)).toBeNull();
     },()=>[]);
