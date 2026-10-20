@@ -1894,15 +1894,60 @@ pub(super) enum Disposition {
     },
 }
 
-/// A successor's coverage of the outbox its released chain left: each entry
-/// Covered by accepted history at or below the prefix, Carried as the
-/// chain's resolved manifest lists it, a seed its activation strictly
-/// abandoned, or a delivery a host strictly refused. Native sources of the
-/// last two belong to the chain. Anything else refuses the succession, and so
-/// does a carried delivery it lacks. Each entry names its sequence and
-/// disposition.
+/// One entry of an adoption's coverage: its original outbox, its sequence
+/// there, and its disposition. The coverage digest hashes them in this order.
+pub(super) type CoveredEntry = (String, i64, Disposition);
+
+/// A successor's coverage of the outboxes its released chain left, under one
+/// budget for all of them: each entry Covered by accepted history at or below
+/// the prefix, Carried as the chain's resolved manifest lists it, a seed its
+/// activation strictly abandoned, or a delivery a host strictly refused.
+/// Native sources of the last two belong to the chain. Anything else refuses
+/// the succession, and so does a carried delivery none of them holds. Entries
+/// are ordered by outbox and sequence, whatever order `outboxes` names them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retained_coverage(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    outboxes: &[String],
+    prefix: &RetainedPrefix,
+    carried: &[InheritedEntry],
+    max_events: usize,
+) -> Result<Vec<CoveredEntry>, ApplicationError> {
+    let mut outboxes = outboxes.to_vec();
+    outboxes.sort();
+    outboxes.dedup();
+    let mut coverage = Vec::new();
+    let mut found = BTreeSet::new();
+    for outbox_id in &outboxes {
+        outbox_entries(
+            conn,
+            namespace,
+            doc,
+            lineage,
+            outbox_id,
+            prefix,
+            carried,
+            max_events,
+            &mut coverage,
+            &mut found,
+        )?;
+    }
+    if carried
+        .iter()
+        .any(|delivery| !found.contains(&delivery.receipt.delivery_id))
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(coverage)
+}
+
+/// Add one outbox's entries to `coverage`, which holds at most `max_events`
+/// across every outbox, and record the Carried deliveries it found.
+#[allow(clippy::too_many_arguments)]
+fn outbox_entries(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
@@ -1911,15 +1956,19 @@ pub(super) fn retained_coverage(
     prefix: &RetainedPrefix,
     carried: &[InheritedEntry],
     max_events: usize,
-) -> Result<Vec<(i64, Disposition)>, ApplicationError> {
+    coverage: &mut Vec<CoveredEntry>,
+    found: &mut BTreeSet<String>,
+) -> Result<(), ApplicationError> {
     let through = prefix
         .terminal_receipt
         .as_ref()
         .map_or(0, |receipt| receipt.journal_cursor);
-    let limit = i64::try_from(max_events)
-        .ok()
-        .and_then(|limit| limit.checked_add(1))
-        .ok_or(invalid("owner adoption capacity"))?;
+    let over_budget = || invalid("owner adoption retained outbox coverage exceeds its budget");
+    let limit = max_events
+        .checked_sub(coverage.len())
+        .and_then(|remaining| i64::try_from(remaining).ok())
+        .and_then(|remaining| remaining.checked_add(1))
+        .ok_or_else(over_budget)?;
     let mut query = conn
         .prepare(
             "SELECT sequence,append_key,delivery_id,update_digest,native_source_json,accepted_receipt_json,pending,
@@ -1928,18 +1977,16 @@ pub(super) fn retained_coverage(
         )
         .map_err(read_sql)?;
     let mut rows = query.query(params![outbox_id, limit]).map_err(read_sql)?;
-    let mut coverage = Vec::new();
-    let mut found = BTreeSet::new();
+    let mut next = 1;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if coverage.len() >= max_events {
-            return Err(invalid(
-                "owner adoption retained outbox coverage exceeds its budget",
-            ));
+            return Err(over_budget());
         }
         let sequence: i64 = row.get(0).map_err(read_sql)?;
-        if sequence != coverage.len() as i64 + 1 || row.get::<_, bool>(6).map_err(read_sql)? {
+        if sequence != next || row.get::<_, bool>(6).map_err(read_sql)? {
             return Err(ApplicationError::Conflict);
         }
+        next += 1;
         let append_key: String = row.get(1).map_err(read_sql)?;
         let delivery: String = row.get(2).map_err(read_sql)?;
         let digest: String = row.get(3).map_err(read_sql)?;
@@ -1972,7 +2019,11 @@ pub(super) fn retained_coverage(
             {
                 return Err(ApplicationError::Conflict);
             }
-            coverage.push((sequence, Disposition::Receipt { receipt }));
+            coverage.push((
+                outbox_id.to_owned(),
+                sequence,
+                Disposition::Receipt { receipt },
+            ));
             continue;
         }
         if let (Some(saved), Some(_)) = (&saved, &source) {
@@ -1992,6 +2043,7 @@ pub(super) fn retained_coverage(
             }
             found.insert(delivery);
             coverage.push((
+                outbox_id.to_owned(),
                 sequence,
                 Disposition::Receipt {
                     receipt: saved.clone(),
@@ -2028,7 +2080,7 @@ pub(super) fn retained_coverage(
             };
             if let Some(retiring) = chained(&source.adoption_id)? {
                 if is_abandoned_seed(conn, namespace, &retiring, &entry)? {
-                    coverage.push((sequence, Disposition::Abandoned));
+                    coverage.push((outbox_id.to_owned(), sequence, Disposition::Abandoned));
                     continue;
                 }
             }
@@ -2041,6 +2093,7 @@ pub(super) fn retained_coverage(
             }
         }
         coverage.push((
+            outbox_id.to_owned(),
             sequence,
             Disposition::Refused {
                 delivery_id: refusal.delivery_id,
@@ -2049,13 +2102,7 @@ pub(super) fn retained_coverage(
             },
         ));
     }
-    if carried
-        .iter()
-        .any(|delivery| !found.contains(&delivery.receipt.delivery_id))
-    {
-        return Err(ApplicationError::Conflict);
-    }
-    Ok(coverage)
+    Ok(())
 }
 
 /// The registration a retirement settles through: the activation's own

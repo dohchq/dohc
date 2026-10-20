@@ -5123,3 +5123,299 @@ async fn resume_through_the_host(catch_up: bool) {
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
+
+/// Sol's round 4b ruling, rename, through the host: the root's C1 and C2 are
+/// Carried when it releases, ordinary sync projects the whole Y.Doc into the
+/// file, and a person renames the document through the host's rename before
+/// the successor captures it at the new path. The successor adopts there:
+/// its coverage takes the root's outbox at the old path, C1 and C2 stay where
+/// the root queued them, with their receipts, and its seed opens the outbox
+/// at its own binding. Applying them at the new path is round 4b3b's.
+#[tokio::test]
+async fn a_successor_adopts_across_a_rename_through_the_host() {
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let (path, renamed) = ("notes/plan.md", "notes/renamed.md");
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let base: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+    let lineage = hex_sha256(&base);
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    let execute = |store: &mut EngineStore, sql: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(sql)
+                    .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+    };
+    execute(&mut store, "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1);
+        INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0);
+        INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','1','epoch','stream')");
+    import_envelope(&mut store, "owner-peer", 1, &base, &lineage, true);
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    let capture = |at: &str| {
+        actor.capture_imported_owner_activation(
+            "relay".into(),
+            key.clone(),
+            at.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+    };
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let binding = dohc_engine_collab::LiveObjectBinding {
+        workspace_id: "workspace".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        current_path: path.into(),
+        selector_paths: vec![path.into()],
+        restore_fence_generation: 0,
+    };
+    let first = capture(path).await.unwrap();
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay".into(), coordinate.clone(), binding.clone())
+        .await
+        .unwrap();
+    handle
+        .adopt_owner(
+            imported_cut(&first, None),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    // The owner's edits: one the host applies, then C1 and C2, which the
+    // relay accepts and the host never applies.
+    let owned = Ydoc::wire();
+    owned.apply(&base).unwrap();
+    let record = |update: Vec<u8>, request: &str| {
+        actor.ydoc_record_update(
+            key.clone(),
+            path.into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            update,
+            Some("owner-origin".into()),
+            None,
+            Some(lineage.clone()),
+            false,
+            None,
+            Some(request.into()),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+    };
+    let covered_bytes = owned.richdoc_append_paragraph("Covered paragraph");
+    record(covered_bytes.clone(), "covered").await.unwrap();
+    let covered = accept_latest(&actor, &store, 2).await;
+    assert!(matches!(
+        deliver_owned(&handle, &binding, &covered, covered_bytes.clone()).await,
+        ApplicationResult::Applied(..)
+    ));
+    record(
+        owned.richdoc_append_paragraph("Carried paragraph one"),
+        "c1",
+    )
+    .await
+    .unwrap();
+    let c1 = accept_latest(&actor, &store, 3).await;
+    record(
+        owned.richdoc_append_paragraph("Carried paragraph two"),
+        "c2",
+    )
+    .await
+    .unwrap();
+    let c2 = accept_latest(&actor, &store, 4).await;
+    // Stop: Phase A, settlement at B through F, the document parks, and the
+    // release.
+    let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+        namespace: "relay".into(),
+        max_deliveries: 8,
+        max_applications: 8,
+    };
+    let retirement = RetirementKey {
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        activation_id: first.activation_id.clone(),
+        restore_fence_generation: 0,
+        accepted_through: 10,
+    };
+    owner
+        .begin_retirement(scope.clone(), coordinate.clone(), retirement.clone(), false)
+        .await
+        .unwrap();
+    owner
+        .settle_retirement(
+            scope.clone(),
+            coordinate.clone(),
+            retirement.clone(),
+            Some(covered.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: adoption_reconstruction(),
+                reservation: Arc::new(()),
+            },
+        )
+        .await
+        .unwrap();
+    execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+          VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
+        INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+    let Release::Released {
+        boundary: Some(boundary),
+        ..
+    } = owner
+        .release_activation(scope, coordinate.clone(), retirement, 40)
+        .await
+        .unwrap()
+    else {
+        panic!("released");
+    };
+    // The document returns, ordinary sync brings a peer's edit and projects
+    // the whole Y.Doc, and a person renames the document.
+    execute(
+        &mut store,
+        "UPDATE hosted_documents SET scope_generation=1,state='ready'",
+    );
+    let peer = Ydoc::wire();
+    peer.apply(&base).unwrap();
+    peer.apply(&covered_bytes).unwrap();
+    import_envelope(
+        &mut store,
+        "peer",
+        2,
+        &peer.richdoc_append_paragraph("Peer paragraph"),
+        &lineage,
+        false,
+    );
+    execute(&mut store, "UPDATE hosted_replicas SET main_cursor=2");
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 50)
+        .await
+        .unwrap();
+    actor
+        .versioned_text_rename(
+            dohc_engine_domain::RenameTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                from_path: path.into(),
+                to_path: renamed.into(),
+                moment_id: "renamed".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 60,
+            },
+            root.path().to_owned(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let next = capture(renamed).await.unwrap();
+    assert_eq!(
+        next.source.predecessor_activation_id.as_deref(),
+        Some(first.activation_id.as_str())
+    );
+    let moved = dohc_engine_collab::LiveObjectBinding {
+        current_path: renamed.into(),
+        selector_paths: vec![renamed.into()],
+        ..binding.clone()
+    };
+    let successor = owner
+        .register_activation(
+            "relay".into(),
+            coordinate.clone(),
+            moved,
+            next.activation_id.clone(),
+        )
+        .await
+        .unwrap();
+    successor
+        .adopt_owner(
+            imported_cut(
+                &next,
+                Some(RetainedPrefix {
+                    terminal_receipt: boundary.terminal_receipt.clone(),
+                    event_count: boundary.event_count,
+                    history_evidence_digest: boundary.history_evidence_digest.clone(),
+                    predecessor_activation_id: first.activation_id.clone(),
+                }),
+            ),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    // Where each entry sits: its outbox's path, its sequence, and the cursor
+    // of the receipt it saved.
+    let entry = |delivery: &str| -> (String, i64, Option<i64>) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT o.current_path,e.sequence,json_extract(e.accepted_receipt_json,'$.journalCursor')
+                     FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id) WHERE e.delivery_id=?1",
+                    [delivery],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(entry(&c1.delivery_id), (path.to_owned(), 2, Some(3)));
+    assert_eq!(entry(&c2.delivery_id), (path.to_owned(), 3, Some(4)));
+    let (_, seed, _) = latest_pending(&store);
+    assert_eq!(entry(&seed), (renamed.to_owned(), 1, None));
+    let covered_sequence: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT covered_outbox_sequence FROM live_owner_activations WHERE activation_id=?1",
+                [&next.activation_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        covered_sequence, 0,
+        "the new binding's outbox held nothing to cover"
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}

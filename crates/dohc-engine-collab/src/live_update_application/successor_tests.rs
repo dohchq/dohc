@@ -37,8 +37,8 @@ fn returned(f: &mut Fixture) {
     write(f, "UPDATE hosted_replicas SET main_cursor=9");
 }
 
-/// The file at the document's path, rewritten to the local Y.Doc's text, as
-/// ordinary sync brings the owner's work.
+/// The file at the fixture binding's path, rewritten to the local Y.Doc's
+/// text, as ordinary sync brings the owner's work.
 fn file_matches_local(f: &mut Fixture, moment: &str) {
     let local = f
         .store
@@ -54,7 +54,7 @@ fn file_matches_local(f: &mut Fixture, moment: &str) {
                 workspace_id: "workspace".into(),
                 version_id: "main".into(),
                 object_id: "object".into(),
-                path: "owner.md".into(),
+                path: f.binding.current_path.clone(),
                 text,
                 moment_id: moment.into(),
                 metadata_origin: "sync".into(),
@@ -146,9 +146,27 @@ fn succession_row(f: &Fixture, id: &str) -> (Option<String>, Option<String>, Opt
         .unwrap()
 }
 
-/// The coverage digest a successor's row keeps for these dispositions.
-fn coverage_digest(coverage: &[(i64, Disposition)]) -> String {
+/// The coverage digest an adoption keeps for these entries, each named by its
+/// original outbox and sequence.
+fn outboxes_digest(coverage: &[(String, i64, Disposition)]) -> String {
     hex_sha256(&serde_json::to_vec(coverage).unwrap())
+}
+
+/// The outbox at `path`.
+fn outbox_at(f: &Fixture, path: &str) -> String {
+    f.store
+        .read_with(|conn| {
+            conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes WHERE current_path=?1", [path], |r| r.get(0))
+        })
+        .unwrap()
+}
+
+/// The coverage digest an adoption keeps for these dispositions of the
+/// entries in the outbox at the fixture's binding.
+fn coverage_digest(f: &Fixture, coverage: &[(i64, Disposition)]) -> String {
+    let outbox = outbox_at(f, &f.binding.current_path);
+    let coverage: Vec<_> = coverage.iter().map(|(sequence, disposition)| (outbox.clone(), *sequence, disposition.clone())).collect();
+    outboxes_digest(&coverage)
 }
 
 /// Each adoption seed: its activation and outbox sequence.
@@ -505,7 +523,7 @@ fn a_successor_covers_its_chains_retained_entries() {
             (2, Disposition::Receipt { receipt: carried.clone() }),
         ];
         let (_, _, _, _, digest) = succession_row(&f, &id);
-        assert_eq!(digest, coverage_digest(&coverage));
+        assert_eq!(digest, coverage_digest(&f, &coverage));
         let covered_sequence: i64 = f
             .store
             .read_with(|conn| {
@@ -542,7 +560,7 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
         }
         f.adopt().unwrap();
         let (_, _, _, _, digest) = succession_row(&f, &id);
-        assert_eq!(digest, coverage_digest(&[(1, Disposition::Abandoned)]));
+        assert_eq!(digest, coverage_digest(&f, &[(1, Disposition::Abandoned)]));
         assert_eq!(seeds(&f), vec![(predecessor, 1), (id.clone(), 2)]);
         let hold = f
             .store
@@ -846,7 +864,7 @@ fn a_refusal_ends_its_delivery_and_never_its_lineage() {
         f.adopt().unwrap();
         let (_, _, _, current, digest) = succession_row(&f, &id);
         assert!(current, "{case}");
-        assert_eq!(digest, coverage_digest(&refused), "{case}");
+        assert_eq!(digest, coverage_digest(&f, &refused), "{case}");
         assert_eq!(terminal_entries(&f), kept, "{case}: terminal bytes, provenance and reasons stay");
         assert_eq!(seeds(&f).last(), Some(&(id, refused.len() as i64 + 1)), "{case}");
     }
@@ -1152,7 +1170,7 @@ fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
         "the same outbox, open again"
     );
     let (_, _, _, _, digest) = succession_row(&f, &id);
-    assert_eq!(digest, coverage_digest(&[(1, Disposition::Abandoned)]));
+    assert_eq!(digest, coverage_digest(&f, &[(1, Disposition::Abandoned)]));
     assert_eq!(seeds(&f), vec![(root, 1), (id, 2)]);
     assert_eq!(query_rows(&f, "SELECT * FROM owner_ydoc_outbox_entries WHERE sequence=1"), abandoned);
     let written = rows(&f, &SUCCESSION_WRITES);
@@ -1383,7 +1401,7 @@ fn a_first_adoption_accounts_for_an_enrolled_owners_refused_draft() {
         let id = f.cut.adoption_id.clone();
         let (_, _, _, current, digest) = succession_row(&f, &id);
         assert!(current, "{plan:?}");
-        assert_eq!(digest, coverage_digest(&draft_coverage(&f, plan)), "{plan:?}");
+        assert_eq!(digest, coverage_digest(&f, &draft_coverage(&f, plan)), "{plan:?}");
         assert_eq!(covered_sequence(&f, &id), plan.len() as i64, "{plan:?}");
         assert_eq!(terminal_entries(&f), kept, "{plan:?}: the refusal stays terminal");
         let (_, independent, _) = owner_draft(&mut f.store, &f.binding, plan.len()).expect("an independent write");
@@ -1421,7 +1439,7 @@ fn a_first_adoption_after_stop_accounts_for_a_refused_draft() {
     assert_eq!(origin.as_deref(), Some(next.activation_id.as_str()), "its own origin");
     assert_eq!(predecessor.as_deref(), Some(first.as_str()));
     assert!(current);
-    assert_eq!(digest, coverage_digest(&refusals(&f)));
+    assert_eq!(digest, coverage_digest(&f, &refusals(&f)));
     assert_eq!(covered_sequence(&f, &next.activation_id), 1);
     assert_eq!(terminal_entries(&f), kept, "the refusal stays terminal");
     let (_, independent, _) = owner_draft(&mut f.store, &f.binding, 1).expect("an independent write");

@@ -36,6 +36,16 @@ fn carried_twice() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDeliv
 
 /// [`carried_twice`], with C2 accepted at `cursor`.
 fn carried_twice_at(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
+    let (mut f, covered, c1, c2) = released_carrying_twice(cursor);
+    successor(&mut f);
+    f.adopt().unwrap();
+    (f, covered, c1, c2)
+}
+
+/// [`carried_twice_at`] before its successor captures: the predecessor
+/// released with C1 and C2 Carried, its document back in scope with the file
+/// holding the local Y.Doc's text.
+fn released_carrying_twice(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, _) = covered_and_carried();
     let second = native_tail_edit(&mut f, "# Carried again\n", 13);
     let c2 = receipt_of(&second.delivery_id, &second.update_digest, cursor);
@@ -49,8 +59,6 @@ fn carried_twice_at(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery
     importable(&mut f);
     returned(&mut f);
     file_matches_local(&mut f, "returned");
-    successor(&mut f);
-    f.adopt().unwrap();
     (f, covered, c1, c2)
 }
 
@@ -212,7 +220,7 @@ fn a_repeated_stop_keeps_the_chains_carried_deliveries() {
             (3, Disposition::Receipt { receipt: c2.receipt.clone() }),
             (4, seed),
         ];
-        assert_eq!(succession_row(&f, &second).4, coverage_digest(&coverage), "{case}");
+        assert_eq!(succession_row(&f, &second).4, coverage_digest(&f, &coverage), "{case}");
         assert_eq!(seeds(&f).last(), Some(&(second, 5)), "{case}");
         // S2 applies the earliest it inherited, which a recomputed release of
         // S1 would count.
