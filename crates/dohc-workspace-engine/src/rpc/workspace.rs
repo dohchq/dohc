@@ -3117,6 +3117,62 @@ mod tests {
         }
     }
 
+    /// A workspace folder whose ACL passes read and search to everyone must
+    /// not pass them to the engine's folder or the store in it (#2207).
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_workspace_gives_the_engine_none_of_its_folders_acl() {
+        let acl_lines = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .expect("ls");
+            assert!(listing.status.success());
+            String::from_utf8(listing.stdout)
+                .expect("listing")
+                .lines()
+                .count()
+                - 1
+        };
+        let scratch = ScratchDir::new().expect("scratch");
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow read,execute,file_inherit,directory_inherit",
+            ])
+            .arg(scratch.path())
+            .status()
+            .expect("chmod");
+        assert!(added.success());
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(
+                    scratch.path(),
+                    "uninherited",
+                    json!({ "captureMode": "none" }),
+                ),
+            )
+            .await
+            .expect("open");
+        let engine = scratch.path().join(".dohc/engine");
+        assert!(engine.join("engine.db").is_file());
+        let mut created = vec![scratch.path().join(".dohc"), engine.clone()];
+        created.extend(
+            std::fs::read_dir(&engine)
+                .expect("engine folder")
+                .map(|entry| entry.expect("entry").path()),
+        );
+        for path in &created {
+            assert_eq!(acl_lines(path), 0, "{}", path.display());
+        }
+        supervisor.close(&engine.join("engine.db")).unwrap();
+    }
+
     fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {
         let mut params = json!({
             "rootDir": root.to_string_lossy(),

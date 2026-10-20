@@ -29,15 +29,23 @@ pub enum RootBindingError {
     /// [`dohc_engine_files::privacy_denied`].
     #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
     PrivacyDenied,
+    /// The volume gave the engine's new folder ACL entries, as a network
+    /// share can, so the store in it could not be kept private.
+    #[error("volume-shares-new-files")]
+    VolumeSharesNewFiles,
 }
 
-/// A macOS privacy refusal at `path` names itself; any other io failure is
-/// `otherwise`.
+/// A macOS privacy refusal at `path`, or a volume that shares new files,
+/// names itself; any other io failure is `otherwise`.
 fn io_failure(
     path: &Path,
     otherwise: RootBindingError,
 ) -> impl FnOnce(std::io::Error) -> RootBindingError {
     move |error| {
+        #[cfg(target_os = "macos")]
+        if dohc_macos_files::volume_shares_new_files(&error) {
+            return RootBindingError::VolumeSharesNewFiles;
+        }
         if dohc_engine_files::privacy_denied(&error, path) {
             RootBindingError::PrivacyDenied
         } else {
@@ -150,16 +158,22 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
 
 fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     let parent = marker.parent().ok_or(RootBindingError::Unwritable)?;
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(parent)
-        .map_err(io_failure(parent, RootBindingError::Unwritable))?;
+    // A mode does not limit an ACL entry, so on a Mac the folder takes none
+    // of the workspace folder's, and nothing the engine creates in it does.
+    #[cfg(target_os = "macos")]
+    let created = dohc_macos_files::create_dir_all_uninherited(parent, 0o700);
+    #[cfg(not(target_os = "macos"))]
+    let created = {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent)
+    };
+    created.map_err(io_failure(parent, RootBindingError::Unwritable))?;
     #[cfg(target_os = "macos")]
     exclude_from_icloud(parent);
     Ok(())

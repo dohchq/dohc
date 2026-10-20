@@ -1,7 +1,7 @@
-//! Create a file without the ACL entries its folder gives new files, copy a
-//! file's macOS ACL and extended attributes between open descriptors, flush a
-//! descriptor behind a drive write barrier, keep a folder out of iCloud Drive,
-//! and unlink a file only when no process has it open.
+//! Create a file or folder without the ACL entries its folder gives new ones,
+//! copy a file's macOS ACL and extended attributes between open descriptors,
+//! flush a descriptor behind a drive write barrier, keep a folder out of
+//! iCloud Drive, and unlink a file only when no process has it open.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::io;
@@ -50,6 +50,7 @@ unsafe extern "C" {
     fn filesec_set_property(fsec: *mut c_void, property: c_int, value: *const c_void) -> c_int;
     fn filesec_free(fsec: *mut c_void);
     fn openx_np(path: *const c_char, flags: c_int, fsec: *mut c_void) -> c_int;
+    fn mkdirx_np(path: *const c_char, fsec: *mut c_void) -> c_int;
 }
 
 /// Create `name` in `dir` for writing, exclusively and without following a
@@ -59,46 +60,73 @@ unsafe extern "C" {
 /// file that is not in `dir`, or that has any ACL entry, is removed and
 /// refused. A file with entries fails with [`VolumeSharesNewFiles`].
 pub fn create_uninherited(dir: impl AsFd, name: &OsStr, mode: u16) -> io::Result<OwnedFd> {
-    create_uninherited_with(dir.as_fd(), name, mode, || {}, |_| {})
+    create_uninherited_with(dir.as_fd(), name, Kind::File, mode, || {}, |_| {})
 }
 
-/// [`create_uninherited`], with test seams just before and after the create.
+/// Create the folder `path` and any missing folder above it, like
+/// `create_dir_all`, each the way [`create_uninherited`] creates a file. A
+/// folder created this way has no ACL entries, so nothing created in it
+/// inherits any. A folder that already exists is left as it is.
+pub fn create_dir_all_uninherited(path: &Path, mode: u16) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::ErrorKind::InvalidInput.into());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    create_dir_all_uninherited(parent, mode)?;
+    let folder = std::fs::File::open(parent)?;
+    match create_uninherited_with(folder.as_fd(), name, Kind::Folder, mode, || {}, |_| {}) {
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        created => created.map(drop),
+    }
+}
+
+/// What [`create_uninherited_with`] creates.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// A file, open for writing.
+    File,
+    /// A folder, open for reading.
+    Folder,
+}
+
+/// [`create_uninherited`] for either kind, with test seams just before and
+/// after the create.
 fn create_uninherited_with(
     dir: BorrowedFd<'_>,
     name: &OsStr,
+    kind: Kind,
     mode: u16,
     before_create: impl FnOnce(),
     after_create: impl FnOnce(&CStr),
 ) -> io::Result<OwnedFd> {
-    // openx_np takes a path. It refuses a link anywhere in the folder's own
-    // path, and the identity check below refuses a folder moved meanwhile.
+    // openx_np and mkdirx_np take a path. The open refuses a link anywhere in
+    // it, and the identity check below refuses a folder moved meanwhile.
     let mut path = rustix::fs::getpath(dir)?.into_bytes();
     path.push(b'/');
     path.extend_from_slice(name.as_bytes());
     let path = CString::new(path)?;
     before_create();
-    let file = match open_uninherited(&path, mode) {
+    let created = match make_uninherited(&path, kind, mode) {
         // A file system without ACLs, such as FAT, refuses one at creation,
-        // and has none for the file to inherit.
+        // and has none for the entry to inherit.
         Err(err) if err.raw_os_error() == Some(libc::EINVAL) && !has_acls(dir) => {
-            use rustix::fs::{Mode, OFlags};
-            let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
-            let mode = Mode::from_raw_mode(mode);
-            return Ok(rustix::fs::openat(
-                dir,
-                name,
-                flags | OFlags::CLOEXEC,
-                mode,
-            )?);
+            return make_plain(dir, name, kind, mode);
         }
-        file => file?,
+        created => created?,
     };
     after_create(&path);
-    if let Err(err) = check_created(dir, name, &file) {
-        remove_if_same(&file, &path);
+    if let Err(err) = check_created(dir, name, &created) {
+        remove_if_same(&created, &path, kind);
         return Err(err);
     }
-    Ok(file)
+    Ok(created)
 }
 
 /// The volume gave a new file ACL entries in place of the empty ACL it was
@@ -121,26 +149,30 @@ pub fn volume_shares_new_files(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<VolumeSharesNewFiles>())
 }
 
-/// Check that `file` is `name` in `dir` and has no ACL entries.
-fn check_created(dir: BorrowedFd<'_>, name: &OsStr, file: &OwnedFd) -> io::Result<()> {
-    let created = rustix::fs::fstat(file)?;
+/// Check that `created` is `name` in `dir` and has no ACL entries.
+fn check_created(dir: BorrowedFd<'_>, name: &OsStr, created: &OwnedFd) -> io::Result<()> {
+    let opened = rustix::fs::fstat(created)?;
     let named = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
-    if (created.st_dev, created.st_ino) != (named.st_dev, named.st_ino) {
-        return Err(io::Error::other("the new file is not in its folder"));
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) {
+        return Err(io::Error::other("the new entry is not in its folder"));
     }
-    if has_entries(file.as_fd())? {
+    if has_entries(created.as_fd())? {
         return Err(io::Error::other(VolumeSharesNewFiles));
     }
     Ok(())
 }
 
-/// Unlink `path` only if it still names `file` when checked. An entry that
-/// takes its place between the check and the unlink is still removed.
-fn remove_if_same(file: &OwnedFd, path: &CStr) {
-    if let (Ok(open), Ok(named)) = (rustix::fs::fstat(file), rustix::fs::lstat(path))
+/// Remove `path` only if it still names `created` when checked. An entry
+/// that takes its place between the check and the removal is still removed.
+fn remove_if_same(created: &OwnedFd, path: &CStr, kind: Kind) {
+    if let (Ok(open), Ok(named)) = (rustix::fs::fstat(created), rustix::fs::lstat(path))
         && (open.st_dev, open.st_ino) == (named.st_dev, named.st_ino)
     {
-        let _ = rustix::fs::unlinkat(rustix::fs::CWD, path, rustix::fs::AtFlags::empty());
+        let flags = match kind {
+            Kind::File => rustix::fs::AtFlags::empty(),
+            Kind::Folder => rustix::fs::AtFlags::REMOVEDIR,
+        };
+        let _ = rustix::fs::unlinkat(rustix::fs::CWD, path, flags);
     }
 }
 
@@ -177,12 +209,70 @@ fn has_acls(dir: BorrowedFd<'_>) -> bool {
     supported != 0
 }
 
-fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
-    let flags =
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC;
+/// Create `path` with `mode` and an empty ACL flagged not to inherit, and
+/// open it.
+fn make_uninherited(path: &CStr, kind: Kind, mode: u16) -> io::Result<OwnedFd> {
+    match kind {
+        Kind::File => {
+            let flags = libc::O_WRONLY
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_NOFOLLOW_ANY
+                | libc::O_CLOEXEC;
+            // SAFETY: The path ends with a NUL and outlives the call, and
+            // openx_np retains neither it nor the filesec.
+            #[allow(unsafe_code)]
+            let fd = with_uninherited_filesec(mode, |fsec| unsafe {
+                openx_np(path.as_ptr(), flags, fsec)
+            })?;
+            // SAFETY: openx_np returned a new descriptor that nothing else owns.
+            #[allow(unsafe_code)]
+            let file = unsafe { OwnedFd::from_raw_fd(fd) };
+            Ok(file)
+        }
+        Kind::Folder => {
+            // SAFETY: The path ends with a NUL and outlives the call, and
+            // mkdirx_np retains neither it nor the filesec.
+            #[allow(unsafe_code)]
+            with_uninherited_filesec(mode, |fsec| unsafe { mkdirx_np(path.as_ptr(), fsec) })?;
+            let flags = rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::from_bits_retain(libc::O_NOFOLLOW_ANY as u32)
+                | rustix::fs::OFlags::CLOEXEC;
+            Ok(rustix::fs::open(path, flags, rustix::fs::Mode::empty())?)
+        }
+    }
+}
+
+/// Create `name` in `dir` with `mode` and the folder's usual inheritance, and
+/// open it, on a file system without ACLs.
+fn make_plain(dir: BorrowedFd<'_>, name: &OsStr, kind: Kind, mode: u16) -> io::Result<OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    let mode = Mode::from_raw_mode(mode);
+    let flags = match kind {
+        Kind::File => OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+        Kind::Folder => {
+            rustix::fs::mkdirat(dir, name, mode)?;
+            OFlags::RDONLY | OFlags::DIRECTORY
+        }
+    };
+    Ok(rustix::fs::openat(
+        dir,
+        name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        mode,
+    )?)
+}
+
+/// Call `create` with a filesec that holds `mode` and an empty ACL flagged
+/// not to inherit, and return what it returns unless that is negative.
+fn with_uninherited_filesec(
+    mode: u16,
+    create: impl FnOnce(*mut c_void) -> c_int,
+) -> io::Result<c_int> {
     // SAFETY: Each object is checked for null before use and freed once.
     // filesec_set_property copies the ACL and the mode it is given, and
-    // openx_np retains neither the path nor the filesec.
+    // `create` gets the filesec only for the call.
     #[allow(unsafe_code)]
     unsafe {
         let acl = acl_init(0);
@@ -191,14 +281,14 @@ fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
         }
         let fsec = filesec_init();
         let mut acl_flags = std::ptr::null_mut();
-        let fd = if !fsec.is_null()
+        let result = if !fsec.is_null()
             && acl_get_flagset_np(acl, &mut acl_flags) == 0
             && acl_add_flag_np(acl_flags, ACL_FLAG_NO_INHERIT) == 0
             && acl_set_flagset_np(acl, acl_flags) == 0
             && filesec_set_property(fsec, FILESEC_ACL, (&raw const acl).cast()) == 0
             && filesec_set_property(fsec, FILESEC_MODE, (&raw const mode).cast()) == 0
         {
-            openx_np(path.as_ptr(), flags, fsec)
+            create(fsec)
         } else {
             -1
         };
@@ -207,10 +297,10 @@ fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
             filesec_free(fsec);
         }
         acl_free(acl);
-        if fd < 0 {
+        if result < 0 {
             return Err(err);
         }
-        Ok(OwnedFd::from_raw_fd(fd))
+        Ok(result)
     }
 }
 
@@ -477,6 +567,55 @@ mod tests {
         assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
+    #[test]
+    fn a_created_folder_takes_none_of_its_folders_acl() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-dir-uninherited").unwrap();
+        let dir = scratch.path().join("shared");
+        std::fs::create_dir(&dir).unwrap();
+        add_entry(
+            &dir,
+            "group:everyone allow read,execute,file_inherit,directory_inherit",
+        );
+        std::fs::create_dir(dir.join("inheriting")).unwrap();
+        assert!(has_entries(&dir.join("inheriting")));
+
+        let engine = dir.join(".dohc/engine");
+        super::create_dir_all_uninherited(&engine, 0o700).unwrap();
+        for folder in [dir.join(".dohc"), engine.clone()] {
+            assert!(!has_entries(&folder), "{}", folder.display());
+            let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", folder.display());
+        }
+        // What is created inside inherits nothing either.
+        std::fs::write(engine.join("engine.db"), b"").unwrap();
+        std::fs::create_dir(engine.join("displaced")).unwrap();
+        assert!(!has_entries(&engine.join("engine.db")));
+        assert!(!has_entries(&engine.join("displaced")));
+        // A folder that exists is kept as it is.
+        super::create_dir_all_uninherited(&dir.join("inheriting"), 0o700).unwrap();
+        assert!(has_entries(&dir.join("inheriting")));
+    }
+
+    /// The seam adds an entry the way a network file system's server would.
+    #[test]
+    fn a_folder_given_acl_entries_is_removed_and_refused() {
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-dir-served-acl").unwrap();
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        let grant = |path: &std::ffi::CStr| {
+            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+            add_entry(path, "group:everyone allow list");
+        };
+        let name = std::ffi::OsStr::new("engine");
+        let kind = super::Kind::Folder;
+        let err = super::create_uninherited_with(folder.as_fd(), name, kind, 0o700, || {}, grant)
+            .unwrap_err();
+        assert!(super::volume_shares_new_files(&err), "{err}");
+        assert!(!scratch.path().join("engine").exists());
+    }
+
     fn add_entry(path: &std::path::Path, entry: &str) {
         let added = std::process::Command::new("/bin/chmod")
             .args(["+a", entry])
@@ -500,8 +639,15 @@ mod tests {
             std::fs::create_dir(&dir).unwrap();
         };
         let name = std::ffi::OsStr::new("temp");
-        let err =
-            super::create_uninherited_with(folder.as_fd(), name, 0o600, swap, |_| {}).unwrap_err();
+        let err = super::create_uninherited_with(
+            folder.as_fd(),
+            name,
+            super::Kind::File,
+            0o600,
+            swap,
+            |_| {},
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
         assert!(!dir.join("temp").exists(), "the replacement keeps a file");
         assert!(!scratch.path().join("moved/temp").exists());
@@ -520,8 +666,15 @@ mod tests {
             add_entry(path, "group:everyone allow read");
         };
         let name = std::ffi::OsStr::new("temp");
-        let err =
-            super::create_uninherited_with(folder.as_fd(), name, 0o600, || {}, grant).unwrap_err();
+        let err = super::create_uninherited_with(
+            folder.as_fd(),
+            name,
+            super::Kind::File,
+            0o600,
+            || {},
+            grant,
+        )
+        .unwrap_err();
         assert!(super::volume_shares_new_files(&err), "{err}");
         assert!(!scratch.path().join("temp").exists());
     }
@@ -535,10 +688,10 @@ mod tests {
         std::fs::rename(&path, scratch.path().join("aside")).unwrap();
         std::fs::write(&path, b"unrelated").unwrap();
         let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-        super::remove_if_same(&created, &c_path);
+        super::remove_if_same(&created, &c_path, super::Kind::File);
         assert_eq!(std::fs::read(&path).unwrap(), b"unrelated");
         std::fs::rename(scratch.path().join("aside"), &path).unwrap();
-        super::remove_if_same(&created, &c_path);
+        super::remove_if_same(&created, &c_path, super::Kind::File);
         assert!(!path.exists());
     }
 }

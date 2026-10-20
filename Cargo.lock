@@ -438,6 +438,7 @@ dependencies = [
  "dohc-engine-sync",
  "dohc-engine-sync-http",
  "dohc-engine-testkit",
+ "dohc-macos-files",
  "file-guard",
  "file-id",
  "fs4",

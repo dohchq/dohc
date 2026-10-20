@@ -490,22 +490,26 @@ fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
         reason: "engine.db path has no parent directory",
         source: None,
     })?;
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    // Owner-only on Unix (matches the TS engine's `.dohc/engine` 0o700 so a
-    // world-searchable directory never exposes workspace contents); a no-op on
-    // Windows, where ACLs govern access.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(parent)
-        .map_err(|err| RuntimeError::Identity {
-            reason: "could not create engine.db parent directory",
-            source: Some(err),
-        })
+    // Owner-only on Unix, so other users cannot reach the store. Windows has
+    // no mode; ACLs govern access there. On macOS a mode does not limit an ACL
+    // entry, so the folder also takes none of the workspace folder's.
+    #[cfg(target_vendor = "apple")]
+    let created = dohc_macos_files::create_dir_all_uninherited(parent, 0o700);
+    #[cfg(not(target_vendor = "apple"))]
+    let created = {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent)
+    };
+    created.map_err(|err| RuntimeError::Identity {
+        reason: "could not create engine.db parent directory",
+        source: Some(err),
+    })
 }
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock
@@ -523,6 +527,47 @@ fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Reg
 mod tests {
     use super::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
+
+    /// A workspace folder whose ACL passes read and search to everyone must
+    /// not pass them to the engine's folder or its store (#2207).
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_new_store_takes_none_of_its_workspace_folders_acl() {
+        let acl_lines = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(listing.status.success());
+            String::from_utf8(listing.stdout).unwrap().lines().count() - 1
+        };
+        let scratch = ScratchDir::new().unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow read,execute,file_inherit,directory_inherit",
+            ])
+            .arg(scratch.path())
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        let engine = db.parent().unwrap();
+        let mut created = vec![scratch.path().join(".dohc"), engine.to_path_buf()];
+        created.extend(
+            std::fs::read_dir(engine)
+                .unwrap()
+                .map(|e| e.unwrap().path()),
+        );
+        assert!(created.contains(&db));
+        for path in &created {
+            assert_eq!(acl_lines(path), 0, "{}", path.display());
+        }
+        supervisor.close(&db).unwrap();
+    }
 
     #[test]
     fn independent_supervisors_refuse_a_second_writer_then_allow_reopen() {

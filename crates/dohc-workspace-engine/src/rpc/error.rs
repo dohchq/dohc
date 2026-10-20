@@ -866,6 +866,9 @@ mod tests {
         ));
         assert_eq!(write.code, dohc_engine_protocol::ErrorCode::Internal);
         assert_eq!(write.message, "volume-shares-new-files");
+        let root =
+            super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
+        assert_eq!(root.message, "volume-shares-new-files");
     }
 
     #[test]
