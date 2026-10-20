@@ -1449,3 +1449,18 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
     drop(guard);
     f.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_replays_rejoin_the_durable_cursor_without_reusing_other_member_inputs() {
+    let f = Fixture::new(20, 20);
+    f.pass("concurrent-forward", Arc::new(NoFaults)).await.unwrap();
+    let (first, second) = tokio::join!(f.undo(), f.undo());
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_eq!(first.moments, second.moments);
+    assert_eq!(first.moments.len(), 21);
+    assert!(first.not_restored.is_empty() && second.not_restored.is_empty());
+    for i in 0..20 {
+        assert_eq!(f.text(&format!("source-{i:04}.md")).await, BODY);
+    }
+    f.close().await;
+}

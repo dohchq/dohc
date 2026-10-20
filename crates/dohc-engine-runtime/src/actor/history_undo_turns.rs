@@ -621,6 +621,7 @@ impl ActorHandle {
             let turn_token = token.clone();
             let next = self.run_undo_turn(request.clone(),phase,Some(prepared_cursor),move |store,cache| {
                 let _guards = (_capture,_sessions);
+                if turn_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                 with_local_file_mutation_cache_reset(cache, || {
                     let (cursor,complete): (i64,bool) = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public)?;
                     let mut index = usize::try_from(cursor).map_err(|_| corrupt())?;
@@ -691,8 +692,10 @@ impl ActorHandle {
             }).await;
             match next {
                 Ok((cursor, committed, remaining)) => {
-                    for input in remaining.into_iter().rev() {
-                        inputs.push_front(input);
+                    if committed {
+                        for input in remaining.into_iter().rev() { inputs.push_front(input); }
+                    } else {
+                        inputs.clear();
                     }
                     if committed {
                         deduped = false;
