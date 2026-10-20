@@ -722,12 +722,10 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
                 .read_with(|c| dohc_engine_collab::read_marker_in(c, &key))?
                 .unwrap();
             let doc = Ydoc::wire();
-            let body = format!(
-                "{}{}",
-                "[[a]] ".repeat(16),
-                "x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200)
+            doc.richdoc_wikilinks_for_test(&"[[a]] ".repeat(16))?;
+            doc.richdoc_append_paragraph(
+                &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200),
             );
-            doc.richdoc_wikilinks_for_test(&body)?;
             let before = doc.project(ContentKind::Richdoc)?.content;
             assert!(matches!(
                 doc.wikilink_spans(),
