@@ -124,6 +124,16 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    // The engine's folder is on a volume that keeps ACL entries on it.
+    #[cfg(target_os = "macos")]
+    if let RuntimeError::Identity {
+        source: Some(source),
+        ..
+    } = error
+        && dohc_macos_files::volume_shares_new_files(source)
+    {
+        return WireError::new(ErrorCode::Internal, "volume-shares-new-files");
+    }
     if matches!(
         error,
         RuntimeError::ChatMentionAccessChanged
@@ -876,6 +886,17 @@ mod tests {
             super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
         assert_eq!(root.code, dohc_engine_protocol::ErrorCode::Internal);
         assert_eq!(root.message, "volume-shares-new-files");
+        #[cfg(target_os = "macos")]
+        {
+            let folder = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+                reason: "could not create engine.db parent directory",
+                source: Some(std::io::Error::other(
+                    dohc_macos_files::VolumeSharesNewFiles,
+                )),
+            });
+            assert_eq!(folder.code, dohc_engine_protocol::ErrorCode::Internal);
+            assert_eq!(folder.message, "volume-shares-new-files");
+        }
     }
 
     #[test]

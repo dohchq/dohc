@@ -251,25 +251,29 @@ fn verify_key_dir(root: &std::path::Path) -> Result<(), CryptoError> {
 pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
     let key = SecretDataKey::generate()?;
+    // The key's directory must not advertise its existence to other local
+    // users (the file itself is 0600 below), on a Mac through an ACL entry
+    // the workspace folder passes on either.
+    #[cfg(target_vendor = "apple")]
+    {
+        let relative = std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
+            .parent()
+            .ok_or(CryptoError::KeyFileMalformed)?;
+        dohc_macos_files::ensure_private_dir(root, relative)
+            .map_err(|err| key_create_error(&err))?;
+    }
+    #[cfg(not(target_vendor = "apple"))]
     if let Some(parent) = path.parent() {
-        // The key's directory must not advertise its existence to
-        // other local users (the file itself is 0600 below), on a Mac
-        // through an ACL entry the workspace folder passes on either.
-        #[cfg(target_vendor = "apple")]
-        dohc_macos_files::ensure_private_dir(parent).map_err(|err| key_create_error(&err))?;
-        #[cfg(not(target_vendor = "apple"))]
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
         {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder
-                .create(parent)
-                .map_err(|_| CryptoError::KeyFileMalformed)?;
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
         }
+        builder
+            .create(parent)
+            .map_err(|_| CryptoError::KeyFileMalformed)?;
     }
     // The key directory must be the workspace's real `.dohc/engine` — an
     // aliased `.dohc` would redirect key custody off-workspace. (An ancestor

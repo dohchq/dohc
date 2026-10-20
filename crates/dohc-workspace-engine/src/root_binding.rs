@@ -89,7 +89,7 @@ fn write_new_root_binding_with_hook(
     before_lock: impl FnOnce(),
 ) -> Result<String, RootBindingError> {
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
-    create_binding_dir(&marker)?;
+    create_binding_dir(root)?;
     let lock = marker.with_extension("lock");
     let anchor = std::fs::OpenOptions::new()
         .read(true)
@@ -152,17 +152,21 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
         return Err(RootBindingError::Malformed);
     }
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
-    create_binding_dir(&marker)?;
+    create_binding_dir(root)?;
     std::fs::write(marker, token).map_err(|_| RootBindingError::Unwritable)
 }
 
-fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
-    let parent = marker.parent().ok_or(RootBindingError::Unwritable)?;
+fn create_binding_dir(root: &Path) -> Result<(), RootBindingError> {
+    let relative = Path::new(ROOT_BINDING_RELATIVE_PATH)
+        .parent()
+        .ok_or(RootBindingError::Unwritable)?;
+    let parent = &root.join(relative);
     // A mode does not limit an ACL entry, so on a Mac each open makes the
-    // folder 0700 with no entries, whoever created it, and refuses one that
-    // another user owns or a volume keeps shared.
+    // folder 0700 with no entries, whoever created it, and refuses a link at
+    // `.dohc` or at the folder, a folder another user owns, and one a volume
+    // keeps shared.
     #[cfg(target_os = "macos")]
-    let created = dohc_macos_files::ensure_private_dir(parent);
+    let created = dohc_macos_files::ensure_private_dir(root, relative);
     #[cfg(not(target_os = "macos"))]
     let created = {
         let mut builder = std::fs::DirBuilder::new();
@@ -263,7 +267,7 @@ mod tests {
             let scratch = ScratchDir::new().expect("scratch");
             let marker = scratch.join(ROOT_BINDING_RELATIVE_PATH);
             if empty_marker {
-                create_binding_dir(&marker).unwrap();
+                create_binding_dir(scratch.path()).unwrap();
                 std::fs::write(&marker, b"").unwrap();
             }
             let barrier = std::sync::Barrier::new(3);
@@ -297,7 +301,7 @@ mod tests {
         for empty_marker in [false, true] {
             let scratch = ScratchDir::new().expect("scratch");
             let marker = scratch.join(ROOT_BINDING_RELATIVE_PATH);
-            create_binding_dir(&marker).unwrap();
+            create_binding_dir(scratch.path()).unwrap();
             if empty_marker {
                 std::fs::write(&marker, b"").unwrap();
             }
@@ -358,6 +362,32 @@ mod tests {
         let minted = write_new_root_binding(scratch.path());
         chflags("nouchg", &engine);
         assert!(matches!(minted, Err(RootBindingError::Unwritable)));
+    }
+
+    /// A direct open of a root whose `.dohc` links elsewhere must not make
+    /// the folder it names private, or write into it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_linked_dohc_folder_is_refused_before_its_target_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().expect("scratch");
+        let elsewhere = scratch.join("elsewhere");
+        let engine = elsewhere.join("engine");
+        std::fs::create_dir_all(&engine).expect("engine dir");
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let root = scratch.join("root");
+        std::fs::create_dir(&root).expect("root");
+        std::os::unix::fs::symlink(&elsewhere, root.join(".dohc")).expect("symlink");
+        assert!(matches!(
+            write_new_root_binding(&root),
+            Err(RootBindingError::Unwritable)
+        ));
+        let mode = std::fs::metadata(&engine)
+            .expect("engine")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(std::fs::read_dir(&engine).expect("engine").count(), 0);
     }
 
     /// iCloud Drive must never sync the engine's folder, in a new workspace or

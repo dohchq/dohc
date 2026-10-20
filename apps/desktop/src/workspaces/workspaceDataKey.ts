@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
 export const SECRET_FILE_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
@@ -74,7 +73,8 @@ export async function loadSecretDataKey(
       "The workspace secret key file is missing but protected data exists; failing closed.",
     );
   }
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // The engine creates and protects `.dohc/engine` when it opens the
+  // workspace, which callers do first. Writing here never creates it.
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   try {
@@ -119,7 +119,7 @@ export async function installWorkspaceDataKey(
       );
     }
   }
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // As above, the engine has already created `.dohc/engine`.
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   try {
     await writeFile(path, payload, { flag: "wx", mode: 0o600 });
