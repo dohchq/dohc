@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createShareReadQueries } from "./shareReadQueries";
 import { filterOpForShare, type ShareSelector } from "./shareFilter";
 
@@ -143,3 +143,25 @@ it("converts admitted automation to the ordinary moment format only for authenti
  expect(queries.filteredLogPage("workspace", "share",selector,0,10,"accountless").ops[0]?.payload).not.toHaveProperty("authors");
  expect(row.admittedAuthorSnapshot).toEqual(authors);
 });
+
+it.each([null, "reset", { path: "docs/plan.md", blobSha256: "a".repeat(64), contentKind: "text" }] as const)(
+  "caches the current object result %j only within one page", result => {
+    const currentObjectFile = vi.fn().mockReturnValue(result);
+    const rows = [1, 2].map(relaySeq => ({ workspaceId: "workspace", originId: "origin", originSeq: relaySeq,
+      relaySeq, opKind: "moment.append", recordedAtMs: 1,
+      payloadJson: JSON.stringify({ ...moment(undefined), objectId: "object", momentId: "moment-" + relaySeq }),
+    }));
+    const storage = { currentObjectFile, fetchLogPage: () => ({ rows, nextCursor: 2, hasMore: false }) };
+    const queries = createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0], 500, "current-query-test-key-at-least-32");
+    const read = () => queries.filteredLogPage("workspace", "share", selector, 0, 500, "accountless", undefined, ["link", "grant"], true, 7);
+    const first = read();
+    expect(first.ops).toHaveLength(2);
+    expect(currentObjectFile).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", versionId: "main", objectId: "object", epochLogFloor: 7 });
+    expect(first.ops.map(op => op.opKind)).toEqual([result === "reset" ? "files.reset" : "file.current", result === "reset" ? "files.reset" : "file.current"]);
+    currentObjectFile.mockReturnValue(null);
+    expect(read().ops.map(op => op.payload)).toEqual([
+      expect.objectContaining({ file: null }), expect.objectContaining({ file: null }),
+    ]);
+    expect(currentObjectFile).toHaveBeenCalledTimes(2);
+  },
+);

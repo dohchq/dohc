@@ -18,7 +18,7 @@ pub(super) fn invalid() -> RuntimeError {
     .into()
 }
 
-pub(super) fn cursor_key() -> Result<&'static SecretDataKey, RuntimeError> {
+pub(crate) fn cursor_key() -> Result<&'static SecretDataKey, RuntimeError> {
     static KEY: OnceLock<Result<SecretDataKey, dohc_engine_crypto::CryptoError>> = OnceLock::new();
     KEY.get_or_init(SecretDataKey::generate)
         .as_ref()

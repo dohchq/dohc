@@ -134,7 +134,7 @@
     "desktop:list-chat-bookmarks",
     "desktop:list-chat-channel-shares",
     "desktop:list-chat-channels",
-    "desktop:list-chat-file-mentions",
+    "desktop:chat-file-mentions-page",
     "desktop:list-chat-follows",
     "desktop:list-chat-messages",
     "desktop:list-chat-reactions",

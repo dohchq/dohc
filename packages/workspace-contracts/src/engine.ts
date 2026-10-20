@@ -1,3 +1,4 @@
+import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "./chatFileMentions";
 import type { AutomationRunAttribution } from "./collection";
 
 type WorkspaceObjectId = string;
@@ -837,13 +838,6 @@ interface ChatAttachment {
   createdAtMs: number;
 }
 
-export interface ChatFileMention {
-  attachment: ChatAttachment;
-  message: ChatMessage;
-  thread: ChatThread;
-  channel?: ChatChannel;
-}
-
 export interface ChatMessage {
   id: ChatMessageId;
   workspaceId: WorkspaceId;
@@ -1157,11 +1151,7 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
   ): Promise<ChatAttachment[]>;
-  listFileMentions(input: {
-    workspaceId: WorkspaceId;
-    objectId?: WorkspaceObjectId;
-    pathHint?: string;
-  }): Promise<ChatFileMention[]>;
+  fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

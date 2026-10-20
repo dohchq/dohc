@@ -31,10 +31,15 @@ export function initializeReplicaHistoryWorkSchema(db: SqliteDb) {
       SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
       AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut,json_each(cut.omitted_json) o WHERE cut.workspace_id=c.workspace_id
         AND json_extract(o.value,'$.versionId')=c.version_id AND json_extract(o.value,'$.objectId')=c.object_id);
+    UPDATE sync_relay_history_pins SET superseded_at_ms=CAST(unixepoch('subsec')*1000 AS INTEGER)
+      WHERE superseded_at_ms IS NULL AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut WHERE cut.workspace_id=sync_relay_history_pins.workspace_id)
+      AND EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
+        WHERE s.workspace_id=sync_relay_history_pins.workspace_id AND ${currentShareGrantSql("g","s")});
     DELETE FROM sync_relay_history_pins AS c WHERE superseded_at_ms IS NULL AND NOT EXISTS (
       SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
       AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut,json_each(cut.omitted_json) o WHERE cut.workspace_id=c.workspace_id
         AND json_extract(o.value,'$.versionId')=c.version_id AND json_extract(o.value,'$.objectId')=c.object_id);
+    ${replicaTextCleanupSql().join("; ")};
     CREATE TABLE sync_relay_history_pin_usage (
       workspace_id TEXT PRIMARY KEY REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
       pin_count INTEGER NOT NULL CHECK(pin_count>=0), total_bytes INTEGER NOT NULL CHECK(total_bytes>=0)

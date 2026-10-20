@@ -186,39 +186,16 @@ describe("chats result decoder rejection", () => {
     expect(mentions.mentions[0]?.createdAtMs).toBe(-40);
 
     const fileMentions = decodeChatsResult(CHATS_METHOD.attachmentsListFileMentions, {
-      mentions: [{
-        attachment: {
-          attachmentId: "attachment",
-          threadId: "thread",
-          messageId: "negative-message",
-          targetKind: "file",
-          objectId: "object",
-          createdAtMs: -39,
-        },
-        message: negativeMessage,
-        thread: {
-          id: "thread",
-          workspaceId: "workspace",
-          title: "Imported",
-          createdAtMs: -41,
-          updatedAtMs: -40,
-          channelId: "channel",
-        },
-        channel: {
-          workspaceId: "workspace",
-          channelId: "channel",
-          name: "Imported",
-          slug: "imported",
-          kind: "channel",
-          type: "posts",
-          purpose: "",
-          createdAtMs: -42,
-          updatedAtMs: -41,
-        },
+      versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false,
+      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null,
+      entries: [{
+        attachment: { attachmentId: "attachment", threadId: "thread", messageId: "negative-message",
+          targetKind: "file", objectId: "object", pathHint: "a.md", createdAtMs: -39 },
+        message: { id: "negative-message", authorDisplayName: "Ada", preview: "Preview", createdAtMs: -40 },
+        thread: { id: "thread", title: "Imported", createdAtMs: -41, updatedAtMs: -40 },
       }],
-      nextCursor: null,
     });
-    expect(fileMentions.mentions[0]?.channel?.updatedAtMs).toBe(-41);
+    expect(fileMentions?.entries[0]?.message.createdAtMs).toBe(-40);
   });
 
   it("reports a wrong-typed nested field path", () => {

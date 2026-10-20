@@ -63,6 +63,18 @@ impl Worker {
             return Err(Failure::Unavailable);
         }
         let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
+        {
+            let digest = crate::wire::sha(&bytes);
+            let mut state = shared.state.lock().unwrap();
+            if state
+                .build_digest
+                .as_ref()
+                .is_some_and(|held| held != &digest)
+            {
+                return Err(Failure::Unavailable);
+            }
+            state.build_digest = Some(digest);
+        }
         for (index, expected, cap) in [
             (0, &manifest["runtime"]["sha256"], 256 * 1024 * 1024),
             (1, &manifest["bundleSha256"], 16 * 1024 * 1024),
@@ -132,8 +144,8 @@ impl Worker {
                     };
                     match session.hello().and_then(|()| check_assets(&checked_assets)) {
                         Ok(()) => send(Ok(None)),
-                        Err(_) => {
-                            send(Err(Failure::Unavailable));
+                        Err(failure) => {
+                            send(Err(failure));
                             return;
                         }
                     }

@@ -409,7 +409,9 @@ it.each(["last-share","epoch","stream"])("retirement after %s ends standing repo
 it("upgrade removes orphan current pins but retains omitted and superseded pins",async()=>{
   const f=await fixture();f.save();f.at(130_000);f.save();
   const original=String(f.pins()[0]!.pin_id);
-  f.db.exec(`DROP TRIGGER replica_history_usage_insert; DROP TRIGGER replica_history_usage_delete;
+  f.db.exec(`ALTER TABLE sync_relay_replica_cuts ADD COLUMN omitted_json TEXT NOT NULL DEFAULT '[]';
+    DROP TABLE sync_relay_replica_cut_omitted; DELETE FROM sync_relay_migrations WHERE migration_id='replica-current-incremental-v1';
+    DROP TRIGGER replica_history_usage_insert; DROP TRIGGER replica_history_usage_delete;
     DROP TRIGGER replica_history_usage_update; DROP TRIGGER replica_history_identity_floor;
     DROP TABLE sync_relay_history_pin_usage; DROP INDEX replica_history_due;
     DROP INDEX IF EXISTS replica_history_log_clock; DROP INDEX IF EXISTS replica_history_journal_clock;
@@ -523,7 +525,9 @@ it("upgrades existing pins, clocks and stale floors once without resetting match
   const pin=String(f.pins()[0]!.pin_id);
   replacementEvidence(f.db,"log"); f.at(140_000); f.save(f.view("next"));
   // Recreate the previous migration's grant trigger and remove only this migration's schema.
-  f.db.exec(`DROP TRIGGER replica_current_view_grant_update;
+  f.db.exec(`ALTER TABLE sync_relay_replica_cuts ADD COLUMN omitted_json TEXT NOT NULL DEFAULT '[]';
+    DROP TABLE sync_relay_replica_cut_omitted; DELETE FROM sync_relay_migrations WHERE migration_id='replica-current-incremental-v1';
+    DROP TRIGGER replica_current_view_grant_update;
     CREATE TRIGGER replica_current_view_grant_update AFTER UPDATE ON sync_relay_share_grants BEGIN
       DELETE FROM sync_relay_replica_cuts WHERE workspace_id=(SELECT workspace_id FROM sync_relay_shares WHERE share_id=NEW.share_id);
     END;
@@ -1139,7 +1143,9 @@ it("migrates a stored 6a cut without multiplying references by its text chunks",
   const f=await fixture(false),sha=sha256("old");
   for(const row of f.db.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'replica_%'").all())
     f.db.exec(`DROP TRIGGER "${String(row.name).replaceAll('"','""')}"`);
-  f.db.exec(`DROP TABLE sync_relay_history_pins; DROP TABLE sync_relay_history_clocks; DROP TABLE sync_relay_history_grant_floors;
+  f.db.exec(`ALTER TABLE sync_relay_replica_cuts ADD COLUMN omitted_json TEXT NOT NULL DEFAULT '[]';
+    DROP TABLE sync_relay_replica_cut_omitted; DELETE FROM sync_relay_migrations WHERE migration_id='replica-current-incremental-v1';
+    DROP TABLE sync_relay_history_pins; DROP TABLE sync_relay_history_clocks; DROP TABLE sync_relay_history_grant_floors;
     DROP TABLE sync_relay_history_pin_usage;
     DROP INDEX replica_history_journal_position;
     DROP TABLE sync_relay_replica_cut_texts; DROP TABLE IF EXISTS sync_relay_replica_cut_text_refs;

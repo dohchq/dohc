@@ -124,6 +124,12 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    if matches!(
+        error,
+        RuntimeError::ChatMentionAccessChanged | RuntimeError::ChatMentionVersionChanged
+    ) {
+        return WireError::new(ErrorCode::Conflict, error.code());
+    }
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
         return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
     }
@@ -524,6 +530,9 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
+        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
+            ErrorCode::Internal
+        }
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -567,6 +576,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
+        SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
@@ -631,6 +641,17 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changed_chat_authority_has_a_restartable_wire_reason() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "chat-mention-access-changed");
+        let error =
+            super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionVersionChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "chat-mention-version-changed");
+    }
+
     #[test]
     fn changed_edge_source_has_a_restartable_wire_reason() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);

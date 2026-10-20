@@ -1,3 +1,4 @@
+import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
@@ -1883,43 +1884,11 @@ export const ChatMessageRecord = z.object({
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
-export const ListChatFileMentionsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  path: PATH_STRING.optional(),
-  paths: z.array(PATH_STRING).min(1).max(500).optional(),
-}).refine(input => (input.path !== undefined) !== (input.paths !== undefined), {
-  message: "Choose a file or a batch of files.",
-});
-export type ListChatFileMentionsPayload = z.infer<
-  typeof ListChatFileMentionsPayload
->;
-
-export const ChatFileMentionRecord = z.object({
-  attachment: ChatAttachmentRecord,
-  message: ChatMessageRecord,
-  thread: ChatThreadRecord,
-  channelId: OPAQUE_ID.optional(),
-  channelWireId: z.string().min(1).max(256).optional(),
-  channelName: z.string().min(1).max(100).optional(),
-  channelSlug: CHAT_CHANNEL_SLUG.optional(),
-  channelKind: z.enum(["channel", "dm", "agent"]).optional(),
-});
+export const ChatFileMentionsPagePayload = ChatFileMentionsInput.extend({ workspaceId: WORKSPACE_ID });
+export const ChatFileMentionRecord = ChatFileMentionEntry;
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
-
-export const ListChatFileMentionsResult = z.object({
-  // These responses are built from the local store after one bounded
-  // shared-channel sync pass. This is how many joined rows that pass did not
-  // leave fresh — the ones its window never reached, plus the ones it reached
-  // and could not sync (offline, relay hiccup). A pass that died outright, or
-  // never ran because the account is signed out, reports every live row.
-  // Absent means the pass that ran left no row behind, which is the only claim
-  // of full freshness this field ever makes.
-  sharedChannelRowsUncovered: z.number().int().positive().optional(),
-  mentions: z.array(ChatFileMentionRecord).max(2000),
-});
-export type ListChatFileMentionsResult = z.infer<
-  typeof ListChatFileMentionsResult
->;
+// The engine adapter validates each page before the reader applies authority filtering.
+export const ChatFileMentionsPageResult = z.custom<z.infer<typeof ChatFileMentionsPage>>();
 
 const CHAT_BOOKMARK_RECORD_BASE = z.object({
   bookmarkId: OPAQUE_ID,
@@ -2273,7 +2242,7 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult.
+  // Partial-freshness marker; see ChatFileMentionsPageResult.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
@@ -2355,7 +2324,7 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult.
+  // Partial-freshness marker; see ChatFileMentionsPageResult.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),

@@ -412,7 +412,7 @@ async function discussionInput(request: Request): Promise<string | null> {
 function logRelayPath(request: Request): string {
   const incoming = new URL(request.url).searchParams;
   const query = new URLSearchParams();
-  for (const key of ["since", "limit", "hold"]) {
+  for (const key of ["since", "limit", "hold", "current"]) {
     const value = incoming.get(key);
     if (value !== null) query.set(key, value);
   }

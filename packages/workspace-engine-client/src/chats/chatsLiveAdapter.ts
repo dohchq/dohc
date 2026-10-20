@@ -1,3 +1,4 @@
+import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { randomUUID } from "node:crypto";
 import {
   WorkspaceDaemonRequester,
@@ -21,7 +22,6 @@ import {
   type ChatDispatchClaim,
   type ChatFeedPage,
   type ChatFeedReadState,
-  type ChatFileMention,
   type ChatFollow,
   type ChatLocalAttachmentParams,
   type ChatMention,
@@ -477,28 +477,10 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  async listFileMentions(input: {
-    workspaceId: string;
-    objectId?: string;
-    pathHint?: string;
-  }): Promise<ChatFileMention[]> {
+  async fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage> {
     this.assertWorkspace(input.workspaceId);
-    const rows: ChatFileMention[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.request(
-        CHATS_METHOD.attachmentsListFileMentions,
-        {
-          ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-          ...(input.pathHint !== undefined ? { pathHint: input.pathHint } : {}),
-          pageLimit: 500,
-          ...(cursor !== undefined ? { cursor } : {}),
-        },
-      );
-      rows.push(...page.mentions);
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor !== undefined);
-    return rows;
+    const { workspaceId: _workspaceId, ...params } = input;
+    return this.request(CHATS_METHOD.attachmentsListFileMentions, params);
   }
 
   async markThreadReadByAgent(input: {

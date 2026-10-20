@@ -8,6 +8,10 @@ use dohc_engine_storage::StorageError;
 /// Errors from the durable Y.Doc layer.
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
+    #[error("dohc is checking this file. Try again.")]
+    MarkdownReaderPending(std::sync::Arc<crate::reader_resolver::PendingProof>),
+    #[error("dohc could not verify this file. Try again.")]
+    MarkdownReaderUnavailable,
     #[error(
         "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
     )]
@@ -224,6 +228,8 @@ impl CollabError {
     /// A stable machine-readable code.
     pub fn code(&self) -> &'static str {
         match self {
+            CollabError::MarkdownReaderPending(_) => "markdown-reader-pending",
+            CollabError::MarkdownReaderUnavailable => "markdown-reader-unavailable",
             CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",

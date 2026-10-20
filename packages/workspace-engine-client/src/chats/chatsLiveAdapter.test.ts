@@ -87,7 +87,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   },
   { method: CHATS_METHOD.reactionsList, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
-  { method: CHATS_METHOD.attachmentsListFileMentions, params: { objectId: "o" } },
+  { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
@@ -1441,4 +1441,13 @@ describe("local chat actor key transport", () => {
     expect(rows[0]!.authorActorKey).toBe(key);
     expect(rows[1]!.authorActorKey).toBeUndefined();
   });
+});
+
+it("returns exactly one chat mention page even when an empty filtered page has a continuation",async()=>{
+  const requests: Request[]=[];
+  const page={versionId:"main",subject:null,entries:[],unchecked:[],complete:false,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:2,nextCursor:"sealed-next"};
+  const adapter=new ChatsLiveAdapter(mockDaemon(requests,()=>page),WORKSPACE,{workspaceId:"workspace"});
+  await expect(adapter.fileMentionsPage({workspaceId:"workspace",scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"})).resolves.toEqual(page);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({workspace:WORKSPACE,method:CHATS_METHOD.attachmentsListFileMentions,params:{scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"}});
 });

@@ -4,7 +4,7 @@ pub(crate) mod cache;
 mod edges;
 pub(crate) mod incoming;
 mod parser;
-mod query;
+pub(crate) mod query;
 pub(crate) mod resolver;
 pub(crate) mod rewrite;
 #[cfg(test)]
