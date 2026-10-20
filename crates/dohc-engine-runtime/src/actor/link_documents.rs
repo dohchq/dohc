@@ -210,7 +210,7 @@ pub(super) fn baseline(
         key,
         path,
         marker.content_kind,
-        true,
+        false,
         marker.lineage_claim_id.as_deref(),
         Some(head.blob_sha256),
         None,
@@ -225,7 +225,7 @@ pub(super) fn baseline(
         super::ydoc::SettlementKind::Document,
         false,
     );
-    match outcome {
+    match outcome.and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller) {
         Ok(_) => {}
         Err(RuntimeError::Collab(_)) => return Ok(false),
         Err(RuntimeError::Domain(DomainError::InvalidInput {

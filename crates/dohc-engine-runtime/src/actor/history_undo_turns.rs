@@ -619,13 +619,12 @@ impl ActorHandle {
                     prepared.version.clone(),
                     member.clone(),
                 );
-                let open = open_documents.clone();
                 let disk_root = root.clone();
                 let reader = inverse_store;
                 let (input, reader) = tokio::task::spawn_blocking(move || {
                     let _guards = guards;
                     let inverse = if usable {
-                        reader.read_with(|c| inverse_input(c, &w, &v, &member, open.as_ref()))
+                        reader.read_with(|c| inverse_input(c, &w, &v, &member, None))
                     } else {
                         Err(DomainError::UndoRefused {
                             path: member.effect.path.clone(),
