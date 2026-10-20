@@ -2,6 +2,7 @@ import {accountIsFenced} from "./storage/accountDeletion";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import * as replicaHistoryReads from "./replicaHistoryReads";
+import {createReplicaLinkReadService} from "./replicaLinkReadService";
 import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
@@ -352,6 +353,7 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  createReplicaLinkReadService(...args:Parameters<SyncRelayStorage["createReplicaLinkReadService"]>) {return createReplicaLinkReadService(this,...args);}
   readonly newDiscussionId: () => string;
   private readingLiveAuthority = false;
 

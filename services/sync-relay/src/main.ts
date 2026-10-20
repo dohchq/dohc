@@ -609,6 +609,7 @@ const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startO
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
 const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
 server.once("close",stopOwnerAdmission);
+server.once("close",()=>relayApplication.dispose());
 process.once("SIGINT",stopOwnerAdmission);
 process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;

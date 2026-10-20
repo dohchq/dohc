@@ -58,7 +58,7 @@ it.each(["current_path","lineage_claim_id","restore_fence_generation"])
     f.db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=?`)
       .run(column==="current_path"?"docs/else.md":column==="lineage_claim_id"?sha256("other-lineage"):2,position);
     f.grant("late");projectedEvidence(f,"journal","final");f.at(140_000);f.save(f.view("final",patch));
-    expect(f.read(id,{grantId:"late"})).toEqual({status:"not-found"});
+    expect(f.read(id,{grantId:"late"})).toMatchObject({status:"ready"});
   });
 
 it.each(["log","journal"])("History-only sampling keeps the carried state's %s entry after restart",async stream=>{
@@ -78,7 +78,7 @@ it.each(["log","journal"])("History-only sampling keeps the carried state's %s e
     .toEqual({state_log_cursor:stream==="log"?entered:0,state_journal_cursor:stream==="journal"?entered:0});
   const pin=f.pins()[0]!;expect(pin.reason).toBe("quiet");f.restart();
   replacementEvidence(f.db,stream);f.at(132_000);f.save(f.view("public",{...patch,restoreGeneration:2}));
-  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toMatchObject({status:"ready"});
   expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
   expect(f.pins().find(p=>p.pin_id===pin.pin_id)).toMatchObject(stream==="log"?
     {replaced_log_position:deleted}:{replaced_journal_position:deleted});
@@ -104,12 +104,12 @@ it.each(["return","no-op"])("ordinary Y.Doc %s evidence keeps the conservative r
     if(kind==="return"){doc.getMap("frontmatter").delete("title");append();}
     doc.getMap("frontmatter").set("title","final");append();
     f.at(140_000);f.save(f.view(yDocToArtifactMarkdown(doc),patch));
-    expect(f.read(id,{grantId:"between"})).toEqual({status:"not-found"});
+    expect(f.read(id,{grantId:"between"})).toMatchObject({status:"ready"});
     expect(f.pins()[0]).toMatchObject({replaced_log_position:replaced});
   } finally {doc.destroy();}
 });
 
-it.each(["log","journal"])("a missing clock cannot authorize a carried state's %s structural pin",async stream=>{
+it.each(["log","journal"])("a missing clock preserves a carried state's %s structural pin for editors",async stream=>{
   const f=await fixture(false),lineage=sha256("lineage"),patch={lineageClaimId:lineage,restoreGeneration:1};
   f.db.exec(`INSERT INTO sync_relay_live_documents
     (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
@@ -122,7 +122,7 @@ it.each(["log","journal"])("a missing clock cannot authorize a carried state's %
   f.db.exec("DELETE FROM sync_relay_history_clocks");f.grant("late");
   replacementEvidence(f.db,stream);f.at(103_000);f.save(f.view("public",{...patch,restoreGeneration:2}));
   const pin=f.pins().find(p=>p.sha256===sha256("private paragraph"))!;
-  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toMatchObject({status:"ready"});
   expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
 });
 
@@ -253,7 +253,7 @@ it("Undo raises the restored grant floor past private edits made during removal"
   replacementEvidence(f.db,"log");f.at(132_000);f.save(f.view("public"));
   f.storage.undoShareRemoval({shareId:"g",actorUserId:"owner",undoId:removal.undo.undoId,nowMs:133_000});
   f.save();
-  expect(f.read(id,{generation:3})).toEqual({status:"not-found"});
+  expect(f.read(id,{generation:3})).toMatchObject({status:"ready"});
   expect(f.read(id,{grantId:"wide"})).toMatchObject({text:"private paragraph"});
 });
 
@@ -436,7 +436,7 @@ it("upgrade removes orphan current pins but retains omitted and superseded pins"
   expect(f.pins().filter(p=>p.object_id==="object" && p.superseded_at_ms===null)).toHaveLength(1);
   replacementEvidence(f.db,"log");f.grant("late");f.save(f.view("final"));
   const pin=f.pins().find(p=>p.object_id==="object")!;
-  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toMatchObject({status:"ready"});
   f.restart();expect(f.pins().some(p=>p.pin_id===original)).toBe(false);
 });
 
@@ -487,9 +487,9 @@ it.each(["epoch","stream","null-epoch"])("current grant floors restart at the %s
     expect(f.read(old,{grantId:id})).toEqual({status:"not-found"});
     expect(f.read(pin,{grantId:id})).toMatchObject({text:"public"});
   }
-  // Later grants cannot read a state replaced before their floor, even in the new identity.
+  // Edit grants can read retained History once the current view reaches their floor.
   replacementEvidence(f.db,"log"); f.grant("late"); f.save(f.view("later"));
-  expect(f.read(pin,{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(pin,{grantId:"late"})).toMatchObject({status:"ready"});
 });
 
 it("deletes a departed object's clock instead of retaining a clean tombstone",async()=>{
@@ -542,7 +542,7 @@ it("upgrades existing pins, clocks and stale floors once without resetting match
   expect(f.db.prepare("SELECT * FROM sync_relay_history_pin_usage").get()).toMatchObject({pin_count:1});
   expect(f.db.prepare("SELECT log_floor FROM sync_relay_history_grant_floors WHERE grant_id='g'").get()).toEqual({log_floor:1});
   expect(f.db.prepare("SELECT log_floor FROM sync_relay_history_grant_floors WHERE grant_id='wide'").get()).toEqual({log_floor:0});
-  expect(f.read(pin)).toEqual({status:"not-found"});
+  expect(f.read(pin)).toMatchObject({status:"ready"});
   expect(f.read(pin,{grantId:"wide"})).toMatchObject({text:"initial"});
   f.storage.revokeShareGrant({shareId:"g",grantId:"g",revokedAtMs:140_000});
   expect(f.read(pin,{grantId:"wide"})).toMatchObject({text:"initial"});
@@ -560,7 +560,7 @@ it("supersedes a pin and deletes its clock when an omitted object disappears",as
   expect(f.pins()[0]!.superseded_at_ms).toBe(150_000);
   expect(f.db.prepare("SELECT * FROM sync_relay_history_clocks").all()).toEqual([]);
   f.grant("late"); f.at(160_000); f.save(f.view());
-  expect(f.read(pin,{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(pin,{grantId:"late"})).toMatchObject({status:"ready"});
 });
 
 function replacementEvidence(db: ReturnType<typeof inspectDatabase>, stream: string, object = "object") {
@@ -606,7 +606,7 @@ it.each([
   replacementEvidence(f.db,stream);f.at(sampling==="quiet"?132_000:103_000);
   f.save(f.view("public",{...patch,restoreGeneration:2}));
   const pin=f.pins().find(p=>p.sha256===sha256("private paragraph"))!;
-  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toMatchObject({status:"ready"});
   expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
   expect(f.read(String(pin.pin_id),{grantId:"before-delete"})).toMatchObject({text:"private paragraph"});
   expect(JSON.parse(String(pin.authors_json))).toEqual(expect.arrayContaining([writer,deleter]));
@@ -633,7 +633,7 @@ it("does not carry snapshot.previous below the grant floor through a restore fen
     .toMatchObject({text:"private paragraph"});
 });
 
-it.each(["log","journal"])("position floor hides %s replacements admitted before a grant while collection is idle", async stream => {
+it.each(["log","journal"])("current readiness floor delays full History until the %s replacement is collected", async stream => {
   const f=await fixture();f.save(f.view("draft"));f.at(101_000);f.save(f.view("secret"));f.at(131_000);f.save();
   const id=String(f.pins().find(p=>p.sha256===sha256("secret"))!.pin_id);
   const position=replacementEvidence(f.db,stream);
@@ -643,7 +643,7 @@ it.each(["log","journal"])("position floor hides %s replacements admitted before
   expect(f.storage.readReplicaHistoryPin({...f.input,grantId:"late",pinId:id},
     {currentReadView:()=>({view:publicView})})).toEqual({status:"updating"});
   f.at(200_000);f.save(publicView);
-  expect(f.read(id,{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(id,{grantId:"late"})).toMatchObject({status:"ready"});
   expect(f.read(id)).toMatchObject({status:"ready",text:"secret"});
 });
 
@@ -656,10 +656,10 @@ it.each(["log","journal"])("position floor preserves a state current at access b
   expect(f.read(id,{grantId:"early"})).toMatchObject({status:"ready",text:"secret"});
 });
 
-it("position floor hides unresolved replacing evidence", async()=>{
+it("edit access includes retained pins with unresolved replacing evidence", async()=>{
   const f=await fixture();f.save(f.view("draft"));f.at(101_000);f.save(f.view("secret"));f.at(131_000);f.save();
   const id=String(f.pins().find(p=>p.sha256===sha256("secret"))!.pin_id);
-  f.save(f.view("public"));expect(f.read(id)).toEqual({status:"not-found"});
+  f.save(f.view("public"));expect(f.read(id)).toMatchObject({status:"ready"});
 });
 
 it.each(["same-stream","both-streams"])("position floor uses the earliest replacement in each %s interval",async kind=>{
@@ -668,7 +668,7 @@ it.each(["same-stream","both-streams"])("position floor uses the earliest replac
   if(kind==="both-streams")replacementEvidence(f.db,"journal");
   else replacementEvidence(f.db,"log");
   f.save(f.view("public"));expect(f.read(id)).toMatchObject({text:"initial"});
-  expect(f.read(id,{grantId:"between"})).toEqual({status:"not-found"});
+  expect(f.read(id,{grantId:"between"})).toMatchObject({status:"ready"});
   expect(f.pins()[0]).toMatchObject({replaced_log_position:first,replaced_journal_position:kind==="both-streams"?1:null});
 });
 
@@ -684,8 +684,8 @@ it("captures link and redeemed dependent floors in their grant transactions and 
     expect(f.db.prepare("SELECT * FROM sync_relay_history_grant_floors WHERE grant_id=?").get(id))
       .toMatchObject({workspace_id:"w",replication_epoch:"e",stream_identity:"s",log_floor:log,journal_floor:journal});
   f.save(f.view("public"));
-  expect(f.read(id,{grantId:"link-floor",principal:{kind:"link"}})).toEqual({status:"not-found"});
-  expect(f.read(id,{grantId:"dependent-floor"})).toEqual({status:"not-found"});
+  expect(f.read(id,{grantId:"link-floor",principal:{kind:"link"}})).toEqual({status:"denied"});
+  expect(f.read(id,{grantId:"dependent-floor"})).toEqual({status:"denied"});
   expect(f.read(id)).toMatchObject({text:"initial"});
   f.db.exec(`CREATE TRIGGER reject_credential BEFORE INSERT ON sync_relay_link_credentials BEGIN SELECT RAISE(ABORT,'refuse'); END`);
   expect(()=>f.storage.createLinkGrant({grant:{...f.storage.getShareGrant("link-floor")!,grantId:"rolled-back"},
@@ -806,6 +806,23 @@ async function fixture(seedBaseline = true) {
   return {get storage(){return storage;},get lease(){return lease;},db,grant,file,view,save,pins,list,read,input,at,restart,get latest(){return latest;}};
 }
 
+it.each(["view","comment"])("R4: %s denies named and link pin lists and known pins after downgrade",async access=>{
+  const f=await fixture();f.save();f.at(130_000);f.save();const pinId=String(f.pins()[0]!.pin_id);
+  f.db.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='g'").run(access);
+  expect(f.list()).toEqual({status:"denied"});expect(f.read(pinId)).toEqual({status:"denied"});
+  seedLinkGrant(f.storage,{shareId:"g",grantId:"r4-link",secretHash:sha256("r4-link"),access:access as "view"|"comment"});
+  const input={grantId:"r4-link",generation:1,principal:{kind:"link" as const}};
+  expect(f.storage.listReplicaHistoryPins(input)).toEqual({status:"denied"});
+  expect(f.storage.readReplicaHistoryPin({...input,pinId})).toEqual({status:"denied"});
+});
+
+it("R4: edit History includes retained in-scope pins superseded before the grant",async()=>{
+  const f=await fixture();f.save();f.at(130_000);f.save();const pinId=String(f.pins()[0]!.pin_id);
+  replacementEvidence(f.db,"log");f.at(140_000);f.save(f.view("later"));f.grant("r4-late");f.save(f.view("later"));
+  expect(f.read(pinId,{grantId:"r4-late"})).toMatchObject({status:"ready",text:"initial"});
+  expect(f.list({grantId:"r4-late"})).toMatchObject({status:"ready",pins:[expect.objectContaining({pinId})]});
+});
+
 it("pins after 30 seconds quiet, never turns every cut into History", async () => {
   const f = await fixture(); f.save(); expect(f.pins()).toHaveLength(0);
   f.at(129_999); f.save(); expect(f.pins()).toHaveLength(0);
@@ -840,14 +857,14 @@ it.each(["rename","delete","restore","lineage"])("pins the previous state before
   expect(pin).toMatchObject({sha256:sha256(reason === "restore" ? "before" : "initial"),superseded_at_ms:100_001});
 });
 
-it("supersedes on the first edit, so a deleted secret predating a grant stays hidden", async () => {
+it("supersedes on the first edit and retains pre-grant History for edit access", async () => {
   const f = await fixture(); f.save(); f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   f.at(140_000); replacementEvidence(f.db,"log"); f.save({...f.view(),files:[],texts:[]});
   f.grant("new",["docs"],150_000);
   f.at(160_000); f.save(f.view("public"));
-  expect(f.read(id,{grantId:"new"})).toEqual({status:"not-found"});
+  expect(f.read(id,{grantId:"new"})).toMatchObject({status:"ready"});
   expect(f.read(id)).toMatchObject({status:"ready",text:"initial"});
-  f.grant("equal",["docs"],140_000); expect(f.read(id,{grantId:"equal"})).toEqual({status:"not-found"});
+  f.grant("equal",["docs"],140_000); expect(f.read(id,{grantId:"equal"})).toMatchObject({status:"ready"});
 });
 
 it("requires both the historical path and the object's current path to be visible", async () => {
@@ -865,7 +882,7 @@ it("rechecks revocation, generation, principal, narrowing and widening", async (
   f.save(); f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   const input = {grantId:"link",principal:{kind:"link" as const}};
   expect(f.storage.retuneShareGrant({shareId:"g",grantId:"link",access:"view",changedAtMs:140_000,expectedDependentGrantIds:[],guard(){}}).ok).toBe(true);
-  expect(f.read(id,input)).toMatchObject({status:"ready"});
+  expect(f.read(id,input)).toEqual({status:"denied"});
   expect(f.storage.retuneShareGrant({shareId:"g",grantId:"link",access:"edit",changedAtMs:150_000,expectedDependentGrantIds:[],guard(){},
     mintCredential:()=>({credentialId:"widened",secretHash:"new-hash"})}).ok).toBe(true);
   expect(f.read(id,input)).toEqual({status:"denied"}); expect(f.read(id,{...input,generation:2})).toMatchObject({status:"ready"});
@@ -896,7 +913,7 @@ it.each(["epoch","stream","workspace-owner","last-share","share-delete","share-o
 
 it("accountless History projects paths and omits authors, without internal cursors", async () => {
   const f = await fixture(false); f.grant("project",["private/docs"]);
-  seedLinkGrant(f.storage,{shareId:"project",grantId:"link",secretHash:"hash",access:"view"});
+  seedLinkGrant(f.storage,{shareId:"project",grantId:"link",secretHash:"hash",access:"edit"});
   f.save(f.view("baseline",{path:"private/docs/a.md"}));
   f.save(f.view("initial",{path:"private/docs/a.md"})); f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   f.db.prepare("UPDATE sync_relay_history_pins SET authors_json=?").run('[{"kind":"human","humanId":"owner","humanName":"Owner"}]');

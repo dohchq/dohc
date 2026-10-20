@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -37,6 +38,7 @@ import {
   REAL_DAEMON_DEADLINE_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
+import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
@@ -1268,3 +1270,209 @@ it.skipIf(engine.missing)(
   },
   60_000,
 );
+
+// No window shows these workspaces.
+const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
+
+// dohc#2308. An open document whose file was deleted outside dohc. The engine
+// refuses every save over the missing file, so nothing writes it back until
+// the person chooses Save it again. `shape` is a file capture recorded and
+// saved over, or one New File left empty and deleted before its first save.
+// Drafts go to a real draft store, as the app keeps them. The store refuses
+// the first `failedDiscards` removals.
+async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0) {
+  const root = await createTestScratch("dohc-deleted-file-");
+  const draftStore = await createTestScratch("dohc-deleted-file-drafts-");
+  const workspaceId = `deleted-file-${shape}`;
+  const store = workspaceDraftStore(draftStore, workspaceId, NO_WINDOWS);
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  await lifecycle.start();
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const capture = createWorkspaceEngineCapture({
+    workspaceId, rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
+    preserveUnsentState: store.preserveUnsentState,
+    discardUnsentState: async (draftId) => {
+      if (failedDiscards-- > 0) throw new Error("The draft store is busy.");
+      await store.discardUnsentState(draftId);
+    },
+  });
+  const absolute = join(root, "note.md");
+  const states: string[] = [];
+  const drafts = async () => (await listLiveDraftRecovery(draftStore, workspaceId)).map(({ path, text }) => `${path}: ${text}`);
+  const stop = async () => {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  };
+  try {
+    if (shape === "recorded") {
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+    } else {
+      await writeFile(absolute, "", { flag: "wx" });
+    }
+    const session = await capture.openYDocSession({
+      path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined, onSaveState: (state) => states.push(state),
+    });
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, session.initialUpdate);
+    const type = (text: string) => {
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, text);
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+    };
+    if (shape === "recorded") {
+      type("saved\n");
+      await session.settleNow();
+    }
+    expect(await drafts()).toEqual([]);
+    await rm(absolute);
+    capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+    type("unsaved\n");
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    expect(states.at(-1)).toBe("error");
+    const text = () => editor.getText("plainText").toString();
+    // A crash from here on keeps the text: the first refused save set it aside.
+    await vi.waitFor(async () => expect(await drafts()).toEqual([`note.md: ${text()}`]));
+    return { capture, session, sessions, absolute, states, type, text, drafts, stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
+it.skipIf(engine.missing).each(["recorded", "new"] as const)(
+  "saves a %s file deleted outside dohc again only when the person asks",
+  async (shape) => {
+    const deleted = await openDeletedDocument(shape);
+    try {
+      // Try again repeats the save, and the engine refuses it the same way.
+      // The draft takes the newest text.
+      deleted.type("more\n");
+      await expect(deleted.session.settleNow()).rejects.toThrow("conflict-stale-target");
+      expect(existsSync(deleted.absolute)).toBe(false);
+      await vi.waitFor(async () => expect(await deleted.drafts()).toEqual([`note.md: ${deleted.text()}`]));
+
+      await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(true);
+      expect(await readFile(deleted.absolute, "utf8")).toBe(deleted.text());
+      expect(deleted.states.at(-1)).toBe("saved");
+      await vi.waitFor(async () => expect(await deleted.drafts()).toEqual([]));
+
+      deleted.type("later\n");
+      await deleted.session.settleNow();
+      expect(await readFile(deleted.absolute, "utf8")).toBe(deleted.text());
+      await expect(deleted.session.close()).resolves.toBeUndefined();
+      expect(await deleted.drafts()).toEqual([]);
+    } finally {
+      await deleted.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)("saves a deleted file again after its tab closed, and the close finishes", async () => {
+  const deleted = await openDeletedDocument("recorded");
+  try {
+    // The close is refused, so the session keeps the text, nothing is
+    // written, and the draft stays.
+    await expect(deleted.session.close()).rejects.toThrow("conflict-stale-target");
+    expect(existsSync(deleted.absolute)).toBe(false);
+    expect(await deleted.drafts()).toEqual(["note.md: unsaved\nsaved\nbase\n"]);
+
+    await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(true);
+    expect(await readFile(deleted.absolute, "utf8")).toBe("unsaved\nsaved\nbase\n");
+    await expect(deleted.session.close()).resolves.toBeUndefined();
+    await vi.waitFor(async () => expect(await deleted.drafts()).toEqual([]));
+
+    // Nothing holds the document now, so nothing more is written.
+    await rm(deleted.absolute);
+    await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(false);
+    expect(existsSync(deleted.absolute)).toBe(false);
+  } finally {
+    await deleted.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing)("removes a replaced draft the store first refused to remove, by the time the session ends", async () => {
+  const deleted = await openDeletedDocument("recorded", 1);
+  try {
+    deleted.type("more\n");
+    await expect(deleted.session.settleNow()).rejects.toThrow("conflict-stale-target");
+    // The newer draft is written, and the older one stays until a removal works.
+    await vi.waitFor(async () => expect(await deleted.drafts()).toHaveLength(2));
+    await expect(deleted.session.close()).rejects.toThrow("conflict-stale-target");
+    expect(await deleted.drafts()).toEqual([`note.md: ${deleted.text()}`]);
+  } finally {
+    await deleted.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing).each(["workspace close", "quit"] as const)(
+  "keeps the draft of a deleted file through a %s, and does not write the file",
+  async (ending) => {
+    const deleted = await openDeletedDocument("recorded");
+    try {
+      deleted.type("last\n");
+      const newest = ["note.md: last\nunsaved\nsaved\nbase\n"];
+      if (ending === "quit") {
+        deleted.capture.beginShutdown();
+        await deleted.session.close({ shuttingDown: true }).catch(() => undefined);
+        // The app exits right after a quit, so the close itself waits for
+        // the draft its refused save sets aside.
+        expect(await deleted.drafts()).toEqual(newest);
+      } else {
+        await expect(deleted.capture.settleAndCloseAllLiveSessions()).rejects.toThrow("conflict-stale-target");
+        await vi.waitFor(async () => expect(await deleted.drafts()).toEqual(newest));
+      }
+      // Releasing the session lets capture retire the path. The draft stays.
+      await deleted.capture.stop();
+      await deleted.sessions.closeAll();
+      expect(await deleted.drafts()).toEqual(newest);
+      expect(existsSync(deleted.absolute)).toBe(false);
+    } finally {
+      await deleted.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)("sets nothing aside for a document whose saves are not refused over a deleted file", async () => {
+  const root = await createTestScratch("dohc-no-draft-");
+  const draftStore = await createTestScratch("dohc-no-draft-drafts-");
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  await lifecycle.start();
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const store = workspaceDraftStore(draftStore, "no-draft", NO_WINDOWS);
+  const preserve = vi.fn(store.preserveUnsentState);
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "no-draft", rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
+    preserveUnsentState: preserve, discardUnsentState: store.discardUnsentState,
+  });
+  try {
+    await writeFile(join(root, "note.md"), "base\n", "utf8");
+    await waitForPathMoments(capture, "note.md", 1);
+    const session = await capture.openYDocSession({ path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined });
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, session.initialUpdate);
+    const type = (text: string) => {
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, text);
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+    };
+    type("saved\n");
+    await session.settleNow();
+    // A save refused because the file changed outside dohc leaves the text
+    // in History, and the file is there to open.
+    await writeFile(join(root, "note.md"), "outside\n", "utf8");
+    type("typed\n");
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    await session.close().catch(() => undefined);
+    await capture.stop();
+    expect(preserve).not.toHaveBeenCalled();
+    expect(await listLiveDraftRecovery(draftStore, "no-draft")).toEqual([]);
+  } finally {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  }
+}, 60_000);

@@ -17,6 +17,7 @@ import { readDesktopPackageVersion, repoRootFromScript, resolveDesktopRelease, s
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
 import { sourceMapUpload } from "./upload-desktop-source-maps.mjs";
 import { parseUpdateManifest, verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
+import { underReleaseLock } from "./release-lock.mjs";
 import { withBuildBudget } from "./verification/build.mjs";
 
 // The repository whose releases the packaged updater reads (publish in electron-builder.yml).
@@ -28,6 +29,8 @@ export const POSTHOG_KEYCHAIN_SERVICE = "dohc-posthog-cli-api-key";
 export const SAVED_PASSWORD_SERVICE = "dohc-release-keychain-password";
 // Each release's throwaway checkout and built files live here, outside every checkout.
 export const WORK_ROOT = join(homedir(), "dohc-release");
+// One release command at a time on this Mac, including the scheduled nightly job (release-lock.mjs).
+export const RELEASE_LOCK = join(WORK_ROOT, "release.lock");
 // The workflow's publish job. It runs only after Preflight, which runs only on refs/heads/main.
 export const PUBLISH_JOB = "Publish";
 export const UNLOCK_WAIT_MS = 30 * 60_000;
@@ -606,6 +609,12 @@ export async function withReleaseKeychain({ dryRun, keychain }, action, run = ca
 }
 
 async function main() {
+  // One release command at a time on this Mac. Under the scheduled nightly job, this command already holds the lock.
+  const locked = process.platform === "darwin" ? await underReleaseLock(RELEASE_LOCK) : null;
+  if (locked !== null) {
+    process.exitCode = locked;
+    return;
+  }
   // A signal stops the command between steps. It still locks the release
   // keychain and removes the throwaway checkout, and starts no further upload.
   let stopping = false;

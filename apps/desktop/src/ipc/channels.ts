@@ -192,6 +192,9 @@ export const CHANNELS = {
   // A timed save stopped counting, because the usage record changed outside dohc.
   usageRecordStopped: "desktop:usage-record-stopped",
   noticesChanged: "desktop:notices-changed",
+  // Main wrote or removed a draft it set aside for a workspace; the renderer
+  // lists them again.
+  liveDraftRecoveryChanged: "desktop:live-draft-recovery-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",

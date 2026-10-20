@@ -519,6 +519,21 @@ function shareUnjournalableNotice(
   return lines.join(" ");
 }
 
+// Lists the drafts main keeps for the workspace again. A failed read files a
+// notice whose Try again reads again.
+function recoverLiveDrafts(
+  workspaceId: string,
+  isCurrent: () => boolean,
+  report: (message: string, error: unknown, retry: () => void) => void,
+): void {
+  const recover = (): void => {
+    void loadLiveDraftRecovery(workspaceId, isCurrent).catch((error: unknown) => {
+      if (isCurrent()) report("dohc could not read set-aside edits.", error, recover);
+    });
+  };
+  recover();
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -2889,6 +2904,20 @@ export function DesktopWorkspaceShell(props: {
     [openChatThreadInPanel, openFile],
   );
 
+  // Open a file and land at a line: a search result, or a link in About.
+  const openPathAtLine = useCallback(
+    (path: string, line: number) => {
+      // Landing at a line is a destination change openFile cannot see: the
+      // line may be in the file the user is already reading.
+      invalidateDmNavigation(dmNavigationRequest);
+      openFile(path, undefined, {
+        line,
+        nonce: ++scrollNonce.current,
+      });
+    },
+    [openFile],
+  );
+
   // Search-result click: open + land at the line (source mode this phase);
   // chat results open in About instead.
   const openSearchResult = useCallback(
@@ -2903,16 +2932,9 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
-      // Landing at a line is the same kind of destination change: openFile
-      // below cannot see it, because the result may be in the file the user is
-      // already reading.
-      invalidateDmNavigation(dmNavigationRequest);
-      openFile(path, undefined, {
-        line,
-        nonce: ++scrollNonce.current,
-      });
+      openPathAtLine(path, line);
     },
-    [openChatThreadInPanel, openFile],
+    [openChatThreadInPanel, openPathAtLine],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -3758,13 +3780,7 @@ export function DesktopWorkspaceShell(props: {
         }
       };
       void refreshInitialFiles().catch(reportInitialFilesFailure);
-      const recoverDrafts = () => loadLiveDraftRecovery(workspaceId, () => !cancelled && !workspaceAdmission.superseded);
-      const reportDraftRecoveryFailure = (error: unknown) => {
-        if (!cancelled && !workspaceAdmission.superseded) {
-          reportShellError("dohc could not read set-aside edits.", error, () => { void recoverDrafts().catch(reportDraftRecoveryFailure); });
-        }
-      };
-      void recoverDrafts().catch(reportDraftRecoveryFailure);
+      recoverLiveDrafts(workspaceId, () => !cancelled && !workspaceAdmission.superseded, reportShellError);
     })();
     return () => {
       cancelled = true;
@@ -3780,6 +3796,21 @@ export function DesktopWorkspaceShell(props: {
     syncStatusLane,
     workspaceAdmission,
   ]);
+
+  // Main also sets drafts aside while the workspace is open, such as the text
+  // of a file deleted outside dohc, and removes them once a save writes it.
+  useEffect(() => {
+    let current = true;
+    const unsubscribe = bridge().onLiveDraftRecoveryChanged((event) => {
+      if (event.workspaceId === workspaceId) {
+        recoverLiveDrafts(workspaceId, () => current && !workspaceAdmission.superseded, reportShellError);
+      }
+    });
+    return () => {
+      current = false;
+      unsubscribe();
+    };
+  }, [workspaceId, workspaceAdmission, reportShellError]);
 
   // Once open has established watcher readiness, refresh everything whenever
   // a settled batch is recorded. The timeline and status stay live without
@@ -5731,11 +5762,6 @@ export function DesktopWorkspaceShell(props: {
                 // not history growth (which must not churn the live session).
                 engineVersionKey={versionEpoch}
                 onOpenPath={openPathWithHeading}
-                onOpenChatMention={openChatMention}
-                // The linked-mentions panel asks main for chat mentions, which
-                // is a Chats call like any other — same gate as the
-                // panel, the tab and the graph's toggle.
-                chatMentionsAvailable={captureAvailable}
                 drawingCollaboration={chatCollaboration}
                 scrollTarget={groupScrollTarget}
                 headingTarget={
@@ -5824,6 +5850,9 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             historyRevision={historyRefreshCounter}
             openMoment={openMomentDiffTab}
+            linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
+            openPathAtLine={openPathAtLine}
+            openChatMention={openChatMention}
             aboutNotices={aboutNotices}
             accessContext={accessContext}
           />
