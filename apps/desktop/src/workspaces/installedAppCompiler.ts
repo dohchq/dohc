@@ -18,14 +18,17 @@ export function appBuildError(error: unknown): unknown {
 
 /**
  * Why this device cannot build apps, or undefined when it can. macOS 13.5 is
- * Darwin 22.6, the oldest release the pinned Node 24 runs on.
+ * Darwin 22.6, the oldest release the pinned Node 24 runs on. Linux 5.13
+ * added Landlock, which confines the compiler there.
  */
 export function appCompilerRefusal(platform: NodeJS.Platform, arch: string, kernel: string): string | undefined {
-  if (platform === "win32" && arch === "x64") return undefined;
-  if (platform !== "darwin") return "Publishing and opening apps needs Windows x64, or an Apple silicon Mac with macOS 13.5 or later.";
-  if (arch !== "arm64") return "Publishing and opening apps needs an Apple silicon Mac with macOS 13.5 or later.";
   const [major = 0, minor = 0] = kernel.split(".").map(Number);
-  if (major < 22 || (major === 22 && minor < 6)) return "Publishing and opening apps needs macOS 13.5 or later. Update macOS, then try again.";
+  const before = (wanted: number, wantedMinor: number) => major < wanted || (major === wanted && minor < wantedMinor);
+  if (platform === "win32" && arch === "x64") return undefined;
+  if (platform === "linux" && arch === "x64") return before(5, 13) ? "Publishing and opening apps needs Linux 5.13 or later. Update Linux, then try again." : undefined;
+  if (platform !== "darwin") return "Publishing and opening apps needs Windows x64, an Apple silicon Mac with macOS 13.5 or later, or Linux x64.";
+  if (arch !== "arm64") return "Publishing and opening apps needs an Apple silicon Mac with macOS 13.5 or later.";
+  if (before(22, 6)) return "Publishing and opening apps needs macOS 13.5 or later. Update macOS, then try again.";
   return undefined;
 }
 

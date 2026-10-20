@@ -12,8 +12,9 @@ pub trait Table {
     fn state(&mut self, pid: Pid) -> io::Result<State>;
     fn footprint(&mut self, pid: Pid) -> io::Result<Option<u64>>;
     fn kill(&mut self, pid: Pid) -> io::Result<Signalled>;
-    /// Collects every exited child of the owner.
-    fn reap(&mut self);
+    /// Collects every exited child of the owner. True while the owner still
+    /// has a child, or may have one.
+    fn reap(&mut self) -> bool;
 }
 
 /// The real process table.
@@ -35,8 +36,8 @@ impl Table for System {
     fn kill(&mut self, pid: Pid) -> io::Result<Signalled> {
         sys::kill(pid)
     }
-    fn reap(&mut self) {
-        sys::reap_children();
+    fn reap(&mut self) -> bool {
+        sys::reap_children()
     }
 }
 
@@ -163,21 +164,27 @@ impl<T: Table> Tree<T> {
     }
 
     /// Kills every live process of the build, again and again until a
-    /// complete census finds none. One round is not enough: a fork in flight
-    /// during a round can create a process that round missed. Reaps the
-    /// owner's own children so they do not linger as zombies. Gives up after
-    /// `budget`, so a process it may not signal, or one it cannot inspect,
-    /// cannot hold the owner forever.
+    /// complete census finds none and the owner has no child left. One round
+    /// is not enough: a fork in flight during a round can create a process
+    /// that round missed. On Linux every descendant reaches the owner through
+    /// a live chain of parents, so a child left over also shows a process the
+    /// census missed. Reaps the owner's own children so they do not linger as
+    /// zombies. Gives up after `budget`, so a process it may not signal, or
+    /// one it cannot inspect, cannot hold the owner forever.
     pub fn stop(&mut self, budget: Duration) -> Result<(), String> {
         let deadline = Instant::now() + budget;
         let mut last_problem = String::new();
         loop {
-            self.table.reap();
+            let parenting = self.table.reap();
             match self.census(false) {
-                Ok(census) if census.live.is_empty() && census.complete => return Ok(()),
+                Ok(census) if census.live.is_empty() && census.complete && !parenting => {
+                    return Ok(());
+                }
                 Ok(census) => {
                     if !census.complete {
                         last_problem = "part of the process table could not be read".to_owned();
+                    } else if census.live.is_empty() {
+                        last_problem = "a child of the owner is still running".to_owned();
                     }
                     for pid in census.live {
                         match self.table.kill(pid) {
@@ -224,6 +231,8 @@ mod tests {
         /// How many more times `state` fails for each pid.
         failures: HashMap<Pid, usize>,
         killed: Vec<Pid>,
+        /// A child of the owner that no listing shows.
+        unlisted_child: bool,
     }
 
     impl Table for Fake {
@@ -254,7 +263,9 @@ mod tests {
             self.group.retain(|&member| member != pid);
             Ok(Signalled::Sent)
         }
-        fn reap(&mut self) {}
+        fn reap(&mut self) -> bool {
+            self.unlisted_child
+        }
     }
 
     /// The worker started a descendant that left the group, then exited. The
@@ -293,6 +304,17 @@ mod tests {
         assert!(
             tree.table.killed.is_empty(),
             "an unverified identity gets no signal"
+        );
+    }
+
+    #[test]
+    fn a_child_no_listing_shows_keeps_teardown_going() {
+        let mut tree = escaped_descendant();
+        tree.table.live.clear();
+        tree.table.unlisted_child = true;
+        assert_eq!(
+            tree.stop(Duration::from_millis(30)),
+            Err("a child of the owner is still running".to_owned())
         );
     }
 
