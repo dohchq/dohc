@@ -692,7 +692,6 @@ pub(super) fn private_tail(
     let adoption = activation.activation_id;
     let chain = activation.predecessor_activation_id.as_deref();
     let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (e.pending=0 AND e.terminal_reason IS NULL AND e.accepted_receipt_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?9)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
-    let gap = head - previous_sequence;
     let bound = params![
         b.workspace_id,
         b.main_version_id,
@@ -711,13 +710,19 @@ pub(super) fn private_tail(
         .map_err(read_sql)?;
     let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),bound,|row|row.get(0)).map_err(read_sql)?;
     let mut sequences = BTreeSet::new();
-    // Coverage counts native sequences, never entries.
-    let count = |sequences: &mut BTreeSet<i64>, sequence: i64| {
-        if sequence > previous_sequence {
-            sequences.insert(sequence);
-            if sequences.len() as i64 > gap {
-                return Err(ApplicationError::Corrupt);
-            }
+    // Coverage counts native sequences, never entries. Seeds may share a
+    // sequence with each other and one native update, never two updates.
+    let mut updates = BTreeSet::new();
+    let mut count = |source: &crate::owner_outbox::OwnerOutboxNativeSource| {
+        if !matches!(
+            source.origin,
+            crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
+        ) && !updates.insert(source.native_sequence)
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        if source.native_sequence > previous_sequence {
+            sequences.insert(source.native_sequence);
         }
         Ok(())
     };
@@ -733,12 +738,11 @@ pub(super) fn private_tail(
         if super::retirement::applied(conn, &held.namespace, &inherited.entry.delivery_id)? {
             continue;
         }
-        let sequence = inherited.entry.source.native_sequence;
-        if sequence > head {
+        if inherited.entry.source.native_sequence > head {
             return Err(ApplicationError::Corrupt);
         }
         any = true;
-        count(&mut sequences, sequence)?;
+        count(&inherited.entry.source)?;
     }
     let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,e.accepted_receipt_json IS NOT NULL,e.outbox_id,e.sequence {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence")).map_err(read_sql)?;
     let mut rows = query.query(bound).map_err(read_sql)?;
@@ -785,10 +789,13 @@ pub(super) fn private_tail(
             source.origin,
             crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
         );
+        // Only this adoption's own refusal leaves the settlement without
+        // attribution; its chain's settlements already covered theirs.
         terminal |= refused
+            && source.adoption_id == adoption
             && (source.native_sequence > previous_sequence
                 || adoption_seed && previous_sequence == source.native_sequence);
-        count(&mut sequences, source.native_sequence)?;
+        count(&source)?;
     }
     Ok(PrivateTail {
         sequences,

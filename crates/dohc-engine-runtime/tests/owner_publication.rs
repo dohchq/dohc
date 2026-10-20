@@ -4519,3 +4519,607 @@ async fn a_retiring_activation_settles_through_its_durable_binding() {
     ));
     supervisor.close_all().unwrap();
 }
+
+/// The cut adopting `captured`, after `prefix` when it succeeds a released
+/// chain.
+fn imported_cut(
+    captured: &ImportedOwnerActivation,
+    prefix: Option<RetainedPrefix>,
+) -> OwnerAdoptionCut {
+    OwnerAdoptionCut {
+        relay_database_namespace: "relay".into(),
+        adoption_id: captured.activation_id.clone(),
+        source_moment_id: captured.source.source_moment_id.clone(),
+        source_digest: captured.source.source_digest.clone(),
+        source_byte_length: captured.source.source_byte_length,
+        baseline_moment_relay_sequence: 1,
+        baseline_registered_at_ms: 3,
+        baseline_bytes: captured.baseline_bytes.clone(),
+        expected_local_sequence: captured.source.native_head_sequence,
+        events: vec![],
+        terminal_receipt: prefix
+            .as_ref()
+            .and_then(|prefix| prefix.terminal_receipt.clone()),
+        retained_prefix: prefix,
+        outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        },
+        reconstruction: adoption_reconstruction(),
+    }
+}
+
+/// The owner's own delivery as the relay accepted it, applied by `handle`.
+async fn deliver_owned(
+    handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+    binding: &dohc_engine_collab::LiveObjectBinding,
+    receipt: &LiveUpdateReceipt,
+    bytes: Vec<u8>,
+) -> ApplicationResult {
+    handle
+        .apply(
+            AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: receipt.clone(),
+                        binding: binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 20 + receipt.journal_cursor,
+                    },
+                    first_seen: vec![],
+                    canonical_version: Some(2),
+                    author_snapshot: Some(vec![]),
+                    first_seen_deletes: Some(vec![]),
+                    checkpoint_coverage: None,
+                },
+                update_bytes: bytes,
+            },
+            Arc::new(NoFaults),
+            100_000_000,
+        )
+        .await
+        .unwrap()
+}
+
+/// An ordinary `ydoc.update` envelope for the document, applied as ordinary
+/// sync applies it.
+fn import_envelope(
+    store: &mut EngineStore,
+    origin: &str,
+    relay_seq: i64,
+    update: &[u8],
+    lineage: &str,
+    base: bool,
+) {
+    let digest = store.put_binary_blob(update).unwrap();
+    let op = dohc_engine_sync::ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "workspace".into(),
+        origin_id: origin.into(),
+        origin_seq: 0,
+        relay_seq: Some(relay_seq),
+        op_kind: "ydoc.update".into(),
+        payload: serde_json::json!({
+            "versionId":"main", "objectId":"object", "path":"notes/plan.md", "contentKind":"richdoc",
+            "updateBlobSha256":digest, "lineageClaimId":lineage, "isBaseState":base
+        }),
+        recorded_at_ms: 10 + relay_seq,
+    };
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        !matches!(
+            applied.primary,
+            dohc_engine_sync::ApplyDisposition::Refused(_)
+        ),
+        "{origin}: {:?}",
+        applied.primary
+    );
+}
+
+/// The latest pending owner entry: its outbox, delivery and digest.
+fn latest_pending(store: &EngineStore) -> (String, String, String) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap()
+}
+
+/// The relay's receipt for the latest pending owner entry at `cursor`,
+/// saved by the owner without applying it.
+async fn accept_latest(actor: &ActorHandle, store: &EngineStore, cursor: i64) -> LiveUpdateReceipt {
+    let (outbox, delivery, digest) = latest_pending(store);
+    actor
+        .owner_ydoc_outbox_acknowledge(
+            "workspace".into(),
+            outbox,
+            vec![dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: delivery.clone(),
+                update_digest: digest.clone(),
+                journal_cursor: cursor,
+                accepting_host_epoch: 1,
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    LiveUpdateReceipt {
+        delivery_id: delivery,
+        update_digest: digest,
+        journal_cursor: cursor,
+        accepting_host_epoch: 1,
+    }
+}
+
+/// Every row a settlement could write, by table.
+fn settlement_counts(store: &EngineStore) -> Vec<i64> {
+    [
+        "moments",
+        "live_device_settlements",
+        "materialization_jobs",
+        "replication_log",
+    ]
+    .map(|table| store.table_row_count(table).unwrap())
+    .to_vec()
+}
+
+/// Each delivery `table` holds, in its order.
+fn deliveries(store: &EngineStore, table: &str) -> Vec<String> {
+    store
+        .read_with(|conn| {
+            conn.prepare(&format!(
+                "SELECT delivery_id FROM {table} ORDER BY journal_cursor"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()
+        })
+        .unwrap()
+}
+
+/// Sol's round 4b ruling, through the host's real lifecycle: Release, a
+/// fresh capture and adoption, Carried application, the first settlement and
+/// a restart, with no rewrite aligning the file and the Y.Doc. The root's
+/// owner edits C1 and C2 are accepted and never applied, and it retires at
+/// B, where its settlement writes the file without them. With `catch_up`, a
+/// peer's ordinary edit arrives after the release and ordinary sync projects
+/// the whole Y.Doc into the file; otherwise the file stays at B and only the
+/// settled-B proof explains the capture. The successor's registration holds
+/// C1 until it adopts, its seed's receipt is saved before anything applies,
+/// each settlement holds only what applied, a restart replays the settlement
+/// with no writes, and once everything applies the file holds the Y.Doc and
+/// accepted history holds each delivery once. This is the native lifecycle
+/// alone, not the relay's or a peer's convergence.
+#[tokio::test]
+async fn resume_after_carried_edits_through_the_host() {
+    for catch_up in [false, true] {
+        resume_through_the_host(catch_up).await;
+    }
+}
+
+async fn resume_through_the_host(catch_up: bool) {
+    let case = format!("catch_up={catch_up}");
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let path = "notes/plan.md";
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let base: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+    let lineage = hex_sha256(&base);
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    let execute = |store: &mut EngineStore, sql: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(sql)
+                    .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+    };
+    execute(&mut store, "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1);
+        INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0);
+        INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','1','epoch','stream')");
+    import_envelope(&mut store, "owner-peer", 1, &base, &lineage, true);
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    let file = || std::fs::read_to_string(root.path().join(path)).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    let capture = || {
+        actor.capture_imported_owner_activation(
+            "relay".into(),
+            key.clone(),
+            path.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+    };
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let binding = dohc_engine_collab::LiveObjectBinding {
+        workspace_id: "workspace".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        current_path: path.into(),
+        selector_paths: vec![path.into()],
+        restore_fence_generation: 0,
+    };
+    let reconstruction = || AdmittedNativeHistoryReconstruction {
+        policy: adoption_reconstruction(),
+        reservation: Arc::new(()),
+    };
+    let first = capture().await.unwrap();
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay".into(), coordinate.clone(), binding.clone())
+        .await
+        .unwrap();
+    handle
+        .adopt_owner(
+            imported_cut(&first, None),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    // The owner's edits: one the host applies, then C1 and C2, which the
+    // relay accepts and the host never applies.
+    let owned = Ydoc::wire();
+    owned.apply(&base).unwrap();
+    let record = |update: Vec<u8>, request: &str| {
+        actor.ydoc_record_update(
+            key.clone(),
+            path.into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            update,
+            Some("owner-origin".into()),
+            None,
+            Some(lineage.clone()),
+            false,
+            None,
+            Some(request.into()),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+    };
+    let covered_bytes = owned.richdoc_append_paragraph("Covered paragraph");
+    record(covered_bytes.clone(), "covered").await.unwrap();
+    let covered = accept_latest(&actor, &store, 2).await;
+    assert!(matches!(
+        deliver_owned(&handle, &binding, &covered, covered_bytes.clone()).await,
+        ApplicationResult::Applied(..)
+    ));
+    record(
+        owned.richdoc_append_paragraph("Carried paragraph one"),
+        "c1",
+    )
+    .await
+    .unwrap();
+    let c1 = accept_latest(&actor, &store, 3).await;
+    record(
+        owned.richdoc_append_paragraph("Carried paragraph two"),
+        "c2",
+    )
+    .await
+    .unwrap();
+    let c2 = accept_latest(&actor, &store, 4).await;
+    // Stop: Phase A, settlement at B through F, then the document leaves the
+    // scope and parks, and the release.
+    let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+        namespace: "relay".into(),
+        max_deliveries: 8,
+        max_applications: 8,
+    };
+    let retirement = |activation: &str| RetirementKey {
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        activation_id: activation.into(),
+        restore_fence_generation: 0,
+        accepted_through: 10,
+    };
+    owner
+        .begin_retirement(
+            scope.clone(),
+            coordinate.clone(),
+            retirement(&first.activation_id),
+            false,
+        )
+        .await
+        .unwrap();
+    owner
+        .settle_retirement(
+            scope.clone(),
+            coordinate.clone(),
+            retirement(&first.activation_id),
+            Some(covered.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+        .await
+        .unwrap();
+    // The replica that hosts the document counts on from its journal.
+    execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+          VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
+        INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+    let Release::Released {
+        boundary: Some(boundary),
+        ..
+    } = owner
+        .release_activation(
+            scope.clone(),
+            coordinate.clone(),
+            retirement(&first.activation_id),
+            40,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("{case}: released");
+    };
+    assert!(
+        file().contains("Covered paragraph") && !file().contains("Carried"),
+        "{case}: {}",
+        file()
+    );
+    // Resume: the document returns, and with `catch_up` ordinary sync brings
+    // a peer's edit and projects the whole Y.Doc.
+    execute(
+        &mut store,
+        "UPDATE hosted_documents SET scope_generation=1,state='ready'",
+    );
+    if catch_up {
+        let peer = Ydoc::wire();
+        peer.apply(&base).unwrap();
+        peer.apply(&covered_bytes).unwrap();
+        import_envelope(
+            &mut store,
+            "peer",
+            2,
+            &peer.richdoc_append_paragraph("Peer paragraph"),
+            &lineage,
+            false,
+        );
+        execute(&mut store, "UPDATE hosted_replicas SET main_cursor=2");
+        actor
+            .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 50)
+            .await
+            .unwrap();
+        assert!(
+            file().contains("Peer paragraph") && file().contains("Carried paragraph two"),
+            "{case}: {}",
+            file()
+        );
+    }
+    let next = capture().await.unwrap();
+    assert_eq!(
+        next.source.predecessor_activation_id.as_deref(),
+        Some(first.activation_id.as_str()),
+        "{case}"
+    );
+    let successor = owner
+        .register_activation(
+            "relay".into(),
+            coordinate.clone(),
+            binding.clone(),
+            next.activation_id.clone(),
+        )
+        .await
+        .unwrap();
+    let carried = |receipt: &LiveUpdateReceipt| {
+        store
+            .get_binary_blob(&receipt.update_digest)
+            .unwrap()
+            .unwrap()
+    };
+    let applied = [
+        "live_device_update_applications",
+        "live_accepted_updates",
+        "ydoc_updates",
+        "moments",
+    ];
+    let before = applied.map(|table| store.table_row_count(table).unwrap());
+    assert_eq!(
+        deliver_owned(&successor, &binding, &c1, carried(&c1)).await,
+        ApplicationResult::Pending(ApplicationPending::DeliveryPending),
+        "{case}: nothing applies before the successor adopts"
+    );
+    assert_eq!(
+        applied.map(|table| store.table_row_count(table).unwrap()),
+        before,
+        "{case}"
+    );
+    successor
+        .adopt_owner(
+            imported_cut(
+                &next,
+                Some(RetainedPrefix {
+                    terminal_receipt: boundary.terminal_receipt.clone(),
+                    event_count: boundary.event_count,
+                    history_evidence_digest: boundary.history_evidence_digest.clone(),
+                    predecessor_activation_id: first.activation_id.clone(),
+                }),
+            ),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let seed = accept_latest(&actor, &store, 11).await;
+    assert_eq!(
+        seed.update_digest,
+        hex_sha256(&next.full_state),
+        "{case}: the seed is the captured state"
+    );
+    assert!(
+        matches!(
+            deliver_owned(&successor, &binding, &c1, carried(&c1)).await,
+            ApplicationResult::Applied(..)
+        ),
+        "{case}"
+    );
+    let settled = successor
+        .settle(
+            Some(c1.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        file().contains("Carried paragraph one")
+            && !file().contains("two")
+            && !file().contains("Peer"),
+        "{case}: {}",
+        file()
+    );
+    // A restart, then the same settlement replays with no writes.
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let successor = owner
+        .register_activation(
+            "relay".into(),
+            coordinate.clone(),
+            binding.clone(),
+            next.activation_id.clone(),
+        )
+        .await
+        .unwrap();
+    let written = settlement_counts(&store);
+    let replayed = successor
+        .settle(
+            Some(c1.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.settlement_id, settled.settlement_id, "{case}");
+    assert_eq!(
+        settlement_counts(&store),
+        written,
+        "{case}: a replay writes nothing"
+    );
+    assert!(
+        matches!(
+            deliver_owned(&successor, &binding, &c2, carried(&c2)).await,
+            ApplicationResult::Applied(..)
+        ),
+        "{case}"
+    );
+    assert!(
+        matches!(
+            deliver_owned(&successor, &binding, &seed, next.full_state.clone()).await,
+            ApplicationResult::Applied(..)
+        ),
+        "{case}"
+    );
+    let converged = successor
+        .settle(
+            Some(seed.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+        .await
+        .unwrap();
+    let local = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap()
+        .doc;
+    assert_eq!(
+        file(),
+        local.project(ContentKind::Richdoc).unwrap().content,
+        "{case}"
+    );
+    assert_eq!(file().contains("Peer paragraph"), catch_up, "{case}");
+    let expected = [&covered, &c1, &c2, &seed]
+        .map(|receipt| receipt.delivery_id.clone())
+        .to_vec();
+    assert_eq!(
+        deliveries(&store, "live_device_update_applications"),
+        expected,
+        "{case}: each applies once"
+    );
+    assert_eq!(
+        deliveries(&store, "live_accepted_updates"),
+        expected,
+        "{case}"
+    );
+    let written = settlement_counts(&store);
+    let again = successor
+        .settle(
+            Some(seed),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.settlement_id, converged.settlement_id, "{case}");
+    assert_eq!(settlement_counts(&store), written, "{case}");
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}

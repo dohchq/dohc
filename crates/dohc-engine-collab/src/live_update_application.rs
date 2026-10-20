@@ -920,7 +920,8 @@ pub enum ApplicationPending {
     /// An earlier delivery applies first: the released chain left an earlier
     /// Carried delivery unapplied, or the current native service activation's
     /// adoption seed has no receipt yet. Until it has one, only the seed's own
-    /// delivery and the released chain's rows through F apply.
+    /// delivery and the released chain's rows through F apply. While a
+    /// released chain has no adopted successor, nothing applies.
     DeliveryPending,
     /// As [`DeliveryPending`](Self::DeliveryPending), but the seed's outbox is
     /// quarantined, so delivery never retries it. The activation stays held
@@ -1619,6 +1620,22 @@ pub fn apply_committed(
             let receipt = &event.metadata.accepted.receipt;
             let suffix =
                 retirement::retained_suffix(tx, &held.namespace, &key, &b.lineage_claim_id)?;
+            // A released chain whose successor has not adopted: anything
+            // applied now would move accepted history past the boundary the
+            // successor adopts, so every delivery waits for that adoption.
+            if suffix.is_some()
+                && owner_activations::current_activation(
+                    tx,
+                    Some(&held.namespace),
+                    &key,
+                    &b.lineage_claim_id,
+                )?
+                .is_none()
+            {
+                return Ok(ApplicationResult::Pending(
+                    ApplicationPending::DeliveryPending,
+                ));
+            }
             match seed_hold(tx, &held.namespace, b)? {
                 // Retirement proved the seed never delivered, which stays
                 // true only while nothing applies after the cut.

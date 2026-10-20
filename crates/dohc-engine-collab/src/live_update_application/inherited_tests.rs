@@ -945,12 +945,13 @@ fn a_predecessors_refusal_stays_private_on_replay() {
 type ChainRefusalDamage = (&'static str, fn(&mut Fixture));
 
 /// Only a strict refusal by an activation of the released chain stays
-/// private. One whose source names an activation outside the chain, one
-/// failing the strict representation, and another activation's pending entry
-/// leave the settlement Corrupt, with no writes.
+/// private. One whose source names an activation outside the chain, or one
+/// released only in another namespace, one failing the strict
+/// representation, and another activation's pending entry leave the
+/// settlement Corrupt, with no writes.
 #[test]
 fn another_activations_entry_outside_a_chain_refusal_is_corrupt() {
-    let damages: [ChainRefusalDamage; 3] = [
+    let damages: [ChainRefusalDamage; 4] = [
         ("outside the chain", |f| {
             // Released activations of the lineage that follow each other, so
             // the chain keeps its one tail.
@@ -958,6 +959,10 @@ fn another_activations_entry_outside_a_chain_refusal_is_corrupt() {
             release_unadopted(f, "namespace", "object", "stray-back", Some("stray"));
             write(f, "UPDATE live_owner_activations SET predecessor_activation_id='stray-back' WHERE activation_id='stray'");
             rewrite_source(f, |source| source.adoption_id = "stray".into());
+        }),
+        ("another namespace", |f| {
+            release_unadopted(f, "elsewhere", "object", "foreign", None);
+            rewrite_source(f, |source| source.adoption_id = "foreign".into());
         }),
         ("invalid reason", |f| write(f, "UPDATE owner_ydoc_outbox_entries SET terminal_reason='refused'||char(10) WHERE sequence=1")),
         ("pending", |f| write_unchecked(f, "UPDATE owner_ydoc_outbox_entries SET pending=1 WHERE sequence=1")),

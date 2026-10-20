@@ -1108,6 +1108,18 @@ fn record_projection(
             )
         }
     };
+    record_text(store, audit, moment, &text, &vector)
+}
+
+/// Write `text` as the settled file and record the settlement as `moment`,
+/// with `vector` the state vector digest of the document it projects.
+fn record_text(
+    store: &mut EngineStore,
+    audit: &LiveSettlementAudit,
+    moment: &str,
+    text: &str,
+    vector: &str,
+) -> Result<LiveSettlementResult, ApplicationError> {
     let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
         let written = dohc_engine_domain::write_projected_text_in_tx(
             tx,
@@ -1116,7 +1128,7 @@ fn record_projection(
                 version_id: "main",
                 object_id: "object",
                 path: std::borrow::Cow::Borrowed("owner.md"),
-                text: std::borrow::Cow::Borrowed(&text),
+                text: std::borrow::Cow::Borrowed(text),
                 moment_id: moment,
                 metadata_origin: "ydoc",
                 metadata_summary: None,
@@ -1132,7 +1144,7 @@ fn record_projection(
             [&written.snapshot.blob_sha256],
         )
         .map_err(write_sql)?;
-        let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, &vector, 30)?;
+        let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, vector, 30)?;
         Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
     })?;
     let TxnOutcome::Committed(result) = result else {

@@ -902,6 +902,29 @@ pub(super) fn read_state(
     native_state::read(conn, held, through, policy)
 }
 
+/// [`read_state`] for a reader no registration serves: the lineage's history
+/// in `namespace` selected by its durable identity alone, through a view that
+/// is never registered or live. `binding` and `coordinate` are the ones a
+/// durable record kept; only the document and lineage select the history.
+pub(super) fn read_state_by_identity(
+    conn: &Connection,
+    namespace: &str,
+    binding: LiveObjectBinding,
+    coordinate: ApplicationHostCoordinate,
+    through: i64,
+    policy: NativeHistoryReconstruction,
+) -> Result<Ydoc, ApplicationError> {
+    let view = Registration {
+        workspace_id: binding.workspace_id.clone(),
+        namespace: namespace.to_owned(),
+        coordinate,
+        binding,
+        activation_id: None,
+        live: false,
+    };
+    read_state(conn, &view, through, policy)
+}
+
 pub(super) fn read(
     conn: &Connection,
     held: &Registration,
