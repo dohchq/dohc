@@ -357,6 +357,13 @@ async fn duplicate_open_copy_proof(edited: bool) {
         )
         .await;
     let closed = !lock(&f.service.sessions).contains_key(&sid);
+    if closed && !edited && result.is_ok() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while f.service.leases.scoped(&f.open.root).is_held(&key) {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("Duplicate Undo placement did not release its lease");
+    }
     let exists = f.root.join("copy.md").exists();
     let moments: Vec<String> = reader
         .read_with(|c| {
