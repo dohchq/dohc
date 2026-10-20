@@ -41,7 +41,7 @@ function processHandle(workspaceId: string) {
   return {
     url: "http://127.0.0.1:4173/", command: "dev", args: [], cwd: `/canonical/${workspaceId}/app`,
     logs: vi.fn(() => logs), onExit: vi.fn((listener: () => void) => { exit = listener; }),
-    stop: vi.fn(async () => undefined), exit: () => exit(),
+    stop: vi.fn(async () => undefined), stillRunning: async () => [], exit: () => exit(),
   } satisfies SiteProcessHandle & { exit(): void };
 }
 
@@ -103,7 +103,7 @@ async function harness() {
     },
     assertTrustedSender, senderWorkspaceAuthority: { requireTrustedSender: event => { assertTrustedSender(event); return event.sender; } },
     withRendererWorkspaceOperation, appCatalog: { list: async () => [], get }, appPreviews,
-    isSharedView, executeAppPreview,
+    isSharedView, assertMayRunAppCode: async () => undefined, executeAppPreview,
   });
   cleanup.push(async () => {
     await Promise.all([...states.values()].map(state => state.sitePreviews.stopAll()));

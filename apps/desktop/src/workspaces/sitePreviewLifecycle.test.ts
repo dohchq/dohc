@@ -54,6 +54,7 @@ function fakeProcessHandle(url: string) {
       else exitListeners.add(listener);
     },
     stop: vi.fn(async () => undefined),
+    stillRunning: async () => [],
   };
   return {
     handle,
@@ -533,6 +534,7 @@ describe("site preview lifecycle", () => {
         throw new Error("listener failed");
       },
       stop: vi.fn(async () => undefined),
+      stillRunning: async () => [],
     };
 
     await expect(startHandle(lifecycle, handle)).rejects.toThrow(
@@ -566,6 +568,7 @@ describe("site preview lifecycle", () => {
         .fn<() => Promise<void>>()
         .mockRejectedValueOnce(new Error("setup cleanup remained ambiguous"))
         .mockResolvedValue(undefined),
+      stillRunning: async () => [],
     };
     const replacement = fakeStaticHandle("http://127.0.0.1:5173/");
 

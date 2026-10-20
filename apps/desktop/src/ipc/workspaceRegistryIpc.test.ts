@@ -23,10 +23,14 @@ async function registryHarness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const summaries: WorkspaceSummary[] = [];
   const steps: string[] = [];
+  const emptyFolders = new Set<string>();
+  const trusted: Array<{ workspaceId: string; folder: string | null }> = [];
   const createFolder = vi.fn(async ({ homeDir, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared" }) => {
     steps.push("create");
     expect(homeDir).toBe(home);
-    return { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) };
+    // The real creation reports a folder it made from nothing.
+    const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
+    return { workspace: { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) }, fresh };
   });
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
   const refresh = vi.fn(() => { steps.push("refresh"); });
@@ -40,6 +44,7 @@ async function registryHarness() {
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
     refreshNativeWorkspaceSurfaces: refresh,
@@ -50,7 +55,7 @@ async function registryHarness() {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ trusted }, payload);
   };
-  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke };
+  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke, emptyFolders, trusted };
 }
 
 describe("registered workspace registry handlers", () => {
@@ -91,6 +96,24 @@ describe("registered workspace registry handlers", () => {
     expect(h.createFolder).toHaveBeenCalledOnce();
   });
 
+  it("trusts a new workspace only when creation made it from nothing, bound to that folder", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const fresh = h.roots.usableRoot(join(root, "fresh"));
+    h.emptyFolders.add(fresh);
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: fresh, kind: "personal" });
+    expect(h.trusted).toEqual([{ workspaceId: "workspace", folder: "7:42" }]);
+    expect(h.steps.slice(-4)).toEqual(["measure", "trust", "register", "refresh"]);
+
+    // A folder with files in it, chosen in New workspace, is an existing folder.
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: join(root, "cloned"), kind: "personal" });
+    // Open folder never trusts, empty or not.
+    const picked = await h.invoke(CHANNELS.pickWorkspaceRoot) as string;
+    h.emptyFolders.add(h.roots.usableRoot(picked));
+    await h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: picked });
+    expect(h.trusted).toEqual([{ workspaceId: "workspace", folder: "7:42" }]);
+  });
+
   it.skipIf(process.platform === "win32")("keeps a backslash in a picked folder's name through create and attach", async () => {
     const h = await registryHarness();
     const picked = join(h.home, "trip\\2026");
@@ -118,7 +141,7 @@ describe("registered workspace registry handlers", () => {
     "rejects a malformed created summary before persistence for %s", async (channel) => {
       const h = await registryHarness();
       const rootPath = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
-      h.createFolder.mockResolvedValue({ workspaceId: "INVALID ID", rootPath, kind: "personal", mode: "local-first" });
+      h.createFolder.mockResolvedValue({ workspace: { workspaceId: "INVALID ID", rootPath, kind: "personal", mode: "local-first" }, fresh: null });
       await expect(h.invoke(channel, { rootPath, kind: "personal" })).rejects.toThrow();
       expect(h.register).not.toHaveBeenCalled();
       expect(h.refresh).not.toHaveBeenCalled();

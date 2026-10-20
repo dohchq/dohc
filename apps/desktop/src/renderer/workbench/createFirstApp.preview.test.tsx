@@ -56,6 +56,9 @@ it("opens the desktop's first app in static mode without spawning a process", as
       stopSitePreview: async () => { await preview?.stop(); },
       getSitePreviewLogs: async () => ({ logs: [], exited: false }),
       onSitePreviewReplaced: () => () => undefined,
+      // New workspace made this workspace, so main trusts it.
+      readWorkspaceTrust: async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true }),
+      onWorkspaceTrustChanged: () => () => undefined,
     });
     render(<SitePreviewPage workspaceId="ws-new-app" siteRoot={root} />);
     await waitFor(() => expect(startSitePreview).toHaveBeenCalledOnce());

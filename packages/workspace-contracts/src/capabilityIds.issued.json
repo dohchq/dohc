@@ -245,5 +245,8 @@
   "agent.color.set",
   "links.in",
   "links.resolve",
-  "links.edges"
+  "links.edges",
+  "workspace.trust.read",
+  "workspace.trust.request",
+  "workspace.trust.restrict"
 ]

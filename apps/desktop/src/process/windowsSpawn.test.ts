@@ -2,7 +2,13 @@ import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
+import {
+  killChildTreeWin32,
+  POWERSHELL_PROCESS_TABLE_READ_TIMEOUT_MS,
+  readProcessTableWithPowershell,
+  resolveSpawnCommand,
+} from "./windowsSpawn";
+import { processDescendants } from "./posixSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 
 // Teardown retries rmdir against asynchronously-released Windows handles, so the
@@ -255,5 +261,25 @@ describeWin32("real .cmd shim topology (win32)", () => {
       }, 5000);
     });
     expect(gone).toBe(true);
+  });
+});
+
+describe.runIf(process.platform === "win32")("the PowerShell process-table read", () => {
+  it("is cut off at its bound and then counts as finding nothing", async () => {
+    // A read takes about a second, so a 50 ms bound stands in for a stalled
+    // PowerShell.
+    const started = performance.now();
+    await expect(readProcessTableWithPowershell(50)).rejects.toThrow();
+    expect(performance.now() - started).toBeLessThan(800);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(processDescendants(process.pid, () => readProcessTableWithPowershell(50))).resolves.toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("reads the table within its default bound", async () => {
+    const table = await readProcessTableWithPowershell();
+    expect(table).toContain(`${process.pid} `);
+    expect(POWERSHELL_PROCESS_TABLE_READ_TIMEOUT_MS).toBe(10_000);
   });
 });
