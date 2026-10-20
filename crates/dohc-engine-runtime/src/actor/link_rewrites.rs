@@ -52,46 +52,42 @@ struct Plan {
     candidates: incoming::Candidates,
 }
 
-fn alias_names(
-    conn: &Connection,
-    ws: &str,
-    version: &str,
-    old: &str,
-    new: &str,
-) -> Result<String, RuntimeError> {
-    // Compare only the basename families through which either name can resolve.
-    // The function uses the resolver's Unicode case folding, rather than SQLite lower().
-    conn.create_scalar_function(
-        "link_rewrite_stem",
-        1,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            let path = ctx.get::<String>(0)?;
-            Ok(crate::links::resolver::without_extension(&path)
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .to_lowercase())
-        },
-    )
-    .map_err(StorageError::corrupt_public)?;
-    let stem = |path: &str| {
-        crate::links::resolver::without_extension(path)
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_lowercase()
-    };
-    conn.query_row(
-        "SELECT json_group_array(path) FROM (
-        SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2
-          AND link_rewrite_stem(path) IN (?3,?4) ORDER BY path)",
-        params![ws, version, stem(old), stem(new)],
-        |r| r.get(0),
-    )
-    .map_err(StorageError::corrupt_public)
-    .map_err(Into::into)
+fn stem(path: &str) -> String {
+    crate::links::resolver::without_extension(path).rsplit('/').next().unwrap_or("").to_lowercase()
+}
+
+fn track_alias_changes(conn: &Connection, ws: &str, operation: &str) -> Result<(), RuntimeError> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_temp_schema WHERE name='rewrite_alias_changes')", [], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+    if !exists {
+        conn.create_scalar_function("link_rewrite_stem", 1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(stem(&ctx.get::<String>(0)?))).map_err(StorageError::corrupt_public)?;
+        conn.execute_batch("CREATE TEMP TABLE rewrite_alias_watch(workspace TEXT,version TEXT,stem TEXT,PRIMARY KEY(workspace,version,stem)) WITHOUT ROWID; CREATE TEMP TABLE rewrite_alias_changes(workspace TEXT,version TEXT,stem TEXT,path TEXT,PRIMARY KEY(workspace,version,stem,path)) WITHOUT ROWID;
+            CREATE TEMP TRIGGER rewrite_alias_insert AFTER INSERT ON main.path_aliases WHEN EXISTS(SELECT 1 FROM rewrite_alias_watch WHERE workspace=NEW.workspace_id AND version=NEW.version_id AND stem=link_rewrite_stem(NEW.path)) BEGIN
+                INSERT OR IGNORE INTO rewrite_alias_changes VALUES(NEW.workspace_id,NEW.version_id,link_rewrite_stem(NEW.path),NEW.path); END;
+            CREATE TEMP TRIGGER rewrite_alias_delete AFTER DELETE ON main.path_aliases WHEN EXISTS(SELECT 1 FROM rewrite_alias_watch WHERE workspace=OLD.workspace_id AND version=OLD.version_id AND stem=link_rewrite_stem(OLD.path)) BEGIN
+                INSERT OR IGNORE INTO rewrite_alias_changes VALUES(OLD.workspace_id,OLD.version_id,link_rewrite_stem(OLD.path),OLD.path); END;
+            CREATE TEMP TRIGGER rewrite_alias_update AFTER UPDATE OF path,object_id ON main.path_aliases WHEN (OLD.path IS NOT NEW.path OR OLD.object_id IS NOT NEW.object_id) AND EXISTS(SELECT 1 FROM rewrite_alias_watch WHERE workspace=NEW.workspace_id AND version=NEW.version_id AND stem IN (link_rewrite_stem(OLD.path),link_rewrite_stem(NEW.path))) BEGIN
+                INSERT OR IGNORE INTO rewrite_alias_changes VALUES(OLD.workspace_id,OLD.version_id,link_rewrite_stem(OLD.path),OLD.path);
+                INSERT OR IGNORE INTO rewrite_alias_changes VALUES(NEW.workspace_id,NEW.version_id,link_rewrite_stem(NEW.path),NEW.path); END;"
+        ).map_err(StorageError::corrupt_public)?;
+    }
+    conn.execute_batch("DELETE FROM rewrite_alias_watch; DELETE FROM rewrite_alias_changes;").map_err(StorageError::corrupt_public)?;
+    conn.execute("INSERT OR IGNORE INTO rewrite_alias_watch SELECT workspace_id,version_id,link_rewrite_stem(path) FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND operation='rename'
+        UNION SELECT workspace_id,version_id,link_rewrite_stem(before_path) FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND operation='rename'", params![ws,operation]).map_err(StorageError::corrupt_public)?;
+    Ok(())
+}
+
+fn alias_names(conn: &Connection, ws: &str, plan: &Plan) -> Result<String, RuntimeError> {
+    // Initial families come from the off-actor snapshot. Only changed families
+    // need discovery here; both the journal and authoritative lookups are indexed.
+    conn.query_row("SELECT json_group_array(path) FROM (
+        SELECT a.path FROM (
+            SELECT value AS path FROM json_each(?3)
+            UNION SELECT path FROM rewrite_alias_changes WHERE workspace=?1 AND version=?2 AND stem IN (?4,?5)
+        ) names JOIN path_aliases a ON a.workspace_id=?1 AND a.version_id=?2 AND a.path=names.path ORDER BY a.path)",
+        params![ws,plan.version,plan.aliases,stem(plan.rename.before_path.as_deref().unwrap_or("")),stem(&plan.rename.path)],
+        |r| r.get(0)).map_err(StorageError::corrupt_public).map_err(Into::into)
 }
 
 fn valid(conn: &Connection, ws: &str, plan: &Plan, actor: bool) -> Result<bool, RuntimeError> {
@@ -112,14 +108,9 @@ fn valid(conn: &Connection, ws: &str, plan: &Plan, actor: bool) -> Result<bool, 
         let revision = crate::links::cache::revision(conn, ws, &plan.version)?;
         let mut prior = plan.alias_revision.lock().unwrap();
         if *prior != Some(revision) {
-            if alias_names(
-                conn,
-                ws,
-                &plan.version,
-                plan.rename.before_path.as_deref().unwrap_or(""),
-                &plan.rename.path,
-            )? != plan.aliases
-            {
+            // A foreign writer cannot run this connection's TEMP journal.
+            if prior.is_some_and(|(_, external)| external != revision.1)
+                || alias_names(conn, ws, plan)? != plan.aliases {
                 return Ok(false);
             }
             *prior = Some(revision);
@@ -230,7 +221,8 @@ impl ActorHandle {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             guard = session_ops.clone().lock_owned() => guard,
         };
-        let db = self
+        let (journal_ws, journal_op) = (workspace.clone(),operation.clone());
+        let (db, external) = self
             .run(move |store, _| {
                 let _admission = serial;
                 #[cfg(test)]
@@ -241,8 +233,12 @@ impl ActorHandle {
                     }
                     .into());
                 }
-                store.read_with(crate::links::cache::track_revisions)?;
-                Ok(store.database_path().to_path_buf())
+                let external = store.read_with(|conn| {
+                    crate::links::cache::track_revisions(conn)?;
+                    track_alias_changes(conn,&journal_ws,&journal_op)?;
+                    Ok::<_,RuntimeError>(conn.pragma_query_value(None, "data_version", |r| r.get::<_,i64>(0)).map_err(StorageError::corrupt_public)?)
+                })?;
+                Ok((store.database_path().to_path_buf(), external))
             })
             .await?;
         let state = self.link_rewrites.clone();
@@ -293,8 +289,8 @@ impl ActorHandle {
                     operation: op.clone(),
                     state,
                     rename: (*rename).clone(),
-                    aliases: alias_names(conn, &ws, &version, old, &rename.path)?,
-                    alias_revision: Mutex::new(None),
+                    aliases: serde_json::to_string(&paths.iter().filter(|path| stem(path)==stem(old) || stem(path)==stem(&rename.path)).collect::<Vec<_>>()).expect("alias paths serialize"),
+                    alias_revision: Mutex::new(Some((i64::MIN,external))),
                     paths,
                     candidates,
                 };
@@ -604,6 +600,7 @@ impl ActorHandle {
             #[cfg(test)]
             let _turn = tests::Turn::start(&workspace, "reply");
             save(store, &receipt, !stopped, &result, faults.as_ref())?;
+            store.read_with(|conn| conn.execute_batch("DELETE FROM rewrite_alias_watch; DELETE FROM rewrite_alias_changes;")).map_err(StorageError::corrupt_public)?;
             Ok(())
         })
         .await?;

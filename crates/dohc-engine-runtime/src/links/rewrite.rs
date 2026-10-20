@@ -2,7 +2,7 @@ use super::{
     parser,
     resolver::{self, Resolver},
 };
-use std::ops::Range;
+use std::{ops::Range, time::{Duration, Instant}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Target {
@@ -118,7 +118,7 @@ pub(crate) fn forward(
 }
 
 // Myers' bidirectional frontiers find a split using linear memory.
-fn bisect<T: PartialEq>(a: &[T], b: &[T]) -> Option<(usize, usize)> {
+fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, usize)> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let limit = (n + m + 1) / 2;
     let offset = limit + 1;
@@ -130,7 +130,9 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T]) -> Option<(usize, usize)> {
     let odd = delta % 2 != 0;
     let (mut fs, mut fe, mut rs, mut re) = (0, 0, 0, 0);
     for d in 0..=limit {
+        if Instant::now() >= deadline { return None; }
         for k in ((-d + fs)..=(d - fe)).step_by(2) {
+            if Instant::now() >= deadline { return None; }
             let slot = (offset + k) as usize;
             let mut x = if k == -d || (k != d && forward[slot - 1] < forward[slot + 1]) {
                 forward[slot + 1]
@@ -159,6 +161,7 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T]) -> Option<(usize, usize)> {
             }
         }
         for k in ((-d + rs)..=(d - re)).step_by(2) {
+            if Instant::now() >= deadline { return None; }
             let slot = (offset + k) as usize;
             let mut x = if k == -d || (k != d && reverse[slot - 1] < reverse[slot + 1]) {
                 reverse[slot + 1]
@@ -191,7 +194,8 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T]) -> Option<(usize, usize)> {
     None
 }
 
-fn matching<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, usize)> {
+fn matching<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<Vec<(Range<usize>, usize)>> {
+    if Instant::now() >= deadline { return None; }
     let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
     let suffix = a[prefix..]
         .iter()
@@ -206,25 +210,25 @@ fn matching<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, usize)> {
     let (left, right) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
     if !left.is_empty()
         && !right.is_empty()
-        && let Some((x, y)) = bisect(left, right)
+        && let Some((x, y)) = bisect(left, right, deadline)
         && (x, y) != (0, 0)
         && (x, y) != (left.len(), right.len())
     {
-        for (r, start) in matching(&left[..x], &right[..y]) {
+        for (r, start) in matching(&left[..x], &right[..y], deadline)? {
             ranges.push((r.start + prefix..r.end + prefix, start + prefix));
         }
-        for (r, start) in matching(&left[x..], &right[y..]) {
+        for (r, start) in matching(&left[x..], &right[y..], deadline)? {
             ranges.push((r.start + prefix + x..r.end + prefix + x, start + prefix + y));
         }
     }
     if suffix > 0 {
         ranges.push((a.len() - suffix..a.len(), b.len() - suffix));
     }
-    ranges
+    (Instant::now() < deadline).then_some(ranges)
 }
 
 /// Diff lines first, then characters only inside the changed line hunks.
-fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usize)>> {
+fn unchanged_ranges(before: &str, after: &str, deadline: Instant) -> Option<Vec<(Range<usize>, usize)>> {
     let a: Vec<_> = before.split_inclusive('\n').collect();
     let b: Vec<_> = after.split_inclusive('\n').collect();
     let offsets = |lines: &[&str]| {
@@ -238,7 +242,7 @@ fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usiz
     let (ao, bo) = (offsets(&a), offsets(&b));
     let mut ranges = Vec::new();
     let (mut x, mut y) = (0, 0);
-    for (r, start) in matching(&a, &b)
+    for (r, start) in matching(&a, &b, deadline)?
         .into_iter()
         .chain([(a.len()..a.len(), b.len())])
     {
@@ -254,7 +258,8 @@ fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usiz
         for (cr, cs) in matching(
             &left.chars().collect::<Vec<_>>(),
             &right.chars().collect::<Vec<_>>(),
-        ) {
+            deadline,
+        )? {
             ranges.push((ao[x] + ac[cr.start]..ao[x] + ac[cr.end], bo[y] + bc[cs]));
         }
         if !r.is_empty() {
@@ -275,7 +280,18 @@ fn unchanged_ranges(before: &str, after: &str) -> Option<Vec<(Range<usize>, usiz
     }
     Some(joined)
 }
+#[cfg(test)]
 pub(crate) fn inverse(before: &str, after: &str, head: &str) -> Option<String> {
+    inverse_budgeted(before, after, head).ok().flatten()
+}
+
+pub(crate) fn inverse_budgeted(before: &str, after: &str, head: &str) -> Result<Option<String>, ()> {
+    let deadline = Instant::now() + Duration::from_millis(25);
+    let unchanged = unchanged_ranges(after, head, deadline).ok_or(())?;
+    Ok(inverse_in_ranges(before, after, head, unchanged))
+}
+
+fn inverse_in_ranges(before: &str, after: &str, head: &str, unchanged: Vec<(Range<usize>, usize)>) -> Option<String> {
     #[cfg(test)]
     if let Some(mutant) = tests::mutant(before, after, head) {
         return Some(mutant);
@@ -286,7 +302,6 @@ pub(crate) fn inverse(before: &str, after: &str, head: &str) -> Option<String> {
         return None;
     }
     let held = targets(head)?;
-    let unchanged = unchanged_ranges(after, head)?;
     let mut edits = Vec::new();
     for (old, new) in originals.iter().zip(&rewritten) {
         if old.literal == new.literal {
@@ -447,7 +462,7 @@ mod tests {
                         };
                     }
                 }
-                let matches = matching(a, b);
+                let matches = matching(a, b, Instant::now() + Duration::from_secs(1)).unwrap();
                 assert_eq!(
                     matches.iter().map(|(r, _)| r.len()).sum::<usize>(),
                     lcs[a.len()][b.len()],
@@ -465,7 +480,7 @@ mod tests {
         let inputs = ["", "a", "b", "aa", "ab", "ba", "bb", "😀a", "a😀"];
         for a in inputs {
             for b in inputs {
-                for (range, start) in unchanged_ranges(a, b).unwrap() {
+                for (range, start) in unchanged_ranges(a, b, Instant::now() + Duration::from_secs(1)).unwrap() {
                     assert_eq!(
                         &a[range.clone()],
                         &b[start..start + range.len()],

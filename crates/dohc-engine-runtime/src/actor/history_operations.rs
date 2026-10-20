@@ -417,7 +417,8 @@ fn link_inverse_input(
     let load = |sha: &str| {
         dohc_engine_storage::text::read(conn, sha).map_err(StorageError::corrupt_public)
     };
-    crate::links::rewrite::inverse(&load(&before)?, &load(&after)?, &load(&head)?).ok_or(
+    crate::links::rewrite::inverse_budgeted(&load(&before)?, &load(&after)?, &load(&head)?)
+        .map_err(|()| DomainError::UndoRefused { path: path.clone(), reason: "link diff budget exceeded" })?.ok_or(
         DomainError::UndoRefused {
             path,
             reason: "link changed after rename",
