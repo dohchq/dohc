@@ -1468,3 +1468,10 @@ pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::N
         .or_default()
         .notify = Some(notify);
 }
+
+pub(in crate::actor) fn pause_inverse(request: &str) -> (std::sync::mpsc::Receiver<()>,Arc<Barrier>) {
+    let (send,receive)=std::sync::mpsc::channel();
+    let barrier=Arc::new(Barrier::new(2));
+    probes().lock().unwrap().entry(request.into()).or_default().hook=Some((send,barrier.clone()));
+    (receive,barrier)
+}

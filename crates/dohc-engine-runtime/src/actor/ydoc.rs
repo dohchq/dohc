@@ -2769,7 +2769,10 @@ pub(super) fn ydoc_settle_on_store(
             format!("ydoc-mat_{}", current.latest_moment_id),
             format!("resolve-mat_{}", current.latest_moment_id),
             dohc_engine_domain::binary_rollback_job_identity(
-                &key.workspace_id, &key.version_id, &current.latest_moment_id),
+                &key.workspace_id,
+                &key.version_id,
+                &current.latest_moment_id,
+            ),
         ];
         for candidate in candidates {
             if let Some(job) = store

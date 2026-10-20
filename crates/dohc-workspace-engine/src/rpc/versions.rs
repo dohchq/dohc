@@ -345,6 +345,28 @@ pub(super) fn mutate_close_write_session(id: String) {
 }
 
 impl VersionFence {
+    pub(super) fn link_document_resync(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> dohc_engine_runtime::actor::DocumentResync {
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let handle = handle.clone();
+        std::sync::Arc::new(move |key| {
+            let ids: Vec<_> = lock(&sessions)
+                .iter()
+                .filter(|(_, session)| session.workspace == handle && session.key == *key)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                events.emit(
+                    "ydoc.remoteUpdate",
+                    json!({"sessionId":id,"resyncRequired":true}),
+                );
+            }
+        })
+    }
+
     /// Acquire the capture and session barriers in the one per-workspace order
     /// used by version fencing and workspace teardown.
     async fn acquire_workspace_barriers(
@@ -591,10 +613,13 @@ impl VersionFence {
         let leases = self.leases.scoped(&open.root);
         let mut held = HashMap::new();
         for member in &result.moments {
-            if held.contains_key(&member.object_id) || lock(&self.sessions).values().any(|session|
-                session.key.workspace_id == open.workspace_id &&
-                session.key.version_id == result.version_id &&
-                session.key.object_id == member.object_id) {
+            if held.contains_key(&member.object_id)
+                || lock(&self.sessions).values().any(|session| {
+                    session.key.workspace_id == open.workspace_id
+                        && session.key.version_id == result.version_id
+                        && session.key.object_id == member.object_id
+                })
+            {
                 continue;
             }
             let Ok(key) = DocKey::new(&open.workspace_id, &result.version_id, &member.object_id)
@@ -746,24 +771,7 @@ impl VersionFence {
             .filter(|m| m.operation == "write")
             .map(|m| m.object_id.clone())
             .collect();
-        let resync: dohc_engine_runtime::actor::DocumentResync = {
-            let sessions = self.sessions.clone();
-            let events = self.events.clone();
-            let handle = handle.clone();
-            Arc::new(move |key| {
-                let ids: Vec<_> = lock(&sessions)
-                    .iter()
-                    .filter(|(_, s)| s.workspace == handle && s.key == *key)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in ids {
-                    events.emit(
-                        "ydoc.remoteUpdate",
-                        json!({"sessionId":id,"resyncRequired":true}),
-                    );
-                }
-            })
-        };
+        let resync = self.link_document_resync(handle);
         let undo_objects = undo_group.as_ref().map(|members| {
             members
                 .iter()
