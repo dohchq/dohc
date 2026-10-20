@@ -5,6 +5,39 @@ use dohc_engine_storage::{EngineStore, hex_sha256};
 
 #[tokio::test]
 async fn observed_editor_reopens_pending_work_without_publishing_it() {
+    accepted_frame_editor_case(EditorCase::Peer).await;
+}
+
+#[tokio::test]
+async fn own_accepted_frame_keeps_edit_before_client_resync() {
+    accepted_frame_editor_case(EditorCase::Own).await;
+}
+
+#[tokio::test]
+async fn accepted_frame_does_not_adopt_replacement_binding() {
+    accepted_frame_editor_case(EditorCase::Replaced).await;
+}
+
+#[tokio::test]
+async fn accepted_frame_does_not_unfreeze_quarantined_editor() {
+    accepted_frame_editor_case(EditorCase::Quarantined).await;
+}
+
+#[tokio::test]
+async fn accepted_frame_replay_does_not_rewind_editor_revision() {
+    accepted_frame_editor_case(EditorCase::Replay).await;
+}
+
+#[derive(Clone, Copy)]
+enum EditorCase {
+    Peer,
+    Own,
+    Replaced,
+    Quarantined,
+    Replay,
+}
+
+async fn accepted_frame_editor_case(case: EditorCase) {
     let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
     let config = serde_json::from_value(json!({
         "ingress":{"aggregateBytes":1_000_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
@@ -29,7 +62,7 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     let bytes: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
     let text = source["markdown"].as_str().unwrap();
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    let binding = dohc_engine_collab::LiveObjectBinding {
+    let mut binding = dohc_engine_collab::LiveObjectBinding {
         workspace_id: "workspace".into(),
         main_version_id: "main".into(),
         object_id: "object".into(),
@@ -214,8 +247,42 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     let mut events = service.events.subscribe();
     let remote = Ydoc::wire();
     remote.apply(&bytes).unwrap();
-    let update = remote.richdoc_append_paragraph("accepted peer edit");
-    doc.apply(&update).unwrap();
+    let update = if matches!(case, EditorCase::Own) {
+        base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap()
+    } else {
+        remote.richdoc_append_paragraph("accepted peer edit")
+    };
+    match case {
+        EditorCase::Replaced => {
+            // Replace the durable binding while the editor retains its old
+            // descriptor. No actor operation runs during this fixture write.
+            binding.restore_fence_generation += 1;
+            let mut store = EngineStore::open(&db, 10).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                        [serde_json::to_string(&binding).unwrap()],
+                    )
+                    .unwrap();
+                    Ok::<_, dohc_engine_collab::OwnerOutboxError>(())
+                })
+                .unwrap();
+        }
+        EditorCase::Quarantined => {
+            service
+                .owner_ydoc_outbox_quarantine(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({"outboxId":result["ownerDraft"]["outboxId"],"reason":"test quarantine"}),
+                )
+                .await
+                .unwrap();
+        }
+        _ => {}
+    }
     let mut ctx = RequestContext::unbounded();
     ctx.connection = Some(connection.handle());
     let input = crate::rpc::owner_delivery::OwnerInput {
@@ -236,20 +303,17 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
         bytes: update,
         reservation: service.reserve_owner_delivery().unwrap(),
     };
+    let request = Request {
+        id: 4,
+        method: "ydoc.ownerDelivery.applyAcceptedFrame".into(),
+        workspace: Some(handle.clone()),
+        deadline_ms: None,
+        idempotency_key: None,
+        progress: false,
+        params: json!({}),
+    };
     let response = service
-        .owner_delivery_apply(
-            ctx,
-            Request {
-                id: 4,
-                method: "ydoc.ownerDelivery.applyAcceptedFrame".into(),
-                workspace: Some(handle.clone()),
-                deadline_ms: None,
-                idempotency_key: None,
-                progress: false,
-                params: json!({}),
-            },
-            input,
-        )
+        .owner_delivery_apply(ctx.clone(), request.clone(), input.clone())
         .await
         .unwrap();
     assert_eq!(response.response.result["acceptedCursor"], 1);
@@ -261,6 +325,72 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     );
     assert!(events.try_recv().is_err());
     drop(response);
+    if matches!(case, EditorCase::Replay) {
+        let update = remote.richdoc_append_paragraph("second accepted peer edit");
+        let mut next = input.clone();
+        if let crate::rpc::owner_delivery::OwnerUpload::Accepted(p) = &mut next.params {
+            p.expected_revision = 2;
+            p.expected_native_head_sequence = 1;
+            p.previous_accepted_cursor = 1;
+            p.journal_cursor = 2;
+            p.byte_length = update.len();
+            p.digest = hex_sha256(&update);
+        }
+        next.bytes = update;
+        drop(
+            service
+                .owner_delivery_apply(ctx.clone(), request.clone(), next)
+                .await
+                .unwrap(),
+        );
+        // Older frame rows are pruned. Their refusal must leave the newer
+        // session position intact.
+        assert_eq!(
+            service
+                .owner_delivery_apply(ctx, request, input)
+                .await
+                .unwrap_err()
+                .message,
+            "owner-outbox-parent-mismatch"
+        );
+    }
+    // The client has not processed the accepted-frame resync yet. Its next
+    // local edit still belongs to the same owner binding.
+    let typed = doc.richdoc_append_paragraph("typed before accepted-frame resync");
+    let recorded = service
+        .ydoc_record_update(
+            &RequestContext::unbounded(),
+            Some(handle.clone()),
+            Some("edit-3".into()),
+            json!({
+                "sessionId":sid,
+                "updateBase64":base64::engine::general_purpose::STANDARD.encode(&typed),
+                "expectedLineageClaimId":claim,
+            }),
+        )
+        .await;
+    if matches!(case, EditorCase::Replaced | EditorCase::Quarantined) {
+        let error = recorded.unwrap_err();
+        assert_eq!(
+            error.message,
+            match case {
+                EditorCase::Replaced => "owner-outbox-parent-mismatch",
+                _ => "owner-outbox-frozen",
+            }
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+        let store = EngineStore::open(&db, 40).unwrap();
+        assert_eq!(
+            store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+            2
+        );
+        return;
+    }
+    let recorded =
+        recorded.expect("accepted-frame revision must not refuse a local edit before resync");
+    assert_eq!(recorded["ownerDraft"]["sequence"], 3);
+    // Merge the remote frame only after the local append, as the client does.
+    doc.apply(&remote.encode_full_state()).unwrap();
     let (_, resync) = service
         .ydoc_resync(
             &RequestContext::unbounded(),
@@ -324,6 +454,7 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
                 ),
             ),
             ("edit-2".to_owned(), None),
+            ("edit-3".to_owned(), None),
         ]
     );
     assert_eq!(
@@ -335,6 +466,10 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
             .unwrap()
             .unwrap()
             .head_update_seq,
-        1
+        if matches!(case, EditorCase::Replay) {
+            2
+        } else {
+            1
+        }
     );
 }
