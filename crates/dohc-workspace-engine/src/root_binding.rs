@@ -166,7 +166,7 @@ fn create_binding_dir(root: &Path) -> Result<(), RootBindingError> {
     // `.dohc` or at the folder, a folder another user owns, and one a volume
     // keeps shared.
     #[cfg(target_os = "macos")]
-    let created = dohc_macos_files::ensure_private_dir(root, relative);
+    let created = dohc_macos_files::ensure_private_dir(root, relative).map(drop);
     #[cfg(not(target_os = "macos"))]
     let created = {
         let mut builder = std::fs::DirBuilder::new();
