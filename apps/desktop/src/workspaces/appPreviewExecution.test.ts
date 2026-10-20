@@ -13,6 +13,7 @@ import { createSitePreviewLifecycle, START_CANCELLED_MESSAGE } from "./sitePrevi
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
+import { WorkspaceRestrictedError } from "./workspaceTrust";
 
 vi.mock("./siteRunner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./siteRunner")>();
@@ -67,9 +68,14 @@ async function harness() {
   const resolveOwner = vi.fn(async (_workspace: { workspaceId: string }, _path: string): Promise<{ target: ShareViewFilesTarget; path: string } | null> => ({ target: ownerTarget, path: "portal/dist" }));
   let files: Pick<ShareViewFiles, "read"> | undefined;
   let resolvePort: typeof resolveOwner | undefined;
+  let trusted = true;
+  const assertMayRunAppCode = vi.fn(async (_workspace: { workspaceId: string; rootPath: string }) => {
+    if (!trusted) throw new WorkspaceRestrictedError();
+  });
   const execute = createAppPreviewExecution({
     get shareViewFiles() { if (!files) throw new Error("File owner not constructed"); return files; },
     get shareViewFilesTargetForPath() { if (!resolvePort) throw new Error("Path owner not constructed"); return resolvePort; },
+    assertMayRunAppCode,
   });
   files = { read: readOwner };
   resolvePort = resolveOwner;
@@ -86,7 +92,9 @@ async function harness() {
   };
   return {
     workspaceRoot, controller, app, input, readOwner, resolveOwner, ownerTarget, devHandle, execute, run, write,
+    assertMayRunAppCode,
     retire: () => { current = false; },
+    restrict: () => { trusted = false; },
     replaceFiles: (value: Pick<ShareViewFiles, "read">) => { files = value; },
     share: async () => {
       app.root = "shared-with-me/alice/portal";
@@ -100,6 +108,33 @@ async function harness() {
 }
 
 describe("app preview execution", () => {
+  describe("in Restricted Mode", () => {
+    it("checks trust just before it starts a dev server, and starts none", async () => {
+      const h = await harness();
+      h.app.scripts = { dev: "node server.js" };
+      h.restrict();
+      await expect(h.execute({ ...h.input, mode: "dev" })).rejects.toThrow(WorkspaceRestrictedError);
+      expect(h.assertMayRunAppCode).toHaveBeenCalledWith({ workspaceId: "workspace-a", rootPath: h.workspaceRoot });
+      expect(startSiteDevServer).not.toHaveBeenCalled();
+    });
+
+    it("checks trust just before it runs a build, and runs none", async () => {
+      const h = await harness();
+      h.app.scripts = { build: "node build.js" };
+      h.restrict();
+      await expect(h.execute({ ...h.input, mode: "build" })).rejects.toThrow(WorkspaceRestrictedError);
+      expect(buildSite).not.toHaveBeenCalled();
+      expect(startStaticSitePreview).not.toHaveBeenCalled();
+    });
+
+    it("serves the static entry without asking", async () => {
+      const h = await harness();
+      h.restrict();
+      await h.run();
+      expect(h.assertMayRunAppCode).not.toHaveBeenCalled();
+    });
+  });
+
   it("serves the local static entry with the real preparation and static server", async () => {
     const h = await harness();
     const execution = await h.run();
@@ -350,6 +385,7 @@ describe("app preview execution", () => {
       catalog: { list: async () => [h.app], get: async () => h.app },
       lifecycle,
       isSharedView: () => false,
+      assertMayRunAppCode: h.assertMayRunAppCode,
       execute: h.execute,
     });
     const building = deferred<void>();

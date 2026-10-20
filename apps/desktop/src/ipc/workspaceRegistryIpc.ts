@@ -91,6 +91,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // New workspace's one default: a workspace made in a folder that held
+  // nothing starts trusted. Every other way in starts in Restricted Mode.
+  isEmptyOrMissingFolder(path: string): Promise<boolean>;
+  trustNewWorkspace(workspace: CreatedWorkspace): Promise<void>;
   refreshNativeWorkspaceSurfaces(): void;
   desktopMarks: {
     mark(name: string): void;
@@ -113,6 +117,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     openWorkspaceManager,
     closeWindowOf,
     registerPhysicalWorkspace,
+    isEmptyOrMissingFolder,
+    trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
   } = dependencies;
@@ -165,8 +171,12 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     assertTrustedSender(event);
     const input = CreateLocalWorkspacePayload.parse(payload);
     desktopMarks.mark("workspace-create-start");
+    const rootPath = usableRoot(input.rootPath);
+    // An empty folder holds no code anyone else wrote. A folder with files in
+    // it is an existing folder, whichever button opened it.
+    const empty = await isEmptyOrMissingFolder(rootPath);
     const created = await createWorkspaceFolder({
-      rootPath: usableRoot(input.rootPath),
+      rootPath,
       homeDir: effectiveHome(),
       kind: input.kind,
     });
@@ -176,6 +186,12 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
     registerPhysicalWorkspace(created);
+    // Restricted Mode is what a failed write leaves, and one click undoes it.
+    if (empty) {
+      await trustNewWorkspace(created).catch((error: unknown) => {
+        console.warn("[desktop] could not trust a new workspace", error);
+      });
+    }
     refreshNativeWorkspaceSurfaces();
     return summary;
   });

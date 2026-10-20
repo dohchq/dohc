@@ -33,6 +33,8 @@ async function registryHarness() {
   const pick = vi.fn(async () => ({ canceled: false, filePaths: [join(home, "picked")] }));
   const forget = vi.fn(async (_workspaceId: string) => { steps.push("forget"); });
   const reveal = vi.fn((_path: string) => { steps.push("reveal"); });
+  const emptyFolders = new Set<string>();
+  const trusted: string[] = [];
   registerWorkspaceRegistryIpcHandlers<Event>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
@@ -40,6 +42,8 @@ async function registryHarness() {
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    isEmptyOrMissingFolder: async (path) => { steps.push("check-empty"); return emptyFolders.has(path); },
+    trustNewWorkspace: async (workspace) => { steps.push("trust"); trusted.push(workspace.workspaceId); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
     refreshNativeWorkspaceSurfaces: refresh,
@@ -50,7 +54,7 @@ async function registryHarness() {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ trusted }, payload);
   };
-  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke };
+  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke, emptyFolders, trusted };
 }
 
 describe("registered workspace registry handlers", () => {
@@ -84,11 +88,29 @@ describe("registered workspace registry handlers", () => {
     const child = join(root, "project");
     await expect(h.invoke(CHANNELS.createLocalWorkspace, { rootPath: child, kind: "shared" }))
       .resolves.toMatchObject({ kind: "shared", rootPath: h.roots.usableRoot(child) });
-    expect(h.steps).toEqual(["mark", "create", "measure", "register", "refresh"]);
+    expect(h.steps).toEqual(["mark", "check-empty", "create", "measure", "register", "refresh"]);
     expect(() => h.roots.usableRoot(`${root}-unapproved`)).toThrow("chosen through dohc");
     await expect(h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: join(h.home, "unapproved") }))
       .rejects.toThrow("chosen through dohc");
     expect(h.createFolder).toHaveBeenCalledOnce();
+  });
+
+  it("trusts a new workspace only when New workspace made it in an empty folder", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const fresh = h.roots.usableRoot(join(root, "fresh"));
+    h.emptyFolders.add(fresh);
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: fresh, kind: "personal" });
+    expect(h.trusted).toEqual(["workspace"]);
+    expect(h.steps.slice(-3)).toEqual(["register", "trust", "refresh"]);
+
+    // A folder with files in it, chosen in New workspace, is an existing folder.
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: join(root, "cloned"), kind: "personal" });
+    // Open folder never trusts, empty or not.
+    const picked = await h.invoke(CHANNELS.pickWorkspaceRoot) as string;
+    h.emptyFolders.add(h.roots.usableRoot(picked));
+    await h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: picked });
+    expect(h.trusted).toEqual(["workspace"]);
   });
 
   it.skipIf(process.platform === "win32")("keeps a backslash in a picked folder's name through create and attach", async () => {

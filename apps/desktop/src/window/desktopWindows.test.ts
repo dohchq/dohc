@@ -177,6 +177,7 @@ describe("desktop workspace windows", () => {
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: () => undefined,
+      isEmptyOrMissingFolder: async () => false, trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: () => undefined,
@@ -539,6 +540,7 @@ describe("desktop native menus", () => {
       roots, effectiveHome: () => home, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
+      isEmptyOrMissingFolder: async () => false, trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
