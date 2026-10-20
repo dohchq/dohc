@@ -602,13 +602,13 @@ async fn forward_does_not_write_through_another_undos_internal_lease() {
     let lease=f.leases.acquire_internal(&key).unwrap();
     let request=format!("{}-other-undo",f.ws);
     let (receive,barrier)=undo_probe::pause_inverse(&request);
-    let (actor,ws,root,serial,leases)=(f.actor.clone(),f.ws.clone(),f.root.to_path_buf(),f.serial.clone(),f.leases.clone());
+    let (actor,ws,root,serial)=(f.actor.clone(),f.ws.clone(),f.root.to_path_buf(),f.serial.clone());
     let capture: Arc<tokio::sync::Mutex<()>> = Arc::default();
     let undo_capture = capture.clone();
     let undo=tokio::spawn(async move {
         actor.history_undo_in_turns(ws,"dohc-operation:other".into(),request,None,root,Arc::new(NoFaults),10,
             [undo_capture,serial],Arc::new(()),
-            Some((Arc::new(move |k| leases.is_held_by_session(k)),Arc::new(|_| {}))),CancellationToken::new()).await
+            Some((Arc::new(|_| false),Arc::new(|_| {}))),CancellationToken::new()).await
     });
     tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
     let held = capture.lock_owned().await;

@@ -563,11 +563,10 @@ impl ActorHandle {
                 } else { true };
                 let (w, v, member) = (prepared.workspace.clone(),prepared.version.clone(),member.clone());
                 let open = open_documents.clone();
-                let read_db = db.clone();
                 let disk_root = root.clone();
-                let input = tokio::task::spawn_blocking(move || {
+                let reader = inverse_store;
+                let (input, reader) = tokio::task::spawn_blocking(move || {
                     let _guards = guards;
-                    let reader = EngineStore::open_read_only(&read_db)?;
                     let inverse = if usable {
                         reader.read_with(|c| inverse_input(c,&w,&v,&member,open.as_ref()))
                     } else { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"document projection unavailable"}.into()) };
@@ -575,8 +574,9 @@ impl ActorHandle {
                         value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link diff budget exceeded" | "wikilink element unavailable" | "document projection unavailable",..}))) => value,
                         Err(error) => return Err(error),
                     };
-                    Ok(Prepared {inverse,disk:Ok(disk_check(&disk_root,&member)?)})
+                    Ok((Prepared {inverse,disk:Ok(disk_check(&disk_root,&member)?)},reader))
                 }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+                inverse_store = reader;
                 inputs.push_back(input);
             }
             let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
