@@ -36,6 +36,9 @@ pub(super) fn prepare_doc(
     let Some(new) = crate::links::rewrite::targets(after) else { return Ok(None) };
     if old.len() != new.len() { return Ok(None); }
     let (projection, spans) = doc.wikilink_spans()?;
+    if projection != before && doc.preserved_markdown_source(&projection).as_deref() != Some(before) {
+        return Ok(None);
+    }
     let ranges: Vec<_> = spans.iter().map(|(r, _)| r.clone()).collect();
     let Some(mapped) = crate::links::rewrite::map_ranges(&projection, before, &ranges) else {
         return Ok(None);
