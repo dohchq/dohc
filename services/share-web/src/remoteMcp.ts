@@ -148,7 +148,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
       return text(await jsonResponse(await options.request("/api/view/current")));
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
-  server.registerTool("dohc_list_changes", {
+  if (metadata.access === "edit") server.registerTool("dohc_list_changes", {
     description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads an afterBlobSha256 while its file is still in the share.",
     inputSchema: z.object({since: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(500).optional()}),
   }, async ({since, limit}) => {
@@ -158,7 +158,8 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded. An earlier revision has no contentKind here, so it is returned as UTF-8 when its bytes decode and as base64 otherwise; use the contentKind from dohc_list_changes.",
+    description: "Read up to 256 KiB of settled file content using a current hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded." +
+      (metadata.access === "edit" ? " Edit links can also read an afterBlobSha256 from dohc_list_changes for an earlier revision still in the share. Earlier revisions use UTF-8 when their bytes decode, otherwise base64." : " History is unavailable with view or comment access."),
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {

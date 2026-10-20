@@ -74,6 +74,7 @@ const PARTS = [
   "about-conversation",
   "file-view-actions",
   "offers",
+  "csv-bound",
   "page-identity",
   "settings-sync",
   "data-grid",

@@ -129,6 +129,10 @@ mod linux {
 
     fn filter() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         use libc::*;
+        // libc 0.2.189 omits this constant on AArch64; Linux numbers it 452 there too.
+        #[cfg(target_arch = "aarch64")]
+        #[allow(non_upper_case_globals)]
+        const SYS_fchmodat2: c_long = 452;
         let mut rules = BTreeMap::new();
         for syscall in [
             SYS_fchmod,
@@ -203,6 +207,25 @@ mod linux {
             SYS_lookup_dcookie,
             SYS_syslog,
             SYS_vhangup,
+            // IPC objects are shared across the IPC namespace and Landlock does not mediate them.
+            SYS_shmget,
+            SYS_shmat,
+            SYS_shmdt,
+            SYS_shmctl,
+            SYS_msgget,
+            SYS_msgsnd,
+            SYS_msgrcv,
+            SYS_msgctl,
+            SYS_semget,
+            SYS_semop,
+            SYS_semtimedop,
+            SYS_semctl,
+            SYS_mq_open,
+            SYS_mq_unlink,
+            SYS_mq_timedsend,
+            SYS_mq_timedreceive,
+            SYS_mq_notify,
+            SYS_mq_getsetattr,
         ] {
             rules.insert(syscall, vec![]);
         }

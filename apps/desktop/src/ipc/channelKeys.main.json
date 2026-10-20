@@ -93,7 +93,6 @@
   "getWorkspaceUiState",
   "historyNamesChanged",
   "holdQuit",
-  "importToDatabase",
   "importWorkspaceFiles",
   "installUpdate",
   "joinSharedChannel",

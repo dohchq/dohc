@@ -68,7 +68,8 @@ use std::sync::MutexGuard;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
     replica_mode: Option<replica_mode::ReplicaMode>,
-    reader: std::sync::OnceLock<dohc_engine_reader::Reader>,
+    reader: std::sync::OnceLock<Arc<dohc_engine_reader::Reader>>,
+    reader_resolver: std::sync::OnceLock<Arc<dohc_engine_collab::reader_resolver::ReaderResolver>>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Arc<Mutex<rpc::live_application::Registry>>,
@@ -163,7 +164,12 @@ impl EngineService {
     pub fn configure_reader(&self, config: dohc_engine_reader::Config) {
         let _ = self
             .reader
-            .set(dohc_engine_reader::Reader::new(Some(config)));
+            .set(Arc::new(dohc_engine_reader::Reader::new(Some(config))));
+        let _ = self.reader_resolver.set(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(
+                self.reader.get().unwrap().clone(),
+            ),
+        ));
     }
 
     pub fn new() -> Self {
@@ -183,6 +189,7 @@ impl EngineService {
         EngineService {
             replica_mode: None,
             reader: std::sync::OnceLock::new(),
+            reader_resolver: std::sync::OnceLock::new(),
             supervisor,
             handles: Mutex::new(HashMap::new()),
             live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),

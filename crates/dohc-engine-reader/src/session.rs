@@ -12,6 +12,7 @@ enum Response {
     Refused { id: u64, reason: RefusalReason },
     Constructed(Reply),
     Proved(Reply),
+    Expired(Reply),
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,7 +48,8 @@ impl<R: Read, W: Write> Session<R, W> {
             schema_version: u32,
             runtime: Value,
         }
-        let h: Hello = self.pipe.json()?;
+        let h: Hello =
+            serde_json::from_value(self.pipe.json()?).map_err(|_| Failure::Unavailable)?;
         let mut runtime = self.manifest["runtime"].clone();
         runtime
             .as_object_mut()
@@ -74,6 +76,7 @@ impl<R: Read, W: Write> Session<R, W> {
         self.pipe.blob(2, &r.checkpoint)?;
         self.pipe.control(&json!({"id": self.id, "end": true}))?;
         let checkpoint_sha256 = checkpoint.sha256;
+        let mut expired = false;
         let reply = match (self.pipe.json()?, r.method) {
             (Response::Refused { id, reason }, _) if id == self.id => {
                 return Ok(Outcome::Refused {
@@ -83,6 +86,10 @@ impl<R: Read, W: Write> Session<R, W> {
             }
             (Response::Constructed(reply), Method::Construct)
             | (Response::Proved(reply), Method::Prove) => reply,
+            (Response::Expired(reply), Method::Prove) => {
+                expired = true;
+                reply
+            }
             _ => return Err(Failure::Crashed),
         };
         if reply.id != self.id
@@ -114,6 +121,11 @@ impl<R: Read, W: Write> Session<R, W> {
             Outcome::Constructed {
                 proof,
                 delta,
+                checkpoint_sha256,
+            }
+        } else if expired {
+            Outcome::Expired {
+                proof,
                 checkpoint_sha256,
             }
         } else {

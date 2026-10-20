@@ -72,6 +72,7 @@ const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
+const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -562,6 +563,12 @@ impl Ydoc {
             source_sha256,
             projection_sha256,
         })
+    }
+
+    pub fn has_reader_source(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        meta.get(&txn, MARKDOWN_SOURCE_READER_META_KEY).is_some()
     }
 
     /// Resolve exact Markdown only after its lightweight projection witness
@@ -1391,6 +1398,7 @@ impl Ydoc {
                             MARKDOWN_SOURCE_META_KEY,
                             MARKDOWN_SOURCE_SHA_META_KEY,
                             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                            MARKDOWN_SOURCE_READER_META_KEY,
                         ] {
                             meta.remove(txn, key);
                         }
@@ -1778,6 +1786,7 @@ impl Ydoc {
                 MARKDOWN_SOURCE_META_KEY,
                 MARKDOWN_SOURCE_SHA_META_KEY,
                 MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
             ] {
                 meta.remove(&mut txn, key);
             }
@@ -1855,6 +1864,7 @@ impl Ydoc {
         let source_sha256 = crate::hex_sha256(markdown.as_bytes());
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
+        meta.remove(&mut txn, MARKDOWN_SOURCE_READER_META_KEY);
         meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, markdown);
         meta.insert(
             &mut txn,

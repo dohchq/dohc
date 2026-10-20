@@ -25,6 +25,8 @@ description = "Durable Y.Doc layer for the workspace engine: update log, snapsho
 test-support = []
 
 [dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
+tokio = { version = "1", features = ["sync"] }
 # The durable store (single writer, migration ledger with the R11a ydoc tables,
 # content-addressed binary_blobs, the R04 materialization-job pipeline).
 dohc-engine-storage = { path = "../dohc-engine-storage" }

@@ -31,14 +31,14 @@ fn store() -> Connection {
 fn key() -> DocKey {
     DocKey::new("workspace", "main", "object").unwrap()
 }
-fn assert_owner_parity(updates: &[Vec<u8>]) -> String {
+fn assert_owner_parity(updates: &[Vec<u8>], label: &str) -> String {
     let doc = Ydoc::wire();
     for update in updates {
         doc.apply(update).unwrap();
     }
     let owner = project_ydoc_with_store(&store(), &key(), &doc, ContentKind::Richdoc).unwrap();
-    let relay =
-        project_ydoc_updates(updates.iter().map(Vec::as_slice), ContentKind::Richdoc).unwrap();
+    let relay = project_ydoc_updates(updates.iter().map(Vec::as_slice), ContentKind::Richdoc)
+        .unwrap_or_else(|error| panic!("{label}: {error:?}"));
     assert_eq!(relay, owner);
     relay.content
 }
@@ -48,7 +48,7 @@ fn every_retained_vector_matches_current_owner_settlement_without_a_snapshot() {
         let vectors: Vec<Vector> =
             serde_json::from_slice(&std::fs::read(fixture(file)).unwrap()).unwrap();
         for vector in &vectors {
-            let current = assert_owner_parity(&decode(vector));
+            let current = assert_owner_parity(&decode(vector), &format!("{file}: {}", vector.name));
             assert_eq!(current, vector.markdown, "{} {}", file, vector.name);
         }
     }
@@ -69,7 +69,10 @@ fn nested_list_source_remains_preserved_without_the_owners_snapshot() {
             .unwrap(),
         Some(source.to_owned())
     );
-    assert_eq!(assert_owner_parity(&[doc.encode_full_state()]), source);
+    assert_eq!(
+        assert_owner_parity(&[doc.encode_full_state()], "native nested list"),
+        source
+    );
 }
 #[test]
 fn forged_source_is_never_projected() {
@@ -79,9 +82,53 @@ fn forged_source_is_never_projected() {
         .iter()
         .filter(|v| v.name == "source-forged-active" || v.name == "source-forged-stale")
     {
-        let content = assert_owner_parity(&decode(vector));
+        let content = assert_owner_parity(&decode(vector), &vector.name);
         assert!(!content.contains("Foreign"));
     }
+}
+#[test]
+fn reader_output_waits_for_an_authoritative_snapshot() {
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let checkpoint = STANDARD
+        .decode(data["checkpoint"].as_str().unwrap())
+        .unwrap();
+    assert!(matches!(
+        project_ydoc_updates([checkpoint.as_slice()], ContentKind::Richdoc),
+        Err(UpdateProjectionError::Invalid(
+            "Markdown reader output requires an authoritative snapshot"
+        ))
+    ));
+}
+#[test]
+fn reader_kind_always_requires_context_even_when_native_proof_succeeds() {
+    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+    let native = Ydoc::wire();
+    native
+        .rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "A native paragraph.\n",
+        )
+        .unwrap();
+    let canonical = native.project(ContentKind::Richdoc).unwrap().content;
+    assert!(native.preserved_markdown_source(&canonical).is_some());
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&native.encode_full_state()).unwrap())
+        .unwrap();
+    doc.get_or_insert_map("meta")
+        .insert(&mut doc.transact_mut(), "dohcMarkdownSourceReader", 1);
+    let checkpoint = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    assert!(matches!(
+        project_ydoc_updates([checkpoint.as_slice()], ContentKind::Richdoc),
+        Err(UpdateProjectionError::Invalid(
+            "Markdown reader output requires an authoritative snapshot"
+        ))
+    ));
 }
 #[test]
 fn output_between_public_and_settlement_caps_is_refused() {

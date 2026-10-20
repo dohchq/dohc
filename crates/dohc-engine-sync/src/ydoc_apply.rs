@@ -3808,15 +3808,47 @@ pub fn project_ydoc_with_store(
     doc: &dohc_engine_collab::Ydoc,
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
+    project_ydoc_inner(conn, key, doc, content_kind, None, false)
+}
+
+pub fn project_ydoc_with_reader(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
+    project_ydoc_inner(conn, key, doc, content_kind, resolver, true)
+}
+
+fn project_ydoc_inner(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    resolve_witness: bool,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
         let mut projection = doc
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
-        if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && let Some(source) =
+        if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+            let source = if resolve_witness && doc.has_reader_source() {
+                dohc_engine_collab::reader_resolver::resolve(
+                    conn,
+                    key,
+                    doc,
+                    &projection.content,
+                    resolver,
+                )
+                .map_err(map_collab_hard_error)?
+            } else {
                 doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
-        {
-            projection.content = source;
+            };
+            if let Some(source) = source {
+                projection.content = source;
+            }
         }
         return Ok(projection);
     }
@@ -5733,6 +5765,10 @@ fn validate_retryable_ydoc_identity(
 
 pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
+        CollabError::MarkdownReaderPending(pending) => SyncError::MarkdownReaderPending(pending),
+        CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
+            reason: "dohc could not verify this file. Try again.",
+        },
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",

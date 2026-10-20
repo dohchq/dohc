@@ -56,6 +56,7 @@ export function createShareReadQueries(
     | "currentObjectBlobByteLength"
     | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
+    | "currentObjectFile"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
@@ -192,6 +193,8 @@ export function createShareReadQueries(
     audience: "authenticated" | "accountless",
     half?: "chat" | "files",
     recipient?: ReceivedRecipient,
+    currentOnly = false,
+    epochLogFloor = 0,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -203,6 +206,7 @@ export function createShareReadQueries(
       audience === "accountless" && fileSelector
         ? createAccountlessPathProjection(fileSelector)
         : null;
+    const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
     const page = scanFilteredLog(
       storage,
       {
@@ -247,6 +251,31 @@ export function createShareReadQueries(
         if (recipient && original) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
           opKind: row.opKind, original, served: payload as Record<string, unknown>,
           ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
+        if (currentOnly) {
+          if (!fileSelector || !accountlessProjection || !recipient) return null;
+          const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
+          if (row.opKind === "version.create") return reset;
+          if (row.opKind !== "moment.append") return null;
+          const objectId = original?.objectId;
+          const receivedObject = identity.object(recipient, workspaceId, objectId);
+          if (typeof objectId !== "string" || !receivedObject) return reset;
+          const versionId = targetVersionId(fileSelector);
+          if (!currentFiles.has(objectId)) {
+            currentFiles.set(objectId, storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }));
+          }
+          const current = currentFiles.get(objectId)!;
+          if (current === "reset") return reset;
+          const projected = current === null ? null : accountlessProjection.projectPath(current.path);
+          return {
+            relaySeq: row.relaySeq,
+            opKind: "file.current",
+            payload: {
+              objectId: receivedObject,
+              file: current && projected !== null ? { objectId: receivedObject, path: projected,
+                blobSha256: current.blobSha256, contentKind: current.contentKind } : null,
+            },
+          };
+        }
         if (authenticatedMoment && original) {
           (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
           const mark = original.attributionUnavailable;

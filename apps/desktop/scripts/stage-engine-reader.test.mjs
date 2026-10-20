@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -78,13 +78,23 @@ for (const platform of ["win32", "linux"]) test(`${platform} packaged resources 
     assert.deepEqual(await stageEngineReader({ resources, platform, arch: "x64", fetchNode: () => { throw Error("must reuse selected closure"); } }), staged);
   }
   const base = join(resources, "engine-reader");
+  await t.test("preparation preserves another run's recent staging and generation", async () => {
+    const names = ["b".repeat(64), ".staging-active", ".selection-active.json"];
+    for (const name of names.slice(0, 2)) await mkdir(join(base, name));
+    await writeFile(join(base, names[2]), "in progress");
+    await stageEngineReader({ resources, platform, arch: "x64" });
+    for (const name of names) await stat(join(base, name));
+    for (const name of names) await rm(join(base, name), { recursive: true });
+  });
   await t.test("preparation removes old generations and interrupted staging files", async () => {
     for (const name of ["a".repeat(64), ".staging-abandoned"]) {
       await mkdir(join(base, name));
       await writeFile(join(base, name, "leftover"), "unused");
       await chmod(join(base, name), 0o555);
+      await utimes(join(base, name), 1, 1);
     }
     await writeFile(join(base, ".selection-old.json"), "unused");
+    await utimes(join(base, ".selection-old.json"), 1, 1);
     await stageEngineReader({ resources, platform, arch: "x64" });
     assert.deepEqual((await readdir(base)).sort(), [staged.generation, "selection.json"].sort());
   });
@@ -121,6 +131,7 @@ for (const platform of ["win32", "linux"]) test(`${platform} packaged resources 
     await rename(backup, file);
   }
   const manifest = JSON.parse(await readFile(installed.manifest, "utf8"));
+  assert.ok(manifest.sources.some(source => source.path === "packages/ydoc-projection/scripts/build-engine-reader.mjs"));
   assert.deepEqual(Object.fromEntries(Object.entries(manifest.runtime).filter(([key]) => key !== "sha256")),
     { version: "24.16.0", platform, arch: "x64", unicode: "17.0", icu: "78.3" });
   for (const key of ["version", "unicode", "icu"]) {
