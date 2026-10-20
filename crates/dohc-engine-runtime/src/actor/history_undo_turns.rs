@@ -388,6 +388,7 @@ impl ActorHandle {
             );
             let read_db = db.clone();
             let disk_root = root.clone();
+            let prepare_token = token.clone();
             let (prepared, body, prepared_inputs) = tokio::task::spawn_blocking(move || {
                 let mut store = EngineStore::open_read_only(&read_db)?;
                 store
@@ -440,6 +441,7 @@ impl ActorHandle {
                 let reader = EngineStore::open_read_only(&read_db)?;
                 let mut inputs = std::collections::VecDeque::new();
                 for member in &prepared.members {
+                    if prepare_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                     let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member));
                     match &inverse {
                         Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason: "link diff budget exceeded", ..})) => {},

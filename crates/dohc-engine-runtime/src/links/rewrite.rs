@@ -322,7 +322,7 @@ pub(crate) fn inverse_budgeted(
         before,
         after,
         head,
-        Instant::now() + Duration::from_millis(25),
+        Instant::now() + Duration::from_secs(1),
     )
 }
 
