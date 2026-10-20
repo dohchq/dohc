@@ -724,9 +724,12 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
             let doc = Ydoc::wire();
             doc.richdoc_wikilinks_for_test(&"[[a]] ".repeat(16))?;
             doc.richdoc_append_paragraph(
-                &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200),
+                &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 450),
             );
-            let before = doc.project(ContentKind::Richdoc)?.content;
+            let before = doc
+                .project(ContentKind::Richdoc)
+                .expect("unmarked projection must fit")
+                .content;
             assert!(matches!(
                 doc.wikilink_spans(),
                 Err(dohc_engine_collab::CollabError::ProjectionTooLarge { .. })
