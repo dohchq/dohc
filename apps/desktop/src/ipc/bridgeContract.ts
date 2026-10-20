@@ -5120,6 +5120,8 @@ export const LiveDraftRecoveryRecord = z.object({
   objectId: z.string().min(1).max(512),
   text: z.string(),
   updateBase64: z.string(),
+  // The text of a file deleted outside dohc.
+  reason: z.literal("deleted").optional(),
 }).strict();
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
 export const LiveDraftRecoveryChangedEvent = z.object({workspaceId: WORKSPACE_ID}).strict();

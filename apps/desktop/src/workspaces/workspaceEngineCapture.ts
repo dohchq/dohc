@@ -475,8 +475,9 @@ export type WorkspaceEngineYDocProviderSession = Omit<
 };
 
 // The session this layer holds, which keeps the evict the public one drops.
-// `setTextAside` puts the document's text in Notices and answers a handle to
-// that write, or null without a draft store.
+// `setTextAside` puts the text of a document whose file was deleted outside
+// dohc in Notices and answers a handle to that write, or null without a draft
+// store.
 type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   evict(): Promise<void>;
   setTextAside(): Promise<string | null>;
@@ -810,7 +811,9 @@ export interface WorkspaceEngineCaptureOptions {
   // Sets a document's text aside in Notices and answers a handle to that
   // write. `discardUnsentState` removes the draft by that handle once a save
   // wrote the text, unless a later write wrote the same draft again.
-  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<string>;
+  // `reason` says why the text is set aside, when that is not that a save was
+  // interrupted.
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc; reason?: "deleted" }) => Promise<string>;
   discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
@@ -2631,12 +2634,12 @@ export function createWorkspaceEngineCapture(
     // Puts text in Notices through the app's draft store, and answers a
     // handle to the write. A refusal tells the person, since the text is then only in
     // the open document.
-    const preserveText = async (doc: Y.Doc, contentKind: YdocContentKind | undefined): Promise<string> => {
+    const preserveText = async (doc: Y.Doc, contentKind: YdocContentKind | undefined, reason?: "deleted"): Promise<string> => {
       try {
         if (!sessionObjectId || contentKind === undefined || !options.preserveUnsentState) {
           throw new Error("Y.Doc recovery has no object identity.");
         }
-        return await options.preserveUnsentState({ path: input.path, objectId: sessionObjectId, contentKind, doc });
+        return await options.preserveUnsentState({ path: input.path, objectId: sessionObjectId, contentKind, doc, ...(reason ? { reason } : {}) });
       } catch (error) {
         const name = input.path.split("/").at(-1) ?? input.path;
         const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
@@ -3460,7 +3463,7 @@ export function createWorkspaceEngineCapture(
       setTextAside() {
         if (!options.preserveUnsentState) return Promise.resolve(null);
         if (canonicalDoc === null) return Promise.reject(closedError());
-        return preserveText(canonicalDoc, contentKind);
+        return preserveText(canonicalDoc, contentKind, "deleted");
       },
       initialUpdate,
       ...(objectId ? { objectId } : {}),

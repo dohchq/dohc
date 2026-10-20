@@ -561,10 +561,11 @@ it("tells only the workspace's windows after a write and a removal, and nothing 
   const draft = {path: "notes/a.md", objectId: "object", contentKind: "plaintext" as const, doc};
   const event = 'this desktop:live-draft-recovery-changed {"workspaceId":"workspace"}';
 
-  const first = await store.preserveUnsentState(draft);
+  const first = await store.preserveUnsentState({...draft, reason: "deleted"});
   expect(sent).toEqual([event]);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.reason)).toEqual(["deleted"]);
   // The same text again is the same draft, written again.
-  const second = await store.preserveUnsentState(draft);
+  const second = await store.preserveUnsentState({...draft, reason: "deleted"});
   expect(second.split(":")[0]).toBe(first.split(":")[0]);
   // The older write's handle leaves the draft written again.
   await store.discardUnsentState(first);

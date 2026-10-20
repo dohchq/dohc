@@ -8,10 +8,12 @@ import { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { sendToWorkspaceWindows } from "../ipc/workspaceActivityBroadcast";
 
+// `reason` "deleted": the text of a file deleted outside dohc.
 export type LiveDraft = {
   path: string;
   objectId: string;
   update: Uint8Array;
+  reason?: "deleted";
 } & (
   { remoteWorkspaceId: string; text?: never; contentKind?: never } |
   { text: string; contentKind: "plaintext" | "richdoc"; remoteWorkspaceId?: never } |
@@ -69,7 +71,8 @@ async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId
     if (record.version !== 1 && !(includeTypingCheckpoints && record.version === 2)) continue;
     if (record.workspaceId !== workspaceId) continue;
     if (target && record.objectId !== target.objectId && record.path !== target.path) continue;
-    const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text: record.text === undefined ? "" : record.text});
+    const parsed = LiveDraftRecoveryRecord.safeParse({recordId: basename(file).slice(0, 64), path: record.path, objectId: record.objectId, updateBase64: record.updateBase64, text: record.text === undefined ? "" : record.text,
+      ...(record.reason === undefined ? {} : {reason: record.reason})});
     if (!parsed.success || classifyEngineFilePathForRead(parsed.data.path, process.platform).kind !== "tracked") continue;
     let text = parsed.data.text;
     if (record.text === undefined) {
@@ -136,6 +139,7 @@ export async function preserveLiveDraft(directory: string, workspaceId: string, 
   if (classifyEngineFilePathForRead(draft.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
   const content = JSON.stringify({ version: 1, workspaceId, path: draft.path, objectId: draft.objectId,
     ...(draft.remoteWorkspaceId !== undefined ? { remoteWorkspaceId: draft.remoteWorkspaceId } : { contentKind: draft.contentKind, text: draft.text }),
+    ...(draft.reason ? { reason: draft.reason } : {}),
     updateBase64: Buffer.from(draft.update).toString("base64") });
   const digest = createHash("sha256").update(content).digest("hex");
   const file = join(directory, `${digest}.json`);
@@ -194,11 +198,12 @@ export function workspaceDraftStore<Contents extends { isDestroyed(): boolean; s
 }
 
 export async function preserveUnsentLiveDraft(directory: string, workspaceId: string, input: {
-  path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc;
+  path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc; reason?: "deleted";
 }): Promise<string> {
   const update = Y.encodeStateAsUpdate(input.doc);
+  const reason = input.reason ? { reason: input.reason } : {};
   if (input.contentKind === "scene") {
-    return await preserveLiveDraft(directory, workspaceId, {path: input.path, objectId: input.objectId, contentKind: "scene", update});
+    return await preserveLiveDraft(directory, workspaceId, {path: input.path, objectId: input.objectId, contentKind: "scene", update, ...reason});
   }
   const snapshot = new Y.Doc();
   try {
@@ -207,7 +212,7 @@ export async function preserveUnsentLiveDraft(directory: string, workspaceId: st
     if (input.contentKind === "plaintext") text = snapshot.getText("plainText").toString();
     else if (input.contentKind === "richdoc") text = (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(snapshot);
     else throw new Error("This document format cannot enter text draft recovery.");
-    return await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update });
+    return await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update, ...reason });
   } finally { snapshot.destroy(); }
 }
 

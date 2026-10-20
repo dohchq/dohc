@@ -93,7 +93,7 @@ function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDra
   for (const record of records) {
     if (findWorkspaceDraft(workspaceId, draft => draft.recovery?.recordId === record.recordId)) continue;
     const current = drafts.get(keyFor(workspaceId, record.path)) ?? EMPTY;
-    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId};
+    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId, ...(record.reason ? {reason: record.reason} : {})};
     const existing = current.find(draft => draft.recovery?.recordId === undefined &&
       draft.recovery?.objectId === record.objectId && draft.recovery.updateBase64 === record.updateBase64 && draft.text === record.text);
     if (existing) replaceOrphanedDraft(workspaceId, record.path, existing.id, record.text, recovery);

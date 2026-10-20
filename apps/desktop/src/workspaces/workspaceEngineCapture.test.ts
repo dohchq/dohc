@@ -1960,6 +1960,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
     if (store === "kept") {
       expect(drafts).toEqual(["typed"]);
+      expect(preserveUnsentState).toHaveBeenCalledWith(expect.objectContaining({path: "notes/a.md", reason: "deleted"}));
       expect(notices).not.toHaveBeenCalled();
     } else {
       expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
