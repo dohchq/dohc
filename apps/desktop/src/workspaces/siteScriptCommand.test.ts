@@ -190,10 +190,10 @@ describe("commandForSiteScript", () => {
 
 describe("commandForSiteScript loopback defaults", () => {
   it.each([
-    ["npm", ["run", "dev", "--", "--hostname", "127.0.0.1"]],
-    ["pnpm", ["dev", "--hostname", "127.0.0.1"]],
-    ["yarn", ["dev", "--hostname", "127.0.0.1"]],
-    ["bun", ["run", "dev", "--hostname", "127.0.0.1"]],
+    ["npm", ["run", "dev", "--", "--hostname", "localhost"]],
+    ["pnpm", ["dev", "--hostname", "localhost"]],
+    ["yarn", ["dev", "--hostname", "localhost"]],
+    ["bun", ["run", "dev", "--hostname", "localhost"]],
   ] as const)("starts a package.json next dev script on loopback through %s", (manager, args) => {
     const site = packageSite({
       packageManager: manager,
@@ -209,7 +209,7 @@ describe("commandForSiteScript loopback defaults", () => {
 
     expect(commandForSiteScript(site, "start")).toEqual({
       command: "npm",
-      args: ["run", "start", "--", "--hostname", "127.0.0.1"],
+      args: ["run", "start", "--", "--hostname", "localhost"],
     });
   });
 
@@ -230,7 +230,7 @@ describe("commandForSiteScript loopback defaults", () => {
 
     expect(commandForSiteScript(site, "dev")).toEqual({
       command: "npm",
-      args: ["run", "dev", "--silent", "--", "--port", "4000", "--hostname", "127.0.0.1"],
+      args: ["run", "dev", "--silent", "--", "--port", "4000", "--hostname", "localhost"],
     });
   });
 
@@ -255,15 +255,15 @@ describe("commandForSiteScript loopback defaults", () => {
 
     expect(commandForSiteScript(site, "dev")).toEqual({
       command: "pnpm",
-      args: ["serve", "--hostname", "127.0.0.1"],
+      args: ["serve", "--hostname", "localhost"],
     });
   });
 
   it.each([
-    ["vite", ["run", "dev", "--", "--host", "127.0.0.1"]],
-    ["vite --port 5174", ["run", "dev", "--", "--host", "127.0.0.1"]],
-    ["vite preview", ["run", "dev", "--", "--host", "127.0.0.1"]],
-    ["vite --host localhost", ["run", "dev"]],
+    ["vite", ["run", "dev", "--", "--host", "localhost"]],
+    ["vite --port 5174", ["run", "dev", "--", "--host", "localhost"]],
+    ["vite preview", ["run", "dev", "--", "--host", "localhost"]],
+    ["vite --host 127.0.0.1", ["run", "dev"]],
     ["vite build --watch", ["run", "dev"]],
   ])("handles a %s dev script", (dev, args) => {
     const site = packageSite({ configuredScripts: {}, scripts: { dev } });
@@ -281,7 +281,7 @@ describe("commandForSiteScript loopback defaults", () => {
       });
 
       const command = commandForSiteScript(site, "start");
-      expect(command.env).toEqual({ HOST: "127.0.0.1" });
+      expect(command.env).toEqual({ HOST: "localhost" });
       expect(command.args).not.toContain("--host");
     },
   );
@@ -298,11 +298,11 @@ describe("commandForSiteScript loopback defaults", () => {
   it("starts a configured literal command on loopback", () => {
     expect(commandForSiteScript(packageSite({ configuredScripts: { dev: "next dev" } }), "dev")).toEqual({
       command: "next",
-      args: ["dev", "--hostname", "127.0.0.1"],
+      args: ["dev", "--hostname", "localhost"],
     });
     expect(
       commandForSiteScript(packageSite({ configuredScripts: { dev: "react-scripts start" } }), "dev").env,
-    ).toEqual({ HOST: "127.0.0.1" });
+    ).toEqual({ HOST: "localhost" });
   });
 
   it.each(["next dev && node notify.mjs", "node server.mjs", "next lint", "nextjs dev", "react-scripts test"])(

@@ -23,7 +23,9 @@ interface PackageManagerScriptRun {
   forwardedArgs: string[];
 }
 
-const LOOPBACK_HOST = "127.0.0.1";
+// localhost keeps each tool's default origin, so OAuth callbacks, cookies, and
+// HMR settings that name it keep working.
+const LOOPBACK_HOST = "localhost";
 
 // Next.js and Create React App listen on every interface when no host is
 // given, yet still print a localhost URL. Vite listens on localhost, but a
