@@ -610,7 +610,7 @@ export async function withReleaseKeychain({ dryRun, keychain }, action, run = ca
 
 async function main() {
   // One release command at a time on this Mac. Under the scheduled nightly job, this command already holds the lock.
-  const locked = process.platform === "darwin" ? underReleaseLock(RELEASE_LOCK) : null;
+  const locked = process.platform === "darwin" ? await underReleaseLock(RELEASE_LOCK) : null;
   if (locked !== null) {
     process.exitCode = locked;
     return;

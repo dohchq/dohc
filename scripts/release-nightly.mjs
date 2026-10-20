@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { RELEASE_LOCK, RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
-import { LOCK_BUSY, releaseLockHeld, underReleaseLock } from "./release-lock.mjs";
+import { LOCK_BUSY, heldLockOptions, releaseLockHeld, underReleaseLock } from "./release-lock.mjs";
 import { repoRootFromScript } from "./resolve-desktop-release.mjs";
 import { LEGACY_NIGHTLIES } from "./select-upgrade-nightly.mjs";
 import { guiDomain, launchAgentsDir, launchPath, listRequests, plist, plistText, queueRoot, terminalStates } from "./verification/queue.mjs";
@@ -166,7 +166,8 @@ export async function runNightly({ dryRun = false }, {
   run = capture, repo = RELEASE_REPOSITORY, root = queueRoot(), wait = delay, now = Date.now, log = console.log,
   queueIdle = () => waitForQueue(root, { wait, now }),
   verifiedHead = () => verifiedNightly(listRequests(root))?.request.head ?? null,
-  addMacFiles = tag => spawnSync(process.execPath, [join(repoRootFromScript(), "scripts/release-desktop-macos.mjs"), "--version", tag, "--channel", "nightly"], { cwd: repoRootFromScript(), stdio: "inherit" }).status,
+  // The macOS command runs under the job's hold on the release lock.
+  addMacFiles = tag => spawnSync(process.execPath, [join(repoRootFromScript(), "scripts/release-desktop-macos.mjs"), "--version", tag, "--channel", "nightly"], { cwd: repoRootFromScript(), ...heldLockOptions(RELEASE_LOCK) }).status,
 } = {}) {
   checkCheckout(run, repo);
   const reports = [];
@@ -279,7 +280,7 @@ async function main() {
   if (command === "report" && rest.length === 1) return post(rest[0]);
   if (command !== "run" || rest.some(arg => arg !== "--dry-run")) throw new Error(USAGE);
   // The whole run, including the macOS command it starts, holds the release lock.
-  const locked = underReleaseLock(RELEASE_LOCK);
+  const locked = await underReleaseLock(RELEASE_LOCK);
   if (locked === LOCK_BUSY) post("Another release command on the Mac mini was running, so the nightly job did not run tonight.");
   if (locked !== null) {
     process.exitCode = locked;

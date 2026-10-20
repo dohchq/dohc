@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { load } from "js-yaml";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
 import { NIGHTLY_AGENT_LABEL, nightlyAgentDefinition, nightlyDecision, runNightly, runTitle, verifiedNightly, waitForQueue, waitForRun } from "./release-nightly.mjs";
-import { LOCK_BUSY, releaseLockHeld } from "./release-lock.mjs";
+import { LOCK_BUSY, heldLockOptions, releaseLockHeld } from "./release-lock.mjs";
 
 const temporaryDirectories = [];
 async function mkdtemp(prefix) {
@@ -1769,30 +1769,54 @@ test("the nightly job waits for the verification queue to finish, up to its limi
   assert.equal(clock, 5000);
 });
 
-test("release commands on the Mac take one lock that the system releases with the last process holding it", { skip: process.platform === "win32" }, async () => {
+test("release commands on the Mac take one lock, hand it to the macOS command they start, and lose it only with the last process holding it", { skip: process.platform === "win32" }, async t => {
   const dir = await mkdtemp(join(tmpdir(), "dohc-release-lock-"));
+  // Whatever the outcome, stop every command this test started.
+  t.after(() => {
+    for (const role of ["parent", "child", "other", "graceful"]) {
+      try { process.kill(Number(readFileSync(join(dir, `${role}.pid`), "utf8")), "SIGKILL"); } catch { /* not started or already gone */ }
+    }
+  });
   const lock = join(dir, "release.lock");
   const script = join(dir, "hold.mjs");
-  // Under the lock, the command starts a child that inherits it, then waits to be stopped.
+  const lockModule = pathToFileURL(fileURLToPath(new URL("./release-lock.mjs", import.meta.url))).href;
+  // A release command: "parent" starts a child release command under its hold, as the nightly job starts the macOS command.
   await writeFile(script, `import { spawn } from "node:child_process";
-import { underReleaseLock } from ${JSON.stringify(pathToFileURL(fileURLToPath(new URL("./release-lock.mjs", import.meta.url))).href)};
-const locked = underReleaseLock(process.argv[2]);
+import { writeFileSync } from "node:fs";
+import { heldLockOptions, underReleaseLock } from ${JSON.stringify(lockModule)};
+const [lock, role, dir] = process.argv.slice(2);
+const locked = await underReleaseLock(lock);
 if (locked !== null) process.exit(locked);
-if (process.argv[3] === "child") spawn(process.execPath, [process.argv[1], process.argv[2]], { stdio: "inherit" });
+if (role === "parent") spawn(process.execPath, [process.argv[1], lock, "child", dir], heldLockOptions(lock));
+if (role === "graceful") process.on("SIGTERM", () => setTimeout(() => { writeFileSync(dir + "/cleaned", ""); process.exit(0); }, 200));
+writeFileSync(dir + "/" + role + ".pid", String(process.pid));
 setInterval(() => {}, 1000);
 `);
-  const holder = spawn(process.execPath, [script, lock, "child"], { stdio: "ignore", env: { ...process.env, DOHC_RELEASE_LOCK_HELD: "" } });
-  for (const deadline = Date.now() + 10_000; !releaseLockHeld(lock); await new Promise(resolve => setTimeout(resolve, 50))) {
-    if (Date.now() > deadline) assert.fail("the first command never took the lock");
-  }
-  const second = await promisify(execFile)(process.execPath, [script, lock], { timeout: 10_000, env: { ...process.env, DOHC_RELEASE_LOCK_HELD: "" } }).then(() => 0, error => error.code);
-  assert.equal(second, LOCK_BUSY, "a second command does not run while the first holds the lock");
-  // Killed outright, the holder leaves no stale lock once its processes are gone.
-  spawnSync("pkill", ["-KILL", "-f", script]);
-  for (const deadline = Date.now() + 10_000; releaseLockHeld(lock); await new Promise(resolve => setTimeout(resolve, 50))) {
-    if (Date.now() > deadline) assert.fail("the lock outlived the commands that held it");
-  }
-  holder.kill("SIGKILL");
+  const clean = { ...process.env, DOHC_RELEASE_LOCK_HELD: "", DOHC_RELEASE_LOCK_FD: "" };
+  const until = async (check, what) => {
+    for (const deadline = Date.now() + 10_000; !check(); await new Promise(resolve => setTimeout(resolve, 50))) if (Date.now() > deadline) assert.fail(what);
+  };
+  const competing = () => promisify(execFile)(process.execPath, [script, lock, "other", dir], { timeout: 10_000, env: clean }).then(() => 0, error => error.code);
+  const pidOf = role => Number(readFileSync(join(dir, `${role}.pid`), "utf8"));
+
+  const job = spawn(process.execPath, [script, lock, "parent", dir], { stdio: "ignore", env: clean });
+  await until(() => existsSync(join(dir, "child.pid")), "the child release command never started");
+  assert.equal(await competing(), LOCK_BUSY, "a release run by hand does not start while the job runs");
+  process.kill(pidOf("parent"), "SIGKILL");
+  await new Promise(resolve => job.once("exit", resolve));
+  assert.equal(await competing(), LOCK_BUSY, "the child still holds the lock after the job is killed");
+  process.kill(pidOf("child"), "SIGKILL");
+  await until(() => !releaseLockHeld(lock), "the lock outlived the last process holding it");
+
+  // A signal sent to the command someone started reaches the run under the lock, which cleans up before the command exits.
+  const started = spawn(process.execPath, [script, lock, "graceful", dir], { stdio: "ignore", env: clean });
+  await until(() => existsSync(join(dir, "graceful.pid")), "the run under the lock never started");
+  const exited = new Promise(resolve => started.once("exit", code => resolve(code)));
+  started.kill("SIGTERM");
+  assert.equal(await exited, 0);
+  assert.equal(existsSync(join(dir, "cleaned")), true);
+  assert.equal(releaseLockHeld(lock), false);
+  assert.throws(() => heldLockOptions(lock, clean), /does not hold/);
 });
 
 test("the nightly LaunchAgent runs at 04:00 in the login session from a clean checkout of main, and reports when it cannot update it", () => {
