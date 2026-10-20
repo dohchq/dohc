@@ -91,10 +91,9 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         .unwrap();
     std::fs::write(root.join("old.md"), "target body").unwrap();
     drop(store);
-    // Pause the normal watcher after its initial settled event. The RPC still
-    // runs its real fence, reconcile, compensation, and placement paths.
+    // Keep the pending-job proof independent of background watcher scheduling.
+    // The RPC still runs its real fence, reconcile, compensation, and placement.
     let probe = crate::capture_driver::CaptureApplyProbe::default();
-    probe.pause_at_initial_settled();
     let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
         probe.clone(),
     ));
@@ -107,13 +106,10 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         .await
         .unwrap();
     let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        probe.wait_at_initial_settled(),
-    )
-    .await
-    .unwrap();
     let open = service.open(Some(&handle)).unwrap();
+    lock(&open.capture).as_ref().unwrap().request_shutdown();
+    // Wait for the in-flight apply to leave before creating pending jobs.
+    drop(open.capture_apply_gate.lock().await);
     open.actor
         .versioned_text_rename(
             RenameTextFile {
@@ -267,6 +263,5 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         )
         .unwrap();
     }
-    probe.release_initial_settled();
     service.workspace_close(Some(handle)).await.unwrap();
 }
