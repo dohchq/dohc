@@ -207,8 +207,11 @@ export function AboutNote(props: {
 
 // The row that reads a list's next page, the same control while pages arrive,
 // so focus on it stays. `onMore` hears whether the row had focus when it was
-// pressed. With `onSeen`, the row coming into view reads the page too, and
-// each new answer named by `watch` checks again whether it is still in view.
+// pressed. With `onSeen`, the row coming into view reads the page too, and it
+// checks again whether it is in view each time `watch` changes. A caller
+// passes the rows: only a read that lands makes new rows, so a page that
+// failed, or was refused while the workspace updated, never asks again at
+// once. Try again, or the gathering's own wait, reads next.
 export function AboutMore(props: {
   testId: string;
   onMore: (focused: boolean) => void;
@@ -619,13 +622,17 @@ function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void })
 // its focus ring and hover fill sit inside it, so nothing is clipped.
 const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
+// What makes a row the same row from one page to the next.
+const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
+const chatLinkKey = (mention: ChatFileMentionRecord) => mention.attachment.attachmentId;
+
 const LinkList = memo(function LinkList(props: { rows: LinkEntry[]; onOpenLink: (path: string, line: number) => void }) {
   return (
     <ul data-testid="about-links-list" className="m-0 list-none p-0">
       {props.rows.map((link, index) => {
         const first = index === 0 || props.rows[index - 1]!.source !== link.source;
         return (
-          <li key={`${link.source}\0${link.ordinal}`} className={`${OFFSCREEN_ROW} ${first && index > 0 ? "mt-1.5" : ""}`}>
+          <li key={linkKey(link)} className={`${OFFSCREEN_ROW} ${first && index > 0 ? "mt-1.5" : ""}`}>
             <LinkRow link={link} first={first} onOpen={() => props.onOpenLink(link.source, link.line)} />
           </li>
         );
@@ -641,7 +648,7 @@ const ChatLinkList = memo(function ChatLinkList(props: {
   return (
     <ul data-testid="chat-file-mentions" className="m-0 list-none p-0">
       {props.rows.map((mention) => (
-        <li key={mention.attachment.attachmentId} className={OFFSCREEN_ROW}>
+        <li key={chatLinkKey(mention)} className={OFFSCREEN_ROW}>
           <ChatLinkRow mention={mention} onOpen={() => props.onOpenChat(mention)} />
         </li>
       ))}
@@ -683,7 +690,12 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
 // adds, so a keyboard reader goes on from there, and keeps a place when the
 // last page takes Show more away. Only while focus is still on Show more, or
 // was lost with it: a person who moved on keeps their place.
-function useFocusAddedRow(rows: readonly unknown[] | null, toggle: RefObject<HTMLButtonElement | null>, selector: string) {
+function useFocusAddedRow<Row>(
+  rows: readonly Row[] | null,
+  keyOf: (row: Row) => string,
+  toggle: RefObject<HTMLButtonElement | null>,
+  selector: string,
+) {
   const pressedFrom = useRef<Element | null | undefined>(undefined);
   const shown = useRef(rows);
   useEffect(() => {
@@ -695,16 +707,18 @@ function useFocusAddedRow(rows: readonly unknown[] | null, toggle: RefObject<HTM
       pressedFrom.current = undefined;
       return;
     }
-    // A page adds rows after the ones shown. A read from the start that
-    // lands first replaces them instead, and the press waits on its page.
-    const added = before !== null && rows.length > before.length && before.every((row, index) => rows[index] === row);
+    // A page adds rows after the ones shown, the same rows by key, though a
+    // row the page repeats is a new record. A read from the start that lands
+    // first replaces them instead, and the press waits on its page.
+    const added = before !== null && rows.length > before.length &&
+      before.every((row, index) => keyOf(rows[index]!) === keyOf(row));
     if (!added) return;
     pressedFrom.current = undefined;
     const section = toggle.current?.closest("section");
     const active = document.activeElement;
     const lost = active === null || active === document.body || (section != null && active.contains(section));
     if (active === from || lost) section?.querySelectorAll<HTMLElement>(selector)[before.length]?.focus();
-  }, [rows, selector, toggle]);
+  }, [keyOf, rows, selector, toggle]);
   return useCallback(() => {
     pressedFrom.current = document.activeElement;
   }, []);
@@ -733,8 +747,8 @@ export function AboutLinksView(props: {
   const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
   const ownToggle = useRef<HTMLButtonElement>(null);
   const toggleRef = props.toggleRef ?? ownToggle;
-  const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, toggleRef, '[data-testid="about-link"]');
-  const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, toggleRef, '[data-testid="chat-file-mention"]');
+  const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, linkKey, toggleRef, '[data-testid="about-link"]');
+  const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, chatLinkKey, toggleRef, '[data-testid="chat-file-mention"]');
   return (
     <AboutSection id="links" icon={Link} label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}
       toggleRef={toggleRef}>
@@ -756,7 +770,7 @@ export function AboutLinksView(props: {
           ) : null}
           {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
           {links.next !== null ? (
-            <AboutMore testId="about-links-more" watch={links}
+            <AboutMore testId="about-links-more" watch={links.rows}
               onMore={(focused) => {
                 if (focused) focusAddedLink();
                 props.onMoreLinks(links);
@@ -777,7 +791,7 @@ export function AboutLinksView(props: {
         <>
           {chats.rows.length > 0 ? <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} /> : null}
           {chats.next !== null ? (
-            <AboutMore testId="about-chat-links-more" watch={chats}
+            <AboutMore testId="about-chat-links-more" watch={chats.rows}
               onMore={(focused) => {
                 if (focused) focusAddedChat();
                 props.onMoreChats(chats);

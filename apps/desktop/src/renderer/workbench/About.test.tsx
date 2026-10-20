@@ -586,6 +586,31 @@ function chatPage(entries: ChatFileMentionRecord[], nextCursor: string | null = 
 const updating = (channel: string) => new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(new DaemonRefusalError(
   { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, null)))}`);
 
+// IntersectionObserver for rows that are in view: it reports once on
+// observe, as the browser's first report does.
+function observeAllInView() {
+  vi.stubGlobal("IntersectionObserver", class {
+    private live = true;
+    private readonly callback: IntersectionObserverCallback;
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback;
+    }
+    observe(target: Element) {
+      void Promise.resolve().then(() => {
+        if (this.live) this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      });
+    }
+    disconnect() {
+      this.live = false;
+    }
+  });
+}
+
+// Lets every answer, render and observer report that is already due land.
+async function settleAll() {
+  for (let round = 0; round < 6; round += 1) await act(async () => {});
+}
+
 const openLink = vi.fn<(path: string, line: number) => void>();
 const openChat = vi.fn<(mention: ChatFileMentionRecord) => void>();
 
@@ -706,6 +731,57 @@ describe("About Links", () => {
     seen();
     await waitFor(() => expect(linkRows()).toHaveLength(2));
     expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", "two"]);
+  });
+
+  it("asks once for a page that keeps failing, files one Notices row, and asks again only on Try again", async () => {
+    observeAllInView();
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+      .mockRejectedValue(new Error("engine unavailable"));
+    render(<Links />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledOnce());
+    await settleAll();
+    // Show more is still in view, and asks nothing more.
+    expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+    expect(notices.report).toHaveBeenCalledOnce();
+    expect(linkRows()).toHaveLength(1);
+    expect(screen.getByTestId("about-links-more")).toBeTruthy();
+
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+      .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
+    const report = notices.report.mock.calls[0]![0] as { retry: () => void };
+    await act(async () => report.retry());
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", undefined, "one"]);
+  });
+
+  it("waits out the gathering's backoff when the next page is refused while the workspace updates", async () => {
+    vi.useFakeTimers();
+    try {
+      observeAllInView();
+      bridgeMock.linksIn
+        .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+        .mockRejectedValueOnce(updating("desktop:links-in"))
+        .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+        .mockResolvedValue(linksPage([link("notes/beta.md", 5)]));
+      render(<Links />);
+      await settleAll();
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      expect(notices.report).not.toHaveBeenCalled();
+
+      await act(async () => vi.advanceTimersByTimeAsync(249));
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      // The read from the start lands, and Show more, still in view, reads on.
+      await settleAll();
+      expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", undefined, "one"]);
+      expect(linkRows()).toHaveLength(2);
+      expect(screen.queryByRole("status")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads Show more after a read again lands, so a page never lands on rows that read replaced", async () => {
@@ -1092,15 +1168,23 @@ describe("About Links", () => {
     expect(screen.getByTestId("about-links-count").textContent).toBe("2");
   });
 
-  it("reads the next page of chats that link here, and shows a row repeated across pages once", async () => {
+  it("reads the next page of chats that link here, shows a row repeated across pages once, and focuses the row it adds", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([]));
     bridgeMock.chatFileMentionsPage
       .mockResolvedValueOnce(chatPage([chatLink("one")], "next"))
       .mockResolvedValueOnce(chatPage([chatLink("one"), chatLink("two")]));
+    const user = userEvent.setup();
     render(<Links chats />);
-    await userEvent.setup().click(await screen.findByTestId("about-chat-links-more"));
+    const more = await screen.findByTestId("about-chat-links-more");
+    more.focus();
+    await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(2));
     expect(bridgeMock.chatFileMentionsPage).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" }, cursor: "next" });
+    // The repeated row is a new record, the same row by key; the last page
+    // took Show more away, and focus lands on the row it added.
+    expect(screen.queryByTestId("about-chat-links-more")).toBeNull();
+    expect(document.activeElement).toBe(screen.getAllByTestId("chat-file-mention")[1]);
+    expect(document.activeElement?.getAttribute("data-thread-id")).toBe("thread-two");
   });
 
   it.each(["chat-mention-access-changed", "chat-mention-version-changed"])(
