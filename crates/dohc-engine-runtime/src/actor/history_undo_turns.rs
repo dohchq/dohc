@@ -42,14 +42,31 @@ fn inverse_input(
 ) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
         let text = link_inverse_input(conn, ws, version, &member.effect)?;
-        let key = DocKey::new(ws, version, &member.effect.object_id)?;
+        let live = inverse_live_edit(conn,ws,version,member,&text,open)?;
+        Ok(Some(Inverse { text, live }))
+    } else {
+        Ok(None)
+    }
+}
+fn inverse_live_edit(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    member: &Member,
+    text: &str,
+    open: Option<&(
+        super::super::link_documents::DocumentIsOpen,
+        super::super::link_documents::DocumentResync,
+    )>,
+) -> Result<Option<super::super::link_documents::Edit>,RuntimeError> {
+    let key = DocKey::new(ws, version, &member.effect.object_id)?;
         let live = if open.is_some_and(|(is_open, _)| is_open(&key)) {
             let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![ws,version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
             let before = dohc_engine_storage::text::read(conn, &head)
                 .map_err(StorageError::corrupt_public)?;
             Some(
-                super::super::link_documents::prepare(conn, &key, &before, &text)?.ok_or(
+                super::super::link_documents::prepare(conn, &key, &before, text)?.ok_or(
                     DomainError::UndoRefused {
                         path: member.effect.path.clone(),
                         reason: "wikilink element unavailable",
@@ -59,11 +76,9 @@ fn inverse_input(
         } else {
             None
         };
-        Ok(Some(Inverse { text, live }))
-    } else {
-        Ok(None)
-    }
+    Ok(live)
 }
+
 fn corrupt() -> RuntimeError {
     DomainError::StateCorrupt {
         reason: "Undo progress",
@@ -787,8 +802,8 @@ impl ActorHandle {
                                 crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
                                 let mut inverse = inverse?;
                                 let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
-                                if member.effect.operation == "write" {
-                                    inverse = inverse_input(tx,&p.workspace,&p.version,member,turn_open.as_ref())?;
+                                if let Some(inverse) = inverse.as_mut() {
+                                    inverse.live = inverse_live_edit(tx,&p.workspace,&p.version,member,&inverse.text,turn_open.as_ref())?;
                                 }
                                 let live = inverse.as_ref().and_then(|i| i.live.as_ref());
                                 let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
