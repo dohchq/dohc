@@ -2,7 +2,8 @@ import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/
 import {resolve} from "node:path";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {afterEach, expect, it, vi} from "vitest";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {startServerOwnerDelivery} from "./serverOwnerDelivery";
 import type {OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
 import {runNativeOwnerDeliveryPass} from "./nativeOwnerDelivery";
 import {parseDesktopOwnerDeliveryConfig} from "./desktopOwnerDelivery";
@@ -19,7 +20,28 @@ const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: re
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]});
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {vi.clearAllMocks(); vi.useRealTimers();});
+
+it("keeps a known-document preparation overload on the work retry cadence", async () => {
+  vi.useFakeTimers();
+  const client = {ownerYDocPrepareEnrollment: vi.fn().mockRejectedValue(
+    new EngineRequestError(1, {code: "OVERLOADED", message: "live-settlement-capacity", retry: "afterBackoff"}))};
+  const runPass = vi.fn(async (_workspace: string, _index: number, signal: AbortSignal) => {
+    const outcome = await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
+      document: config.documents[0]!, signal, bearer: "credential", accountId: "owner", assertCurrent() {}});
+    return {documentCount: 1, acknowledged: outcome === "acknowledged"};
+  });
+  const onError = vi.fn(), owner = startServerOwnerDelivery({workspaceIds: () => ["workspace"],
+    attemptTimeoutMs: config.attemptTimeoutMs, retryDelayMs: config.retryDelayMs, runPass, onError});
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runPass).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(config.retryDelayMs + 1);
+    expect(runPass).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    expect(mock.drain).not.toHaveBeenCalled();
+  } finally {await owner.stop();}
+});
 
 it("advances only from captured native positions and checks exact receipts", async () => {
   const receipt = {deliveryId: "delivery", updateDigest: "b".repeat(64), journalCursor: 8, acceptingHostEpoch: parseHostEpoch(1)};
