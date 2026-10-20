@@ -437,11 +437,12 @@ export async function verify(args) {
         throw error;
       }
     }
-    // Rust in the host's WSL distro, beside the Windows job: clippy for a PR, the whole Rust job for a full run.
+    // Rust in the host's WSL distro, beside the Windows job: clippy and the compiler owner's tests for a PR,
+    // the whole Rust job for a full run.
     async function linuxJob() {
       if (!linux) return;
       const linuxOutput = join(output, "rust-linux");
-      const mode = full ? "gate" : "clippy";
+      const mode = full ? "gate" : "pr";
       let receipt;
       let scope;
       try {
