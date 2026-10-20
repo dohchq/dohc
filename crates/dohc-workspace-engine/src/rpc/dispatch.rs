@@ -601,6 +601,10 @@ impl EngineService {
                 self.capture_release(request.workspace, request.params)
                     .await?
             }
+            "capture.duplicateFile" => {
+                self.capture_duplicate_file(request.workspace, request.params)
+                    .await?
+            }
             "capture.moveFile" => {
                 self.capture_move_file(request.workspace, request.params)
                     .await?
@@ -802,6 +806,10 @@ impl EngineService {
             }
             "chats.attachments.listForThread" => {
                 self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.conversations.listLinks" => {
+                self.chats_conversations_list_links(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.attachments.listFileMentions" => {
@@ -1474,6 +1482,7 @@ mod tests {
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
+            "chats.conversations.listLinks",
             "chats.attachments.listForThread",
             "chats.bookmarks.archive",
             "chats.bookmarks.find",

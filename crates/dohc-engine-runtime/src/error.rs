@@ -11,6 +11,8 @@ pub enum RuntimeError {
     ChatMentionAccessChanged,
     #[error("chat-mention-version-changed")]
     ChatMentionVersionChanged,
+    #[error("chat-conversation-links-changed")]
+    ChatConversationLinksChanged,
     #[error("links-edges-source-changed")]
     LinksEdgesSourceChanged,
     #[error("capture-file-held: {path}")]
@@ -131,6 +133,7 @@ impl RuntimeError {
         match self {
             RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
+            RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",

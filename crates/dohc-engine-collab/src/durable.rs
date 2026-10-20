@@ -2490,6 +2490,27 @@ pub fn encode_origination_base_in_tx(
     if doc.has_missing_updates() {
         return Ok(None);
     }
+    // A rolled-back first append must propose the same E lineage on retry.
+    // Re-encoding JSON mark attributes can change their map order and hash.
+    if doc.has_reader_source() && marker.head_update_seq == 1 && marker.head_snapshot_seq == 0 {
+        let seed: Option<String> = tx.query_row(
+            "SELECT update_blob_sha256 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=1 AND is_seed=1",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+        ).optional().map_err(map_sql)?;
+        if let Some(seed) = seed {
+            let bytes = binary_blob_for_gate(tx, &seed)?;
+            let original = Ydoc::wire();
+            original.apply(&bytes)?;
+            if !original.has_missing_updates()
+                && crate::replay_parity::structurally_equal_v2(&doc, &original)?
+            {
+                return Ok(Some(OriginationBase {
+                    base: bytes,
+                    state_vector: doc.encode_state_vector(),
+                }));
+            }
+        }
+    }
     Ok(Some(OriginationBase {
         base: doc.encode_full_state(),
         state_vector: doc.encode_state_vector(),

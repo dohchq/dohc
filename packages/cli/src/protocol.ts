@@ -182,6 +182,7 @@ const fileMoveArgsSchema = z.object({
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
+const fileDuplicateArgsSchema = z.object({...argsBase, path: documentPathArg, agent: documentAgentNameSchema.optional(), requestId: requestIdSchema}).strict();
 const fileDeleteArgsSchema = z.object({
   ...argsBase,
   path: documentPathArg,
@@ -452,6 +453,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("historyOperation"), args: historyOperationArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema }).strict(),
+  z.object({...requestBase, verb: z.literal("fileDuplicate"), args: fileDuplicateArgsSchema}).strict(),
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
@@ -524,6 +526,7 @@ export const CLI_CAPABILITIES = {
   collectionSetFields: ["collection.record.edit"],
   collectionCreateRecord: ["collection.record.create"],
   fileWrite: ["file.write"],
+  fileDuplicate: ["file.duplicate"],
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
@@ -1375,6 +1378,7 @@ export const cliResultSchemas = {
   fileWrite: fileWriteResultSchema,
   historyOperation: HistoryOperationReadResult,
   historyUndo: HistoryOperationUndoResult,
+  fileDuplicate: z.discriminatedUnion("ok", [z.object({ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), materialized: z.boolean()}).strict(), z.object({ok: z.literal(false), reason: z.string()}).strict()]),
   fileMove: fileMoveResultSchema,
   fileDelete: fileDeleteResultSchema,
   dataset: DatasetResult,

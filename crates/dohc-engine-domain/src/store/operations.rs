@@ -127,6 +127,22 @@ fn preflight_originals_in(
                 reason: "multiple changes to one object",
             });
         }
+        let current = get_snapshot(conn, ws, version, &effect.object_id)?;
+        if effect.operation == "write"
+            && super::is_duplicate_in(conn, ws, operation, effect.moment_order)?
+        {
+            if !current.as_ref().is_some_and(|head| {
+                head.path == effect.path && head.latest_moment_id == effect.moment_id
+            }) || alias_object_id(conn, ws, version, &effect.path)?.as_deref()
+                != Some(effect.object_id.as_str())
+            {
+                return Err(DomainError::UndoRefused {
+                    path: effect.path.clone(),
+                    reason: "copy changed after Duplicate",
+                });
+            }
+            continue;
+        }
         let old = if effect.operation == "rename" {
             effect
                 .before_path
@@ -241,13 +257,26 @@ pub fn undo_correlation_id(ws: &str, operation: &str, request: &str) -> String {
     )
 }
 
-pub fn undo_request_fingerprint(ws: &str, operation: &str, author: Option<&str>) -> String {
-    hash_fields(&[
-        b"history.undo",
-        ws.as_bytes(),
-        operation.as_bytes(),
-        author.unwrap_or("").as_bytes(),
-    ])
+pub fn undo_request_fingerprint(
+    conn: &Connection,
+    ws: &str,
+    operation: &str,
+    author: Option<&str>,
+) -> Result<String, DomainError> {
+    let duplicate: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3)",
+        params![format!("duplicate_{operation}"), ws, operation], |row| row.get(0),
+    ).map_err(DomainError::sql_corrupt)?;
+    Ok(if duplicate {
+        hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes()])
+    } else {
+        hash_fields(&[
+            b"history.undo",
+            ws.as_bytes(),
+            operation.as_bytes(),
+            author.unwrap_or("").as_bytes(),
+        ])
+    })
 }
 
 fn checked_undo_request_in(
@@ -262,7 +291,7 @@ fn checked_undo_request_in(
     let Some(recorded) = lookup_request(conn, request)? else {
         return Ok(None);
     };
-    if recorded.payload_hash != undo_request_fingerprint(ws, operation, author) {
+    if recorded.payload_hash != undo_request_fingerprint(conn, ws, operation, author)? {
         return Err(DomainError::IdempotencyKeyReuseMismatch);
     }
     Ok(Some(recorded))
@@ -322,7 +351,44 @@ where
     F: FnMut(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
 {
     let id = undo_member_moment_id(correlation, &effect.moment_id);
-    let moment = if effect.operation == "rename" {
+    let moment = if effect.operation == "write"
+        && super::is_duplicate_in(
+            tx,
+            ws,
+            &get_moment(tx, ws, &effect.moment_id)?
+                .ok_or(DomainError::FileNotFound)?
+                .metadata_correlation_id
+                .unwrap_or_default(),
+            effect.moment_order,
+        )? {
+        let current = get_snapshot(tx, ws, version, &effect.object_id)?;
+        if !current.as_ref().is_some_and(|head| {
+            head.path == effect.path && head.latest_moment_id == effect.moment_id
+        }) {
+            return Err(DomainError::UndoRefused {
+                path: effect.path,
+                reason: "copy changed after Duplicate",
+            });
+        }
+        super::delete_text_in_tx_checked(
+            tx,
+            &crate::DeleteTextFile {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                path: effect.path,
+                moment_id: id,
+                request_id: None,
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Undo Duplicate".into()),
+                metadata_correlation_id: Some(correlation.into()),
+                author_json: author.map(str::to_owned),
+                now_ms: now,
+            },
+            Some(&effect.object_id),
+            None,
+        )?
+        .moment
+    } else if effect.operation == "rename" {
         rename_text_in_tx(
             tx,
             &RenameTextFile {

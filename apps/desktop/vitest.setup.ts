@@ -56,6 +56,20 @@ if (
   });
 }
 
+// jsdom runs no animations and has no document.getAnimations. A theme change
+// reads it to end the color transitions it starts (theme.ts); with nothing
+// animated, no animation is the honest answer.
+if (
+  typeof document !== "undefined" &&
+  typeof document.getAnimations !== "function"
+) {
+  Object.defineProperty(document, "getAnimations", {
+    configurable: true,
+    writable: true,
+    value: () => [],
+  });
+}
+
 // Testing Library's own 1 s default for waitFor and findBy* failed loaded runs
 // with "Unable to find" while the product was healthy. A full gate beside other
 // work then missed a 5 s wait for the source-view toggle that passes alone.

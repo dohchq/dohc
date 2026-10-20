@@ -18,7 +18,7 @@ export interface CompilerProcessRuntime {
   nodeExecutable: string;
   workerPath: string;
   workerArgs?: readonly string[];
-  /** macOS: the installed compiler-owner. The worker's directory is the only tree the build may read and run. */
+  /** macOS and Linux: the installed compiler-owner. The worker's directory is the only tree the build may read and run. */
   ownerExecutable?: string;
   onOwnerSpawn?: (pid: number) => void;
 }
@@ -60,8 +60,8 @@ function windowsOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBo
   return { child, stop: () => child.kill("SIGKILL"), finish: async () => {}, reasons: new Map([[124, { reason: "timeout", message: "Compiler owner timed out." }]]) };
 }
 
-// The macOS owner's exit codes, from crates/dohc-compiler-owner/src/supervise.rs.
-const macosReasons = new Map<number, { reason: CompilerProcessError["reason"]; message: string }>([
+// The owner's exit codes, from crates/dohc-compiler-owner/src/supervise.rs.
+const ownerReasons = new Map<number, { reason: CompilerProcessError["reason"]; message: string }>([
   [122, { reason: "processes", message: "Compiler process bound exceeded." }],
   [123, { reason: "memory", message: "Compiler memory bound exceeded." }],
   [124, { reason: "timeout", message: "Compiler owner timed out." }],
@@ -90,13 +90,13 @@ async function killProcessGroup(group: number): Promise<void> {
 }
 
 /**
- * The owner leads a new process group, confines the worker with Seatbelt, and
- * samples memory and process count. It stops every process it tracks when
+ * The owner leads a new process group, confines the worker with Seatbelt on
+ * macOS or Landlock and seccomp on Linux, and samples memory and process count. It stops every process it tracks when
  * a bound trips, the deadline passes, or its lifeline on descriptor 3 ends.
  * It removes the build directory itself, without following symlinks a
  * process that escaped its tree may have put there.
  */
-async function macosOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): Promise<CompilerOwner> {
+async function confinedOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): Promise<CompilerOwner> {
   if (!runtime.ownerExecutable || !isAbsolute(runtime.ownerExecutable)) throw new Error("Compiler runtime paths must be absolute.");
   const directory = await mkdtemp(join(tmpdir(), "dohc-app-compiler-"));
   const child = spawn(runtime.ownerExecutable, [String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes),
@@ -130,13 +130,13 @@ async function macosOwner(runtime: CompilerProcessRuntime, bounds: CompilerProce
       // that is not empty stays for the system to clear from the temporary folder.
       await rmdir(directory).catch(() => {});
     },
-    reasons: macosReasons,
+    reasons: ownerReasons,
   };
 }
 
 /** Runs one compile under an owner that bounds and stops everything the worker starts. */
 export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, request: CompilerProcessRequest): Promise<CompilerProcessResult> {
-  if (process.platform !== "win32" && process.platform !== "darwin") throw new Error("Compiler process limits are unavailable on this platform.");
+  if (!["win32", "darwin", "linux"].includes(process.platform)) throw new Error("Compiler process limits are unavailable on this platform.");
   const bounds = { ...request.bounds };
   const signal = request.signal;
   const onOwnerSpawn = runtime.onOwnerSpawn;
@@ -149,7 +149,7 @@ export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, r
   if (!isAbsolute(runtime.nodeExecutable) || !isAbsolute(runtime.workerPath)) throw new Error("Compiler runtime paths must be absolute.");
   if (signal?.aborted) throw new CompilerProcessError("cancelled", "Compiler cancelled.");
   const input = Buffer.from(request.input);
-  const owner = process.platform === "win32" ? windowsOwner(runtime, bounds, input.byteLength) : await macosOwner(runtime, bounds, input.byteLength);
+  const owner = process.platform === "win32" ? windowsOwner(runtime, bounds, input.byteLength) : await confinedOwner(runtime, bounds, input.byteLength);
   const { child } = owner;
   return new Promise((resolve, reject) => {
     const stdout: Buffer[] = [], stderr: Buffer[] = [];

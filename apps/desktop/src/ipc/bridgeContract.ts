@@ -804,6 +804,9 @@ export type CreateWorkspaceFolderPayload = z.infer<
 >;
 
 // rename === move: one engine — F2, inline rename, and drag-drop all call it.
+export const DuplicateWorkspaceFilePayload = z.object({workspaceId: WORKSPACE_ID, relativePath: PATH_STRING}).strict();
+export const DuplicateWorkspaceFileResult = CreateWorkspaceFileResult.extend({...OperationRecovery.shape, materialized: z.boolean()});
+
 export const MoveWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   fromPath: PATH_STRING,
@@ -5583,9 +5586,9 @@ export const UnmountShareResult = z.object({
 });
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
-// Local agent integration. An agent run is a LOCAL concept: a small
-// record persisted to .dohc/agent-runs.json. Starting a run sets the watcher's
-// active-run slot, so the run's writes are attributed to the agent.
+// Local agent integration. An agent run is a LOCAL concept: a small record in
+// this installation's file under .dohc/agent-runs. Starting a run sets the
+// watcher's active-run slot, so the run's writes are attributed to the agent.
 export const AgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });

@@ -213,7 +213,7 @@ async function harness(options: {
   };
   let account = "account-alice";
   const deletedBy: string[] = [];
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
+  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
   const owner = createWorkspaceFileMutationOwner({
     historyFor: () => history,
     assertTrustedSender,
@@ -272,7 +272,9 @@ async function harness(options: {
           let gone = false;
           try {
             const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
-              recordDisk: async (_path, files) => [...files], moveFile: async () => false,
+              readDuplicate: async () => null, hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
+      recordDisk: async (_path, files) => [...files], moveFile: async () => false,
               rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });
             gone = removed(value).length > 0;
             return value;
@@ -306,6 +308,13 @@ async function openYDoc(
 }
 
 describe("WorkspaceFileMutationOwner", () => {
+  it("rejects untrusted Duplicate and forged operation ids before workspace admission", async () => {
+    const test = await harness();
+    const payload = {workspaceId: test.workspace.workspaceId, relativePath: "source.md"};
+    await expect(test.owner.duplicateFile({trusted: false}, payload)).rejects.toThrow("Untrusted renderer");
+    await expect(test.owner.duplicateFile(trustedEvent, {...payload, operationId: "dohc-operation:forged"})).rejects.toThrow();
+    expect(test.requireWorkspace).not.toHaveBeenCalled();
+  });
   it("stops an Undo waiting on system trash when its workspace retires", async () => {
     const test = await harness();
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
@@ -356,6 +365,7 @@ describe("WorkspaceFileMutationOwner", () => {
     };
     const workspaceId = test.workspace.workspaceId;
     const mutations = [
+      () => test.owner.duplicateFile(staleEvent, {workspaceId, relativePath: "source.md"}),
       () =>
         test.owner.createFile(staleEvent, {
           workspaceId,

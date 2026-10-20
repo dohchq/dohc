@@ -27,6 +27,7 @@ use std::{
 
 #[derive(Debug)]
 pub struct HistoryOperation {
+    pub kind: Option<&'static str>,
     pub operation_id: String,
     pub version_id: String,
     pub moments: Vec<OperationMoment>,
@@ -43,6 +44,74 @@ pub struct HistoryUndoResult {
 }
 
 impl ActorHandle {
+    pub async fn duplicate_file(
+        &self,
+        input: dohc_engine_domain::DuplicateFile,
+        root: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<HistoryOperation, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                let policy = crate::search::read_engine_search_policy(&root);
+                let outcome = store.write_with(
+                    faults.as_ref(),
+                    |tx| -> Result<HistoryOperation, RuntimeError> {
+                        dohc_engine_domain::ensure_no_pending_undo_in(tx, &input.workspace_id)?;
+                        let replay: bool = tx
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                                [format!("duplicate_{}", input.operation_id)],
+                                |r| r.get(0),
+                            )
+                            .map_err(StorageError::corrupt_public)?;
+                        if !replay {
+                            for path in [&input.from_path, &input.to_path] {
+                                dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                                    tx,
+                                    &input.workspace_id,
+                                    &input.version_id,
+                                    path,
+                                )?;
+                                super::capture::ensure_no_pending_undo_placement(
+                                    tx,
+                                    &input.workspace_id,
+                                    path,
+                                )?;
+                            }
+                        }
+                        let m = dohc_engine_domain::duplicate_file_in_tx(tx, &input)?;
+                        if !replay {
+                            publish_undo_member(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &policy,
+                                &m,
+                                input.now_ms,
+                            )?;
+                        }
+                        Ok(HistoryOperation {
+                            kind: Some("file-duplicate"),
+                            operation_id: input.operation_id.clone(),
+                            version_id: input.version_id.clone(),
+                            moments: dohc_engine_domain::operation_moments_in(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &input.operation_id,
+                            )?,
+                        })
+                    },
+                )?;
+                match outcome {
+                    TxnOutcome::Committed(result) => Ok(result),
+                    TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+                }
+            })
+        })
+        .await
+    }
+
     pub async fn preflight_history_undo(
         &self,
         ws: String,
@@ -228,12 +297,18 @@ impl ActorHandle {
         operation: String,
     ) -> Result<HistoryOperation, RuntimeError> {
         self.run(move |store, _| {
-            let version_id = VersionedTextStore::new(store)
-                .get_active_version(&ws)?
-                .version_id;
+            let duplicate_version: Option<String> = store.read_with(|conn| conn.query_row(
+                "SELECT m.version_id FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3",
+                params![format!("duplicate_{operation}"),ws,operation], |r| r.get(0)).optional().map_err(StorageError::corrupt_public))?;
+            let kind = duplicate_version.as_ref().map(|_| "file-duplicate");
+            let version_id = match duplicate_version {
+                Some(version) => version,
+                None => VersionedTextStore::new(store).get_active_version(&ws)?.version_id,
+            };
             let moments =
                 store.read_with(|conn| operation_moments_in(conn, &ws, &version_id, &operation))?;
             Ok(HistoryOperation {
+                kind,
                 operation_id: operation,
                 version_id,
                 moments,
@@ -352,17 +427,29 @@ fn check_undo_ownership(
     conn: &rusqlite::Connection,
     ws: &str,
     version: &str,
+    operation: &str,
     m: &OperationMoment,
 ) -> Result<(), RuntimeError> {
+    let duplicate = dohc_engine_domain::is_duplicate_in(conn, ws, operation, m.moment_order)?;
     let mut m = m.clone();
-    if m.operation == "write" {
+    if m.operation == "write" && !duplicate {
         m.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![ws,version,m.object_id], |r| r.get(0)).optional().map_err(StorageError::corrupt_public)?
             .ok_or(DomainError::UndoRefused {path:m.path,reason:"linking document removed"})?;
         m.before_path = None;
     }
     for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
-        check_path_ownership(conn, ws, version, &m.object_id, path)?;
+        if let Err(error) = check_path_ownership(conn, ws, version, &m.object_id, path) {
+            if duplicate
+                && matches!(
+                    error,
+                    RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)
+                )
+            {
+                return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
+            }
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -1500,7 +1587,46 @@ fn publish_undo_member(
     live: bool,
 ) -> Result<(), DomainError> {
     let mut journal_eligibility = None;
-
+    if m.operation == dohc_engine_domain::MomentOp::Delete {
+        let sha = m
+            .before_binary_sha256
+            .as_ref()
+            .or(m.before_blob_sha256.as_ref())
+            .ok_or(DomainError::FileNotFound)?;
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
+        enqueue_delete_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id: binary_rollback_job_identity(ws, version_id, &m.moment_id),
+                workspace_id: ws.into(),
+                target_path: m.path.clone(),
+                content_sha256: sha.clone(),
+                preimage: Preimage::Present(sha.clone()),
+                target_generation: m.moment_order,
+                now_ms: now,
+            },
+        )?;
+        journal_moment_outbound_with_batch_in_tx(
+            tx,
+            ws,
+            &m.moment_id,
+            false,
+            &mut journal_eligibility,
+        )?;
+        return Ok(());
+    }
     let (path, text, kind, sha): (String, Option<String>, String, String) = tx
         .query_row(
             "SELECT s.path,b.sha256,s.content_kind,
@@ -1602,3 +1728,7 @@ fn publish_undo_member(
 
 #[path = "history_undo_turns.rs"]
 pub(super) mod turns;
+
+#[cfg(test)]
+#[path = "duplicate_tests.rs"]
+mod duplicate_tests;

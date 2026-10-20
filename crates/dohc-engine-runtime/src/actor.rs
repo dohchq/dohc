@@ -174,6 +174,7 @@ type RegistrationWork =
 enum Command {
     Run(ActorWork),
     WakeLinks,
+    ConversationLinksRequested,
     /// Work that may release live application registrations in the same step.
     RunWithRegistrations(RegistrationWork),
     LiveApplication(Box<live_application::Request>),
@@ -524,6 +525,36 @@ impl Drop for LinkDrainHold {
     }
 }
 
+fn wait_for_reader<R>(
+    result: &Result<R, RuntimeError>,
+    attempt: usize,
+) -> impl std::future::Future<Output = bool> + Send + 'static {
+    let pending = match result {
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(pending)))
+        | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownReaderPending(
+            pending,
+        )))
+        | Err(RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Collab(
+                dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
+            ),
+        )) => Some(pending.clone()),
+        _ => None,
+    };
+    async move {
+        let Some(pending) = pending else {
+            return false;
+        };
+        if attempt < 2 {
+            pending.resolve().await;
+            true
+        } else {
+            tokio::spawn(async move { pending.resolve().await });
+            false
+        }
+    }
+}
+
 impl ActorHandle {
     pub async fn configure_reader_resolver(
         &self,
@@ -539,34 +570,27 @@ impl ActorHandle {
     async fn run_with_reader_retry<R: Send + 'static>(
         &self,
         work: impl Fn(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
-        + Clone
         + Send
+        + Sync
         + 'static,
     ) -> Result<R, RuntimeError> {
+        let work = Arc::new(work);
         for attempt in 0..=2 {
-            let result = self.run(work.clone()).await;
-            let pending = match &result {
-                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(
-                    pending,
-                )))
-                | Err(RuntimeError::Collab(
-                    dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
-                )) => Some(pending.clone()),
-                _ => None,
-            };
-            if let Some(pending) = pending {
-                if attempt < 2 {
-                    pending.resolve().await;
-                } else {
-                    tokio::spawn(async move { pending.resolve().await });
-                    return result;
-                }
-            } else {
+            let work = work.clone();
+            let result = self.run(move |store, cache| work(store, cache)).await;
+            if !wait_for_reader(&result, attempt).await {
                 return result;
             }
         }
         unreachable!()
     }
+    pub(crate) async fn request_conversation_links(&self) -> Result<(), RuntimeError> {
+        self.tx
+            .send(Command::ConversationLinksRequested)
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)
+    }
+
     pub fn hold_link_drain(&self) -> LinkDrainHold {
         self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
         LinkDrainHold {
@@ -891,6 +915,7 @@ fn worker_main(
     // Publish before link startup, then let queued foreground commands win.
     // An idle reopened store must also resume its durable drain without a
     // foreground request; link-drain holds still postpone startup and slices.
+    let mut conversation_links_requested = false;
     let mut links_started = false;
     let mut links = None;
     let mut timer = None;
@@ -906,17 +931,17 @@ fn worker_main(
                     && link_drain_holds.load(Ordering::Acquire) == 0
                 {
                     links_started = true;
+                    timer = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .ok();
+                    #[cfg(test)]
+                    if timer.is_some() {
+                        link_metrics.lock().unwrap().timer_starts += 1;
+                    }
                     match DrainWorker::new(Arc::clone(&link_metrics)) {
                         Ok(worker) => {
                             links = Some(worker);
-                            timer = tokio::runtime::Builder::new_current_thread()
-                                .enable_time()
-                                .build()
-                                .ok();
-                            #[cfg(test)]
-                            if timer.is_some() {
-                                link_metrics.lock().unwrap().timer_starts += 1;
-                            }
                         }
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
                     }
@@ -927,6 +952,20 @@ fn worker_main(
                     // whether the hold prevented worker and timer creation.
                     link_metrics.lock().unwrap().idle_slots += 1;
                 }
+                let conversation_delay = if conversation_links_requested
+                    && matches!(mode, ActorOpenMode::ReadWrite)
+                    && link_drain_holds.load(Ordering::Acquire) == 0
+                {
+                    match crate::conversation_links::tick_delay(&mut store) {
+                        Ok(delay) => delay,
+                        Err(error) => {
+                            eprintln!("conversation links repair retained: {error}");
+                            std::time::Duration::from_millis(250)
+                        }
+                    }
+                } else {
+                    std::time::Duration::MAX
+                };
                 match (&mut links, &timer) {
                     (Some(worker), Some(timer))
                         if link_drain_holds.load(Ordering::Acquire) == 0 =>
@@ -940,7 +979,7 @@ fn worker_main(
                         );
                         #[cfg(feature = "fault-injection")]
                         phase.field("link_drain_holds", link_drain_holds.load(Ordering::Acquire));
-                        let delay = worker.tick(&mut store);
+                        let delay = worker.tick(&mut store).min(conversation_delay);
                         #[cfg(feature = "fault-injection")]
                         {
                             phase.finish("completed");
@@ -963,6 +1002,10 @@ fn worker_main(
                                 }
                             })
                         }
+                    }
+                    _ if conversation_delay.is_zero() => continue,
+                    (_, Some(timer)) if conversation_delay != std::time::Duration::MAX => {
+                        timer.block_on(wait_for_conversation_retry(&mut rx, conversation_delay))
                     }
                     _ => rx.blocking_recv(),
                 }
@@ -990,6 +1033,7 @@ fn worker_main(
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
+            Command::ConversationLinksRequested => conversation_links_requested = true,
             Command::RunWithRegistrations(work) => {
                 work(&mut store, &mut doc_cache, &mut live_applications);
             }
@@ -1014,6 +1058,13 @@ fn worker_main(
     // guarantees on a panic unwind).
     drop(links);
     drop(store);
+}
+
+async fn wait_for_conversation_retry(
+    rx: &mut mpsc::Receiver<Command>,
+    delay: std::time::Duration,
+) -> Option<Command> {
+    tokio::select! { biased; cmd = rx.recv() => cmd, () = tokio::time::sleep(delay) => None }
 }
 
 /// Pay the drain that barrier flushes left owed before a result leaves the
@@ -1178,6 +1229,21 @@ mod saturation_tests {
             .unwrap();
         assert!(!actor.store_freshly_created, "exercise a reopened store");
         actor
+    }
+
+    #[tokio::test]
+    async fn conversation_retry_wakes_without_a_parser_and_keeps_command_priority() {
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.send(Command::WakeLinks).await.unwrap();
+        assert!(matches!(
+            wait_for_conversation_retry(&mut rx, Duration::ZERO).await,
+            Some(Command::WakeLinks)
+        ));
+        assert!(
+            wait_for_conversation_retry(&mut rx, Duration::ZERO)
+                .await
+                .is_none()
+        );
     }
 
     #[test]

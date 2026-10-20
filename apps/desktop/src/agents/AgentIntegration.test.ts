@@ -1,8 +1,9 @@
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveAgentRun } from "./activeAgentRun";
 import {
+  agentRunsFileName,
   AgentIntegrationState,
   createAgentIntegration as createPhysicalAgentIntegration,
 } from "./AgentIntegration";
@@ -15,7 +16,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     readFile: (...args: Parameters<typeof actual.readFile>) => {
-      if (historyRead.failure && String(args[0]).endsWith("agent-runs.json")) {
+      if (historyRead.failure && String(args[0]).endsWith(agentRunsFileName("install-local"))) {
         return Promise.reject(historyRead.failure);
       }
       return actual.readFile(...args);
@@ -86,6 +87,10 @@ function heldClearRace(root: string, order: "queued" | "independent") {
   };
 }
 
+// This installation's run history in a workspace.
+const runsFolder = (root: string) => join(root, ".dohc", "agent-runs");
+const runsPath = (root: string) => join(runsFolder(root), agentRunsFileName("install-local"));
+
 async function withWorkspace<T>(
   fn: (input: { root: string; setSlot: (r: ActiveAgentRun | null) => void; slots: Array<ActiveAgentRun | null> }) => Promise<T>,
 ): Promise<T> {
@@ -112,14 +117,14 @@ describe("AgentIntegration", () => {
       expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: run.id, depth: 0 });
 
       // The record is durable and inspectable on disk.
-      const persisted = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
+      const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(persisted).toHaveLength(1);
       expect(persisted[0]).toMatchObject({ id: run.id, status: "running" });
 
       await integration.endAgentRun("ws", run.id);
       // Slot cleared back to local user.
       expect(slots.at(-1)).toBeNull();
-      const after = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
+      const after = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(after[0]).toMatchObject({ status: "complete" });
       expect(after[0].endedAt).toBeTypeOf("number");
     });
@@ -135,7 +140,7 @@ describe("AgentIntegration", () => {
       });
       const run = await integration.startAgentRun("ws");
       expect(run).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
-      const persisted = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
+      const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(persisted[0]).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
     });
   });
@@ -184,8 +189,8 @@ describe("AgentIntegration", () => {
     ["object", "{}"],
     ["invalid record", '[{"id":"bad-start","startedAt":"yesterday","status":"complete"}]'],
     ["mixed valid and invalid records", JSON.stringify([
-      { id: "run-valid", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "failed" },
-      { id: "bad-status", startedAt: 3, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "done" },
+      { id: "run-valid", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "failed", incarnation: "process-1" },
+      { id: "bad-status", startedAt: 3, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "done", incarnation: "process-1" },
     ])],
   ])("preserves history and keeps an active run stoppable when history contains %s", async (_label, source) => {
     await withWorkspace(async ({ root, setSlot }) => {
@@ -197,7 +202,7 @@ describe("AgentIntegration", () => {
         onRunEnded,
       });
       const run = await integration.startAgentRun("ws");
-      const path = join(root, ".dohc", "agent-runs.json");
+      const path = runsPath(root);
       await writeFile(path, source);
       const bytes = await readFile(path);
       setAgentRun.mockClear();
@@ -212,7 +217,7 @@ describe("AgentIntegration", () => {
         lastRun: null,
       });
       expect(await readFile(path)).toEqual(bytes);
-      expect(await readdir(join(root, ".dohc"))).toEqual(["agent-runs.json"]);
+      expect(await readdir(runsFolder(root))).toEqual([agentRunsFileName("install-local")]);
       expect(setAgentRun).toHaveBeenCalledExactlyOnceWith("ws", null);
       expect(onRunEnded).not.toHaveBeenCalled();
       await writeFile(path, JSON.stringify([run]));
@@ -232,7 +237,7 @@ describe("AgentIntegration", () => {
       const setAgentRun = vi.fn((_id: string, run: ActiveAgentRun | null) => setSlot(run));
       const integration = createAgentIntegration({ rootFor: () => root, setAgentRun });
       const run = await integration.startAgentRun("ws");
-      const path = join(root, ".dohc", "agent-runs.json");
+      const path = runsPath(root);
       const bytes = await readFile(path);
       setAgentRun.mockClear();
       historyRead.failure = Object.assign(new Error("temporarily unreadable"), { code: "EACCES" });
@@ -272,7 +277,7 @@ describe("AgentIntegration", () => {
       });
       const older = await integration.startAgentRun("ws");
       const newer = await integration.startAgentRun("ws");
-      const path = join(root, ".dohc", "agent-runs.json");
+      const path = runsPath(root);
       await writeFile(path, "corrupt history\n");
       setAgentRun.mockClear();
       await expect(integration.endAgentRun("ws", older.id)).rejects.toThrow(/invalid JSON/);
@@ -301,7 +306,7 @@ describe("AgentIntegration", () => {
         },
       });
       const run = await integration.startAgentRun("ws");
-      const path = join(root, ".dohc", "agent-runs.json");
+      const path = runsPath(root);
       await writeFile(path, "corrupt history\n");
       refuseClear = true;
       await expect(integration.endAgentRun("ws", run.id)).rejects.toBe(clearFailure);
@@ -373,7 +378,7 @@ describe("AgentIntegration", () => {
       expect(b.id).toBe("run-b");
       expect(state.activeRun?.id).toBe(b.id);
       expect(slot?.agentRunId).toBe(b.id);
-      const runs = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      const runs = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(runs).toMatchObject([
         { id: a.id, status: "complete" },
         { id: b.id, status: "running" },
@@ -414,7 +419,7 @@ describe("AgentIntegration", () => {
 
       expect(race.state.activeRun?.id).toBe(b.id);
       expect(race.slot()?.agentRunId).toBe(b.id);
-      const runs = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      const runs = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(runs).toMatchObject([
         { id: a.id, status: "complete" },
         { id: b.id, status: "running" },
@@ -427,7 +432,7 @@ describe("AgentIntegration", () => {
       const primary = new Error("slot occupied");
       const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
-        const path = join(root, ".dohc", "agent-runs.json");
+        const path = runsPath(root);
         const integration = createAgentIntegration({
           rootFor: () => root,
           setAgentRun: async () => {
@@ -449,8 +454,8 @@ describe("AgentIntegration", () => {
 
   it("does not start a run when an inactive workspace's history is unreadable", async () => {
     await withWorkspace(async ({ root, setSlot, slots }) => {
-      await mkdir(join(root, ".dohc"));
-      const path = join(root, ".dohc", "agent-runs.json");
+      await mkdir(runsFolder(root), { recursive: true });
+      const path = runsPath(root);
       await writeFile(path, "not JSON\n");
       const integration = createAgentIntegration({
         rootFor: () => root,
@@ -589,7 +594,7 @@ describe("AgentIntegration", () => {
       expect(setAgentRun).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();
       const runs = JSON.parse(
-        await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"),
+        await readFile(runsPath(root), "utf8"),
       ) as Array<{ status: string; endedAt?: number }>;
       expect(runs).toHaveLength(1);
       expect(runs[0]).toMatchObject({ status: "failed" });
@@ -607,6 +612,7 @@ describe("AgentIntegration", () => {
       agentId: "dohc-mcp",
       onBehalfOf: "person-local",
       status: "running",
+      incarnation: "process-1",
     };
     secondState.activeRun = {
       id: "run-second",
@@ -614,6 +620,7 @@ describe("AgentIntegration", () => {
       agentId: "dohc-mcp",
       onBehalfOf: "person-local",
       status: "running",
+      incarnation: "process-1",
     };
     const releases: string[] = [];
     const clearedSlots: string[] = [];
@@ -654,25 +661,23 @@ describe("AgentIntegration", () => {
         activeRun: null,
         lastRun: expect.objectContaining({ id: run.id, status: "interrupted", endedAt: 99 }),
       });
-      const persisted = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(persisted).toMatchObject([{ id: run.id, status: "interrupted", endedAt: 99 }]);
     });
   });
 
-  it("sweeps another process's and unmarked running runs, and keeps this process's, finished, and other installs' runs", async () => {
+  it("sweeps another process's running runs, and keeps this process's and finished runs", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
-      await mkdir(join(root, ".dohc"));
-      const path = join(root, ".dohc", "agent-runs.json");
+      await mkdir(runsFolder(root), { recursive: true });
+      const path = runsPath(root);
       const run = (id: string, fields: Record<string, unknown> = {}) => ({
         id, startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running", ...fields,
       });
       const runs = [
-        run("earlier-process", { incarnation: "process-1", installId: "install-local" }),
-        run("unmarked"),
-        run("this-process", { incarnation: "process-2", installId: "install-local" }),
-        run("other-install", { incarnation: "process-9", installId: "install-other" }),
-        run("finished", { status: "complete", endedAt: 2, incarnation: "process-1", installId: "install-local" }),
-        run("failed", { status: "failed", endedAt: 3 }),
+        run("earlier-process", { incarnation: "process-1" }),
+        run("this-process", { incarnation: "process-2" }),
+        run("finished", { status: "complete", endedAt: 2, incarnation: "process-1" }),
+        run("failed", { status: "failed", endedAt: 3, incarnation: "process-1" }),
       ];
       await writeFile(path, JSON.stringify(runs));
       const integration = createAgentIntegration({
@@ -684,14 +689,12 @@ describe("AgentIntegration", () => {
       await integration.getAgentRunStatus("ws");
       expect(JSON.parse(await readFile(path, "utf8"))).toEqual([
         { ...runs[0], status: "interrupted", endedAt: 50 },
-        { ...runs[1], status: "interrupted", endedAt: 50 },
+        runs[1],
         runs[2],
         runs[3],
-        runs[4],
-        runs[5],
       ]);
       // Each workspace sweeps once per process.
-      await writeFile(path, JSON.stringify([run("written-later")]));
+      await writeFile(path, JSON.stringify([run("written-later", { incarnation: "process-1" })]));
       await integration.getAgentRunStatus("ws");
       expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject([{ id: "written-later", status: "running" }]);
     });
@@ -699,10 +702,10 @@ describe("AgentIntegration", () => {
 
   it("writes nothing when no run needs settling", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
-      await mkdir(join(root, ".dohc"));
-      const path = join(root, ".dohc", "agent-runs.json");
+      await mkdir(runsFolder(root), { recursive: true });
+      const path = runsPath(root);
       const source = JSON.stringify([
-        { id: "done", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "complete" },
+        { id: "done", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "complete", incarnation: "process-1" },
       ]);
       await writeFile(path, source);
       const integration = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
@@ -713,8 +716,8 @@ describe("AgentIntegration", () => {
 
   it("leaves unreadable history unwritten, falls back for status, and sweeps once it is repaired", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
-      await mkdir(join(root, ".dohc"));
-      const path = join(root, ".dohc", "agent-runs.json");
+      await mkdir(runsFolder(root), { recursive: true });
+      const path = runsPath(root);
       await writeFile(path, "not JSON\n");
       const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
@@ -725,9 +728,9 @@ describe("AgentIntegration", () => {
         });
         await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({ activeRun: null, lastRun: null });
         expect(await readFile(path, "utf8")).toBe("not JSON\n");
-        expect(await readdir(join(root, ".dohc"))).toEqual(["agent-runs.json"]);
+        expect(await readdir(runsFolder(root))).toEqual([agentRunsFileName("install-local")]);
         await writeFile(path, JSON.stringify([
-          { id: "left-open", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running" },
+          { id: "left-open", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running", incarnation: "process-1" },
         ]));
         await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
           lastRun: { id: "left-open", status: "interrupted", endedAt: 7 },
@@ -739,25 +742,140 @@ describe("AgentIntegration", () => {
   });
 
   // Same boundary as workspaceUiState: a malicious attached workspace can ship
-  // `.dohc` as a SYMLINK to a directory outside the workspace. The run-log
-  // writer must refuse instead of planting agent-runs.json at the target.
-  it("refuses to write agent-runs through a symlinked .dohc and never lands files outside", async () => {
+  // `.dohc` or `.dohc/agent-runs` as a SYMLINK to a directory outside the
+  // workspace. The run-log writer must refuse instead of planting a run file
+  // at the target.
+  it.each([
+    [".dohc", "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry."],
+    [".dohc/agent-runs", "dohc could not open this workspace's agent run history. A link is at .dohc/agent-runs, which must be a real folder. Remove or rename that link. Then retry."],
+  ])("refuses to write agent runs through a symlinked %s and never lands files outside", async (link, refusal) => {
     await withWorkspace(async ({ root, setSlot }) => {
       const outside = await createTestScratch("dohc-agent-escape-");
       try {
-        await symlink(outside, join(root, ".dohc"), "dir");
+        if (link !== ".dohc") await mkdir(join(root, ".dohc"));
+        await symlink(outside, join(root, link), "dir");
         const integration = createAgentIntegration({
           rootFor: () => root,
           setAgentRun: (_id, run) => setSlot(run),
         });
-        await expect(integration.startAgentRun("ws")).rejects.toThrow(
-          "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
-        );
+        await expect(integration.startAgentRun("ws")).rejects.toThrow(refusal);
         // The escape target stayed untouched: no run log, no temp files.
         expect(await readdir(outside)).toEqual([]);
       } finally {
         await rm(outside, { recursive: true, force: true });
       }
+    });
+  });
+
+  // Two computers share one workspace folder through a file-sync service
+  // such as iCloud Drive. Each computer has its own copy. A sync copies each
+  // file one computer changed since the last sync to the other; when both
+  // changed the same file, it keeps the winner's version whole.
+  describe("with two computers syncing one workspace", () => {
+    async function filesUnder(root: string): Promise<Map<string, string>> {
+      const files = new Map<string, string>();
+      const folder = join(root, ".dohc");
+      for (const entry of await readdir(folder, { withFileTypes: true, recursive: true })) {
+        if (!entry.isFile()) continue;
+        const path = join(entry.parentPath, entry.name);
+        files.set(relative(folder, path), await readFile(path, "utf8"));
+      }
+      return files;
+    }
+
+    function fileSync(rootA: string, rootB: string) {
+      let synced = new Map<string, string>();
+      return async (winner: "a" | "b") => {
+        const [a, b] = await Promise.all([filesUnder(rootA), filesUnder(rootB)]);
+        for (const path of new Set([...a.keys(), ...b.keys()])) {
+          const aChanged = a.get(path) !== synced.get(path);
+          const bChanged = b.get(path) !== synced.get(path);
+          const keepA = aChanged && (!bChanged || winner === "a");
+          const [source, target] = keepA ? [a, rootB] : [b, rootA];
+          const kept = source.get(path);
+          if (kept === undefined || a.get(path) === b.get(path)) continue;
+          await mkdir(dirname(join(target, ".dohc", path)), { recursive: true });
+          await writeFile(join(target, ".dohc", path), kept);
+        }
+        synced = await filesUnder(rootA);
+      };
+    }
+
+    async function recordsUnder(root: string): Promise<Array<{ id: string; status: string }>> {
+      const found: Array<{ id: string; status: string }> = [];
+      for (const source of (await filesUnder(root)).values()) {
+        found.push(...(JSON.parse(source) as Array<{ id: string; status: string }>));
+      }
+      return found.sort((left, right) => left.id.localeCompare(right.id));
+    }
+
+    it("keeps every run record and review card when both start and end runs before a sync", async () => {
+      await withWorkspace(async ({ root: rootA }) => {
+        await withWorkspace(async ({ root: rootB }) => {
+          const ended: string[] = [];
+          const computer = (root: string, installId: string, ids: string[]) => createAgentIntegration({
+            rootFor: () => root,
+            installId: () => installId,
+            createId: () => ids.shift() ?? "run-extra",
+            setAgentRun: () => undefined,
+            onRunEnded: ({ runId }) => ended.push(runId),
+          });
+          const a = computer(rootA, "local:computer-a", ["a-1", "a-2"]);
+          const b = computer(rootB, "local:computer-b", ["b-1", "b-2"]);
+
+          const sync = fileSync(rootA, rootB);
+
+          await a.startAgentRun("ws");
+          await b.startAgentRun("ws");
+          await sync("a");
+          await b.endAgentRun("ws", "b-1");
+          await a.endAgentRun("ws", "a-1");
+          await a.startAgentRun("ws");
+          await b.startAgentRun("ws");
+          await sync("b");
+          await a.endAgentRun("ws", "a-2", "failed");
+          await b.endAgentRun("ws", "b-2");
+          await sync("a");
+
+          expect(ended.sort()).toEqual(["a-1", "a-2", "b-1", "b-2"]);
+          const expected = [
+            { id: "a-1", status: "complete" },
+            { id: "a-2", status: "failed" },
+            { id: "b-1", status: "complete" },
+            { id: "b-2", status: "complete" },
+          ];
+          expect(await recordsUnder(rootA)).toMatchObject(expected);
+          expect(await recordsUnder(rootB)).toMatchObject(expected);
+        });
+      });
+    });
+
+    it("ignores conflict copies, another computer's file, and the old shared file", async () => {
+      await withWorkspace(async ({ root, setSlot }) => {
+        await mkdir(runsFolder(root), { recursive: true });
+        const planted = {
+          [join(root, ".dohc", "agent-runs.json")]: "not JSON\n",
+          [join(root, ".dohc", "agent-runs 2.json")]: "not JSON\n",
+          [join(runsFolder(root), "other-computer.json")]: "not JSON\n",
+          [runsPath(root).replace(/\.json$/, " 2.json")]: "not JSON\n",
+        };
+        for (const [path, source] of Object.entries(planted)) await writeFile(path, source);
+        const ended = vi.fn();
+        const integration = createAgentIntegration({
+          rootFor: () => root,
+          setAgentRun: (_id, run) => setSlot(run),
+          onRunEnded: ended,
+        });
+
+        const run = await integration.startAgentRun("ws");
+        await integration.endAgentRun("ws", run.id);
+        await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+          activeRun: null,
+          lastRun: { id: run.id, status: "complete" },
+        });
+        expect(ended).toHaveBeenCalledOnce();
+        for (const [path, source] of Object.entries(planted)) expect(await readFile(path, "utf8")).toBe(source);
+      });
     });
   });
 });

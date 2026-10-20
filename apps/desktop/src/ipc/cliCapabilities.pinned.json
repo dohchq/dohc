@@ -194,6 +194,9 @@
     ],
     "chatFileMentions": [
       "chat.read"
+    ],
+    "fileDuplicate": [
+      "file.duplicate"
     ]
   },
   "public": {
@@ -279,6 +282,7 @@
     "links in": "links.in",
     "links resolve": "links.resolve",
     "links edges": "links.edges",
-    "chat file-mentions": "chat.read"
+    "chat file-mentions": "chat.read",
+    "file duplicate": "file.duplicate"
   }
 }

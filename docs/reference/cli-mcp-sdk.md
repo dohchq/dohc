@@ -125,6 +125,16 @@ Resolve wikilink or Markdown literals from one source document using the engine'
 
 Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
+### `dohc_duplicate_file`
+
+Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, operationId, undo: { available: true } | { available: false, reason, paths }, path, materialized } | { ok: false, reason }`.
+
 ### `dohc_read_operation`
 
 List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
@@ -1533,6 +1543,22 @@ operationId names this removal. Retry failed items with the same operationId.
 - `operationId`: `string`. Required.
 
 Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCursor }`.
+
+### `dohc file`
+
+Change workspace files.
+
+Undo removes the copy while it is unchanged.
+
+#### `dohc file duplicate`
+
+```sh
+dohc file duplicate <path> [options]
+```
+
+Duplicate one file beside its source.
+
+With `--json`, prints `{ schemaVersion, ok: true, operationId, undo: { available: true } | { available: false, reason, paths }, path, materialized }`.
 
 ### `dohc history`
 

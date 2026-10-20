@@ -269,8 +269,8 @@ export function createSettingsIpc<
 
     // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
     // cannot write .dohc through writeWorkspaceText (reserved path) — this
-    // narrow pair is the only writer, same pattern as agent-runs.json. Both
-    // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
+    // narrow pair is the only writer. Both directions are zod-bounded; a
+    // corrupt/foreign on-disk file reads as null
     // ("no saved state"), never an error.
     getWorkspaceUiState: async (_input, { operation }) => {
       const parsed = GetWorkspaceUiStateResult.safeParse(

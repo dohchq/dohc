@@ -310,7 +310,9 @@ dependencies = [
 name = "dohc-compiler-owner"
 version = "0.1.0"
 dependencies = [
+ "landlock",
  "libc",
+ "seccompiler",
 ]
 
 [[package]]

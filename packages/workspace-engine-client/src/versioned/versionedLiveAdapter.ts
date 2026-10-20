@@ -1722,6 +1722,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   // One rename that refuses to replace, of a visible regular file, under a hold.
+  async duplicateFileUnderHold(input: { holdId: string; fromPath: string; toPath: string; author?: WriteAuthor }): Promise<{path: string; materialized: boolean}> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureDuplicateFile, input);
+  }
+
   async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
   }

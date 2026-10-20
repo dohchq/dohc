@@ -3,12 +3,11 @@ import { join } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
-// Main-side store for per-workspace UI state (.dohc/ui-state.json), the same
-// pattern as agent-runs.json in AgentIntegration. It lives under .dohc by
-// design: the watcher/tree/history ignore .dohc at any depth, so workbench
-// state never lands in the timeline and never syncs as user content — and the
-// renderer cannot write here through writeWorkspaceText (reserved path), so
-// this narrow main-owned pair is the only writer. The metadata dir resolves
+// Main-side store for per-workspace UI state (.dohc/ui-state.json). It lives
+// under .dohc by design: the watcher/tree/history ignore .dohc at any depth,
+// so workbench state never lands in the timeline and never syncs as user
+// content — and the renderer cannot write here through writeWorkspaceText
+// (reserved path), so this narrow main-owned pair is the only writer. The metadata dir resolves
 // through resolveWorkspaceMetadataDir, so a symlinked .dohc in a malicious
 // attached workspace can never route these writes outside the workspace.
 
@@ -43,7 +42,7 @@ async function writeUiStateFileNow(
 ): Promise<void> {
   const path = join(await resolveWorkspaceMetadataDir(rootPath), UI_STATE_FILE);
   // Atomic temp+rename so a crash mid-write never truncates the state file
-  // (agent-runs.json idiom; the unique suffix keeps concurrent writers apart).
+  // (the unique suffix keeps concurrent writers apart).
   await atomicReplaceFile(path, (tmp) => writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`));
 }
 

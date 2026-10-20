@@ -10,7 +10,7 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -57,6 +57,7 @@ import {
 import * as Y from "yjs";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import { deferred } from "../testing/deferred";
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
@@ -1946,16 +1947,18 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
       openRustYDocProviderSession: async options => {
         const doc = new Y.Doc();
-        doc.getText("plainText").insert(0, "typed");
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
           path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
-          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
           settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
           close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
         } as EngineYdocProviderSession;
       },
     });
     const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, "typed");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
     await expect(session.settleNow()).rejects.toBe(stale);
     await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
     if (store === "kept") {
@@ -2192,8 +2195,8 @@ describe("workspaceEngineCapture batch capture", () => {
     };
   }
 
-  // Open a session on note.md, let its close settle, and report the save
-  // states that settle produced.
+  // Open a session on note.md, type the editor text, let the close settle it,
+  // and report the save states that settle produced.
   async function settleOnClose(
     root: string,
     settled: { sha256: string; content: string | null },
@@ -2209,6 +2212,9 @@ describe("workspaceEngineCapture batch capture", () => {
       onRemoteUpdate: () => undefined,
       onSaveState: (state) => states.push(state),
     });
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, EDITOR_TEXT);
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
     await session.close();
     await engine.stop();
     return states;
@@ -5070,4 +5076,109 @@ it("names the run's person as capture's author, whoever is signed in here", asyn
     author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 },
   });
   await engine.stop();
+});
+
+it("checks one root copy name with one bounded identity lookup, including binary History-only files", async () => {
+  const root = await createTestScratch("duplicate-bounded-name-");
+  const loopback = new VersionedLoopbackEngine();
+  loopback.seedBinaryFile({workspace: WORKSPACE_ID, path: "copy.png", bytes: [0, 255], objectId: "binary-copy"});
+  const requests: Request[] = [];
+  const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback, requests)});
+  try {
+    await engine.changePathsAs(["source.png"], {operation: "duplicate", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", author: RESTORER}, async held => {
+      requests.length = 0;
+      expect(await held.hasPath("copy.png")).toBe(true);
+      expect(requests.map(request => [request.method, request.params])).toEqual([
+        ["files.resolve", {versionId: "main", targets: [{path: "copy.png"}]}],
+      ]);
+    }, () => []);
+  } finally {await engine.stop();}
+});
+
+it.each(["pending-placement", "undone", "deleted", "renamed", "superseded", "replaced"] as const)(
+  "checks the real Duplicate receipt guard when the copy is %s", async state => {
+    const root = await createTestScratch("duplicate-receipt-guard-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const sessions = mockLiveSessions(loopback, requests);
+    const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const path = "copy.md";
+    const target = {workspaceId: WORKSPACE_ID, versionId: "main", path};
+    await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+    await store.writeTextFile({...target, text: "copied", metadata: {origin: "api", correlationId: operationId}});
+    // The loopback has no operation ledger. Only its header is supplied here;
+    // identity resolution and moment reads use the loopback's actual state.
+    vi.spyOn(store, "readHistoryOperation").mockResolvedValue({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"});
+    const engine = capture(root, {store, rustEngineSessions: sessions});
+    const readReceipt = () => engine.changePathsAs(["source.md"], {operation: "duplicate", operationId, author: RESTORER}, async held => {
+      requests.length = 0;
+      const result = await held.readDuplicate(operationId, path);
+      expect(requests.every(request => request.method !== VERSIONED_METHOD.historyPage)).toBe(true);
+      const moments = requests.filter(request => request.method === VERSIONED_METHOD.momentsList);
+      expect(moments.length).toBeLessThanOrEqual(1);
+      if (moments.length) expect(moments[0]?.params).toMatchObject({limit: 1});
+      return result;
+    }, () => []);
+    try {
+      // Valid even before any copy exists on disk.
+      expect(await readReceipt()).toEqual({path});
+      if (state === "pending-placement") return;
+      if (state === "undone" || state === "deleted" || state === "replaced") {
+        await store.deleteTextFile({...target, metadata: {origin: state === "undone" ? "restore" : "api"}});
+      }
+      if (state === "renamed") {
+        await store.renameTextFile({workspaceId: WORKSPACE_ID, versionId: "main", fromPath: path, toPath: "renamed.md", metadata: {origin: "api"}});
+      }
+      if (state === "superseded" || state === "replaced") {
+        await store.writeTextFile({...target, text: "later", metadata: {origin: "api", correlationId: "later-operation"}});
+      }
+      expect(await readReceipt()).toBeNull();
+    } finally {await engine.stop();}
+  },
+);
+
+it("drops an undone pending-placement receipt through the real guard before a fresh Duplicate", async () => {
+  const root = await createTestScratch("duplicate-pending-undo-receipt-");
+  await writeFile(join(root, "source.md"), "Original");
+  const loopback = new VersionedLoopbackEngine();
+  const sessions = mockLiveSessions(loopback);
+  const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+  await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+  // Only the operation header is supplied; the receipt guard reads actual heads and moments.
+  vi.spyOn(store, "readHistoryOperation").mockImplementation(async ({operationId}) => ({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"}));
+  const engine = capture(root, {store, rustEngineSessions: sessions});
+  const commits: string[] = [];
+  const pendingCapture: Pick<WorkspaceEngineCapture, "changePathsAs"> = {
+    changePathsAs: (paths, authored, work, removed) => engine.changePathsAs(paths, authored, held => work({
+      ...held,
+      recordDisk: async (_path, files) => [...files],
+      duplicateFile: async (_from, path) => {
+        commits.push(authored.operationId!);
+        await store.writeTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path, text: "Original", metadata: {origin: "api", correlationId: authored.operationId}});
+        const materialized = commits.length > 1;
+        if (materialized) await writeFile(join(root, path), "Original");
+        return {path, materialized};
+      },
+    }), removed),
+  };
+  const operation = {workspace: {workspaceId: WORKSPACE_ID, rootPath: root}, assertCurrent() {}};
+  const run = () => duplicateWorkspaceFile(operation, "source.md", RESTORER, pendingCapture);
+  const directory = join(root, ".dohc/duplicate-pending");
+  try {
+    const pending = await run();
+    expect(pending.materialized).toBe(false);
+    expect(existsSync(join(root, pending.path))).toBe(false);
+    const receipt = join(directory, (await readdir(directory))[0]!);
+    expect(JSON.parse(await readFile(receipt, "utf8"))).toMatchObject({operationId: pending.operationId});
+    // The Rust pending-create proof exercises the Undo transaction and placement.
+    // Apply its resulting head here, without ever writing the cancelled copy.
+    await store.deleteTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path: pending.path, metadata: {origin: "restore"}});
+    const fresh = await run();
+    expect(fresh.operationId).not.toBe(pending.operationId);
+    expect(fresh.path).toBe(pending.path);
+    expect(commits).toEqual([pending.operationId, fresh.operationId]);
+    expect(await readdir(directory)).toEqual([]);
+    expect(await readFile(join(root, fresh.path), "utf8")).toBe("Original");
+  } finally {await engine.stop();}
 });

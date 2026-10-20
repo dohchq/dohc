@@ -1393,31 +1393,53 @@ it.skipIf(engine.missing).each(["recorded", "new"] as const)(
 );
 
 // The wait ends with the document: once it closes, History records the delete.
-it.skipIf(engine.missing)("records a file deleted outside dohc once its document closes", async () => {
-  const opened = await openRealCapture("deleted-file-closed");
-  try {
-    const absolute = join(opened.root, "note.md");
-    await writeFile(absolute, "base\n", "utf8");
-    await waitForPathMoments(opened.capture, "note.md", 1);
-    const session = await opened.capture.openYDocSession({
-      path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined,
+// History already holds all of the document, so the close is no failed save
+// and sets nothing aside (dohc#2366).
+it.skipIf(engine.missing).each(["no edit", "an edit saved before the delete"] as const)(
+  "records a file deleted outside dohc once its document closes, with %s and no failed save",
+  async (edit) => {
+    const workspaceId = `deleted-file-closed-${edit === "no edit" ? "unedited" : "saved"}`;
+    const draftStore = await createTestScratch("dohc-deleted-file-closed-drafts-");
+    const store = workspaceDraftStore(draftStore, workspaceId, NO_WINDOWS);
+    const opened = await openRealCapture(workspaceId, {
+      settleDebounceMs: 60_000, preserveUnsentState: store.preserveUnsentState, discardUnsentState: store.discardUnsentState,
     });
-    await rm(absolute);
-    opened.capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
-    expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
-    const before = await waitForPathMoments(opened.capture, "note.md", 1);
-    expect(before.map((moment) => moment.operation)).toEqual(["write"]);
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const states: string[] = [];
+      const session = await opened.capture.openYDocSession({
+        path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined, onSaveState: (state) => states.push(state),
+      });
+      const writes = edit === "no edit" ? ["write"] : ["write", "write"];
+      if (edit !== "no edit") {
+        const editor = new Y.Doc();
+        Y.applyUpdate(editor, session.initialUpdate);
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, "saved\n");
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+        await session.settleNow();
+        await waitForPathMoments(opened.capture, "note.md", 2);
+      }
+      await rm(absolute);
+      opened.capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      const before = await waitForPathMoments(opened.capture, "note.md", writes.length);
+      expect(before.map((moment) => moment.operation)).toEqual(writes);
 
-    // The close's last save is refused over the missing file, but the close
-    // still lets the document go.
-    await session.close().catch(() => undefined);
-    const after = await waitForPathMoments(opened.capture, "note.md", 2);
-    expect(after.map((moment) => moment.operation)).toEqual(["delete", "write"]);
-    expect(existsSync(absolute)).toBe(false);
-  } finally {
-    await opened.stop();
-  }
-}, 60_000);
+      await expect(session.close()).resolves.toBeUndefined();
+      const after = await waitForPathMoments(opened.capture, "note.md", writes.length + 1);
+      expect(after.map((moment) => moment.operation)).toEqual(["delete", ...writes]);
+      expect(existsSync(absolute)).toBe(false);
+      expect(states).not.toContain("error");
+      expect(await listLiveDraftRecovery(draftStore, workspaceId)).toEqual([]);
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
 
 // A folder capture cannot read is a real failure, so both workspace notices
 // still come, also while a deleted file's document is open.

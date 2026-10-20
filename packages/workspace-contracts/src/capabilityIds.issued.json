@@ -248,5 +248,6 @@
   "links.edges",
   "workspace.trust.read",
   "workspace.trust.request",
-  "workspace.trust.restrict"
+  "workspace.trust.restrict",
+  "file.duplicate"
 ]

@@ -36,7 +36,7 @@ Read the job's reports on #2281 before starting any nightly work.
 To test the workflow without publishing, run `node scripts/release-nightly.mjs run --dry-run` on the Mac mini.
 Check the live workflow and its inputs before dispatching.
 Confirm that the required self-hosted runners are online and owned by the release operator.
-If a selected Windows runner is offline, start its registered `run.cmd` for this release.
+If a selected Windows runner is offline, start its scheduled task, `dohc Windows runner`, for this release.
 For Linux-only builds, use the registered Linux runner for every job, including preflight and publication.
 For WSL, follow the Linux runner and shared-PC requirements in the release procedure.
 Start only a registered Linux runner that the operator owns, using its `run.sh` and native Linux tools.

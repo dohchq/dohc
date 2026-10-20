@@ -41,6 +41,11 @@ export const DOHC_TRASH_GUARD: DohcPathGuard = {
   lead: "dohc could not move this to the workspace trash.",
 };
 
+export const DOHC_AGENT_RUNS_GUARD: DohcPathGuard = {
+  path: ".dohc/agent-runs",
+  lead: "dohc could not open this workspace's agent run history.",
+};
+
 export const DOHC_ENGINE_GUARD: DohcPathGuard = {
   path: ".dohc/engine",
   lead: "dohc could not start the engine for this workspace.",

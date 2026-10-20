@@ -8,7 +8,6 @@
 //! 33 to 67 MB, and a spawn loop reached 9 to 12 processes against a bound of
 //! 8. See docs/engineering/app-compiler.md.
 use crate::args::Args;
-use crate::profile::profile;
 use crate::sys::{self, Wait};
 use crate::tree::{System, Tree};
 use std::io::{self, ErrorKind, Write};
@@ -17,6 +16,9 @@ use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
+/// The most task slots the tree may take: threads on Linux, and processes
+/// no one has reaped. A real compile takes a few dozen.
+const MAX_TASKS: u64 = 1024;
 /// How long teardown may keep signalling before the owner reports failure.
 const TEARDOWN_BUDGET: Duration = Duration::from_secs(2);
 const CHUNK: usize = 64 * 1024;
@@ -65,6 +67,8 @@ fn run() -> Result<u8, String> {
         return Err("The caller did not pass a lifeline on descriptor 3.".to_owned());
     }
     let owner = sys::lead_process_group().map_err(|error| format!("Process group: {error}"))?;
+    #[cfg(target_os = "linux")]
+    sys::adopt_orphans().map_err(|error| format!("Subreaper: {error}"))?;
     sys::close_inherited_descriptors_on_exec().map_err(|error| format!("Descriptors: {error}"))?;
     let args = Args::parse(std::env::args_os())?;
     let started = Instant::now();
@@ -88,9 +92,13 @@ fn run() -> Result<u8, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // Node stops at startup when the system OpenSSL configuration exists but
+    // the sandbox keeps it unreadable. The compiler needs none.
+    #[cfg(target_os = "linux")]
+    command.env("OPENSSL_CONF", "/dev/null");
     sys::confine(
         &mut command,
-        profile(&args.root, &args.node, &args.build)?,
+        sys::sandbox(&args.root, &args.node, &args.build)?,
         cpu_seconds,
     );
     let mut child = command
@@ -149,9 +157,15 @@ fn watch(
             Ok(None) => {}
             Err(error) => return Outcome::Unmeasurable(error),
         }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = sys::reap_adopted(child.id() as sys::Pid) {
+            return Outcome::Unmeasurable(error);
+        }
         match tree.measure() {
             Ok(sample) if sample.footprint > args.memory_bytes => return Outcome::Memory,
-            Ok(sample) if sample.processes > args.max_processes => return Outcome::Processes,
+            Ok(sample) if sample.processes > args.max_processes || sample.tasks > MAX_TASKS => {
+                return Outcome::Processes;
+            }
             Ok(_) => {}
             Err(error) => return Outcome::Unmeasurable(error),
         }

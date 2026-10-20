@@ -110,8 +110,8 @@ export function refuseCallerOperationId(id: string | undefined): void {
   if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
 }
 
-export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
-export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
+export interface HistoryOperation { operationId: string; versionId: string; momentCount: number; kind: "file-duplicate" | null }
+export interface HistoryUndoResult extends Omit<HistoryOperation, "kind"> { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
 export interface HistoryLinkRewriteResult {
   documents: number;
   links: number;

@@ -196,6 +196,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
   dohc_write_file: "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
   dohc_create_directory: "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
+  dohc_duplicate_file: { cli: "fileDuplicate" },
   dohc_move_path: "`{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.",
   dohc_delete_path: "`{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.",
   dohc_detect_apps: "`{ ok: true, apps: { root, title, kind, confidence, entry?, packageManager?, scripts, configuredPreviewMode?, buildOutputs, configPath?, diagnostics }[], count, detector }`",
@@ -444,7 +445,7 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "links"
+  const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
     ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
     : command === "chat"
     ? name === "file-mentions" ? "chatFileMentions" : name
@@ -461,7 +462,7 @@ function verbReturns(command: string, name: string): string {
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
     // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => !["history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["file", "history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;

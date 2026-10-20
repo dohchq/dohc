@@ -1020,3 +1020,38 @@ mod tests {
         );
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConversationLinksParams {
+    channel_wire_id: String,
+    scope: String,
+    shared_channel_rows_uncovered: i64,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
+}
+impl EngineService {
+    pub(crate) async fn chats_conversations_list_links(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let p: ConversationLinksParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "chats.conversations.listLinks",
+            open.actor.conversation_file_links_page(
+                open.workspace_id.clone(),
+                p.channel_wire_id,
+                p.scope,
+                p.shared_channel_rows_uncovered,
+                p.cursor,
+                cancellation.token(),
+            ),
+        )
+        .await
+    }
+}

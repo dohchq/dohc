@@ -74,6 +74,18 @@ const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
 const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
+
+pub(crate) fn reader_source_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        MARKDOWN_SOURCE_META_KEY
+            | MARKDOWN_SOURCE_SHA_META_KEY
+            | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY
+            | MARKDOWN_SOURCE_READER_META_KEY
+            | FRONTMATTER_SOURCE_META_KEY
+            | MARKDOWN_CRLF_META_KEY
+    ) || key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
+}
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -696,6 +708,15 @@ impl Ydoc {
     }
 
     pub(crate) fn validate_public_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
+        self.validate_public_baseline_as(bytes, false)
+    }
+
+    /// Schema/budget checks only. Exact output also requires the strict reader proof.
+    pub(crate) fn validate_reader_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
+        self.validate_public_baseline_as(bytes, true)
+    }
+
+    fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         self.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -728,10 +749,15 @@ impl Ydoc {
                     )
             );
             let item_record = matches!(
-                (key, value),
+                (key, &value),
                 (key, Out::Any(Any::String(_))) if key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
             );
-            if !valid && !item_record {
+            let reader_meta = reader
+                && matches!(
+                    (key, &value),
+                    (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
+                );
+            if !valid && !item_record && !reader_meta {
                 return Err(invalid());
             }
         }
@@ -1289,7 +1315,7 @@ impl Ydoc {
     /// retained XML before journaling the returned update.
     pub fn replace_frontmatter_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
-        self.stage_source_preserving_edit_bounded(markdown, None, false, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, false, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut transaction = staged.doc.transact_mut();
@@ -1572,7 +1598,7 @@ impl Ydoc {
             .ok_or(CollabError::FrontmatterEditRefused)?
             .insert(key.to_owned(), value.clone());
         self.validate_frontmatter_edit(&current, &[key], Some(markdown))?;
-        self.stage_source_preserving_edit(markdown, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, true, true, |staged| {
             let _ = staged.write_frontmatter_value(key, &value);
             Ok(())
         })
@@ -1606,9 +1632,13 @@ impl Ydoc {
         point: &Ydoc,
         max_bytes: usize,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), true, |staged| {
-            restore_copy::copy(point, staged, max_bytes)
-        })
+        self.stage_source_preserving_edit_bounded(
+            markdown,
+            Some(max_bytes),
+            true,
+            false,
+            |staged| restore_copy::copy(point, staged, max_bytes),
+        )
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -1734,7 +1764,7 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, None, true, edit)
+        self.stage_source_preserving_edit_bounded(markdown, None, true, false, edit)
     }
 
     fn stage_source_preserving_edit_bounded(
@@ -1742,8 +1772,12 @@ impl Ydoc {
         markdown: &str,
         budget: Option<usize>,
         retain_matching_source: bool,
+        reader_edit: bool,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
+        if self.has_reader_source() && retain_matching_source && !reader_edit {
+            return Err(CollabError::MarkdownReaderUnavailable);
+        }
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
             return Err(CollabError::ProjectionTooLarge {
                 actual: markdown.len(),
@@ -1865,7 +1899,6 @@ impl Ydoc {
         let source_sha256 = crate::hex_sha256(markdown.as_bytes());
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
-        meta.remove(&mut txn, MARKDOWN_SOURCE_READER_META_KEY);
         meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, markdown);
         meta.insert(
             &mut txn,

@@ -26,6 +26,7 @@
 
 pub mod actor;
 mod chat_mentions;
+mod conversation_links;
 pub mod error;
 pub mod identity;
 pub(crate) mod links;

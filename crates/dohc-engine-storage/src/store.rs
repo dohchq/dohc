@@ -305,6 +305,13 @@ impl EngineStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn startup_checkpoint_work_for_test(&self) -> (u64, i64) {
+        self.checkpoints
+            .as_ref()
+            .map_or((0, 0), |c| c.startup_work_for_test())
+    }
+
+    #[cfg(test)]
     pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
         self.checkpoints.as_ref().unwrap().completed_for_test()
     }

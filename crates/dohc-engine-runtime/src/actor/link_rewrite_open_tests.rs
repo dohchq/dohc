@@ -861,7 +861,7 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
                 "path":"source-0000.md","contentKind":"richdoc",
                 "updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":false}),
         };
-        dohc_engine_sync::apply_replication_envelope(store, cache, &envelope, &NoFaults, leases.as_ref())?;
+        dohc_engine_sync::apply_replication_envelope(store, cache, &envelope, &NoFaults, &leases)?;
         let queued: i64 = store.read_with(|c| c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r|r.get(0)))?;
         assert_eq!(queued, 1);
         Ok(())

@@ -178,6 +178,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_reactions",
     "chat_decisions",
     "chat_attachments",
+    "chat_conversation_file_links",
+    "chat_conversation_file_link_state",
+    "chat_conversation_file_link_work",
     "chat_pending_message_parents",
     "chat_pending_replication",
     "chat_agent_read_state",
@@ -671,6 +674,30 @@ mod tests {
     use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn conversation_links_schema_rejects_missing_projection_resources() {
+        for table in [
+            "chat_conversation_file_links",
+            "chat_conversation_file_link_state",
+            "chat_conversation_file_link_work",
+        ] {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("conversation-links-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(&format!("DROP TABLE {table}")).unwrap();
+            drop(c);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "missing {table}"
+            );
+        }
+    }
 
     #[test]
     fn checkpoint_fullfsync_is_set_for_the_connection_lifetime() {
