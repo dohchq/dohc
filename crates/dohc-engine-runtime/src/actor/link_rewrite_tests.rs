@@ -825,14 +825,14 @@ async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
         .run(move |store, _| {
             store
                 .read_with(|conn| {
-                    let (cursor, kind): (usize, String) = conn.query_row(
+                    let (cursor, kind): (i64, String) = conn.query_row(
                         "SELECT result_seq,kind FROM engine_requests WHERE request_id=?1",
                         [&request],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
                     assert_eq!(
                         cursor,
-                        nth - 1,
+                        i64::try_from(nth - 1).unwrap(),
                         "the selected member committed before the crash"
                     );
                     assert_eq!(kind, "history-undo-pending", "at least one write remains");
