@@ -286,7 +286,7 @@ impl ActorHandle {
         let mut unchecked = plan.candidates.unchecked.clone();
         let mut cursor = 0;
         let mut stopped = false;
-        while cursor < plan.candidates.sources.len() {
+        'sources: while cursor < plan.candidates.sources.len() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -504,13 +504,22 @@ impl ActorHandle {
                     })
                     })()?;
                     if committed { next_result = next; } else { skipped.push(source_path); }
-                    if started.elapsed() >= Duration::from_millis(5) { break; }
+                    if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
                     Ok((prepared, next_result, skipped, stopped))
                 }).await?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
                 stopped = committed.3;
+                if stopped {
+                    unchecked.extend(prepared.drain(..).map(|(_, head, _, _)| head.path));
+                    unchecked.extend(
+                        plan.candidates.sources[cursor..]
+                            .iter()
+                            .map(|(_, path)| path.clone()),
+                    );
+                    break 'sources;
+                }
             }
         }
         unchecked.sort();
