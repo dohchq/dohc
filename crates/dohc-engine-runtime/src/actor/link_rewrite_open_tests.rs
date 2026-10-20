@@ -643,7 +643,9 @@ async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage()
     };
     let (result,lease) = tokio::join!(f.undo_open(),reopen);
     assert!(result.unwrap().not_restored.is_empty());
-    assert!(f.document("source-0000").await.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
+    let doc = f.document("source-0000").await;
+    assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
+    assert_eq!(doc.wikilink_spans().unwrap().1.len(),2,"reopened editor lost its native wikilink elements");
     assert_eq!(f.text("source-0000.md").await,BODY);
     drop(lease);
     f.close().await;
