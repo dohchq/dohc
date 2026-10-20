@@ -1394,7 +1394,11 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
                 }
                 && w.writes
                     <= if forward {
-                        (if matches!(p.phase.as_str(), "admission" | "reply") { 3 } else { 2 }) + 112 * w.sources
+                        (if matches!(p.phase.as_str(), "admission" | "reply") {
+                            3
+                        } else {
+                            2
+                        }) + 112 * w.sources
                     } else {
                         16 + 496 * w.inverses.max(1)
                     }
