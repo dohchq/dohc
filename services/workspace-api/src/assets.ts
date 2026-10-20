@@ -336,7 +336,8 @@ if (page === "reset-password") {
   onSubmit(form, "Saving your password\\u2026", async () => {
     const password = byId("password").value;
     if (password !== byId("confirm").value) throw new Error("The two passwords do not match.");
-    await call("/api/auth/reset-password", { newPassword: password, token: document.body.dataset.token });
+    const name = byId("name");
+    await call("/api/auth/reset-password", { newPassword: password, token: document.body.dataset.token, ...(name ? { name: name.value.trim() } : {}) });
     form.hidden = true;
     setStatus("done", "Your password is saved.");
     byId("after").hidden = false;

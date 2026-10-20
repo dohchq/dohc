@@ -242,6 +242,15 @@ describe("account pages", () => {
     expect(without).toContain("This reset link is incomplete");
   });
 
+  it("asks for a name only on a closed server's setup link", async () => {
+    const reset = await (await router()(get("/account/reset-password?token=abc"))).text();
+    expect(reset).toContain("<h1>Choose a new password</h1>");
+    expect(reset).not.toContain('id="name"');
+    const setup = await (await router()(get("/account/reset-password?token=abc&setup=1"))).text();
+    expect(setup).toContain("<h1>Finish setting up your account</h1>");
+    expect(setup).toContain('id="name"');
+  });
+
   it("serves the hashed assets with a long-lived cache", async () => {
     const css = await router()(get(ACCOUNT_CSS_PATH));
     expect(css.headers.get("content-type")).toContain("text/css");
