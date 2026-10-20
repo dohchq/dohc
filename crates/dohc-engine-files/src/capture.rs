@@ -63,6 +63,10 @@ pub enum IngestOutcome {
     /// The capture driver asks for that scan once a session releases its
     /// lease.
     Deferred,
+    /// The file was gone when the sink read it, and retiring its record waits
+    /// for a live document session, as with [`RetireOutcome::Deferred`]. The
+    /// manifest keeps the path's entry, so a later scan retires it.
+    RetireDeferred,
     /// The bytes were durably observed but could not be recorded. A separate
     /// hold protects them; acknowledging this identity must not claim capture.
     Held { size: u64, sha256: String },
@@ -186,9 +190,12 @@ pub struct CaptureApplyResult {
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
     /// Ops the sink deferred to a live document session, in plan order. They
-    /// do not degrade the run. A deferred ingest's manifest entry is dropped;
-    /// a deferred retire's stays.
+    /// do not degrade the run, and their manifest entries are dropped unless
+    /// they are in [`Self::deferred_retires`].
     pub deferred_paths: Vec<String>,
+    /// The deferred paths whose record waits to be retired. Their manifest
+    /// entries stay, so the next scan retires them.
+    pub deferred_retires: Vec<String>,
     pub held_observations: Vec<HeldObservation>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
@@ -432,6 +439,7 @@ enum Applied {
     Retired,
     NotOwned,
     Deferred,
+    DeferredRetire,
     Held { size: u64, sha256: String },
 }
 
@@ -439,7 +447,7 @@ impl From<RetireOutcome> for Applied {
     fn from(outcome: RetireOutcome) -> Self {
         match outcome {
             RetireOutcome::Retired => Self::Retired,
-            RetireOutcome::Deferred => Self::Deferred,
+            RetireOutcome::Deferred => Self::DeferredRetire,
         }
     }
 }
@@ -450,6 +458,7 @@ impl From<IngestOutcome> for Applied {
             IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
             IngestOutcome::NotOwned => Self::NotOwned,
             IngestOutcome::Deferred => Self::Deferred,
+            IngestOutcome::RetireDeferred => Self::DeferredRetire,
             IngestOutcome::Held { size, sha256 } => Self::Held { size, sha256 },
         }
     }
@@ -461,6 +470,7 @@ struct Receipt {
     not_owned_paths: Vec<String>,
     failed_applies: Vec<String>,
     deferred_paths: Vec<String>,
+    deferred_retires: Vec<String>,
     held_observations: Vec<HeldObservation>,
 }
 
@@ -472,6 +482,7 @@ impl Receipt {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
             held_observations: Vec::new(),
         }
     }
@@ -489,6 +500,10 @@ impl Receipt {
             Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
             Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
             Ok(Applied::Deferred) => self.deferred_paths.push(op.path().to_owned()),
+            Ok(Applied::DeferredRetire) => {
+                self.deferred_paths.push(op.path().to_owned());
+                self.deferred_retires.push(op.path().to_owned());
+            }
             Ok(Applied::Held { size, sha256 }) => self.held_observations.push(HeldObservation {
                 path: op.path().to_owned(),
                 size,
@@ -510,6 +525,7 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            deferred_retires: self.deferred_retires,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: Some(boundary_path.to_owned()),
             degraded: true,
@@ -524,6 +540,7 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            deferred_retires: self.deferred_retires,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: None,
             degraded,

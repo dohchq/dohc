@@ -2622,8 +2622,14 @@ fn ensure_capture_target_not_leased(
 /// store has a head for it.
 pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
 
-/// The capture refusal for a recorded file whose live session holds it.
-pub const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
+/// The capture refusal for a recorded file a lease holds.
+const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
+
+/// The capture refusal to retire a recorded file while a document session
+/// holds it. The session's release wakes capture, which retires it then. An
+/// internal attempt's release wakes nothing, so its lease refuses as
+/// `ydoc-session-live` and capture retries as for any failure.
+pub const CAPTURE_RETIRE_WAITS_FOR_SESSION: &str = "capture-retire-waits-for-session";
 
 fn capture_secret_on_store(
     store: &mut EngineStore,
@@ -2836,7 +2842,11 @@ fn capture_retire_on_store(
             if leases.is_held(&key) {
                 return Err(RuntimeError::Sync(
                     dohc_engine_sync::SyncError::RetryableState {
-                        reason: CAPTURE_RECORDED_FILE_LIVE,
+                        reason: if leases.is_held_by_session(&key) {
+                            CAPTURE_RETIRE_WAITS_FOR_SESSION
+                        } else {
+                            CAPTURE_RECORDED_FILE_LIVE
+                        },
                     },
                 ));
             }

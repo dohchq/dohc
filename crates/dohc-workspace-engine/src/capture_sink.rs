@@ -1016,7 +1016,7 @@ impl StoreCaptureSink {
             }
             Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason }))
                 if confirm_absent
-                    && reason == dohc_engine_runtime::actor::CAPTURE_RECORDED_FILE_LIVE =>
+                    && reason == dohc_engine_runtime::actor::CAPTURE_RETIRE_WAITS_FOR_SESSION =>
             {
                 Err(RETIRE_HELD)
             }
@@ -1576,13 +1576,17 @@ impl CaptureSink for StoreCaptureSink {
                 // Raced a delete between scan and re-read: retire like an
                 // ordinary delete (pass provenance; no ownership label), and
                 // report NotOwned so the manifest forgets the path. A refused
-                // retire keeps the self-write identity: the file is back, and
-                // the rescan may find dohc's own bytes.
-                self.retire_absent_head(path, self.provenance.summary.clone())?;
-                if changed {
-                    self.self_writes.clear_path(&self.workspace_id, path);
+                // or deferred retire keeps the self-write identity: the file
+                // can come back, and the rescan may find dohc's own bytes.
+                match self.retire_deleted(path)? {
+                    RetireOutcome::Retired => {
+                        if changed {
+                            self.self_writes.clear_path(&self.workspace_id, path);
+                        }
+                        Ok(IngestOutcome::NotOwned)
+                    }
+                    RetireOutcome::Deferred => Ok(IngestOutcome::RetireDeferred),
                 }
-                Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::NonOwnable => {
                 if changed {

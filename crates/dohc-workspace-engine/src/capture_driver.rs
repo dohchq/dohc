@@ -3552,6 +3552,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         not_owned_paths: Vec::new(),
         failed_applies: failed,
         deferred_paths: Vec::new(),
+        deferred_retires: Vec::new(),
         held_observations: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,

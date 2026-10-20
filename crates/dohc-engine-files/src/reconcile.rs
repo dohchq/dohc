@@ -619,6 +619,8 @@ impl ReconcileController {
         let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
         let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
         let deferred: BTreeSet<&str> = result.deferred_paths.iter().map(String::as_str).collect();
+        let deferred_retires: BTreeSet<&str> =
+            result.deferred_retires.iter().map(String::as_str).collect();
         let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
             .captured
             .iter()
@@ -668,7 +670,7 @@ impl ReconcileController {
                 // unchanged whenever the bytes match that file, and capture
                 // would never check them. A deferred retire keeps its entry,
                 // so the next scan retires the path again.
-                if matches!(op, CaptureOp::Ingest { .. }) {
+                if !deferred_retires.contains(op.path()) {
                     next.remove(op.path());
                 }
                 continue;
@@ -978,6 +980,7 @@ mod ack_receipt_tests {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
@@ -1019,6 +1022,7 @@ mod ack_receipt_tests {
             not_owned_paths: vec!["over-cap.md".to_owned()],
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
