@@ -610,7 +610,22 @@ const crashReports = createCrashReportStore({
 });
 // Whether this computer runs each workspace's app commands. Main's own
 // record, in this computer's dohc profile: nothing in a workspace sets it.
-const workspaceTrust = createWorkspaceTrust({ file: join(stateDir(), "workspace-trust.json") });
+const workspaceTrust = createWorkspaceTrust({
+  file: join(stateDir(), "workspace-trust.json"),
+  onChange: (workspaceId, trusted) => agentTrustChanged(workspaceId, trusted),
+});
+
+// Every trust change, from the dialog, Settings, Forget, or New workspace:
+// the held notice and the ask on a send come once per change, and requests
+// Restricted Mode held start once trusted, without another message.
+function agentTrustChanged(workspaceId: string, trusted: boolean): void {
+  chatDispatchService.trustChanged(workspaceId);
+  chatDispatchNotices.clear(workspaceId, "restricted");
+  if (!trusted) return;
+  void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+    console.error("[desktop] chat dispatch scan after trust:", error);
+  });
+}
 
 // The windows showing a workspace follow its trust at once.
 function notifyWorkspaceTrustChanged(workspaceId: string, trusted: boolean): void {
@@ -6961,17 +6976,8 @@ function registerIpcHandlers(): void {
     stopAppCommands: (operation) =>
       operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
     stopAgents: (workspaceId) => chatDispatchService.stopForRestrictedMode(workspaceId),
-    notifyChanged: (workspaceId, trusted) => {
-      notifyWorkspaceTrustChanged(workspaceId, trusted);
-      // The held notice and the ask on a send come once per trust change.
-      chatDispatchService.trustChanged(workspaceId);
-      chatDispatchNotices.clear(workspaceId, "restricted");
-      if (!trusted) return;
-      // Requests Restricted Mode held start now, without another message.
-      void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
-        console.error("[desktop] chat dispatch scan after trust:", error);
-      });
-    },
+    onAsk: (workspaceId) => chatDispatchService.trustAsked(workspaceId),
+    notifyChanged: notifyWorkspaceTrustChanged,
   }));
 
   registerOpenWorkspaceIpcHandler<

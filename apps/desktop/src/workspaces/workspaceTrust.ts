@@ -71,6 +71,9 @@ export function createWorkspaceTrust(dependencies: {
   file: string;
   identify?: (rootPath: string) => Promise<string | null>;
   now?: () => number;
+  // Hears every change, whatever made it: true once a grant holds, false
+  // the moment a workspace is restricted.
+  onChange?: (workspaceId: string, trusted: boolean) => void;
   // Tests replace the file system calls.
   readText?: (file: string) => Promise<string>;
   writeText?: (file: string, text: string) => Promise<void>;
@@ -155,6 +158,7 @@ export function createWorkspaceTrust(dependencies: {
   function revoke(workspaceId: string): void {
     restricted.add(workspaceId);
     revocations.set(workspaceId, (revocations.get(workspaceId) ?? 0) + 1);
+    dependencies.onChange?.(workspaceId, false);
   }
 
   // Writes Restricted Mode to the file. A failed write leaves the workspace
@@ -201,6 +205,7 @@ export function createWorkspaceTrust(dependencies: {
         // of the file.
         if (revokedMeanwhile()) return false;
         restricted.delete(workspace.workspaceId);
+        dependencies.onChange?.(workspace.workspaceId, true);
         return true;
       });
     },

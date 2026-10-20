@@ -34,6 +34,8 @@ export function workspaceTrustHandlers<
   isSharedView(workspaceId: string): boolean;
   // Main's dialog, over the window that asked. True only on Trust workspace.
   confirm(event: Event, workspace: TrustedFolder): Promise<boolean>;
+  // The dialog is opening for the workspace.
+  onAsk?(workspaceId: string): void;
   // Stops every app command the workspace runs, and its previews. Rejects
   // when one did not stop.
   stopAppCommands(operation: Operation): Promise<void>;
@@ -50,6 +52,7 @@ export function workspaceTrustHandlers<
     // The grant names the folder the person was asked about. A folder put at
     // the path while the dialog was open does not match it.
     const folder = await dependencies.identify(workspace.rootPath);
+    dependencies.onAsk?.(workspace.workspaceId);
     if (!(await dependencies.confirm(event, workspace))) return;
     // The dialog can outlast the window's workspace.
     operation.assertCurrent();

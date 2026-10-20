@@ -545,8 +545,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const storeResolves = { chat: 0, dispatch: 0 };
   const dispatchDaemon = await fakeDispatchDaemon(workspace, now, options);
   let trustText: string | null = null;
+  let changes: ChatDispatchService | null = null;
   const trust = createWorkspaceTrust({
     file: "workspace-trust.json",
+    onChange: (workspaceId) => changes?.trustChanged(workspaceId),
     identify: async () => "1:1",
     readText: async () => {
       if (trustText === null) throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -679,6 +681,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     },
   };
   const service = createChatDispatchService(serviceOptions);
+  changes = service;
 
   const fixture: Fixture = {
     root,
@@ -811,11 +814,9 @@ afterEach(async () => {
 // As main's trust operations do: change the record, then tell dispatch.
 async function trustWorkspace(fixture: Fixture): Promise<void> {
   await fixture.trust.trust(fixture.workspace);
-  fixture.service.trustChanged(WORKSPACE_ID);
 }
 async function restrictWorkspace(fixture: Fixture): Promise<void> {
   await fixture.trust.restrict(WORKSPACE_ID);
-  fixture.service.trustChanged(WORKSPACE_ID);
 }
 
 describe("chatDispatchService", () => {
@@ -3540,7 +3541,8 @@ describe("chatDispatchService", () => {
       await fixture.service.scanWorkspace(WORKSPACE_ID);
 
       expect(fixture.spawnCalls).toEqual([]);
-      expect(fixture.requeues).toEqual([]);
+      // dohc asks; the engine allows no third attempt, so it stays failed.
+      expect(fixture.requeues).toEqual([expect.objectContaining({ triggerMessageId: trigger.messageId })]);
       expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("failed");
       await vi.waitFor(() => expect(fixture.notices).toEqual([expect.objectContaining({
         title: "Your agent's run in \"Plan day 4\" did not start in Restricted Mode",
@@ -3555,7 +3557,7 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls).toEqual([]);
     });
 
-    it("asks once for a person's own held message, never for another person's, and again after a restrict", async () => {
+    it("asks for a person's own held message until the dialog opens, never for another person's, and again after a restrict", async () => {
       const fixture = await createFixture({ restricted: true });
       fixture.service.start();
       const ask = async (authorUserId: string, body: string) => {
@@ -3565,13 +3567,15 @@ describe("chatDispatchService", () => {
       };
       await expect(ask("user_other", "Theirs.")).resolves.toBe(false);
       await expect(ask("user_local", "Mine.")).resolves.toBe(true);
-      await expect(ask("user_local", "Mine again.")).resolves.toBe(false);
+      // A window that dropped that answer showed no dialog, so the next send asks.
+      await expect(ask("user_local", "Mine again.")).resolves.toBe(true);
+      fixture.service.trustAsked(WORKSPACE_ID);
+      await expect(ask("user_local", "After the dialog.")).resolves.toBe(false);
 
       await trustWorkspace(fixture);
       await expect(ask("user_local", "Trusted now.")).resolves.toBe(false);
       await restrictWorkspace(fixture);
       await expect(ask("user_local", "Restricted again.")).resolves.toBe(true);
-      await expect(ask("user_local", "And again.")).resolves.toBe(false);
     });
 
     it("tells the person again after a restrict-again that came while dispatch was paused", async () => {
@@ -3661,6 +3665,93 @@ describe("chatDispatchService", () => {
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS + 1_000);
       await outcome;
+    });
+
+    it("requeues a trust-blocked start whose end failed to save, once recovery saves it", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const trigger = await createAgentThread(fixture, { body: "Plan day 5", authorUserId: "user_local" });
+      fixture.rejectNextFailRun!(new Error("daemon unavailable"));
+
+      await activate(fixture);
+
+      await vi.waitFor(() => {
+        expect(fixture.requeues).toEqual([expect.objectContaining({ triggerMessageId: trigger.messageId })]);
+      }, { timeout: 10_000 });
+      await vi.waitFor(() => expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("pending"));
+      // The notice owed until the requeue landed goes unseen.
+      await vi.waitFor(async () => expect(await owedRuns(fixture)).toEqual([]));
+      expect(fixture.notices).toEqual([]);
+      await trustWorkspace(fixture);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+    });
+
+    it("owes the notice until the requeue lands, so a crash before it still tells the person", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+        requeueFailures: [new Error("dohc stopped before the requeue")],
+      });
+      const trigger = await createAgentThread(fixture, { body: "Plan day 6", authorUserId: "user_local" });
+      await activate(fixture);
+      const runId = fixture.requeues[0]!.runId;
+      expect(await owedRuns(fixture)).toEqual([runId]);
+
+      // Nothing this run of dohc held in memory survives.
+      await fixture.service.stop();
+      const restarted = createChatDispatchService(fixture.serviceOptions);
+      try {
+        restarted.start();
+        await restarted.scanWorkspace(WORKSPACE_ID);
+        expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("failed");
+        expect(fixture.notices).toEqual([expect.objectContaining({
+          title: "Your agent's run in \"Plan day 6\" did not start in Restricted Mode",
+        })]);
+      } finally {
+        await restarted.stop();
+      }
+    });
+
+    it("tells the person when the engine does not requeue a trust-blocked start, whatever its attempt", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const service = createChatDispatchService({ ...fixture.serviceOptions, requeueFailedTrigger: async () => false });
+      try {
+        const trigger = await createAgentThread(fixture, { body: "Plan day 7", authorUserId: "user_local" });
+        service.start();
+        await service.scanWorkspace(WORKSPACE_ID);
+        expect(fixture.spawnCalls).toEqual([]);
+        expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({ state: "failed", attemptCount: 1 });
+        await vi.waitFor(() => expect(fixture.notices).toEqual([expect.objectContaining({
+          title: "Your agent's run in \"Plan day 7\" did not start in Restricted Mode",
+        })]));
+      } finally {
+        await service.stop();
+      }
+    });
+
+    it("looks for held requests when a self-test's runner exits after the kill grace", async () => {
+      vi.useFakeTimers();
+      const fixture = await createFixture();
+      const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1), { interval: 0 });
+      await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
+      await expect(result).resolves.toMatchObject({ ok: false });
+      await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS + 1_000);
+
+      // The runner is still alive, so a request waits behind it.
+      await createAgentThread(fixture, { body: "After the self-test.", authorUserId: "user_local" });
+      fixture.service.start();
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+
+      fixture.spawnCalls[0]!.process.emitExit(null, "SIGKILL");
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
     });
   });
 });

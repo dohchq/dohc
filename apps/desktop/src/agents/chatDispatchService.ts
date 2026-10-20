@@ -231,6 +231,10 @@ interface PendingPreRunFailure {
   claim: AgentDispatchClaim;
   reason: string;
   releaseWorkspace: (() => Promise<void>) | null;
+  // Restricted Mode stopped the start, so the request goes back in line.
+  requeue: boolean;
+  // The run's end is saved; a retry only requeues and settles its notice.
+  failed: boolean;
 }
 
 interface PendingInterruptedRequeue {
@@ -755,12 +759,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
 
-  async function failClaimBeforeRun(
-    workspace: ChatDispatchWorkspace,
-    claim: AgentDispatchClaim,
-    reason: string,
-    notice = true,
-  ): Promise<void> {
+  async function failClaimBeforeRun(failure: PendingPreRunFailure): Promise<void> {
     // A daemon restart can reject attribution teardown after the claim has
     // reserved this workspace but before a child exists. Retry once, then
     // finish the failed claim even if capture remains unavailable: the next
@@ -768,38 +767,50 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     // in-memory reservation would deadlock dispatch until app quit.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await options.setRunAttribution(workspace, null);
+        await options.setRunAttribution(failure.workspace, null);
         break;
       } catch (error) {
         reportError(error);
       }
     }
-    await markRunFailureHandled(workspace, claim.run).catch(reportError);
-    if (notice) await oweRunNotice(workspace, claim.run.runId);
-    await options.dispatchStoreFor(workspace).failRun({
-      runId: claim.run.runId,
-      reason,
-    });
-    notifyRunUpdated(workspace);
-    if (notice) await settleRunNotice(workspace, claim.run.runId);
+    await markRunFailureHandled(failure.workspace, failure.claim.run).catch(reportError);
+    await endPreRunFailure(failure);
+  }
+
+  // Saves the run's end, then tells the person. A request Restricted Mode
+  // stopped goes back in line when the engine still allows it an attempt;
+  // its notice is owed from before the end is saved, so a crash before the
+  // requeue still tells the person, and it is dropped unseen once the
+  // requeue lands.
+  async function endPreRunFailure(failure: PendingPreRunFailure): Promise<void> {
+    const { workspace } = failure;
+    const { runId, triggerMessageId } = failure.claim.run;
+    if (!failure.failed) {
+      await oweRunNotice(workspace, runId);
+      await options.dispatchStoreFor(workspace).failRun({ runId, reason: failure.reason });
+      failure.failed = true;
+      notifyRunUpdated(workspace);
+    }
+    const requeued = failure.requeue && (await options.requeueFailedTrigger?.({
+      workspaceId: workspace.workspaceId,
+      ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
+      triggerMessageId,
+      runId,
+    })) === true;
+    if (requeued) await options.runNotices?.owed.remove(workspace.workspaceId, runId).catch(reportError);
+    else await settleRunNotice(workspace, runId);
   }
 
   async function recoverPreRunFailure(
     recovery: PendingPreRunFailure,
   ): Promise<boolean> {
     try {
-      await oweRunNotice(recovery.workspace, recovery.claim.run.runId);
-      await options.dispatchStoreFor(recovery.workspace).failRun({
-        runId: recovery.claim.run.runId,
-        reason: recovery.reason,
-      });
+      await endPreRunFailure(recovery);
       if (
         pendingPreRunFailures.get(recovery.workspace.workspaceId) === recovery
       ) {
         pendingPreRunFailures.delete(recovery.workspace.workspaceId);
       }
-      notifyRunUpdated(recovery.workspace);
-      await settleRunNotice(recovery.workspace, recovery.claim.run.runId);
       await releaseWorkspaceLease(recovery.releaseWorkspace);
       recovery.releaseWorkspace = null;
       return true;
@@ -899,30 +910,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       reportError(error);
       // A restrict that landed while the run was starting stops it here. Its
       // request goes back in line, where the next drain holds it, or starts
-      // it when the workspace is trusted again. That costs one attempt; on
-      // the last one it stays failed, and the person is told.
+      // it when the workspace is trusted again. That costs one attempt; when
+      // the engine allows no more, it stays failed, and the person is told.
       const restricted = error instanceof WorkspaceRestrictedError;
-      const requeue = restricted && claim.dispatch.attemptCount < 2;
       const detail =
         error instanceof Error && error.message ? error.message : "unknown error";
-      const reason = restricted ? RESTRICTED_AT_START : `${RUNNER_START_FAILURE}: ${detail}`;
+      const failure: PendingPreRunFailure = {
+        workspace,
+        claim,
+        reason: restricted ? RESTRICTED_AT_START : `${RUNNER_START_FAILURE}: ${detail}`,
+        releaseWorkspace,
+        requeue: restricted,
+        failed: false,
+      };
       try {
-        await failClaimBeforeRun(workspace, claim, reason, !requeue);
+        await failClaimBeforeRun(failure);
         await releaseWorkspaceLease(releaseWorkspace);
-        if (requeue && !(await requeueInterruptedRun(workspace, {
-          workspaceId: workspace.workspaceId,
-          ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
-          triggerMessageId: claim.run.triggerMessageId,
-          runId: claim.run.runId,
-        }))) return;
       } catch (persistenceError) {
         reportError(persistenceError);
-        pendingPreRunFailures.set(workspace.workspaceId, {
-          workspace,
-          claim,
-          reason,
-          releaseWorkspace,
-        });
+        pendingPreRunFailures.set(workspace.workspaceId, failure);
         scheduleRecoveryScan(workspace);
         return;
       }
@@ -1446,9 +1452,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   // Whether main should ask the person to trust the workspace for their own
-  // message: the dispatch holds it in Restricted Mode, and nobody asked them
-  // since the workspace's trust last changed. A trusted workspace answers at
-  // once; a restricted one answers behind the scan the message's post queued.
+  // message: the dispatch holds it in Restricted Mode, and main's dialog has
+  // not opened for it since its trust last changed. A trusted workspace
+  // answers at once; a restricted one answers behind the scan the message's
+  // post queued.
   async function waitsForTrust(workspaceId: string, messageId: string): Promise<boolean> {
     const workspace = options.workspaceFor(workspaceId);
     if (stopped || !workspace || told(workspaceId).asked || (await agentStartCheck(workspace))) return false;
@@ -1459,9 +1466,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const pending = await options.dispatchStoreFor(current).listPending(workspaceId);
       waits = pending.some((each) => each.triggerMessageId === messageId) &&
         (await agentStartCheck(current)) === null;
-      if (waits) told(workspaceId).asked = true;
     });
     return waits;
+  }
+
+  // Main's trust dialog opened for the workspace, by any path. Sends stop
+  // asking until its trust changes.
+  function trustAsked(workspaceId: string): void {
+    told(workspaceId).asked = true;
   }
 
   // The workspace was trusted or restricted: a later hold tells the person
@@ -1639,9 +1651,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               clearTimeout(test.killEscalation);
               test.killEscalation = null;
             }
-            // A restrict finds the runner until it has exited.
+            // A restrict finds the runner until it has exited. A runner that
+            // outlived the kill grace has already given up its reservation,
+            // so its exit is what lets held requests start.
             const forget = () => {
-              if (selfTests.get(workspaceId) === test) selfTests.delete(workspaceId);
+              if (selfTests.get(workspaceId) !== test) return;
+              selfTests.delete(workspaceId);
+              if (!selfTestReservations.has(workspaceId) && !stopped) {
+                void scanWorkspace(workspaceId).catch(reportError);
+              }
             };
             if (test.child.hasExited()) forget();
             else test.child.onExit(forget);
@@ -1874,6 +1892,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopAgentRun,
     stopForRestrictedMode,
     waitsForTrust,
+    trustAsked,
     trustChanged,
     resumeThreadDispatch,
     dispatchStateForThread,

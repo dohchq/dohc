@@ -20,6 +20,8 @@ async function harness(input: {
   stop?: () => Promise<void>;
   // Stands in for the stop of the workspace's agent.
   stopAgents?: (workspaceId: string) => Promise<void>;
+  // Hears the dialog open.
+  onAsk?: (workspaceId: string) => void;
   // Runs before each write of the trust file, to hold it.
   writeGate?: { hold: (() => Promise<void>) | null };
 } = {}) {
@@ -54,6 +56,7 @@ async function harness(input: {
     stopAppCommands: (held) =>
       input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
     stopAgents: input.stopAgents ?? (async () => undefined),
+    ...(input.onAsk ? { onAsk: input.onAsk } : {}),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
@@ -311,5 +314,17 @@ describe("main's workspace trust operations", () => {
     await vi.waitFor(() => expect(h.notified.at(-1)).toEqual(["trip", false]));
     agentStopping.resolve();
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: false });
+  });
+
+  it("tells dispatch the dialog opened, once for requests that share it, and not for a trusted workspace", async () => {
+    const asked: string[] = [];
+    const h = await harness({ answer: false, onAsk: (workspaceId) => asked.push(workspaceId) });
+    await Promise.all([h.request(), h.request()]);
+    expect(asked).toEqual(["trip"]);
+    const trusted = await harness({ answer: true, onAsk: (workspaceId) => asked.push(workspaceId) });
+    await trusted.request();
+    await trusted.request();
+    expect(asked).toEqual(["trip", "trip"]);
+    expect(h.confirm).toHaveBeenCalledTimes(1);
   });
 });
