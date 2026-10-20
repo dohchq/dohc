@@ -1325,7 +1325,7 @@ async fn a_peer_head_edit_after_read_is_unchecked_and_preserved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_rewrites_publish_before_undo_and_external_disk_edits_still_refuse() {
+async fn pending_rewrites_cancel_in_the_inverse_transaction_and_external_edits_still_refuse() {
     for external in [false, true] {
         let f = Fixture::new(2, 2);
         f.pass("pending", Arc::new(NoFaults)).await.unwrap();
@@ -1357,6 +1357,14 @@ async fn pending_rewrites_publish_before_undo_and_external_disk_edits_still_refu
             let undone = f.undo().await.unwrap();
             assert_eq!(undone.moments.len(), 3);
             assert!(undone.not_restored.is_empty());
+            f.actor.run(|store,_| {
+                let statuses: Vec<String> = store.read_with(|conn| {
+                    let mut stmt=conn.prepare("SELECT status FROM materialization_jobs WHERE job_id LIKE 'authored-mat_link-rewrite-%'").unwrap();
+                    stmt.query_map([],|r|r.get(0)).unwrap().collect::<Result<_,_>>()
+                }).map_err(StorageError::corrupt_public)?;
+                assert_eq!(statuses, vec!["cancelled";2], "forward bytes must never be published");
+                Ok(())
+            }).await.unwrap();
             let placed = f
                 .actor
                 .history_undo_place(
@@ -1414,4 +1422,18 @@ async fn competing_alias_families_stop_and_resume_without_a_workspace_revision()
         assert_eq!(reply["complete"], true);
         f.close().await;
     }
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate() {
+    let f = Fixture::new(1, 1);
+    let guard = f.actor.link_rewrites.gate.clone().lock_owned().await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), f.actor.history_undo_in_turns(
+        f.ws.clone(), "unrelated-missing-operation".into(), "unrelated-gate".into(), None,
+        f.root.to_path_buf(), Arc::new(NoFaults), 10, [Arc::default(), f.serial.clone()],
+        Arc::new(()), CancellationToken::new())).await.expect("Undo waited for a whole forward pass");
+    assert!(matches!(reply, Err(RuntimeError::Domain(_))));
+    drop(guard);
+    f.close().await;
 }

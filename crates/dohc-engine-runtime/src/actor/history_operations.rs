@@ -418,13 +418,17 @@ fn link_inverse_input(
         dohc_engine_storage::text::read(conn, sha).map_err(StorageError::corrupt_public)
     };
     crate::links::rewrite::inverse_budgeted(&load(&before)?, &load(&after)?, &load(&head)?)
-        .map_err(|()| DomainError::UndoRefused { path: path.clone(), reason: "link diff budget exceeded" })?.ok_or(
-        DomainError::UndoRefused {
-            path,
-            reason: "link changed after rename",
-        }
-        .into(),
-    )
+        .map_err(|()| DomainError::UndoRefused {
+            path: path.clone(),
+            reason: "link diff budget exceeded",
+        })?
+        .ok_or(
+            DomainError::UndoRefused {
+                path,
+                reason: "link changed after rename",
+            }
+            .into(),
+        )
 }
 
 fn rename_head_sha(

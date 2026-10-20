@@ -24,10 +24,16 @@ struct Prepared {
     inverse: Result<Option<String>, RuntimeError>,
     disk: Result<DiskProof, RuntimeError>,
 }
-fn inverse_input(conn: &rusqlite::Connection, plan: &Plan, member: &Member) -> Result<Option<String>, RuntimeError> {
+fn inverse_input(
+    conn: &rusqlite::Connection,
+    plan: &Plan,
+    member: &Member,
+) -> Result<Option<String>, RuntimeError> {
     if member.effect.operation == "write" {
         link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect).map(Some)
-    } else { Ok(None) }
+    } else {
+        Ok(None)
+    }
 }
 fn corrupt() -> RuntimeError {
     DomainError::StateCorrupt {
@@ -314,35 +320,65 @@ impl ActorHandle {
             // Keep unchanged preimages pending until their compensation commits.
             let disk_root = root.clone();
             let (unpublished, pending) = tokio::task::spawn_blocking(move || {
-                let probe = dohc_engine_files::ProjectionProbe::new(&disk_root).map_err(StorageError::persist_public)?;
+                let probe = dohc_engine_files::ProjectionProbe::new(&disk_root)
+                    .map_err(StorageError::persist_public)?;
                 let mut unpublished = std::collections::HashMap::new();
                 let mut replay = Vec::new();
                 for (job, path, present, sha) in pending {
                     let unchanged = match probe_undo_source(&probe, &path) {
-                        dohc_engine_files::ProjectionTargetState::Text {sha256} | dohc_engine_files::ProjectionTargetState::Binary {sha256} => present && sha.as_deref()==Some(&sha256),
+                        dohc_engine_files::ProjectionTargetState::Text { sha256 }
+                        | dohc_engine_files::ProjectionTargetState::Binary { sha256 } => {
+                            present && sha.as_deref() == Some(&sha256)
+                        }
                         dohc_engine_files::ProjectionTargetState::Absent => !present,
                         _ => false,
                     };
-                    if unchanged { unpublished.insert(path, sha); } else { replay.push(job); }
+                    if unchanged {
+                        unpublished.insert(path, sha);
+                    } else {
+                        replay.push(job);
+                    }
                 }
-                Ok::<_,RuntimeError>((unpublished,replay))
-            }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+                Ok::<_, RuntimeError>((unpublished, replay))
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
             for jobs in pending.chunks(16) {
-                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
                 let jobs: HashSet<_> = jobs.iter().cloned().collect();
                 let (w, root, recorder) = (ws.clone(), root.clone(), recorder.clone());
                 let capture = gates[0].clone().lock_owned().await;
                 let sessions = gates[1].clone().lock_owned().await;
-                self.run_undo_turn(request.clone(), "write-publication", None, move |store, _| {
-                    let _guards = (capture, sessions);
-                    store.with_materialization_status_batch(|store| {
-                        replay_pending_materializations(store, &root, MaterializationReplayScope {
-                            holds: None, workspace_id: &w, self_writes: Some(recorder.as_ref()),
-                            progress: None, file_outcomes_settled: false, released_hold_paths: None,
-                        }, now, &dohc_engine_storage::NoFaults, Some(&jobs), false)
-                    })?;
-                    Ok(())
-                }).await?;
+                self.run_undo_turn(
+                    request.clone(),
+                    "write-publication",
+                    None,
+                    move |store, _| {
+                        let _guards = (capture, sessions);
+                        store.with_materialization_status_batch(|store| {
+                            replay_pending_materializations(
+                                store,
+                                &root,
+                                MaterializationReplayScope {
+                                    holds: None,
+                                    workspace_id: &w,
+                                    self_writes: Some(recorder.as_ref()),
+                                    progress: None,
+                                    file_outcomes_settled: false,
+                                    released_hold_paths: None,
+                                },
+                                now,
+                                &dohc_engine_storage::NoFaults,
+                                Some(&jobs),
+                                false,
+                            )
+                        })?;
+                        Ok(())
+                    },
+                )
+                .await?;
             }
             let (w, o, r, a) = (
                 ws.clone(),
@@ -535,23 +571,40 @@ impl ActorHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             }
-            let end = (prepared_cursor + if plan.members[prepared_cursor].effect.operation == "rename" { 1 } else { 16 }).min(plan.members.len());
+            let end = (prepared_cursor
+                + if plan.members[prepared_cursor].effect.operation == "rename" {
+                    1
+                } else {
+                    16
+                })
+            .min(plan.members.len());
             let count = end - prepared_cursor;
             let cached: Vec<_> = (0..count).map(|_| inputs.pop_front()).collect();
             let disk_root = root.clone();
             let p = plan.clone();
             let (batch, policy, reader) = tokio::task::spawn_blocking(move || {
-                let batch = cached.into_iter().enumerate().map(|(offset, cached)| {
-                    cached.unwrap_or_else(|| {
-                        let member = &p.members[prepared_cursor + offset];
-                        Prepared {
-                            inverse: inverse_store.read_with(|conn| inverse_input(conn, &p, member)),
-                            disk: disk_check(&disk_root, member),
-                        }
+                let batch = cached
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, cached)| {
+                        cached.unwrap_or_else(|| {
+                            let member = &p.members[prepared_cursor + offset];
+                            Prepared {
+                                inverse: inverse_store
+                                    .read_with(|conn| inverse_input(conn, &p, member)),
+                                disk: disk_check(&disk_root, member),
+                            }
+                        })
                     })
-                }).collect::<std::collections::VecDeque<_>>();
-                (batch, crate::search::read_engine_search_policy(&disk_root), inverse_store)
-            }).await.map_err(|_| RuntimeError::ActorUnavailable)?;
+                    .collect::<std::collections::VecDeque<_>>();
+                (
+                    batch,
+                    crate::search::read_engine_search_policy(&disk_root),
+                    inverse_store,
+                )
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
             inverse_store = reader;
             let _capture = gates[0].clone().lock_owned().await;
             let _sessions = gates[1].clone().lock_owned().await;
@@ -636,7 +689,9 @@ impl ActorHandle {
             }).await;
             match next {
                 Ok((cursor, committed, remaining)) => {
-                    for input in remaining.into_iter().rev() { inputs.push_front(input); }
+                    for input in remaining.into_iter().rev() {
+                        inputs.push_front(input);
+                    }
                     if committed {
                         deduped = false;
                     }
@@ -644,6 +699,7 @@ impl ActorHandle {
                     locked_since = None;
                 }
                 Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                    inputs.clear();
                     Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone())
                         .await?;
                 }
