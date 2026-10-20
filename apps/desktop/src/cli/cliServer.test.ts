@@ -562,6 +562,28 @@ describe("CLI socket server", () => {
     expect(object).toHaveBeenCalledOnce();
   });
 
+  it("keeps CLI and MCP group listings available when one wire lookup rejects", async () => {
+    const listed = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    const original = store!.getChannelWireId.bind(store);
+    const failedWire = listed.groups[0]!.channelWireId;
+    vi.spyOn(store!, "getChannelWireId").mockImplementation(async input => {
+      const wire = await original(input);
+      if (wire === failedWire) throw Error("channel disappeared");
+      return wire;
+    });
+    const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    expect(groups.groups[0]).toMatchObject({ channelWireId: null });
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    const full = await mcpListGroups(ctx);
+    expect(full).toMatchObject({ ok: true });
+    if (!full.ok) throw Error(full.reason);
+    expect(full.groups.some(group => group.channelWireId === null)).toBe(true);
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+    expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: listed.groups[0]!.name })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("discovers chat wire IDs through CLI and MCP before asking for Links", async () => {
     const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
@@ -573,13 +595,16 @@ describe("CLI socket server", () => {
     expect(full.groups.some(group => group.channelWireId === channelWireId)).toBe(true);
     const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
     serverOptions.chatLinks = read;
-    const cli = await executeCli({
-      argv: ["chat", "links", "--channel-wire-id", channelWireId!], cwd: workspaceRoot, env: {},
-      request: value => invoke(value.verb, value.args),
-    });
-    expect(cli.exitCode).toBe(0);
+    const group = groups.groups[0]!;
+    for (const target of [group.name, group.id, group.id.slice(0, -1)]) {
+      const cli = await executeCli({
+        argv: ["chat", "links", target], cwd: workspaceRoot, env: {},
+        request: value => invoke(value.verb, value.args),
+      });
+      expect(cli.exitCode).toBe(0);
+    }
     expect(await mcpChatLinks(ctx, { channelWireId: channelWireId! })).toBeNull();
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(4);
     for (const [, input] of read.mock.calls) expect(input.channelWireId).toBe(channelWireId);
   });
 

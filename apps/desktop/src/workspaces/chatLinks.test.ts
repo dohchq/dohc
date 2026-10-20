@@ -16,7 +16,7 @@ function harness(share=false) {
  let generation=1, attachment=Symbol();
  const store={
  listChannels:vi.fn(async()=>[{id:"channel"}]),
- getChannelWireId:vi.fn(async()=>"wire"),
+ getChannelWireId:vi.fn(async(_input: {workspaceId:string;channelId:string})=>"wire"),
  linksPage:vi.fn(async (_input: unknown)=>raw()),
  };
  const withAuthority=vi.fn(async(work:()=>Promise<unknown>)=>work());
@@ -130,4 +130,37 @@ it("refuses damaged share authority without trying the owned file boundary",asyn
   const h=harness(true);h.change({shareView:{shareId:"s",grantedSelector:null} as never});
   await expect(h.read("w",{channelWireId:"wire"})).rejects.toThrow("chat-mention-access-changed");
   expect(h.store.linksPage).not.toHaveBeenCalled();expect(h.resolveEngineFiles).not.toHaveBeenCalled();
+});
+
+it("looks up readable wire IDs in parallel and ignores a deleted channel", async () => {
+  const h = harness(), first = deferred<string>();
+  h.store.listChannels.mockResolvedValue([{ id: "slow" }, { id: "deleted" }, { id: "healthy" }]);
+  h.store.getChannelWireId.mockImplementation(({ channelId }: { channelId: string }) =>
+    channelId === "slow" ? first.promise : channelId === "deleted" ? Promise.reject(Error("deleted")) : Promise.resolve("wire"));
+  const reading = h.read("w", { channelWireId: "wire", cursor: "sealed" });
+  await vi.waitFor(() => expect(h.store.getChannelWireId).toHaveBeenCalledTimes(3));
+  first.resolve("other");
+  expect(await reading).toMatchObject({ subject: { channelWireId: "wire" } });
+  expect(await h.read("w", { channelWireId: "missing", cursor: "sealed" })).toBeNull();
+});
+
+it.each(["view", "mount"] as const)("keeps paging after %s skip records and warning dismissal", async kind => {
+  const h = harness(kind === "view");
+  const record = {
+    shareId: "s", label: "shared", recipientUserId: "u", relayUrl: "https://relay.test",
+    granterEmail: null, genericChatWritable: false,
+    grantedSelector: { paths: ["notes"], versionId: null, access: "view" as const },
+  };
+  const change = (extra: object) => kind === "view"
+    ? h.change({ shareView: { ...record, ...extra } })
+    : h.change({ shareMounts: [{ ...record, ...extra }] });
+  change({});
+  await h.read("w", { channelWireId: "wire" });
+  const original = (h.store.linksPage.mock.calls.at(-1)![0] as { scope: string }).scope;
+  change({ skippedOps: { ops: [], more: 1, generation: 2, acknowledgedGeneration: 2 } });
+  await h.read("w", { channelWireId: "wire", cursor: "sealed" });
+  expect(h.store.linksPage.mock.calls.at(-1)![0]).toMatchObject({ scope: original });
+  change({ grantedSelector: { paths: ["other"], versionId: null, access: "view" } });
+  await h.read("w", { channelWireId: "wire", cursor: "sealed" });
+  expect((h.store.linksPage.mock.calls.at(-1)![0] as { scope: string }).scope).not.toBe(original);
 });

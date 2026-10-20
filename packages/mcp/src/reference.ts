@@ -150,7 +150,7 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
-  links: [["chat","links","--channel-wire-id","wire","--cursor","sealed"]],
+  links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],

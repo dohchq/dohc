@@ -2510,12 +2510,14 @@ async function dispatchWorkspace(
         if (fullChannels.length !== before.length) {
           await notifyWrite(options, context);
         }
+        const wireIds = await Promise.all(fullChannels.map(channel =>
+          context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }).catch(() => null)));
         const withThreads = [];
-        for (const channel of fullChannels) {
+        for (const [index, channel] of fullChannels.entries()) {
           const threads = await listCliChannelThreads(context, channel);
           withThreads.push({
             id: channel.id,
-            channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }),
+            channelWireId: wireIds[index] ?? null,
             name: channel.name,
             slug: channel.slug,
             kind: cliGroupKind(channel.kind),
@@ -3034,7 +3036,7 @@ async function dispatchWorkspace(
     case "groups":
       return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
         ...cli,
-        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }),
+        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }).catch(() => null),
       }))) };
 
     case "threads": {
@@ -3492,7 +3494,19 @@ async function dispatchMentionAndLinkReads(
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
   if (request.verb === "chatLinks") {
     if (!options.chatLinks) throw new CliCommandError("Chat links are unavailable.");
-    return options.chatLinks(workspace, { channelWireId: request.args.channelWireId, cursor: request.args.cursor });
+    let channelWireId: string | null;
+    if ("group" in request.args) {
+      const context = await workspaceContextForRequest(request, options);
+      const loaded = await loadChannels(context);
+      if (loaded.provisioned) await notifyWrite(options, context);
+      const channel = resolveChannel(request.args.group, loaded.channels);
+      channelWireId = await context.store.getChannelWireId({
+        workspaceId: context.workspaceId, channelId: channel.engine.id,
+      }).catch(() => null);
+    } else {
+      channelWireId = request.args.channelWireId;
+    }
+    return channelWireId === null ? null : options.chatLinks(workspace, { channelWireId, cursor: request.args.cursor });
   }
   if (request.verb === "chatFileMentions") {
     if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");

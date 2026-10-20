@@ -391,7 +391,7 @@ List the workspace's Chats groups (including the default #general) with each gro
 
 No arguments.
 
-Returns `{ ok: true, groups: { kind, id, channelWireId, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
+Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
 
 ### `dohc_start_group_chat`
 
@@ -805,7 +805,7 @@ dohc chat groups [options]
 
 List the Groups in this workspace.
 
-With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId }[] }`.
+With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
 
 #### `dohc chat threads`
 
@@ -927,12 +927,11 @@ With `--json`, prints `{ schemaVersion, files: { threadId, path }[] }`.
 #### `dohc chat links`
 
 ```sh
-dohc chat links [options]
+dohc chat links <group> [options]
 ```
 
 Read one page of files mentioned in a chat.
 
-- `--channel-wire-id <id>`: From chat groups --json. Required.
 - `--cursor <cursor>`: Continue the previous page.
 
 With `--json`, prints `{ schemaVersion, versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] }` or `null`.

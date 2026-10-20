@@ -2,7 +2,7 @@ import { createChatLinksReader } from "../workspaces/chatLinks";
 import { chatLinks as mcpChatLinks } from "@dohc/mcp/tools";
 import { executeCli } from "@dohc/cli";
 import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "@dohc/cli/protocol";
-import { handleCliRequestLine, type CliServerOptions } from "../cli/cliServer";
+import { handleCliRequestLine, type CliServerOptions, type CliWorkspaceContext } from "../cli/cliServer";
 import { chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -824,7 +824,9 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
-    openWorkspace:async()=>{throw Error("Links must use the shared reader");},
+    openWorkspace:async()=>({
+      workspaceId:"workspace",rootPath:root,readOnly:true,store:h.storeMethods,
+    } as unknown as CliWorkspaceContext),
   };
   const request=async(value:CliRequestWithoutToken)=>{
     const token="a".repeat(64);
@@ -833,7 +835,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     return response.result;
   };
   const ipc=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
-  const cli=await executeCli({argv:["chat","links","--channel-wire-id","wire","--cursor","sealed","--json"],cwd:root,env:{},request});
+  const cli=await executeCli({argv:["chat","links","Group","--cursor","sealed","--json"],cwd:root,env:{},request});
   expect(cli.exitCode).toBe(0);
   const {schemaVersion:_,...cliPage}=JSON.parse(cli.stdout);
   const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request},{channelWireId:"wire",cursor:"sealed"});

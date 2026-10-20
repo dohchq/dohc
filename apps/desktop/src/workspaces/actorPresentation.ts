@@ -174,6 +174,7 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
 export function chatLinkMessageForPresentation(
   author: NonNullable<ChatLinksEnginePage>["entries"][number]["author"],
 ): DisplayMessage {
+  // Relay origin changes assurance, not the key used for grouping, hue and self.
   return {
     author: { kind: author.authorKind, displayName: author.authorDisplayName },
     ...(author.authorUserId === undefined ? {} : { authorUserId: author.authorUserId }),

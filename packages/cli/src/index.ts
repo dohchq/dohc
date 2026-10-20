@@ -81,7 +81,7 @@ function buildCliRequest(
     case "linksEdges":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, cursor: command.cursor } };
     case "chatLinks":
-      return {protocolVersion:common.protocolVersion,verb:command.verb,args:{cwd:common.cwd,actor:common.actor,channelWireId:command.channelWireId,cursor:command.cursor}};
+      return {protocolVersion:common.protocolVersion,verb:command.verb,args:{cwd:common.cwd,actor:common.actor,group:command.group,cursor:command.cursor}};
     case "chatFileMentions":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
     case "linksIn":

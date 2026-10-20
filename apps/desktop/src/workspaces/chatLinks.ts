@@ -29,8 +29,14 @@ export function createChatLinksReader(deps: {
     }
     return createHash("sha256").update(JSON.stringify([
       attachment.key, workspace.workspaceId, workspace.rootPath,
-      workspace.shareView === undefined ? ["owned"] : ["share", workspace.shareView],
-      workspace.sharedChannels ?? [], workspace.shareMounts ?? [], workspace.remote ?? null,
+      workspace.shareView === undefined ? ["owned"] : ["share",
+        workspace.shareView?.shareId, workspace.shareView?.grantedSelector, workspace.shareView?.ended,
+        workspace.shareView?.receivedIdentity, workspace.shareView?.recipientUserId, workspace.shareView?.relayUrl],
+      (workspace.sharedChannels ?? []).map(row => [row.shareId, row.channelWireId, row.access,
+        row.ended, row.left, row.recipientUserId, row.relayUrl, row.serverUrl]),
+      (workspace.shareMounts ?? []).map(row => [row.shareId, row.grantedSelector, row.ended, row.label,
+        row.receivedIdentity, row.recipientUserId, row.relayUrl, row.recipientEmail]),
+      workspace.remote ?? null,
       workspace.pausedRemote ?? null, deps.principalGeneration(),
     ])).digest("hex");
   };
@@ -56,6 +62,7 @@ export function createChatLinksReader(deps: {
       }
       // Continuations retain coverage in the sealed cursor. Refresh owner channels once.
       if (scope.kind === "workspace" && !parsed.cursor && attempt === 0) {
+        // Sync exposes only an aggregate uncovered count, not per-channel freshness.
         uncovered = await deps.syncWorkspaceSharedChannels(workspaceId);
         assertCurrent();
         const current = deps.readWorkspace(workspaceId);
@@ -65,13 +72,10 @@ export function createChatLinksReader(deps: {
       const read = async (): Promise<ChatLinksPage> => {
         const channels = await store.listChannels({ workspaceId });
         check();
-        let admitted = false;
-        for (const channel of channels) {
-          const wire = await store.getChannelWireId({ workspaceId, channelId: channel.id });
-          check();
-          if (wire === parsed.channelWireId) { admitted = true; break; }
-        }
-        if (!admitted) return null;
+        const wires = await Promise.all(channels.map(channel =>
+          store.getChannelWireId({ workspaceId, channelId: channel.id }).catch(() => null)));
+        check();
+        if (!wires.includes(parsed.channelWireId)) return null;
         const page = await store.linksPage({
           workspaceId, ...parsed, scope: key, sharedChannelRowsUncovered: uncovered,
         });

@@ -59,3 +59,35 @@ it("reports current errors but suppresses errors after unmount",async()=>{
   let work!:Promise<void>;act(()=>{work=h.result.current.load();});h.unmount();
   pending.reject(Error("late"));await work;expect(h.onError).toHaveBeenCalledTimes(1);
 });
+
+it("distinguishes idle, loading, loaded empty and unavailable; refresh keeps existing pages", async () => {
+  const h = setup(), refresh = deferred<ReturnType<typeof page>>();
+  expect(h.result.current.status).toBe("idle");
+  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(refresh.promise).mockResolvedValueOnce(null);
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("loaded");
+  let pending!: Promise<void>;
+  act(() => { pending = h.result.current.load(); });
+  expect(h.result.current.status).toBe("loading");
+  expect(h.result.current.pages).toHaveLength(1);
+  await act(async () => { refresh.resolve(page("fresh", null)); await pending; });
+  expect(h.result.current.status).toBe("loaded");
+  expect(h.result.current.pages.map(p => p.subject.channelWireId)).toEqual(["fresh"]);
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("unavailable");
+  expect(h.result.current.pages).toEqual([]);
+  h.read.mockResolvedValueOnce(page("empty", null));
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("loaded");
+  expect(h.result.current.pages[0]!.entries).toEqual([]);
+});
+
+it("keeps the loaded status and pages when a refresh fails", async () => {
+  const h = setup();
+  h.read.mockResolvedValueOnce(page()).mockRejectedValueOnce(Error("refresh"));
+  await act(() => h.result.current.load());
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("loaded");
+  expect(h.result.current.pages).toHaveLength(1);
+  expect(h.onError).toHaveBeenCalledOnce();
+});

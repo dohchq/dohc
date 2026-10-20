@@ -3,6 +3,7 @@ import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { bridge } from "../bridge";
 
 type Page = NonNullable<ChatLinksPage>;
+type Status = "idle" | "loaded" | "unavailable";
 
 // Reads only when opened or paged by the caller. Each scope owns its requests.
 export function useChatLinks({ workspaceId, channelWireId, onError }: {
@@ -15,8 +16,8 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
     scope.current = { workspaceId, channelWireId, sequence: 0, busy: false, mounted: true };
   }
   const current = scope.current;
-  const [state, setState] = useState<{ scope: typeof current; pages: Page[]; loading: boolean }>({
-    scope: current, pages: [], loading: false,
+  const [state, setState] = useState<{ scope: typeof current; pages: Page[]; status: Status; loading: boolean }>({
+    scope: current, pages: [], status: "idle", loading: false,
   });
   const pages = state.scope === current ? state.pages : [];
   const latest = useRef(pages);
@@ -30,13 +31,16 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
     const sequence = ++current.sequence;
     const active = () => scope.current === current && current.mounted && current.sequence === sequence;
     current.busy = true;
-    setState({ scope: current, pages: cursor ? latest.current : [], loading: true });
+    setState(previous => ({
+      scope: current, pages: previous.scope === current ? previous.pages : [],
+      status: previous.scope === current ? previous.status : "idle", loading: true,
+    }));
     try {
       const page = await bridge().chatLinks({ workspaceId, channelWireId, ...(cursor ? { cursor } : {}) });
       if (!active()) return;
       setState(previous => ({
         scope: current, pages: page ? [...(cursor && previous.scope === current ? previous.pages : []), page] : [],
-        loading: false,
+        status: page ? "loaded" : "unavailable", loading: false,
       }));
     } catch (error) {
       if (active()) onError(error);
@@ -52,5 +56,7 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
     const cursor = latest.current.at(-1)?.nextCursor;
     return cursor ? read(cursor) : Promise.resolve();
   }, [read]);
-  return { pages, loading: state.scope === current && state.loading, load, loadMore };
+  const loading = state.scope === current && state.loading;
+  const status = state.scope !== current ? "idle" : loading ? "loading" : state.status;
+  return { pages, status, loading, load, loadMore };
 }

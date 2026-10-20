@@ -1,9 +1,8 @@
-import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -22,7 +21,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
-  | ({ verb: "chatLinks" } & ChatLinksInput)
+  | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
   | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
   | ({ verb: "linksIn" } & InInput)
@@ -1130,14 +1129,13 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
     verbs: { ...CHAT_VERBS, links: {
-      capabilityId:"chat.read", summary:"Read one page of files mentioned in a chat.", operands:"",
-      flags:[
-        {name:"--channel-wire-id",value:"id",text:"From chat groups --json. Required."},
-        {name:"--cursor",value:"cursor",text:"Continue the previous page."},
-      ],
-      parse:input=>{
-        noExtraArgs(input.operands,"chat links");
-        return {verb:"chatLinks",...ChatLinksInput.parse({channelWireId:lastValue(input,"--channel-wire-id"),cursor:lastValue(input,"--cursor")})};
+      capabilityId: "chat.read", summary: "Read one page of files mentioned in a chat.", operands: "<group>",
+      flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+      parse: input => {
+        const [group, ...extra] = input.operands;
+        if (!group) fail("links requires a group");
+        noExtraArgs(extra, "chat links");
+        return { verb: "chatLinks", ...chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") }) };
       },
     }, "file-mentions": {
       capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
