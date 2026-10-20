@@ -6,7 +6,7 @@ import type { LinkLiveBrowserContext } from "./liveBrowserContext";
 import { hashLinkBearer, hashLinkProfileSecret, validateLinkCapability } from "./linkSecurity";
 
 /** Compose only behind the live route's trusted Host, Origin, and exchange-key check. */
-export function createLinkLiveBrowserResolver(options: { storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease?: PublicEditRelease }) {
+export function createLinkLiveBrowserResolver(options: { storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease: PublicEditRelease | undefined }) {
   const { storage } = options;
   const supplied = options.linkKey;
   const linkKey = typeof supplied === "string" ? supplied : Buffer.from(new Uint8Array(supplied.buffer, supplied.byteOffset, supplied.byteLength));

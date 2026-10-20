@@ -14,7 +14,7 @@ import {ReplicaMap} from "./replicaMap";
 export interface ReplicaCurrentViewReadInput {
   readonly grantId: string;
   readonly generation: number;
-  readonly principal: Extract<CurrentShareGrantPrincipal, {kind:"user"}> | {kind:"link"; requireSession:()=>unknown};
+  readonly principal: Extract<CurrentShareGrantPrincipal, {kind:"user"}> | {kind:"link"; requireSession:()=>{grantId:string;generation:number}};
 }
 export interface ReplicaCurrentViewSource {
   currentReadView(workspaceId: string, readStored?:()=>ReplicaCurrentView|null): {view: ReplicaCurrentView; previous?: ReplicaCurrentView} | null;
@@ -272,7 +272,10 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     const selector = fileSideOf(authorized.effectiveSelector);
     if (!selector) return {status:"denied"};
     if (authority?.history && selector.access !== "edit") return {status:"denied"};
-    if (input.principal.kind === "link") input.principal.requireSession();
+    if (input.principal.kind === "link") {
+      const session = input.principal.requireSession();
+      if (session.grantId !== input.grantId || session.generation !== input.generation) return {status:"denied"};
+    }
     const workspace = authorized.share.workspaceId;
     const standing = storage.readReplicaStanding(workspace);
     if (!standing) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }

@@ -102,7 +102,7 @@ export function createLinkReadRoutes(
 
     if (route.route === "link-current") {
       if(replica) {
-        const body=replica.inventory({grantId:capability.grantId,generation:capability.generation,principal:{kind:"link"}},
+        const body=replica.inventory({grantId:capability.grantId,generation:capability.generation},
           ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
         if(body.files.length>linkCurrentFileLimit)throw notFound();
         return linkJsonResponse(capability.shareId,capability.grantId,body);
@@ -156,7 +156,7 @@ export function createLinkReadRoutes(
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
       if(replica && currentOnly) {
-        const input={grantId:capability.grantId,generation:capability.generation,principal:{kind:"link" as const}};
+        const input={grantId:capability.grantId,generation:capability.generation};
         let since=parseCursor(url.searchParams.get("since"));
         if(!Number.isSafeInteger(since))throw notFound();
         const limit=parseLimit(url.searchParams.get("limit")),hold=parseLinkLogHold(url.searchParams.get("hold"));
@@ -326,7 +326,7 @@ export function createLinkReadRoutes(
     }
 
     assertSha256(route.sha256);
-    const replicaInput={grantId:capability.grantId,generation:capability.generation,principal:{kind:"link" as const}};
+    const replicaInput={grantId:capability.grantId,generation:capability.generation};
     const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFreshLinkRead(capabilityToken,capability),route.sha256,includeBytes);
     let historicalByteLength:number|null|undefined;
     const historicalLength=()=>historicalByteLength===undefined ? historicalByteLength=capability.access === "edit" ? linkRevisionByteLength(

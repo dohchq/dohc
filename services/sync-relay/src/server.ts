@@ -567,7 +567,6 @@ export function createSyncRelayHandler({
     rateLimiter: collectionWriteRateLimiter,
     admission: linkCollectionWriteAdmission,
     linkKey,
-    publicEditRelease,
     requireLinkCapability,
     nowMs,
     newId,
@@ -657,7 +656,6 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
-    publicEditRelease,
   );
 
   const {

@@ -10,7 +10,7 @@ afterEach(async()=>{vi.restoreAllMocks();await closeTestStorages();});
 it.skipIf(process.env.DOHC_LINK_READ_PERF !== "1")("measures the per-read capability check",async()=>{
   const f=await fixture();
   try {
-    const input={storage:f.storage,capabilityToken:f.capabilityToken,linkKey:LINK_KEY,nowMs:2000};
+    const input={storage:f.storage,capabilityToken:f.capabilityToken,linkKey:LINK_KEY,nowMs:2000,publicEditRelease:undefined};
     const methods=["findLinkSessionByCapabilityHash","getShare","getShareGrant","workspaceIsOwnedBy","findChannelCreateKind"] as const;
     const spies=methods.map(method=>vi.spyOn(f.storage,method));
     expect(validateLinkCapability(input)).not.toBeNull();
@@ -46,11 +46,24 @@ it.each(["view","comment","edit","read-only","read-write"] as const)("rechecks %
       expect.soft((await closed(request(null,"/sync/link/log",{headers}))).status).toBe(404);
       expect.soft((await closed(request(null,"/sync/link-exchange",{...jsonBody({secret:f.secret}),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":"e".repeat(64)}}))).status).toBe(404);
     }
-    const input={storage:f.storage,capabilityToken:f.capabilityToken,linkKey:LINK_KEY,nowMs:2000};
+    const input={storage:f.storage,capabilityToken:f.capabilityToken,linkKey:LINK_KEY,nowMs:2000,publicEditRelease:undefined};
     expect(validateLinkCapability(Object.assign({},input,{publicEditRelease:{version:1 as const}}))).not.toBeNull();
     expect.soft(validateLinkCapability(input) === null).toBe(status === 404);
     const liveRequest=new Request("https://relay.test",{headers:{authorization:`Bearer ${f.capabilityToken}`,"x-dohc-link-profile-secret":"p".repeat(43)}});
-    expect.soft(await createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY}).resolve(liveRequest,"abcdefghijkl","read") === null).toBe(status === 404);
+    expect.soft(await createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:undefined}).resolve(liveRequest,"abcdefghijkl","read") === null).toBe(status === 404);
+    expect(await createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:{version:1}}).resolve(liveRequest,"abcdefghijkl","read")).not.toBeNull();
+  } finally {closed.dispose();f.dispose();}
+});
+
+it.each([
+  ["edit","/sync/link/discussion"],
+  ["read-write","/sync/link/chat/channels"],
+] as const)("refuses release-off %s sessions through %s",async(access,path)=>{
+  const f=await fixture(access);
+  const closed=testHandler(f.storage,{...f.options,publicEditRelease:undefined});
+  try {
+    expect((await f.send(path)).status).toBe(200);
+    expect((await closed(request(null,path,{headers:{authorization:`LinkCapability ${f.capabilityToken}`}}))).status).toBe(404);
   } finally {closed.dispose();f.dispose();}
 });
 

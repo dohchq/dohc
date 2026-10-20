@@ -10,7 +10,7 @@ import type {SyncRelayStorage} from "./storage";
 import {linkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 
 /** Private relay metadata. The viewer receives only the selected object ID. */
-export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease?: PublicEditRelease;
+export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease: PublicEditRelease | undefined;
   hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
   sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean}) {

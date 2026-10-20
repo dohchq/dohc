@@ -4802,6 +4802,7 @@ describe("relay link grants", () => {
 
       expect(
         validateLinkCapability({
+          publicEditRelease: undefined,
           storage,
           capabilityToken: "capped-capability-0",
           linkKey: LINK_KEY,
@@ -4810,6 +4811,7 @@ describe("relay link grants", () => {
       ).toBeNull();
       expect(
         validateLinkCapability({
+          publicEditRelease: undefined,
           storage,
           capabilityToken: `capped-capability-${limit}`,
           linkKey: LINK_KEY,
@@ -4819,6 +4821,7 @@ describe("relay link grants", () => {
       expect(countSessions(untouchedGrantId)).toBe(1);
       expect(
         validateLinkCapability({
+          publicEditRelease: undefined,
           storage,
           capabilityToken: untouchedToken,
           linkKey: LINK_KEY,
@@ -4953,6 +4956,7 @@ describe("relay link grants", () => {
     expect(session?.capabilityHash).not.toContain(capabilityToken);
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken,
         linkKey: LINK_KEY,
@@ -4966,6 +4970,7 @@ describe("relay link grants", () => {
     });
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken,
         linkKey: LINK_KEY,
@@ -4985,6 +4990,7 @@ describe("relay link grants", () => {
     ).toBe(200);
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken,
         linkKey: LINK_KEY,
@@ -5050,6 +5056,7 @@ describe("relay link grants", () => {
     expect(storage.findLinkSessionByCapabilityHash(hmac(oldCapability))).toBeNull();
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken: oldCapability,
         linkKey: LINK_KEY,
@@ -5058,6 +5065,7 @@ describe("relay link grants", () => {
     ).toBeNull();
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken: newCapability,
         linkKey: LINK_KEY,
@@ -5108,6 +5116,7 @@ describe("relay link grants", () => {
 
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken: oldCapability,
         linkKey: LINK_KEY,
@@ -5131,6 +5140,7 @@ describe("relay link grants", () => {
     expect(storage.findLinkSessionByCapabilityHash(hmac(oldCapability))).toBeNull();
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken: oldCapability,
         linkKey: LINK_KEY,
@@ -5139,6 +5149,7 @@ describe("relay link grants", () => {
     ).toBeNull();
     expect(
       validateLinkCapability({
+        publicEditRelease: undefined,
         storage,
         capabilityToken: newCapability,
         linkKey: LINK_KEY,

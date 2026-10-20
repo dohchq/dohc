@@ -214,7 +214,7 @@ export function validateLinkCapability(input: {
   capabilityToken: string;
   linkKey: BinaryLike;
   nowMs: number;
-  publicEditRelease?: PublicEditRelease;
+  publicEditRelease: PublicEditRelease | undefined;
 }): ValidatedLinkCapability | null {
   const capabilityHash = hashLinkBearer(input.capabilityToken, input.linkKey);
   const session = input.storage.findLinkSessionByCapabilityHash(capabilityHash);

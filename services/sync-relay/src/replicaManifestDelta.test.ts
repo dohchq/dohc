@@ -11,13 +11,13 @@ afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
 it("R4 review: publish notifies once; unchanged persists and History samples stay quiet",async()=>{
   const f=await fixture(3),notified=vi.fn();f.supervisor.subscribeReadChanges(notified);
   seedLinkGrant(f.storage,{shareId:"s",grantId:"link",secretHash:"hash"});
-  const input={grantId:"link",generation:1,principal:{kind:"link" as const}};
+  const input={grantId:"link",generation:1};
   const service=f.storage.createReplicaLinkReadService(f.supervisor,{holdReader(){}},{wakeLog(){}},()=>({lastSettledKnown:false,lastSettledAtMs:null}));
-  const cursor=service.inventory(input,()=>{}).nextCursor;
+  const cursor=service.inventory(input,()=>input).nextCursor;
   vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
   try {
     f.update({});await f.supervisor.activate("w");expect(notified).not.toHaveBeenCalled();
-    expect(service.feed(input,()=>{},cursor,500)).toMatchObject({ops:[],nextCursor:cursor});
+    expect(service.feed(input,()=>input,cursor,500)).toMatchObject({ops:[],nextCursor:cursor});
     f.update({files:[{...f.files[0]!,sha256:sha256("edit"),byteLength:4}],texts:[{sha256:sha256("edit"),text:"edit"}]});
     await f.supervisor.activate("w");expect(notified).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(2000);expect(notified).toHaveBeenCalledTimes(1);
@@ -43,18 +43,18 @@ it("R4 review: a replacement manifest resets removals absent from the stored bas
 it("R4 review: feed waits after a persist refusal until another publish",async()=>{
   const f=await fixture(3);
   seedLinkGrant(f.storage,{shareId:"s",grantId:"link",secretHash:"hash"});
-  const input={grantId:"link",generation:1,principal:{kind:"link" as const}};
+  const input={grantId:"link",generation:1};
   const service=f.storage.createReplicaLinkReadService(f.supervisor,{holdReader(){}},{wakeLog(){}},()=>({lastSettledKnown:false,lastSettledAtMs:null}));
   vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
   try {
-    service.inventory(input,()=>{});
+    service.inventory(input,()=>input);
     f.update({files:[{...f.files[0]!,sha256:sha256("edit"),byteLength:4}],texts:[{sha256:sha256("edit"),text:"edit"}]});await f.supervisor.activate("w");
-    const cursor=service.inventory(input,()=>{}).nextCursor;
+    const cursor=service.inventory(input,()=>input).nextCursor;
     vi.spyOn(f.storage,"storeReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});
     await vi.advanceTimersByTimeAsync(2000);
-    for(let i=0;i<3;i++)expect(service.feed(input,()=>{},cursor,500)).toMatchObject({ops:[],nextCursor:cursor,hasMore:false});
+    for(let i=0;i<3;i++)expect(service.feed(input,()=>input,cursor,500)).toMatchObject({ops:[],nextCursor:cursor,hasMore:false});
     f.update({delta:false,files:[]});await f.supervisor.activate("w");
-    expect(service.feed(input,()=>{},cursor,500).ops).toContainEqual(expect.objectContaining({opKind:"files.reset"}));
+    expect(service.feed(input,()=>input,cursor,500).ops).toContainEqual(expect.objectContaining({opKind:"files.reset"}));
   }finally{service.close();await f.supervisor.close();vi.restoreAllMocks();}
 });
 it("prepares each replacement path once across collection and the first list",async()=>{
