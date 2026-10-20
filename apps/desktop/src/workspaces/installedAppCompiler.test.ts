@@ -16,8 +16,19 @@ it("passes the compiler's reason on in place of the supervisor's code", () => {
   expect(appBuildError(other)).toBe(other);
 });
 
-it("builds apps on Windows x64 and Apple silicon Macs with macOS 13.5 or later only", () => {
+it("builds apps on Windows x64, Apple silicon Macs with macOS 13.5 or later, and Linux x64 with Landlock only", () => {
   expect(appCompilerRefusal("win32", "x64", "10.0.26100")).toBeUndefined();
+  // Linux 5.13 added Landlock, which confines the compiler.
+  for (const kernel of ["5.13.0", "6.8.0-45-generic", "6.18.54.1-microsoft-standard-WSL2"]) expect(appCompilerRefusal("linux", "x64", kernel)).toBeUndefined();
+  for (const kernel of ["5.12.19", "4.19.0-27-amd64"]) {
+    expect(appCompilerRefusal("linux", "x64", kernel)).toBe("Publishing and opening apps needs Linux 5.13 or later. Update Linux, then try again.");
+  }
+  // The kernel lists the security modules it turned on. An unreadable or empty list leaves the owner to decide.
+  for (const modules of ["lockdown,capability,landlock,yama,apparmor", "landlock", "", undefined]) {
+    expect(appCompilerRefusal("linux", "x64", "6.8.0-45-generic", modules)).toBeUndefined();
+  }
+  expect(appCompilerRefusal("linux", "x64", "6.8.0-45-generic", "lockdown,capability,yama,apparmor\n"))
+    .toBe("Publishing and opening apps needs Landlock, which this Linux kernel leaves off. Add landlock to its lsm boot option and restart, or use a kernel that includes Landlock.");
   // macOS 13.5 is Darwin 22.6, the oldest release the pinned Node runs on.
   for (const kernel of ["22.6.0", "22.10.0", "23.0.0", "27.0.0"]) expect(appCompilerRefusal("darwin", "arm64", kernel)).toBeUndefined();
   for (const kernel of ["21.6.0", "22.5.0"]) {
@@ -29,7 +40,7 @@ it("builds apps on Windows x64 and Apple silicon Macs with macOS 13.5 or later o
       expect(appCompilerRefusal("darwin", arch, kernel)).toBe("Publishing and opening apps needs an Apple silicon Mac with macOS 13.5 or later.");
     }
   }
-  for (const [platform, arch] of [["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]] as const) {
-    expect(appCompilerRefusal(platform, arch, "27.0.0")).toBe("Publishing and opening apps needs Windows x64, or an Apple silicon Mac with macOS 13.5 or later.");
+  for (const [platform, arch] of [["win32", "arm64"], ["linux", "arm64"], ["freebsd", "x64"]] as const) {
+    expect(appCompilerRefusal(platform, arch, "27.0.0")).toBe("Publishing and opening apps needs Windows x64, an Apple silicon Mac with macOS 13.5 or later, or Linux x64.");
   }
 });

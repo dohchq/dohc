@@ -11,7 +11,8 @@ import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const ownerTarget = "aarch64-apple-darwin";
+/** The platforms that build apps under crates/dohc-compiler-owner, and its Rust target on each. */
+const ownerTargets = { darwin: "aarch64-apple-darwin", linux: "x86_64-unknown-linux-gnu" };
 const ownerCrate = "crates/dohc-compiler-owner";
 
 function compilerFiles(platform, arch) {
@@ -29,11 +30,11 @@ function refuseIntelMac(platform, arch) {
   if (platform === "darwin" && arch !== "arm64") throw new Error("The packaged app compiler requires macOS arm64. dohc has no Intel Mac build.");
 }
 
-// Windows x64 and Apple silicon Macs build apps; Linux ships only the esbuild
-// binary that Collection actions compile with.
+// Windows x64, Apple silicon Macs and Linux x64 build apps. Linux arm64 ships
+// only the esbuild binary that Collection actions compile with.
 function stagedFiles(platform, arch) {
   if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "windowsCompilerJob.ps1"] : undefined;
-  if (platform === "darwin") return [...compilerFiles(platform, arch), "compiler-owner"];
+  if (platform === "darwin" || platform === "linux" && arch === "x64") return [...compilerFiles(platform, arch), "compiler-owner"];
   if (platform !== "linux" || !["arm64", "x64"].includes(arch)) return undefined;
   const native = `node_modules/@esbuild/${platform}-${arch}`;
   return ["node_modules/esbuild/LICENSE.md", `${native}/package.json`, `${native}/bin/esbuild`];
@@ -53,7 +54,7 @@ export async function requireAppCompiler(root = join(desktopRoot, "resources/app
   const files = stagedFiles(platform, arch);
   if (!files) return;
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  const node = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
+  const node = PINNED_NODE[`${platform}-${arch}`];
   if (node && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== node.sha256) ||
       manifest.platform !== platform || manifest.arch !== arch ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
@@ -103,7 +104,7 @@ export function archiveMember(archive, name) {
 /** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
 export async function readPinnedCompilerNode(options = {}) {
   const target = `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
-  const node = target.startsWith("linux-") ? undefined : PINNED_NODE[target];
+  const node = PINNED_NODE[target];
   if (!node) throw new Error(`App compiler has no pinned Node for ${target}.`);
   if (options.nodeExecutable) {
     const bytes = await readFile(options.nodeExecutable);
@@ -121,8 +122,9 @@ export async function readPinnedCompilerNode(options = {}) {
   return bytes;
 }
 
-/** Builds crates/dohc-compiler-owner for Apple silicon. */
-async function buildCompilerOwner(sourceRoot) {
+/** Builds crates/dohc-compiler-owner for this platform's target. */
+async function buildCompilerOwner(sourceRoot, platform) {
+  const ownerTarget = ownerTargets[platform];
   const repoRoot = resolve(sourceRoot, "../..");
   const targetDir = join(repoRoot, "target");
   try {
@@ -142,7 +144,7 @@ export async function stageAppCompiler(options = {}) {
   if (!files) return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const pinned = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
+  const pinned = PINNED_NODE[`${platform}-${arch}`];
   // A temporary destination reuses the copy that development staging keeps.
   const stagedNodePaths = pinned ? [join(destination, pinned.file), join(sourceRoot, "resources/app-compiler", pinned.file)] : [];
   const node = pinned ? await readPinnedCompilerNode({ platform, arch, nodeExecutable: options.nodeExecutable, stagedNodePaths }) : null;
@@ -161,7 +163,7 @@ export async function stageAppCompiler(options = {}) {
     throw new Error(`App compiler requires ${nativePackage}. Install it with pnpm install --cpu=current --cpu=${arch}.`);
   }
   if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error(`App compiler requires ${nativePackage} 0.28.1.`);
-  const owner = platform === "darwin" ? await buildCompilerOwner(sourceRoot) : null;
+  const owner = files.includes("compiler-owner") ? await buildCompilerOwner(sourceRoot, platform) : null;
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
   try {
