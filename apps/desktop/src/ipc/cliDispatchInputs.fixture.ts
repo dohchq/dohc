@@ -45,6 +45,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],
   "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],
   "chat grep": ["pattern"], "chat export": ["--out", "exports"],
+  "file duplicate": ["Notes/a.md"],
   "history operation": ["dohc-operation:11111111-1111-4111-8111-111111111111"], "history undo": ["dohc-operation:11111111-1111-4111-8111-111111111111"],
   "history list": [], "history show": ["change"],
   "automation list": ["Tasks"], "automation buttons": ["Tasks"],

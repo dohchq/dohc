@@ -1546,7 +1546,7 @@ Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCur
 
 Change workspace files.
 
-Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.
+Undo removes the copy while it is unchanged.
 
 #### `dohc file duplicate`
 

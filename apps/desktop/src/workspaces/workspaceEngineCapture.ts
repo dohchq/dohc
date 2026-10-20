@@ -327,7 +327,7 @@ export type WorkspaceGeneratedTextIdentityValidator = (text: string) => boolean;
 // the disk move succeeded, ok=false to roll the engine rename back.
 export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
 
-// What an authored move or delete records while capture is held. Every path
+// What an authored path change records while capture is held. Every path
 // is workspace-relative.
 export interface AuthoredPathChanges {
   // The workspace file policy, read once for this change after it left the
@@ -341,12 +341,12 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  hasPath(path: string): Promise<boolean>;
+  duplicateFile(fromPath: string, toPath: string): Promise<{path: string; materialized: boolean}>;
   // Moves one visible regular file to an empty name in one rename that
   // refuses to replace. Answers false where this filesystem has no such
   // rename, and the caller moves the file another way. Throws when the
   // destination is taken or the source is gone.
-  hasPath(path: string): Promise<boolean>;
-  duplicateFile(fromPath: string, toPath: string): Promise<{path: string; materialized: boolean}>;
   moveFile(fromPath: string, toPath: string): Promise<boolean>;
   rename(fromPath: string, toPath: string): Promise<void>;
   // Records a delete of a file already gone from disk. Answers its row's id.

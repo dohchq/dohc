@@ -832,6 +832,7 @@ describe("CLI socket server", () => {
     expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
     expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
     expect(duplicateFile).toHaveBeenCalledOnce();
+    expect(await executeCli({argv: ["file", "duplicate", "source.md", "--json"], cwd: workspaceRoot, request: request => invoke(request.verb, request.args)})).toMatchObject({exitCode: 0});
     duplicateFile.mockClear();
     expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
     for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
