@@ -271,7 +271,10 @@ describe.runIf(process.platform === "win32")("the PowerShell process-table read"
     const started = performance.now();
     await expect(readProcessTableWithPowershell(50)).rejects.toThrow();
     expect(performance.now() - started).toBeLessThan(800);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(processDescendants(process.pid, () => readProcessTableWithPowershell(50))).resolves.toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("reads the table within its default bound", async () => {

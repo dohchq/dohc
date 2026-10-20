@@ -1227,7 +1227,14 @@ async function stopChild(
     const [root, ...alsoSignal] = roots;
     if (root === undefined) return [];
     try {
-      return await killProcessTreePosix(root, signal, { alsoSignal });
+      return await killProcessTreePosix(root, signal, {
+        alsoSignal,
+        // The table read waits on ps, and Node can reap the wrapper meanwhile.
+        sendSignal: (each, eachSignal) => {
+          if (each === pid && wrapperExited()) return;
+          process.kill(each, eachSignal);
+        },
+      });
     } catch {
       if (!wrapperExited()) child.kill(signal);
       return roots;
