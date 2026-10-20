@@ -210,8 +210,9 @@ export function AboutNote(props: {
 // pressed. With `onSeen`, the row coming into view reads the page too, and it
 // checks again whether it is in view each time `watch` changes. A caller
 // passes the rows: only a read that lands makes new rows, so a page that
-// failed, or was refused while the workspace updated, never asks again at
-// once. Try again, or the gathering's own wait, reads next.
+// failed, or was refused while the workspace updated, does not check again,
+// and the list's read guard pauses the row coming back into view until a
+// read lands.
 export function AboutMore(props: {
   testId: string;
   onMore: (focused: boolean) => void;
@@ -345,16 +346,23 @@ const failedOver = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> | { 
 // never lands on rows that read replaced. Pressed again while the next page
 // is read, it asks for nothing. Show more coming into view during any read
 // is checked again once the read lands.
-type ReadGuard = { reading: "start" | "more" | null; moreAfter: boolean };
+//
+// A read that failed, or was refused while the workspace updated, pauses
+// Show more coming into view until a read lands: Try again, or the
+// gathering's read from the start. Pressing Show more still asks at once.
+type ReadGuard = { reading: "start" | "more" | null; moreAfter: boolean; paused: boolean };
+const NO_READ: ReadGuard = { reading: null, moreAfter: false, paused: false };
 function asksMore(guard: ReadGuard, seen: boolean | undefined): boolean {
+  if (seen && guard.paused) return false;
   if (guard.reading === "start" && !seen) guard.moreAfter = true;
   return guard.reading === null;
 }
 // The read that ends, if it is still the newest: whether Show more waits on it.
-function readEnds(guard: ReadGuard): boolean {
-  const more = guard.moreAfter;
+function readEnds(guard: ReadGuard, landed: boolean): boolean {
+  const more = guard.moreAfter && landed;
   guard.reading = null;
   guard.moreAfter = false;
+  guard.paused = !landed;
   return more;
 }
 
@@ -391,8 +399,8 @@ export function AboutLinks(props: {
   shownLinks.current = links.view.status === "ready" ? links.view : null;
   const shownChats = useRef<ReadyChatLinks | null>(null);
   shownChats.current = chats.view.status === "ready" ? chats.view : null;
-  const linksGuard = useRef<ReadGuard>({ reading: null, moreAfter: false });
-  const chatsGuard = useRef<ReadGuard>({ reading: null, moreAfter: false });
+  const linksGuard = useRef<ReadGuard>({ ...NO_READ });
+  const chatsGuard = useRef<ReadGuard>({ ...NO_READ });
 
   // A read from the start, until it holds as many rows as `again` showed, or
   // the page after `after`. A read that fails keeps the rows it would replace.
@@ -426,7 +434,7 @@ export function AboutLinks(props: {
       else request.fail(failedOver(kept), ipcErrorMessage(error, LINKS_FAILED), error,
         () => void loadLinks({ again: shownLinks.current ?? undefined }));
     } finally {
-      if (request.current() && readEnds(linksGuard.current) && landed?.next) void loadLinks({ after: landed });
+      if (request.current() && readEnds(linksGuard.current, landed !== null) && landed?.next) void loadLinks({ after: landed });
     }
   }, [beginLinks, path, workspaceId]);
 
@@ -460,7 +468,7 @@ export function AboutLinks(props: {
       else request.fail(failedOver(kept), ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
         () => void loadChats({ again: shownChats.current ?? undefined }));
     } finally {
-      if (request.current() && readEnds(chatsGuard.current) && landed?.next) void loadChats({ after: landed });
+      if (request.current() && readEnds(chatsGuard.current, landed !== null) && landed?.next) void loadChats({ after: landed });
     }
   }, [beginChats, path, workspaceId]);
 
@@ -477,8 +485,8 @@ export function AboutLinks(props: {
   // Another file, or the section closing, ends every read and what waited on
   // one. Declared before the reads, so it ends them before the next begins.
   useEffect(() => () => {
-    linksGuard.current = { reading: null, moreAfter: false };
-    chatsGuard.current = { reading: null, moreAfter: false };
+    linksGuard.current = { ...NO_READ };
+    chatsGuard.current = { ...NO_READ };
   }, [key, reads]);
 
   useEffect(() => {

@@ -587,23 +587,37 @@ const updating = (channel: string) => new Error(`Error invoking remote method '$
   { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, null)))}`);
 
 // IntersectionObserver for rows that are in view: it reports once on
-// observe, as the browser's first report does.
+// observe, as the browser's first report does. What it returns scrolls every
+// observed row out of view and back, so each reports again.
 function observeAllInView() {
+  const live = new Set<() => void>();
   vi.stubGlobal("IntersectionObserver", class {
-    private live = true;
+    private report: (() => void) | null = null;
     private readonly callback: IntersectionObserverCallback;
     constructor(callback: IntersectionObserverCallback) {
       this.callback = callback;
     }
     observe(target: Element) {
+      const report = () =>
+        this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      this.report = report;
+      live.add(report);
       void Promise.resolve().then(() => {
-        if (this.live) this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+        if (live.has(report)) report();
       });
     }
     disconnect() {
-      this.live = false;
+      if (this.report) live.delete(this.report);
     }
   });
+  return async () => {
+    for (let pass = 0; pass < 3; pass += 1) {
+      act(() => {
+        for (const report of live) report();
+      });
+      await settleAll();
+    }
+  };
 }
 
 // Lets every answer, render and observer report that is already due land.
@@ -734,14 +748,16 @@ describe("About Links", () => {
   });
 
   it("asks once for a page that keeps failing, files one Notices row, and asks again only on Try again", async () => {
-    observeAllInView();
+    const scrollBack = observeAllInView();
     bridgeMock.linksIn
       .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
       .mockRejectedValue(new Error("engine unavailable"));
     render(<Links />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledOnce());
     await settleAll();
-    // Show more is still in view, and asks nothing more.
+    // Show more is still in view, and asks nothing more, though it scrolls
+    // out of view and back.
+    await scrollBack();
     expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
     expect(notices.report).toHaveBeenCalledOnce();
     expect(linkRows()).toHaveLength(1);
@@ -759,7 +775,7 @@ describe("About Links", () => {
   it("waits out the gathering's backoff when the next page is refused while the workspace updates", async () => {
     vi.useFakeTimers();
     try {
-      observeAllInView();
+      const scrollBack = observeAllInView();
       bridgeMock.linksIn
         .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
         .mockRejectedValueOnce(updating("desktop:links-in"))
@@ -767,6 +783,8 @@ describe("About Links", () => {
         .mockResolvedValue(linksPage([link("notes/beta.md", 5)]));
       render(<Links />);
       await settleAll();
+      // Scrolled out of view and back, Show more waits for the gathering too.
+      await scrollBack();
       expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
       expect(screen.getByRole("status").textContent).toBe("Gathering links");
       expect(notices.report).not.toHaveBeenCalled();
@@ -782,6 +800,24 @@ describe("About Links", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("pauses chat rows coming into view after a failed page too, while pressing Show more still asks at once", async () => {
+    const scrollBack = observeAllInView();
+    bridgeMock.linksIn.mockResolvedValue(linksPage([]));
+    bridgeMock.chatFileMentionsPage
+      .mockResolvedValueOnce(chatPage([chatLink("one")], "after-one"))
+      .mockRejectedValueOnce(new Error("chats unavailable"))
+      .mockResolvedValueOnce(chatPage([chatLink("two")]));
+    render(<Links chats />);
+    await waitFor(() => expect(notices.report).toHaveBeenCalledOnce());
+    await scrollBack();
+    expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(2);
+    expect(notices.report).toHaveBeenCalledOnce();
+
+    await userEvent.setup().click(screen.getByTestId("about-chat-links-more"));
+    await waitFor(() => expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(2));
+    expect(bridgeMock.chatFileMentionsPage.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "after-one", "after-one"]);
   });
 
   it("reads Show more after a read again lands, so a page never lands on rows that read replaced", async () => {
