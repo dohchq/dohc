@@ -341,6 +341,7 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
     for object in ["local", "sync", "replay"] {
         alias(&mut s, object, &format!("{object}.md"));
     }
+    let begin = std::time::Instant::now();
     LinkedChatStore::new(&mut s)
         .start_channel_thread(
             &StartChannelThread {
@@ -372,6 +373,7 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
             &NoFaults,
         )
         .unwrap();
+    let local_us = begin.elapsed().as_micros();
     let envelope = |origin: &str, kind: &str, payload: Value| ReplicationEnvelope {
         settlement_admission: None,
         admitted_author_snapshot: None,
@@ -394,7 +396,9 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
         "chat.attachment.add",
         attachment("m", "sync", 20),
     );
+    let begin = std::time::Instant::now();
     apply_chat_envelope(&mut s, &sync, &NoFaults).unwrap();
+    let sync_us = begin.elapsed().as_micros();
     apply_chat_envelope(&mut s, &sync, &NoFaults).unwrap();
     let replay = envelope(
         "pending-attachment",
@@ -407,9 +411,14 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
             .iter()
             .any(|r| r["file"]["objectId"] == "replay")
     );
+    let begin = std::time::Instant::now();
     apply_chat_envelope(&mut s,&envelope("late-message","chat.message.append",json!({
         "messageId":"late","threadId":"t","authorKind":"human","authorDisplayName":"Ada","body":"later","createdAtMs":25
     })),&NoFaults).unwrap();
+    let replay_us = begin.elapsed().as_micros();
+    println!(
+        "NATIVE_INSERT_US local={local_us} sync={sync_us} pendingReplayWithParent={replay_us}"
+    );
     drain(&mut s);
     let rows = entries(&s, "a");
     assert_eq!(
@@ -582,4 +591,35 @@ fn conversation_links_move_barrier_covers_every_file_repair_slice() {
         }
     }
     panic!("move repair did not finish");
+}
+
+#[test]
+fn conversation_links_uncovered_rows_remain_incomplete_across_continuations() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    drain(&mut s);
+    for i in 0..125 {
+        let f = format!("f-{i:03}");
+        alias(&mut s, &f, &format!("{f}.md"));
+        attach(&mut s, &f, Some(&f), i, "t", "m");
+    }
+    let first = s
+        .read_with(|c| {
+            super::page::read(
+                c,
+                "ws",
+                "a",
+                "wire-a",
+                "main",
+                "scope",
+                5,
+                None,
+                &CancellationToken::new(),
+            )
+        })
+        .unwrap();
+    let last = page(&s, "a", Some(first["nextCursor"].as_str().unwrap().into())).unwrap();
+    assert_eq!(last["sharedChannelRowsUncovered"], 5);
+    assert_eq!(last["complete"], false);
+    assert!(last["nextCursor"].is_null());
 }

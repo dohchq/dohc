@@ -12,7 +12,7 @@ pub(super) fn sql(error: rusqlite::Error) -> StorageError {
 }
 
 fn publish(c: &Connection, ws: &str, channel: &str, id: &str) -> Result<(), StorageError> {
-    c.execute(
+    c.prepare_cached(
         "INSERT INTO chat_conversation_file_links(workspace_id,channel_id,file_key,attachment_id,thread_id,message_id,object_id,path_hint,mentioned_at_ms)
          SELECT workspace_id,channel_id,object_id,attachment_id,thread_id,message_id,object_id,path_hint,created_at_ms
          FROM chat_conversation_file_link_candidates WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3 AND object_id IS NOT NULL
@@ -20,11 +20,10 @@ fn publish(c: &Connection, ws: &str, channel: &str, id: &str) -> Result<(), Stor
          attachment_id=excluded.attachment_id,thread_id=excluded.thread_id,message_id=excluded.message_id,
          object_id=excluded.object_id,path_hint=excluded.path_hint,mentioned_at_ms=excluded.mentioned_at_ms,invalid=0
          WHERE (excluded.mentioned_at_ms,excluded.attachment_id)>(chat_conversation_file_links.mentioned_at_ms,chat_conversation_file_links.attachment_id)",
-        params![ws,channel,id],
-    ).map_err(sql)?;
-    c.execute("UPDATE chat_conversation_file_link_state SET legacy=1 WHERE workspace_id=?1 AND channel_id=?2 AND EXISTS(
+    ).map_err(sql)?.execute(params![ws,channel,id]).map_err(sql)?;
+    c.prepare_cached("UPDATE chat_conversation_file_link_state SET legacy=1 WHERE workspace_id=?1 AND channel_id=?2 AND EXISTS(
         SELECT 1 FROM chat_conversation_file_link_candidates WHERE workspace_id=?1 AND channel_id=?2 AND attachment_id=?3 AND object_id IS NULL)",
-        params![ws,channel,id]).map_err(sql)?;
+        ).map_err(sql)?.execute(params![ws,channel,id]).map_err(sql)?;
     Ok(())
 }
 

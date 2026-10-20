@@ -20,6 +20,7 @@ struct Position {
     scope: String,
     revision: i64,
     generation: i64,
+    uncovered: i64,
     time: i64,
     id: String,
     key: String,
@@ -59,6 +60,7 @@ pub(super) fn read(
             scope: scope.into(),
             revision,
             generation,
+            uncovered,
             time: i64::MAX,
             id: String::new(),
             key: String::new(),
@@ -80,10 +82,11 @@ pub(super) fn read(
         "SELECT EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2),
         EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2 AND kind='thread') OR EXISTS(SELECT 1 FROM chat_conversation_file_link_work WHERE workspace_id=?1 AND channel_id=?2 AND kind='reset')",
         params![ws,channel], |r| Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
+    pos.uncovered = pos.uncovered.max(uncovered);
     let building = scanning || pending;
     let mut page = json!({"versionId":version,"subject":{"channelWireId":wire},"entries":[],"unchecked":[],
-        "complete":!building&&!legacy&&uncovered==0,"indexBuilding":building,"mountsCovered":true,
-        "sharedChannelRowsUncovered":uncovered,"nextCursor":null});
+        "complete":!building&&!legacy&&pos.uncovered==0,"indexBuilding":building,"mountsCovered":true,
+        "sharedChannelRowsUncovered":pos.uncovered,"nextCursor":null});
     if barrier {
         return Ok(page);
     }
