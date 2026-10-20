@@ -93,12 +93,15 @@ async fn fixture() -> OpenFixture {
 }
 impl OpenFixture {
     async fn open_document(&self) -> String {
+        self.open_path("source-0000.md").await
+    }
+    async fn open_path(&self, path: &str) -> String {
         let (session, blob) = self
             .service
             .ydoc_open(
                 &RequestContext::unbounded(),
                 Some(self.handle.clone()),
-                json!({"versionId":"main","path":"source-0000.md","contentKind":"richdoc"}),
+                json!({"versionId":"main","path":path,"contentKind":"richdoc"}),
                 101,
             )
             .await
@@ -261,4 +264,74 @@ async fn open_session_proof(mutate: bool, timing_file: &str) {
     }
     assert!(stays_open, "Undo closed the write member's session");
     assert!(inverse_resync);
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_undo_closes_an_untouched_copy_before_removing_it() {
+    duplicate_open_copy_proof(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_undo_closes_an_edited_copy_and_preserves_mains_guard() {
+    duplicate_open_copy_proof(true).await;
+}
+
+async fn duplicate_open_copy_proof(edited: bool) {
+    let f = fixture().await;
+    let operation = "dohc-operation:open-copy";
+    let copy = f.open.actor.duplicate_file(
+        dohc_engine_domain::DuplicateFile {
+            workspace_id: WS.into(), version_id: "main".into(),
+            from_path: "source-0000.md".into(), to_path: "copy.md".into(),
+            operation_id: operation.into(), author_json: None, now_ms: 5,
+        }, f.open.root.clone(), Arc::new(NoFaults),
+    ).await.unwrap();
+    let object = copy.moments[0].object_id.clone();
+    let original = copy.moments[0].moment_id.clone();
+    let placed = f.open.actor.history_undo_place(
+        WS.into(), dohc_engine_runtime::HistoryUndoResult {
+            operation_id: operation.into(), version_id: copy.version_id,
+            moments: copy.moments, compensation_operation_id: operation.into(),
+            deduped: false, materialized: false, not_restored: vec![],
+        }, f.open.root.clone(), Arc::new(f.service.self_writes.scoped(&f.open.root)), 6, |_| {},
+    ).await;
+    assert!(placed.materialized);
+    let sid = f.open_path("copy.md").await;
+    if edited {
+        f.edit(&sid, "typed copy [[old#part|label]]").await;
+    }
+    let key = lock(&f.service.sessions).get(&sid).unwrap().key.clone();
+    let reader = EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap();
+    let projection = reader.read_with(|c| dohc_engine_collab::load_doc_in(c, &key)).unwrap()
+        .project(ContentKind::Richdoc).unwrap();
+    let expected_settle = format!("moment-ydoc-{}", dohc_engine_storage::hex_sha256(
+        format!("{}\0main\0{}\0copy.md\0{}\0{}\0{}", WS, object, sid, original,
+            projection.source_state_vector_sha256).as_bytes()));
+    let result = f.transport.call(
+        RequestContext::unbounded(), Request {
+            id: 110, method: "history.undo".into(), workspace: Some(f.handle.clone()),
+            deadline_ms: None, idempotency_key: Some("undo-open-copy".into()),
+            progress: false, params: json!({"operationId": operation}),
+        },
+    ).await;
+    let closed = !lock(&f.service.sessions).contains_key(&sid);
+    let exists = f.root.join("copy.md").exists();
+    let moments: Vec<String> = reader.read_with(|c| {
+        c.prepare("SELECT moment_id FROM moments WHERE object_id=?1 AND metadata_origin='ydoc'")?
+            .query_map([object], |r| r.get(0))?.collect::<Result<_, _>>()
+    }).unwrap();
+    drop(reader);
+    f.service.workspace_close(Some(f.handle)).await.unwrap();
+    assert!(closed, "Duplicate Undo left the copy's session open");
+    assert_eq!(moments, if edited { vec![expected_settle] } else { vec![] },
+        "Duplicate must only settle in its closing fence, never as a link baseline");
+    if edited {
+        let error = result.expect_err("changed copy must retain main's guarded delete");
+        assert!(error.message.contains("copy changed after Duplicate"), "{error:?}");
+        assert!(exists);
+    } else {
+        assert_eq!(result.unwrap().result["notRestored"], json!([]));
+        assert!(!exists);
+    }
 }

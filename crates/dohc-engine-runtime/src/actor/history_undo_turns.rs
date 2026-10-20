@@ -351,7 +351,7 @@ impl ActorHandle {
             })
         }).await
     }
-    async fn wait_undo_checkpoint(
+    pub(in crate::actor) async fn wait_undo_checkpoint(
         token: &crate::CancellationToken,
         since: &mut Option<std::time::Instant>,
         wait: Arc<impl Fn() + Send + Sync + 'static>,
@@ -556,7 +556,18 @@ impl ActorHandle {
                 if token.is_cancelled() {
                     return Err(RuntimeError::Cancelled);
                 }
-                let guards = if member.effect.operation == "write" {
+                let key = DocKey::new(
+                    &prepared.workspace,
+                    &prepared.version,
+                    &member.effect.object_id,
+                )?;
+                let duplicate = inverse_store.read_with(|conn| {
+                    dohc_engine_domain::is_duplicate_in(
+                        conn, &prepared.workspace, &prepared.operation, member.effect.moment_order,
+                    )
+                })?;
+                let guards = loop {
+                    let guards = if member.effect.operation == "write" {
                     let capture = tokio::select! {
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
                         guard = gates[0].clone().lock_owned() => guard,
@@ -569,17 +580,11 @@ impl ActorHandle {
                 } else {
                     None
                 };
-                let key = DocKey::new(
-                    &prepared.workspace,
-                    &prepared.version,
-                    &member.effect.object_id,
-                )?;
-                let live = member.effect.operation == "write"
-                    && open_documents
-                        .as_ref()
-                        .is_some_and(|(is_open, _)| is_open(&key));
-                if live {
-                    loop {
+                    let live = member.effect.operation == "write" && !duplicate
+                        && open_documents.as_ref().is_some_and(|(is_open, _)| is_open(&key));
+                    if !live {
+                        break guards;
+                    }
                         let key = key.clone();
                         let (path, root2, recorder2, token2) = (
                             member.effect.path.clone(),
@@ -622,9 +627,12 @@ impl ActorHandle {
                                     member.settle_error =
                                         Some("document projection unavailable".into());
                                 }
-                                break;
+                                break guards;
                             }
                             Err(error) if error.code() == "file-locked" => {
+                                drop(guards);
+                                #[cfg(test)]
+                                tests::checkpoint_wait(&request).await;
                                 Self::wait_undo_checkpoint(
                                     &token,
                                     &mut locked_since,
@@ -635,11 +643,10 @@ impl ActorHandle {
                             Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
                             Err(error) => {
                                 member.settle_error = Some(error.to_string());
-                                break;
+                                break guards;
                             }
                         }
-                    }
-                }
+                };
                 let (w, v, o, member) = (
                     prepared.workspace.clone(),
                     prepared.version.clone(),

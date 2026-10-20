@@ -801,13 +801,15 @@ impl VersionFence {
         } else {
             None
         };
-        let undo_writes: std::collections::HashSet<_> = undo_group
-            .as_ref()
-            .into_iter()
-            .flatten()
-            .filter(|m| m.operation == "write")
-            .map(|m| m.object_id.clone())
-            .collect();
+        let undo_writes = if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
+            EngineService::read_under_ctx(
+                cancellation,
+                "history.undo (open writes)",
+                open.actor.history_undo_open_writes(open.workspace_id.clone(), operation_id.clone()),
+            ).await?
+        } else {
+            std::collections::HashSet::new()
+        };
         let resync = self.link_document_resync(handle);
         let is_open = self.link_document_is_open(handle);
         let undo_objects = undo_group.as_ref().map(|members| {

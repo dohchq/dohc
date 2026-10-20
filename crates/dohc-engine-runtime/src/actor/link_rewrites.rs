@@ -246,7 +246,7 @@ impl ActorHandle {
             guard = session_ops.clone().lock_owned() => guard,
         };
         let (journal_ws, journal_op) = (workspace.clone(), operation.clone());
-        let (db, external) = self
+        let (db, external, checkpoint) = self
             .run(move |store, _| {
                 let _admission = serial;
                 #[cfg(test)]
@@ -265,7 +265,7 @@ impl ActorHandle {
                             .map_err(StorageError::corrupt_public)?,
                     )
                 })?;
-                Ok((store.database_path().to_path_buf(), external))
+                Ok((store.database_path().to_path_buf(), external, Arc::new(store.checkpoint_cycle())))
             })
             .await?;
         let state = self.link_rewrites.clone();
@@ -374,6 +374,7 @@ impl ActorHandle {
         let mut unchecked = plan.candidates.unchecked.clone();
         let mut pending: VecDeque<_> = plan.candidates.sources.clone().into();
         let mut stopped = false;
+        let mut locked_since = None;
         'sources: while !pending.is_empty() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -392,7 +393,7 @@ impl ActorHandle {
                 before.clone(),
                 after.clone(),
             );
-            let (remaining, sources, skipped, admitted) = self
+            let (remaining, sources, skipped, admitted, locked) = self
                 .run(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
@@ -404,9 +405,10 @@ impl ActorHandle {
                         .get_active_version(&ws)?
                         .version_id;
                     if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p, true))? {
-                        return Ok((pending, sources, skipped, false));
+                        return Ok((pending, sources, skipped, false, false));
                     }
                     let mut read_count = 0;
+                    let mut locked = false;
                     while read_count < 16
                         && (read_count == 0 || started.elapsed() < Duration::from_millis(5))
                     {
@@ -447,6 +449,11 @@ impl ActorHandle {
                                         dohc_engine_sync::SyncError::LiveDocumentBindingActive,
                                     ),
                                 ) => false,
+                                Err(error) if error.code() == "file-locked" => {
+                                    pending.push_front((object, path));
+                                    locked = true;
+                                    break;
+                                }
                                 Err(error) => return Err(error),
                             }
                         } else {
@@ -481,10 +488,17 @@ impl ActorHandle {
                             skipped.push(path.clone());
                         }
                     }
-                    Ok((pending, sources, skipped, true))
+                    Ok((pending, sources, skipped, true, locked))
                 })
                 .await?;
             pending = remaining;
+            if locked {
+                #[cfg(test)]
+                tests::undo_probe::checkpoint_wait(&workspace).await;
+                Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone()).await?;
+            } else {
+                locked_since = None;
+            }
             unchecked.extend(skipped);
             if !admitted {
                 stopped = true;

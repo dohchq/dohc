@@ -113,6 +113,27 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn history_undo_open_writes(
+        &self,
+        ws: String,
+        operation: String,
+    ) -> Result<HashSet<String>, RuntimeError> {
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store).get_active_version(&ws)?.version_id;
+            store.read_with(|conn| {
+                let mut objects = HashSet::new();
+                for member in operation_moments_in(conn, &ws, &version, &operation)? {
+                    if member.operation == "write"
+                        && !dohc_engine_domain::is_duplicate_in(conn, &ws, &operation, member.moment_order)?
+                    {
+                        objects.insert(member.object_id);
+                    }
+                }
+                Ok(objects)
+            })
+        }).await
+    }
+
     pub async fn preflight_history_undo(
         &self,
         ws: String,
