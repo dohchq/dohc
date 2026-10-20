@@ -3791,5 +3791,45 @@ describe("chatDispatchService", () => {
         await service.stop();
       }
     });
+
+    it("still shows the owed notice of a request that stayed failed when a later request in its thread runs", async () => {
+      let lookups = 0;
+      // Posting notices fails until request B has run.
+      const noticeFailures = Array.from({ length: 20 }, () => new Error("notice store unavailable"));
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+        noticeFailures,
+      });
+      // Request A is on its last attempt when Restricted Mode stops it.
+      const first = await createAgentThread(fixture, { body: "Plan day 9", authorUserId: "user_local" });
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: first.messageId, threadId: first.threadId,
+      });
+      const earlier = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      if (!earlier) throw new Error("Expected a first attempt.");
+      await fixture.dispatch.failRun({ runId: earlier.run.runId, reason: "app restart during run" });
+      await fixture.requeueRaw({ workspaceId: WORKSPACE_ID, triggerMessageId: first.messageId, runId: earlier.run.runId });
+      fixture.service.start();
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.readDispatch(first.messageId, first.threadId).state).toBe("failed");
+      expect(await owedRuns(fixture)).toHaveLength(1);
+
+      // Once trusted, request B in the same thread runs before A's notice posts.
+      await fixture.trust.trust(fixture.workspace);
+      await fixture.chat.sendMessage({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: first.threadId,
+        author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", body: "Book the hotel.",
+      });
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.notices).toEqual([]);
+
+      noticeFailures.length = 0;
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.readDispatch(first.messageId, first.threadId).state).toBe("failed");
+      expect(fixture.notices).toEqual([expect.objectContaining({
+        title: "Your agent's run in \"Plan day 9\" did not start in Restricted Mode",
+      })]);
+    });
   });
 });

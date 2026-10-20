@@ -696,8 +696,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           outcome = linked.length === 0 ? "no-reply" : "finished";
         }
         // A request Restricted Mode stopped whose requeue landed before
-        // dohc could drop the notice runs again, so the notice is stale.
-        if (outcome !== "restricted" || !(await runsAgain(dispatch, run))) {
+        // dohc could drop the notice is back in line, so the notice is stale.
+        if (outcome !== "restricted" || !(await backInLine(dispatch, run))) {
           await noticeRun(workspace, run, outcome);
         }
       }
@@ -708,15 +708,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Whether a run's request is back in line, or a later run in its thread
-  // has started since.
-  async function runsAgain(dispatch: AwaitableAgentDispatchStore, run: AgentRunRecord): Promise<boolean> {
-    const [pending, latest] = await Promise.all([
-      dispatch.listPending(run.workspaceId),
-      dispatch.latestRunForThread(run.workspaceId, run.threadId),
-    ]);
-    return pending.some((each) => each.triggerMessageId === run.triggerMessageId) ||
-      (latest !== null && latest.runId !== run.runId && latest.startedAtMs >= run.startedAtMs);
+  // Whether a run's own request is pending again. A later run in its
+  // thread does not cover it: the engine coalesces only pending requests.
+  async function backInLine(dispatch: AwaitableAgentDispatchStore, run: AgentRunRecord): Promise<boolean> {
+    return (await dispatch.listPending(run.workspaceId))
+      .some((each) => each.triggerMessageId === run.triggerMessageId);
   }
 
   // Posts every notice this workspace still owes, after a crash or a failed
