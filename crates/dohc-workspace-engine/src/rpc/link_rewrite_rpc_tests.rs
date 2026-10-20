@@ -86,6 +86,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
                 std::fs::write(root.join(path), body).unwrap();
             }
             write_text_in_tx(tx, &write("target", "old.md", "target body", "seed-target"))?;
+            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [WS]).unwrap();
             Ok(())
         })
         .unwrap();
