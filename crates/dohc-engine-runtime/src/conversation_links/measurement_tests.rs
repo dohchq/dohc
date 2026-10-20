@@ -61,7 +61,7 @@ fn median_page(mut run: impl FnMut() -> Value) -> (u128, Value) {
 #[ignore = "scheduled conversation Links measurement"]
 async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pages() {
     assert!(
-        !cfg!(debug_assertions),
+        !std::hint::black_box(cfg!(debug_assertions)),
         "run the measurement with --release"
     );
     let mut results = Vec::new();
