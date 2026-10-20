@@ -973,10 +973,11 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         nth: 1001,
         seen: AtomicUsize::new(0),
     });
-    assert!(matches!(
-        f.pass("performance", crash).await,
-        Err(RuntimeError::OperationCrashed)
-    ));
+    let result = f.pass("performance", crash).await;
+    assert!(
+        matches!(result, Err(RuntimeError::OperationCrashed)),
+        "expected the injected crash, got {result:?}"
+    );
     f.restart().await;
     drop(initial_hold);
     assert_eq!(
