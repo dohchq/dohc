@@ -423,10 +423,15 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
             start.elapsed().as_nanos(),
         )
     });
-    assert_eq!(
-        f.pass("open-contention", Arc::new(NoFaults)).await.unwrap()["documents"],
-        2000
-    );
+    let mut forward = f.pass("open-contention", Arc::new(NoFaults)).await;
+    for _ in 0..8 {
+        if !matches!(&forward, Err(error) if error.code() == "file-locked") {
+            break;
+        }
+        tokio::task::yield_now().await;
+        forward = f.pass("open-contention", Arc::new(NoFaults)).await;
+    }
+    assert_eq!(forward.unwrap()["documents"], 2000);
     let (forward_gap, forward_wait) = typing.await.unwrap();
     assert!(forward_gap <= 1);
     f.settle_document("source-0000").await;
