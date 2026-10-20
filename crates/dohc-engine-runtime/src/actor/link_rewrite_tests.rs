@@ -470,7 +470,8 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
                     .unwrap();
                 assert!(!plan.contains("Long paragraph"));
                 assert!(!plan.contains("\"inverse\""));
-            });
+                Ok::<_, RuntimeError>(())
+            })?;
             Ok(())
         })
         .await
