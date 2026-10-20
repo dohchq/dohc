@@ -32,6 +32,7 @@ pub mod live_update_application;
 pub mod owner_base_source;
 pub mod owner_outbox;
 pub mod reader_resolver;
+pub mod reader_snapshot;
 pub mod replay_parity;
 pub mod replication;
 pub mod scene;
