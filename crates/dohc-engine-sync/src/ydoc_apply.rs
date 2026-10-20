@@ -1,4 +1,5 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
+use dohc_engine_collab::live_update_application::PassTails;
 use dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
@@ -1894,7 +1895,8 @@ enum Incoming<'a> {
 /// update that lands off the tail's binding or that structural inspection
 /// does not admit. The hold carries the binding and records no refusal.
 /// `relay_namespace` is the feed's, as the pull's trusted configuration
-/// names it.
+/// names it, and `pass` holds the tails the pass already read.
+#[allow(clippy::too_many_arguments)]
 fn hold_released_lineage(
     tx: &rusqlite::Connection,
     key: &DocKey,
@@ -1902,6 +1904,7 @@ fn hold_released_lineage(
     op: &ReplicationEnvelope,
     relay_seq: i64,
     relay_namespace: Option<&str>,
+    pass: &mut PassTails,
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     use dohc_engine_collab::live_update_application::{
@@ -1931,6 +1934,7 @@ fn hold_released_lineage(
             lineage_claim_id: lineage,
             incoming: &coordinate,
         },
+        pass,
     )
     .map_err(|error| match error {
         ApplicationError::Storage(error) => SyncError::Storage(error),
@@ -4372,11 +4376,22 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
+    apply_ydoc_envelope_in_batch(
+        store,
+        cache,
+        envelope,
+        faults,
+        leases,
+        false,
+        None,
+        &mut PassTails::default(),
+    )
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one.
+/// pull's trusted configuration names one, and `pass` holds the protected
+/// tails its pass already read.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_ydoc_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -4385,6 +4400,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
     relay_namespace: Option<&str>,
+    pass: &mut PassTails,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
     if envelope.op_kind != "ydoc.update" {
@@ -4789,6 +4805,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     op,
                     relay_seq,
                     relay_namespace,
+                    pass,
                     Incoming::Replacement,
                 )?;
             }
@@ -5255,6 +5272,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                             op,
                             relay_seq,
                             relay_namespace,
+                            pass,
                             Incoming::Replacement,
                         )?;
                     }
@@ -5316,6 +5334,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op,
                 relay_seq,
                 relay_namespace,
+                pass,
                 Incoming::Update {
                     bytes: &remote.bytes,
                     path: &update_path,

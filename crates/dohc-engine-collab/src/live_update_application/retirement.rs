@@ -661,10 +661,13 @@ pub(crate) fn applied(
     receipt: &LiveUpdateReceipt,
 ) -> Result<bool, ApplicationError> {
     let row: Option<(String, String, String, String, String, i64, i64)> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,update_digest,journal_cursor,
                 accepting_host_epoch
              FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2",
+        )
+        .map_err(read_sql)?
+        .query_row(
             params![namespace, receipt.delivery_id],
             |row| {
                 Ok((
@@ -708,8 +711,9 @@ pub(crate) struct RetainedSuffix {
 }
 
 /// The retained suffix of the adopted chain the lineage's activation follows,
-/// or its next activation while none is current. Only an unapplied Carried
-/// delivery needs the shared resolution, which validates every listed one.
+/// or its next activation while none is current. Every Carried delivery the
+/// chain lists goes through the shared resolution and the exact application
+/// check, applied or not, so an application that conflicts refuses.
 pub(crate) fn retained_suffix(
     conn: &Connection,
     namespace: &str,
@@ -719,16 +723,12 @@ pub(crate) fn retained_suffix(
     let Some(tail) = owner_activations::capture_predecessor(conn, namespace, doc, lineage)? else {
         return Ok(None);
     };
-    let (adopted, through, outstanding): (bool, i64, bool) = conn
+    let (adopted, through): (bool, i64) = conn
         .query_row(
-            "SELECT released_boundary_json<>'null',released_accepted_cursor,
-                EXISTS(SELECT 1 FROM json_each(carried_manifest_json) c WHERE NOT EXISTS(
-                  SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?1
-                    AND a.delivery_id=json_extract(c.value,'$.receipt.deliveryId')))
-             FROM live_owner_activations
+            "SELECT released_boundary_json<>'null',released_accepted_cursor FROM live_owner_activations
              WHERE relay_database_namespace=?1 AND activation_id=?2 AND released_at_ms IS NOT NULL",
             params![namespace, tail],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_sql)?;
     // A chain that never adopted retains no suffix.
@@ -736,14 +736,12 @@ pub(crate) fn retained_suffix(
         return Ok(None);
     }
     let mut earliest_carried = None;
-    if outstanding {
-        for inherited in inherited_entries(conn, namespace, doc, lineage, Some(&tail))? {
-            let cursor = inherited.receipt.journal_cursor;
-            if !applied(conn, namespace, doc, lineage, &inherited.receipt)?
-                && earliest_carried.is_none_or(|earliest| cursor < earliest)
-            {
-                earliest_carried = Some(cursor);
-            }
+    for inherited in inherited_entries(conn, namespace, doc, lineage, Some(&tail))? {
+        let cursor = inherited.receipt.journal_cursor;
+        if !applied(conn, namespace, doc, lineage, &inherited.receipt)?
+            && earliest_carried.is_none_or(|earliest| cursor < earliest)
+        {
+            earliest_carried = Some(cursor);
         }
     }
     Ok(Some(RetainedSuffix {
@@ -801,6 +799,17 @@ pub(crate) fn unproven_retained(
     for inherited in inherited_in_chain(conn, namespace, doc, lineage, tail, &chain)? {
         let receipt = inherited.receipt;
         listed.insert(receipt.delivery_id.clone());
+        let accepted = accepted_receipt(
+            conn,
+            namespace,
+            doc,
+            lineage,
+            &receipt.delivery_id,
+            &receipt.update_digest,
+        )?;
+        if accepted.is_some_and(|accepted| accepted != receipt) {
+            return Err(ApplicationError::Conflict);
+        }
         if !applied(conn, namespace, doc, lineage, &receipt)? {
             unproven.push(RetainedContribution::Carried {
                 delivery_id: receipt.delivery_id,
@@ -809,19 +818,7 @@ pub(crate) fn unproven_retained(
             });
         }
     }
-    type Row = (
-        String,
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        bool,
-        Option<String>,
-        Option<String>,
-    );
-    let rows = conn
+    let mut entries = conn
         .prepare(
             "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
                 length(CAST(e.native_source_json AS BLOB)),e.pending,e.accepted_receipt_json,e.terminal_reason
@@ -829,47 +826,30 @@ pub(crate) fn unproven_retained(
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
              ORDER BY e.outbox_id,e.sequence",
         )
-        .map_err(read_sql)?
-        .query_map(
-            params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                ))
-            },
-        )
-        .map_err(read_sql)?
-        .collect::<Result<Vec<Row>, _>>()
         .map_err(read_sql)?;
-    for (
-        outbox_id,
-        sequence,
-        append_key,
-        delivery_id,
-        update_digest,
-        source,
-        length,
-        pending,
-        receipt,
-        terminal,
-    ) in rows
-    {
+    let mut rows = entries
+        .query(params![
+            doc.workspace_id,
+            doc.version_id,
+            doc.object_id,
+            lineage
+        ])
+        .map_err(read_sql)?;
+    while let Some(row) = rows.next().map_err(read_sql)? {
+        let outbox_id: String = row.get(0).map_err(read_sql)?;
+        let sequence: i64 = row.get(1).map_err(read_sql)?;
+        let delivery_id: String = row.get(3).map_err(read_sql)?;
+        let update_digest: String = row.get(4).map_err(read_sql)?;
+        let pending: bool = row.get(7).map_err(read_sql)?;
+        let receipt: Option<String> = row.get(8).map_err(read_sql)?;
+        let terminal: Option<String> = row.get(9).map_err(read_sql)?;
         // A native entry of another activation of the lineage is that
         // activation's work; one whose source names nothing it can be is not.
-        if let Some(json) = source {
+        if let Some(json) = row.get::<_, Option<String>>(5).map_err(read_sql)? {
             let source = native_source(
                 &json,
-                length.unwrap_or(0),
-                &append_key,
+                row.get::<_, Option<i64>>(6).map_err(read_sql)?.unwrap_or(0),
+                &row.get::<_, String>(2).map_err(read_sql)?,
                 doc,
                 lineage,
                 &update_digest,
@@ -925,9 +905,12 @@ fn lineage_activation(
     lineage: &str,
     activation_id: &str,
 ) -> Result<bool, ApplicationError> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM live_owner_activations WHERE workspace_id=?1 AND main_version_id=?2
            AND object_id=?3 AND lineage_claim_id=?4 AND activation_id=?5)",
+    )
+    .map_err(read_sql)?
+    .query_row(
         params![
             doc.workspace_id,
             doc.version_id,
@@ -1460,22 +1443,22 @@ fn accepted_receipt(
     update_digest: &str,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let row: Option<(String, String, String, String, String, String)> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,update_sha256,
                 json_extract(metadata_json,'$.accepted.receipt')
              FROM live_accepted_updates WHERE relay_database_namespace=?1 AND delivery_id=?2",
-            params![namespace, delivery],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
         )
+        .map_err(read_sql)?
+        .query_row(params![namespace, delivery], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
         .optional()
         .map_err(read_sql)?;
     let Some((workspace, version, object, lineage, update, receipt)) = row else {

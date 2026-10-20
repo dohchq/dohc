@@ -130,8 +130,9 @@ pub(super) const LINEAGE_NAMESPACES_SQL: &str =
 
 /// The released window of a document lineage: no activation of it is current
 /// in any namespace, and each namespace listed, in namespace order, keeps a
-/// released chain tail, named beside it. Empty outside the window. Disk
-/// capture and synced ingress each decide their own policy inside it.
+/// released chain tail, named beside it. A namespace with activations of the
+/// lineage and no tail is corrupt. Empty outside the window. Disk capture and
+/// synced ingress each decide their own policy inside it.
 pub(super) fn released_window(
     conn: &Connection,
     key: &DocKey,
@@ -152,10 +153,9 @@ pub(super) fn released_window(
         .map_err(read_sql)?;
     let mut tails = Vec::new();
     for namespace in namespaces {
-        if let Some(tail) = owner_activations::released_chain_tail(conn, &namespace, key, lineage)?
-        {
-            tails.push((namespace, tail));
-        }
+        let tail = owner_activations::released_chain_tail(conn, &namespace, key, lineage)?
+            .ok_or(ApplicationError::Corrupt)?;
+        tails.push((namespace, tail));
     }
     Ok(tails)
 }

@@ -59,9 +59,9 @@ pub enum StructuralHold {
     /// An origin or parent lands on a clock neither side holds, or a block
     /// follows a gap the head does not fill.
     UnresolvedReference,
-    /// The bytes or structure cannot be classified: among others, a block
-    /// that repeats clocks earlier in the candidate, or one whose origins sit
-    /// in another parent or key.
+    /// The bytes or structure cannot be classified: among others, bytes the
+    /// scan rejects, such as a client's block section given twice, or a block
+    /// whose origins sit in another parent or key.
     Unclassifiable,
 }
 
@@ -96,16 +96,9 @@ fn decide(head: &Ydoc, candidate: &[u8]) -> Result<(), StructuralHold> {
     let mut fresh = Vec::new();
     for (&client, blocks) in &incoming.blocks {
         let mut next = index.clock(client);
-        let mut written = 0;
         let mut gap = false;
         for block in blocks {
             let end = block.id.clock + block.len;
-            // yrs integrates a repeated block whole, with its own origins.
-            if block.id.clock < written {
-                block_hold = first(block_hold, StructuralHold::Unclassifiable);
-                continue;
-            }
-            written = end;
             if end <= next {
                 continue;
             }

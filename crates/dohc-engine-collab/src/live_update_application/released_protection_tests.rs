@@ -17,8 +17,13 @@ fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
 }
 
 fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<ReleasedLineageBinding> {
+    protected_in(f, incoming, &mut PassTails::default())
+}
+
+/// [`protected_from`], decided in `pass`.
+fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, pass: &mut PassTails) -> Option<ReleasedLineageBinding> {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
-    match f.store.read_with(|conn| protection(conn, &key)).unwrap() {
+    match f.store.read_with(|conn| protection(conn, &key, pass)).unwrap() {
         Protection::Unprotected => None,
         Protection::Protected { binding, head } => {
             assert_eq!(binding.head_digest, hex_sha256(&head.encode_full_state()), "the head it names");
@@ -206,6 +211,79 @@ fn unproven_or_unreadable_retained_evidence_protects() {
         let coverage: Vec<RetainedCoverage> = listed(binding).into_iter().map(|tail| tail.coverage).collect();
         assert_eq!(coverage, [RetainedCoverage::Invalid], "{case}");
     }
+}
+
+/// Record, past the store's checks, that the host applied exactly `receipt`:
+/// a copy of the covered delivery's application at cursor 3.
+fn applied_exactly(f: &mut Fixture, receipt: &LiveUpdateReceipt) {
+    write_unchecked(f, &format!("PRAGMA foreign_keys=OFF;
+        CREATE TEMP TABLE applied AS SELECT * FROM live_device_update_applications WHERE journal_cursor=3;
+        UPDATE applied SET delivery_id='{}',update_digest='{}',journal_cursor={},accepting_host_epoch={};
+        INSERT INTO live_device_update_applications SELECT * FROM applied",
+        receipt.delivery_id, receipt.update_digest, receipt.journal_cursor, receipt.accepting_host_epoch));
+}
+
+/// Opus's 1a-2b finding 1: a pass reads each lineage's tails once, on its
+/// first decision, and its later decisions reuse them, while each still
+/// reads its own path. Tail inputs that change after it, here both Carried
+/// deliveries applied, show in the next pass.
+#[test]
+fn a_pass_reads_each_lineages_tails_once() {
+    let (mut f, _, c1, c2) = released_at_b();
+    let mut pass = PassTails::default();
+    let first = protected_in(&f, &incoming(), &mut pass).expect("protected");
+    applied_exactly(&mut f, &c1.receipt);
+    applied_exactly(&mut f, &c2.receipt);
+    write_unchecked(&mut f, "UPDATE path_aliases SET path='renamed.md' WHERE path='owner.md'");
+    let later = protected_in(&f, &incoming(), &mut pass).expect("the pass's tails");
+    assert_eq!(later.tails, first.tails, "read once");
+    assert_eq!(later.current_path.as_deref(), Some("renamed.md"), "the path is each decision's own");
+    assert!(protected(&f).is_none(), "the next pass reads both applied");
+}
+
+/// Opus's 1a-2b finding 3: a Carried delivery applied exactly is proven
+/// only while its accepted history agrees. History of it at another
+/// coordinate conflicts, and the tail protects as invalid.
+#[test]
+fn a_carried_application_its_accepted_history_contradicts_protects() {
+    let with_history = |cursor_shift: i64| {
+        let (mut f, _, c1, c2) = released_at_b();
+        let receipt = &c1.receipt;
+        applied_exactly(&mut f, receipt);
+        let history = LiveUpdateReceipt { journal_cursor: receipt.journal_cursor + cursor_shift, ..receipt.clone() };
+        write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+            CREATE TEMP TABLE accepted AS SELECT * FROM live_accepted_updates WHERE journal_cursor=3;
+            UPDATE accepted SET delivery_id='{}',update_sha256='{}',journal_cursor={},event_count=99,
+              metadata_json=json_set(metadata_json,'$.accepted.receipt',json('{}'));
+            INSERT INTO live_accepted_updates SELECT * FROM accepted",
+            receipt.delivery_id,
+            receipt.update_digest,
+            receipt.journal_cursor,
+            serde_json::to_string(&history).unwrap()));
+        (f, c2)
+    };
+    let (f, c2) = with_history(0);
+    assert_eq!(only_unproven(&f), vec![carried(&c2)], "applied, and its history agrees");
+    let (f, _) = with_history(100);
+    assert_eq!(coverage(&f), [RetainedCoverage::Invalid]);
+}
+
+/// Opus's 1a-2b finding 2: a namespace that holds activations of the lineage
+/// but no tail, which only a damaged store can hold, does not drop out of the
+/// window. The window does not read, so the lineage is protected as invalid.
+#[test]
+fn a_namespace_with_activations_and_no_tail_protects_as_invalid() {
+    let mut f = released_without_carried();
+    assert!(protected(&f).is_none(), "nothing retained");
+    write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+        CREATE TEMP TABLE looped AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
+        UPDATE looped SET relay_database_namespace='other',predecessor_activation_id='adoption';
+        INSERT INTO live_owner_activations SELECT * FROM looped");
+    let window = f.store.read_with(|conn| settled_base::released_window(conn, &f.key, &f.binding.lineage_claim_id));
+    assert!(matches!(window, Err(ApplicationError::Corrupt)), "{window:?}");
+    let binding = protected(&f).expect("protected");
+    assert_eq!(binding.tails, ProtectedTails::Invalid);
+    assert!(binding.moved("owner.md"), "every update holds");
 }
 
 /// Sol's 4b2i-1 ruling 5: the binding lists every protected namespace's

@@ -457,7 +457,8 @@ fn a_block_between_known_blocks_of_a_head_skip_holds() {
 }
 
 /// Hand-encoded: client 5's section appears twice. The first appends to the
-/// note. yrs integrates the second whole after the title, replacing it.
+/// note. yrs integrates the second whole after the title, replacing it, so
+/// the scan rejects the repeat.
 #[test]
 fn a_repeated_block_section_holds() {
     let head = note_and_title();

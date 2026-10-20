@@ -2462,6 +2462,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         pass.conflicts_opened += recovered.conflicts_opened;
         let mut round = ordered.iter().collect::<Vec<_>>();
         let mut first = true;
+        // What protects each released lineage, read once for the pass.
+        let mut tails = dohc_engine_collab::live_update_application::PassTails::default();
         loop {
             let mut held = match &holding {
                 Holding::ByOrigin => durable.clone(),
@@ -2494,6 +2496,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         leases,
                         true,
                         relay_namespace,
+                        &mut tails,
                     ),
                 };
                 // The pass keeps only the hold's reason; its binding is not

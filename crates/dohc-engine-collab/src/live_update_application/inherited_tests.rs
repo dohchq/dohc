@@ -437,6 +437,26 @@ fn the_seed_cannot_overtake_the_retained_suffix() {
     }
 }
 
+/// Sol's 1a-2b finding: once every Carried delivery has an application, the
+/// suffix still resolves each one and checks its application exactly. One
+/// applied at another accepting epoch conflicts, so a later delivery refuses
+/// with nothing written.
+#[test]
+fn a_conflicting_carried_application_refuses_after_every_carried_delivery_applied() {
+    let (mut f, _, c1, c2) = carried_twice();
+    apply_carried(&mut f, &c1);
+    apply_carried(&mut f, &c2);
+    let later = remote_event(&mut f, 11);
+    held(&mut f, later.clone());
+    write_unchecked(&mut f, &format!(
+        "UPDATE live_device_update_applications SET accepting_host_epoch=2 WHERE delivery_id='{}'",
+        c1.receipt.delivery_id
+    ));
+    let before = rows(&f, &APPLICATION_WRITES);
+    assert!(matches!(apply_event(&mut f, later), Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &APPLICATION_WRITES), before, "a refusal writes nothing");
+}
+
 /// An applied Carried delivery, delivered again exactly, returns its saved
 /// ACK and writes nothing, before and after the suffix drains and after a
 /// restart. A replay that changes its bytes, digest, receipt or cursor, or

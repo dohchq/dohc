@@ -144,59 +144,38 @@ fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, Applica
     }
 }
 
+/// The protected tails of each document lineage, as one pass of synced rows
+/// first read them; none for a lineage nothing protects. Tails read only
+/// activations, outboxes and their entries, applications and accepted
+/// history, which applying a synced row never writes, so a pass reads each
+/// lineage's tails once. Its owner drops it when the pass ends.
+#[derive(Debug, Default)]
+pub struct PassTails(std::collections::HashMap<(DocKey, String), Option<ProtectedTails>>);
+
 /// Whether the released window protects the head of `key`'s lineage from
 /// the incoming update, and the binding a hold of it names. A tail whose
 /// retained work all has proof leaves the lineage unprotected; a window or
-/// tail whose evidence does not read protects it. Storage failures stay
+/// tail whose evidence does not read protects it. The tails come from
+/// `pass`, read on its first decision for the lineage; the path, restore
+/// generation and head are read for each update. Storage failures stay
 /// errors.
 pub fn protection(
     conn: &Connection,
     key: &ProtectionKey<'_>,
+    pass: &mut PassTails,
 ) -> Result<Protection, ApplicationError> {
     let (doc, lineage) = (key.doc, key.lineage_claim_id);
-    let tails = match readable(super::settled_base::released_window(conn, doc, lineage))? {
-        None => ProtectedTails::Invalid,
-        Some(window) => {
-            let mut tails = Vec::new();
-            for (namespace, activation_id) in window {
-                let release = readable(super::retirement::released_binding(
-                    conn,
-                    &namespace,
-                    doc,
-                    lineage,
-                    &activation_id,
-                ))?
-                .map(|(path, restore_generation)| TailRelease {
-                    path,
-                    restore_generation,
-                });
-                let unproven = match release {
-                    Some(_) => readable(super::retirement::unproven_retained(
-                        conn,
-                        &namespace,
-                        doc,
-                        lineage,
-                        &activation_id,
-                    ))?,
-                    None => None,
-                };
-                let coverage = match unproven {
-                    Some(unproven) if unproven.is_empty() => continue,
-                    Some(unproven) => RetainedCoverage::Unproven(unproven),
-                    None => RetainedCoverage::Invalid,
-                };
-                tails.push(ProtectedTail {
-                    namespace,
-                    activation_id,
-                    release,
-                    coverage,
-                });
-            }
-            if tails.is_empty() {
-                return Ok(Protection::Unprotected);
-            }
-            ProtectedTails::Listed(tails)
+    let read = (doc.clone(), lineage.to_owned());
+    let tails = match pass.0.get(&read) {
+        Some(tails) => tails.clone(),
+        None => {
+            let tails = protected_tails(conn, doc, lineage)?;
+            pass.0.insert(read, tails.clone());
+            tails
         }
+    };
+    let Some(tails) = tails else {
+        return Ok(Protection::Unprotected);
     };
     let current_path = conn
         .query_row(
@@ -227,4 +206,52 @@ pub fn protection(
         }),
         head,
     })
+}
+
+/// The tails of the released window that protect the document's lineage, or
+/// none while nothing does.
+fn protected_tails(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<Option<ProtectedTails>, ApplicationError> {
+    let Some(window) = readable(super::settled_base::released_window(conn, doc, lineage))? else {
+        return Ok(Some(ProtectedTails::Invalid));
+    };
+    let mut tails = Vec::new();
+    for (namespace, activation_id) in window {
+        let release = readable(super::retirement::released_binding(
+            conn,
+            &namespace,
+            doc,
+            lineage,
+            &activation_id,
+        ))?
+        .map(|(path, restore_generation)| TailRelease {
+            path,
+            restore_generation,
+        });
+        let unproven = match release {
+            Some(_) => readable(super::retirement::unproven_retained(
+                conn,
+                &namespace,
+                doc,
+                lineage,
+                &activation_id,
+            ))?,
+            None => None,
+        };
+        let coverage = match unproven {
+            Some(unproven) if unproven.is_empty() => continue,
+            Some(unproven) => RetainedCoverage::Unproven(unproven),
+            None => RetainedCoverage::Invalid,
+        };
+        tails.push(ProtectedTail {
+            namespace,
+            activation_id,
+            release,
+            coverage,
+        });
+    }
+    Ok((!tails.is_empty()).then_some(ProtectedTails::Listed(tails)))
 }

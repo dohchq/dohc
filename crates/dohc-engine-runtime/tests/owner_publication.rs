@@ -6249,40 +6249,57 @@ impl RetainedWindow {
 
 /// Every row a synced update, its refusal or its application could write.
 fn ingress_rows(store: &EngineStore) -> Vec<String> {
-    let mut rows: Vec<String> = [
-        "moments",
-        "snapshots",
-        "ydoc_docs",
-        "ydoc_updates",
-        "ydoc_snapshots",
-        "ydoc_deferred_updates",
-        "replication_log",
-        "replication_pending_refusals",
-        "relay_deferred_ops",
-        "owner_ydoc_outbox_entries",
-        "live_owner_activations",
-        "live_device_settlements",
-        "live_device_update_applications",
-        "live_accepted_updates",
-    ]
-    .iter()
-    .flat_map(|table| {
-        store
-            .read_with(|conn| {
-                let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
-                let columns = statement.column_count();
-                statement
-                    .query_map([], |row| {
-                        let values = (0..columns)
-                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok(format!("{table}: {values:?}"))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap()
-    })
-    .collect();
+    table_rows(
+        store,
+        &[
+            "moments",
+            "snapshots",
+            "ydoc_docs",
+            "ydoc_updates",
+            "ydoc_snapshots",
+            "ydoc_deferred_updates",
+            "replication_log",
+            "replication_pending_refusals",
+            "relay_deferred_ops",
+            "owner_ydoc_outbox_entries",
+            "live_owner_activations",
+            "live_device_settlements",
+            "live_device_update_applications",
+            "live_accepted_updates",
+        ],
+    )
+}
+
+/// Every table a released window's protected tails read.
+const TAIL_INPUTS: [&str; 5] = [
+    "live_owner_activations",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
+    "live_device_update_applications",
+    "live_accepted_updates",
+];
+
+/// Every row of `tables`, sorted.
+fn table_rows(store: &EngineStore, tables: &[&str]) -> Vec<String> {
+    let mut rows: Vec<String> = tables
+        .iter()
+        .flat_map(|table| {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            let values = (0..columns)
+                                .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(format!("{table}: {values:?}"))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        })
+        .collect();
     rows.sort();
     rows
 }
@@ -7287,6 +7304,252 @@ async fn a_window_that_does_not_read_holds_only_its_document() {
         committed,
         dohc_engine_storage::TxnOutcome::Committed(_)
     ));
+    w.close().await;
+}
+
+/// `count` acknowledged native entries of the released tail's outbox, after
+/// the retained one, each applied here: the proven history a long-lived
+/// lineage keeps. Written past the store's checks, each still reads as valid.
+fn proven_history(w: &RetainedWindow, count: usize) {
+    use dohc_engine_collab::owner_outbox::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
+    let mut raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let tx = raw.transaction().unwrap();
+    let (outbox, last, template): (String, i64, String) = tx
+        .query_row(
+            "SELECT outbox_id,(SELECT MAX(sequence) FROM owner_ydoc_outbox_entries),native_source_json
+             FROM owner_ydoc_outbox_entries WHERE update_digest=?1",
+            [&w.retained_digest],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let mut source: OwnerOutboxNativeSource = serde_json::from_str(&template).unwrap();
+    assert!(matches!(
+        source.origin,
+        OwnerOutboxNativeOrigin::NativeUpdate { .. }
+    ));
+    {
+        let mut entry = tx
+            .prepare(
+                "INSERT INTO owner_ydoc_outbox_entries (outbox_id,sequence,append_key,delivery_id,
+                   update_digest,native_source_json,accepted_receipt_json,byte_length,created_at_ms,pending,
+                   result_pending_bytes,result_oldest_entry_at_ms,result_state)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,1,1,0,1,1,'active')",
+            )
+            .unwrap();
+        let mut application = tx.prepare(APPLIED_EXACTLY).unwrap();
+        for index in 0..count as i64 {
+            source.native_sequence = 1_000 + index;
+            let json = serde_json::to_string(&source).unwrap();
+            let delivery_id = format!("history-{index}");
+            let receipt = dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: delivery_id.clone(),
+                update_digest: w.retained_digest.clone(),
+                journal_cursor: 1_000 + index,
+                accepting_host_epoch: 1,
+            };
+            entry
+                .execute(rusqlite::params![
+                    outbox,
+                    last + 1 + index,
+                    format!("adopted-local:{}", hex_sha256(json.as_bytes())),
+                    delivery_id,
+                    w.retained_digest,
+                    json,
+                    serde_json::to_string(&receipt).unwrap()
+                ])
+                .unwrap();
+            application
+                .execute(rusqlite::params![
+                    delivery_id,
+                    w.lineage,
+                    w.retained_digest,
+                    receipt.journal_cursor,
+                    receipt.accepting_host_epoch
+                ])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
+
+/// The host's application of exactly one delivery to the window's document,
+/// written past the store's checks: its delivery, lineage, digest, journal
+/// cursor and accepting epoch.
+const APPLIED_EXACTLY: &str = "INSERT INTO live_device_update_applications (relay_database_namespace,
+      workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
+      restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,
+      principal_kind,principal_id,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,
+      applied_host_epoch,applied_instance_id,applied_connection_id)
+    VALUES ('relay','workspace',?1,'main','object',?2,'notes/plan.md','[\"notes/plan.md\"]',0,?3,1,?4,?5,
+      'owner','owner',0,0,1,'host',1,'instance','connection')";
+
+/// Opus's 1a-2b finding 1: what released-window protection costs as the
+/// lineage's proven history grows, alone and in complete hosted passes of
+/// safe rows followed by a held row the pass retries. Run in a release build:
+/// `cargo test --release -p dohc-engine-runtime --test owner_publication
+/// measure_released_window_protection -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "manual release-build protection timing"]
+async fn measure_released_window_protection() {
+    const SAFE_ROWS: usize = 8;
+    let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+    let summary = |mut samples: Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        let p95 = (samples.len() * 95).div_ceil(100) - 1;
+        (samples.len(), samples[samples.len() / 2], samples[p95])
+    };
+    for entries in [0, 1_000, 10_000, 50_000] {
+        let mut w = retained_window(Retained::Carried).await;
+        proven_history(&w, entries);
+        let incoming = IncomingCoordinate {
+            relay_namespace: Some("relay".into()),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            origin_id: "measure".into(),
+            origin_seq: 0,
+            relay_seq: 1,
+        };
+        let key = window_key();
+        let protection_key = ProtectionKey {
+            doc: &key,
+            lineage_claim_id: &w.lineage,
+            incoming: &incoming,
+        };
+        let mut calls = Vec::new();
+        for _ in 0..21 {
+            let started = std::time::Instant::now();
+            // A fresh pass reads the tails, as every pass's first row does.
+            let protected = w
+                .store
+                .read_with(|conn| protection(conn, &protection_key, &mut PassTails::default()))
+                .unwrap();
+            calls.push(ms(started));
+            assert!(matches!(protected, Protection::Protected { .. }));
+        }
+        let mut passes = Vec::new();
+        for sample in 0..11 {
+            let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+            let doc = w.head();
+            for row in 0..SAFE_ROWS {
+                let bytes = doc.richdoc_append_paragraph(&format!("Row {sample}.{row}"));
+                let op = ydoc_row(
+                    &format!("safe-{sample}-{row}"),
+                    &bytes,
+                    &w.lineage,
+                    WINDOW_PATH,
+                    false,
+                );
+                feed.serve(op, bytes);
+            }
+            let moved = doc.richdoc_append_paragraph("Moved");
+            let held = feed.serve(
+                ydoc_row(
+                    &format!("moved-{sample}"),
+                    &moved,
+                    &w.lineage,
+                    "notes/moved.md",
+                    false,
+                ),
+                moved,
+            );
+            let client = dohc_engine_sync::RelaySyncClient::new(feed);
+            let started = std::time::Instant::now();
+            let pass = hosted_pass(
+                &mut w.store,
+                &client,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+            );
+            passes.push(ms(started));
+            assert_eq!(
+                pass.applied as usize, SAFE_ROWS,
+                "{:?}",
+                pass.pending_cursor
+            );
+            assert!(stopped_before(&pass, &held), "{:?}", pass.pending_cursor);
+        }
+        for (name, samples) in [("protection", calls), ("pass", passes)] {
+            let (count, p50, p95) = summary(samples);
+            println!(
+                "released_window_{name} entries={entries} safe_rows={SAFE_ROWS} samples={count} p50_ms={p50:.3} p95_ms={p95:.3}"
+            );
+        }
+        w.close().await;
+    }
+}
+
+/// Opus's 1a-2b finding 1: a pass reads each protected lineage's tails once,
+/// which holds because applying a hosted `ydoc.update` or `moment.append`
+/// writes nothing the tails read. Tails that change between passes, here
+/// the Carried delivery applied, show in the next pass, which applies the
+/// fold the first one held.
+#[tokio::test]
+async fn a_pass_reads_released_tails_once_and_the_next_pass_reads_them_again() {
+    let mut w = retained_window(Retained::Carried).await;
+    execute(
+        &mut w.store,
+        "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+        VALUES ('workspace','neighbour','notes/neighbour.md','ready',1)",
+    );
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("Safe")
+    };
+    let feed = HostedFeed::new(&[("neighbour", "notes/neighbour.md"), ("object", WINDOW_PATH)]);
+    let safe = feed.serve(
+        ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false),
+        safe,
+    );
+    let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
+    let fold = feed.serve(fold, fold_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let tails = table_rows(&w.store, &TAIL_INPUTS);
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let pass = hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(pass.applied, 2, "{:?}", pass.pending_cursor);
+    assert!(journaled(&w.store, &safe) && journaled(&w.store, &created));
+    assert!(!journaled(&w.store, &fold));
+    assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
+    assert_eq!(
+        table_rows(&w.store, &TAIL_INPUTS),
+        tails,
+        "applying writes nothing the tails read"
+    );
+    let (delivery_id, receipt): (String, String) = w
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT delivery_id,accepted_receipt_json FROM owner_ydoc_outbox_entries
+                 WHERE update_digest=?1",
+                [&w.retained_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    let receipt: dohc_engine_collab::OwnerDeliveryReceipt = serde_json::from_str(&receipt).unwrap();
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    raw.execute(
+        APPLIED_EXACTLY,
+        rusqlite::params![
+            delivery_id,
+            w.lineage,
+            w.retained_digest,
+            receipt.journal_cursor,
+            receipt.accepting_host_epoch
+        ],
+    )
+    .unwrap();
+    drop(raw);
+    let next = hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(next.applied, 1, "{:?}", next.pending_cursor);
+    assert!(journaled(&w.store, &fold));
+    desktop.close().await;
     w.close().await;
 }
 

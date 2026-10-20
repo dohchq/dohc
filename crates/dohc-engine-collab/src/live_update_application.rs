@@ -49,8 +49,8 @@ mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
 pub use released_protection::{
-    protection, IncomingCoordinate, ProtectedTail, ProtectedTails, Protection, ProtectionKey,
-    ReleasedLineageBinding, RetainedContribution, RetainedCoverage, TailRelease,
+    protection, IncomingCoordinate, PassTails, ProtectedTail, ProtectedTails, Protection,
+    ProtectionKey, ReleasedLineageBinding, RetainedContribution, RetainedCoverage, TailRelease,
 };
 mod restore_content;
 pub(crate) mod restore_fence;
