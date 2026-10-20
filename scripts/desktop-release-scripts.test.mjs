@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { load } from "js-yaml";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
-import { NIGHTLY_AGENT_LABEL, nightlyAgentDefinition, nightlyDecision, runNightly, waitForQueue } from "./release-nightly.mjs";
+import { NIGHTLY_AGENT_LABEL, acquireNightlyLock, nightlyAgentDefinition, nightlyDecision, runNightly, runTitle, verifiedNightly, waitForQueue, waitForRun } from "./release-nightly.mjs";
 
 const temporaryDirectories = [];
 async function mkdtemp(prefix) {
@@ -1574,7 +1574,7 @@ const ONLINE_RUNNERS = [
   { name: "dohc-windows", status: "online", labels: ["self-hosted", "Windows", "X64", "desktop-release"] },
   { name: "dohc-linux", status: "online", labels: ["self-hosted", "Linux", "X64", "desktop-release"] },
 ];
-const YESTERDAY = { tag: "v0.1.1-nightly.20261019.41.1", commit: "b".repeat(40), publishedAt: "2026-10-19T20:30:00Z" };
+const YESTERDAY = { tag: "v0.1.1-nightly.20261019.41.1", commit: "b".repeat(40), publishedAt: "2026-10-19T20:30:00Z", assets: ["nightly.yml", "nightly-linux.yml", "nightly-mac.yml"] };
 const TONIGHT = Date.parse("2026-10-20T20:00:00Z");
 
 test("the nightly job dispatches only a new main that passed verification, with both release runners online", () => {
@@ -1583,8 +1583,7 @@ test("the nightly job dispatches only a new main that passed verification, with 
   assert.deepEqual(nightlyDecision({ ...night, lastNightly: null }), { kind: "dispatch" }, "the first nightly needs no earlier one");
 
   const quiet = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
-  assert.equal(quiet.kind, "skip");
-  assert.equal(quiet.report, false, "a night with nothing new is not reported");
+  assert.deepEqual([quiet.kind, quiet.report], ["skip", false], "a night with nothing new is not reported");
   const sameDay = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T01:00:00Z" } });
   assert.deepEqual([sameDay.kind, sameDay.report], ["skip", false]);
   assert.match(sameDay.reason, /one nightly publishes per UTC day/);
@@ -1604,27 +1603,46 @@ test("the nightly job dispatches only a new main that passed verification, with 
   assert.match(nightlyDecision({ ...night, runners: [], dryRun: true }).reason, /dry run would wait/);
 });
 
-// Answers the commands the nightly job runs. The started run is 9; 8 ran before the dispatch.
-function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY } = {}) {
+test("only a full nightly verification of main counts as verified", () => {
+  const pass = (request, state = "passed") => ({ request: { nightly: true, full: true, scope: "all", gates: { rust: true, js: true }, ...request }, status: { state } });
+  assert.equal(verifiedNightly([pass({ head: "1" }), pass({ head: "2" })]).request.head, "2");
+  assert.equal(verifiedNightly([pass({ head: "1" }), pass({ head: "2" }, "failed")]).request.head, "1");
+  for (const narrower of [{ full: false }, { scope: "js" }, { gates: { rust: false, js: true } }, { nightly: false }]) {
+    assert.equal(verifiedNightly([pass({ head: "2", ...narrower })]), null, JSON.stringify(narrower));
+  }
+});
+
+// Answers the commands the nightly job runs. The job's run is 9. Run 8 ran
+// earlier, and run 10 is someone else's dispatch that starts at the same time.
+function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical" } = {}) {
   const calls = [];
   const tag = "v0.1.1-nightly.20261020.42.1";
   let dispatched = false;
-  let views = 0;
+  let viewCount = 0;
   const tags = { ...(lastNightly ? { [lastNightly.tag]: lastNightly.commit } : {}), [tag]: runHead };
+  const viewAnswers = views ?? [{ status: "in_progress", jobs: [] }, { status: "in_progress", jobs: [] }, { status: "completed", conclusion, jobs: [] }];
   const run = (command, args) => {
     const line = [command, ...args].join(" ");
     calls.push(line);
     const ok = stdout => ({ status: 0, stdout, stderr: "" });
+    if (line === "git status --porcelain") return ok(status);
+    if (line === "git rev-parse HEAD") return ok(`${"e".repeat(40)}\n`);
+    if (line.startsWith("gh api repos/dohchq/dohc/compare/")) return ok(`${compare}\n`);
     if (line.startsWith("gh api repos/dohchq/dohc/git/ref/heads/main")) return ok(`${NIGHTLY_HEAD}\n`);
-    if (line.startsWith("gh api --paginate repos/dohchq/dohc/releases")) return ok(lastNightly ? `${JSON.stringify({ tag: lastNightly.tag, publishedAt: lastNightly.publishedAt })}\n` : "");
+    if (line.startsWith("gh api --paginate repos/dohchq/dohc/releases")) return ok(lastNightly ? `${JSON.stringify({ tag: lastNightly.tag, publishedAt: lastNightly.publishedAt, assets: lastNightly.assets })}\n` : "");
     if (line.startsWith("gh api repos/dohchq/dohc/commits/refs/tags/")) return ok(`${tags[args[1].split("/").pop()]}\n`);
     if (line.startsWith("gh api --paginate repos/dohchq/dohc/actions/runners")) return ok(ONLINE_RUNNERS.map(runner => JSON.stringify(runner)).join("\n"));
     if (line.startsWith("gh run list")) {
-      const earlier = { databaseId: 8, headSha: YESTERDAY.commit, url: "https://github.com/dohchq/dohc/actions/runs/8" };
-      return ok(JSON.stringify(dispatched ? [{ databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9" }, earlier] : [earlier]));
+      const earlier = { databaseId: 8, headSha: YESTERDAY.commit, url: "https://github.com/dohchq/dohc/actions/runs/8", displayTitle: "Desktop Release" };
+      const others = { databaseId: 10, headSha: NIGHTLY_HEAD, url: "https://github.com/dohchq/dohc/actions/runs/10", displayTitle: "Desktop Release" };
+      const ours = { databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9", displayTitle: runTitle(NIGHTLY_HEAD) };
+      return ok(JSON.stringify(dispatched ? [others, ours, earlier] : [earlier]));
     }
     if (line.startsWith("gh workflow run")) { dispatched = true; return ok(""); }
-    if (line.startsWith("gh run view 9")) return ok(JSON.stringify(++views < 3 ? { status: "in_progress", conclusion: "" } : { status: "completed", conclusion }));
+    if (line.startsWith("gh run view 9")) {
+      const answer = viewAnswers[Math.min(viewCount++, viewAnswers.length - 1)];
+      return answer === "error" ? { status: 1, stdout: "", stderr: "HTTP 502" } : ok(JSON.stringify(answer));
+    }
     if (line.startsWith("gh run cancel 9")) return ok("");
     if (line.startsWith("gh api repos/dohchq/dohc/releases?per_page=20")) {
       return ok(`${JSON.stringify({ tag, publishedAt: "2026-10-20T21:10:00Z", url: `https://github.com/dohchq/dohc/releases/tag/${tag}` })}\n${JSON.stringify({ tag: YESTERDAY.tag, publishedAt: YESTERDAY.publishedAt, url: "" })}\n`);
@@ -1646,40 +1664,99 @@ function nightlyHost(fake, extra = {}) {
   };
 }
 
-test("a nightly dispatches Desktop Release on main, waits for it to publish, then adds the macOS files to that release", async () => {
+test("a nightly dispatches Desktop Release for main's verified commit, follows its own run, and adds the macOS files to the release it published", async () => {
   const fake = fakeNightly();
   const host = nightlyHost(fake);
   const report = await runNightly({}, host.deps);
-  assert.ok(fake.calls.includes("gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=false"));
+  assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=false -f commit=${NIGHTLY_HEAD}`));
+  assert.ok(fake.calls.some(call => call.startsWith("gh run view 9")), "it follows the run titled with its commit, not another dispatch that started then");
+  assert.ok(!fake.calls.some(call => call.startsWith("gh run view 10")));
   assert.deepEqual(host.macs, [fake.tag], "the macOS files go to the release the run published");
-  assert.match(report, new RegExp(`Published \\[${RegExp.escape(fake.tag)}\\]\\(.+\\) from aaaaaaaaa for Windows, Linux and macOS \\(\\[run\\]\\(https://github.com/dohchq/dohc/actions/runs/9\\)\\)`));
+  assert.match(report, new RegExp(`^Published \\[${RegExp.escape(fake.tag)}\\]\\(.+\\) from aaaaaaaaa for Windows, Linux and macOS \\(\\[run\\]\\(https://github.com/dohchq/dohc/actions/runs/9\\)\\)\\.$`));
 });
 
-test("a nightly publishes nothing on a quiet night, a busy queue, a moved main, or a failed run", async () => {
+test("a nightly publishes nothing on a quiet night, a busy queue, a moved main, a failed run, or a checkout that is not clean main", async () => {
   const quiet = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
   assert.equal(await runNightly({}, nightlyHost(quiet).deps), null);
   assert.ok(!quiet.calls.some(call => call.startsWith("gh workflow run")));
 
   const busy = fakeNightly();
   assert.match(await runNightly({}, nightlyHost(busy, { queueIdle: async () => false }).deps), /verification queue was still busy/);
-  assert.deepEqual(busy.calls, [], "nothing reads GitHub or dispatches while verification runs");
+  assert.ok(!busy.calls.some(call => call.startsWith("gh api repos/dohchq/dohc/git/ref")), "nothing reads GitHub or dispatches while verification runs");
 
-  const moved = fakeNightly({ runHead: "d".repeat(40) });
+  // The workflow refuses to build a commit other than the requested one, so no cancel is needed.
+  const moved = fakeNightly({ runHead: "d".repeat(40), conclusion: "failure" });
   const movedHost = nightlyHost(moved);
-  assert.match(await runNightly({}, movedHost.deps), /main moved to ddddddddd after the checks passed on aaaaaaaaa, so the job cancelled/);
-  assert.ok(moved.calls.includes("gh run cancel 9 -R dohchq/dohc"));
+  assert.match(await runNightly({}, movedHost.deps), /main moved to ddddddddd after the checks passed on aaaaaaaaa, so \[Desktop Release\]\(.+\) refused to build it\. Nothing was published\./);
+  assert.ok(!moved.calls.some(call => call.startsWith("gh run cancel")));
   assert.deepEqual(movedHost.macs, []);
 
   const failed = fakeNightly({ conclusion: "failure" });
   const failedHost = nightlyHost(failed);
   assert.match(await runNightly({}, failedHost.deps), /ended with "failure"\. Nothing was published\./);
   assert.deepEqual(failedHost.macs, []);
+
+  await assert.rejects(runNightly({}, nightlyHost(fakeNightly({ status: " M scripts/release-nightly.mjs" })).deps), /checkout the job runs from has changes/);
+  await assert.rejects(runNightly({}, nightlyHost(fakeNightly({ compare: "diverged" })).deps), /which is not on main/);
+});
+
+test("a nightly keeps following its run through gh errors, cancels one still waiting at the limit, and never cancels a publish", async () => {
+  const waiting = { status: "queued", jobs: [{ name: "Preflight", status: "queued" }] };
+  const publishing = { status: "in_progress", jobs: [{ name: "Publish", status: "in_progress" }] };
+  let clock = 0;
+  const options = { wait: async ms => { clock += ms; }, now: () => clock, limitMs: 3000, pollMs: 1000 };
+
+  const flaky = fakeNightly({ views: ["error", "error", { status: "completed", conclusion: "success", jobs: [] }] });
+  assert.deepEqual(await waitForRun(flaky.run, 9, options), { conclusion: "success", cancelled: false });
+
+  clock = 0;
+  const stuck = fakeNightly({ views: [waiting, waiting, waiting, waiting, { status: "completed", conclusion: "cancelled", jobs: [] }] });
+  assert.deepEqual(await waitForRun(stuck.run, 9, options), { conclusion: "cancelled", cancelled: true });
+  assert.equal(stuck.calls.filter(call => call.startsWith("gh run cancel 9")).length, 1);
+
+  clock = 0;
+  const late = fakeNightly({ views: [publishing, publishing, publishing, publishing, publishing, { status: "completed", conclusion: "success", jobs: [] }] });
+  assert.deepEqual(await waitForRun(late.run, 9, options), { conclusion: "success", cancelled: false });
+  assert.ok(!late.calls.some(call => call.startsWith("gh run cancel")), "a run that started publishing is never cancelled");
+
+  clock = 0;
+  await assert.rejects(waitForRun(fakeNightly({ views: ["error"] }).run, 9, { ...options, failureLimit: 3 }), /could not read the run 3 times in a row: HTTP 502/);
+
+  clock = 0;
+  const neverStops = fakeNightly({ views: [waiting] });
+  await assert.rejects(waitForRun(neverStops.run, 9, { ...options, graceMs: 2000 }), /still not finished 0\.0\d+ minutes after the job's .+ limit, though the job cancelled it/);
+  assert.equal(neverStops.calls.filter(call => call.startsWith("gh run cancel 9")).length, 1);
+
+  const lost = fakeNightly({ views: ["error"] });
+  assert.match(await runNightly({}, nightlyHost(lost).deps), /lost track of \[Desktop Release\]\(.+\) for aaaaaaaaa: .+If it publishes, the next night adds its macOS files\./);
+
+  const stuckNight = fakeNightly({ views: [...Array(80).fill(waiting), { status: "completed", conclusion: "cancelled", jobs: [] }] });
+  const stuckHost = nightlyHost(stuckNight);
+  assert.match(await runNightly({}, stuckHost.deps), /still had not started publishing after 6 hours, so the job cancelled it\. Nothing was published\. Check that the runners on ICE-PC are online\./);
+  assert.deepEqual(stuckHost.macs, []);
+});
+
+test("a nightly adds missing macOS files to the newest nightly first, except to the legacy June nightly", async () => {
+  const missing = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD, assets: ["nightly.yml", "nightly-linux.yml"] } });
+  const host = nightlyHost(missing);
+  assert.match(await runNightly({}, host.deps), /^Added the macOS files to v0\.1\.1-nightly\.20261019\.41\.1, which published without them\.$/);
+  assert.deepEqual(host.macs, [YESTERDAY.tag]);
+
+  const failing = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD, assets: ["nightly.yml"] } });
+  const report = await runNightly({}, nightlyHost(failing, { addMacFiles: () => 1 }).deps);
+  assert.match(report, /adding the macOS files to v0\.1\.1-nightly\.20261019\.41\.1 failed with exit code 1/);
+  assert.match(report, /node scripts\/release-desktop-macos\.mjs --version v0\.1\.1-nightly\.20261019\.41\.1 --channel nightly/);
+
+  const legacy = fakeNightly({ lastNightly: { tag: "v0.1.1-nightly.20260622.15.1", commit: NIGHTLY_HEAD, publishedAt: "2026-06-22T09:42:56Z", assets: ["latest.yml"] } });
+  const legacyHost = nightlyHost(legacy);
+  assert.equal(await runNightly({}, legacyHost.deps), null);
+  assert.deepEqual(legacyHost.macs, []);
 });
 
 test("a nightly whose macOS files fail reports the command that finishes them", async () => {
   const fake = fakeNightly();
   const report = await runNightly({}, nightlyHost(fake, { addMacFiles: () => 1 }).deps);
-  assert.match(report, /but adding the macOS files failed with exit code 1/);
+  assert.match(report, /^Published \[.+\]\(.+\) for Windows and Linux \(\[run\]\(.+\)\), but adding the macOS files to .+ failed with exit code 1/);
   assert.match(report, new RegExp(`node scripts/release-desktop-macos\\.mjs --version ${RegExp.escape(fake.tag)} --channel nightly`));
 });
 
@@ -1687,7 +1764,7 @@ test("a nightly dry run dispatches with dry_run=true, does not wait for verifica
   const fake = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
   const host = nightlyHost(fake, { queueIdle: async () => assert.fail("a dry run does not wait for the queue"), verifiedHead: () => assert.fail("a dry run needs no verification") });
   assert.match(await runNightly({ dryRun: true }, host.deps), /dry run of Desktop Release passed for aaaaaaaaa/);
-  assert.ok(fake.calls.includes("gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=true"));
+  assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=true -f commit=${NIGHTLY_HEAD}`));
   assert.deepEqual(host.macs, []);
 });
 
@@ -1702,13 +1779,43 @@ test("the nightly job waits for the verification queue to finish, up to its limi
   assert.equal(clock, 5000);
 });
 
-test("the nightly LaunchAgent runs at 04:00 in the login session from main's reviewed code", () => {
+test("one nightly run holds the lock at a time, and a lock whose process is gone is taken over", async () => {
+  const lock = join(await mkdtemp(join(tmpdir(), "dohc-nightly-lock-")), "nightly.lock");
+  const release = acquireNightlyLock(lock);
+  assert.equal(readFileSync(lock, "utf8"), String(process.pid));
+  assert.throws(() => acquireNightlyLock(lock), new RegExp(`Another nightly run \\(pid ${process.pid}\\) is in progress`));
+  release();
+  assert.equal(existsSync(lock), false);
+  writeFileSync(lock, "2147483646");
+  const again = acquireNightlyLock(lock);
+  assert.equal(readFileSync(lock, "utf8"), String(process.pid), "a dead process's lock is replaced");
+  writeFileSync(lock, "2147483646");
+  again();
+  assert.equal(readFileSync(lock, "utf8"), "2147483646", "a run removes only its own lock");
+});
+
+test("the nightly LaunchAgent runs at 04:00 in the login session from a clean checkout of main, and reports when it cannot update it", () => {
   const definition = nightlyAgentDefinition({ checkout: "/Users/maker/dohc-release/driver", queue: "/Users/maker/dev/worktrees/_verification", logPath: "/Users/maker/dohc-release/nightly.log", path: "/usr/bin:/bin" });
   assert.match(definition, new RegExp(`<key>Label</key><string>${RegExp.escape(NIGHTLY_AGENT_LABEL)}</string>`));
   assert.match(definition, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
   assert.match(definition, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>0<\/integer>/);
-  assert.match(definition, /git fetch --quiet origin main &amp;&amp; git checkout --quiet --detach origin\/main &amp;&amp; exec node scripts\/release-nightly\.mjs run/);
-  assert.match(definition, /<string>\/Users\/maker\/dohc-release\/driver<\/string><\/array>/);
+  assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec node scripts\/release-nightly\.mjs report "The nightly job could not check out main/);
+  assert.match(definition, /exec node scripts\/release-nightly\.mjs report "The nightly job could not fetch main/);
+  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><\/array>/);
   assert.match(definition, /<key>DOHC_VERIFICATION_QUEUE_ROOT<\/key><string>\/Users\/maker\/dev\/worktrees\/_verification<\/string>/);
   assert.match(definition, /<key>StandardOutPath<\/key><string>\/Users\/maker\/dohc-release\/nightly\.log<\/string>/);
+});
+
+test("Desktop Release names the requested commit in its run title and builds nothing when main is elsewhere", async () => {
+  assert.equal(runTitle(NIGHTLY_HEAD), `Desktop Release for ${NIGHTLY_HEAD}`);
+  assert.equal(releaseWorkflow["run-name"], "Desktop Release${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}");
+  assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.commit.required, false);
+  const [guard] = releaseWorkflow.jobs.preflight.steps;
+  assert.equal(guard.name, "Check the requested commit", "the guard runs before anything else in preflight");
+  assert.equal(guard.if, "inputs.commit != ''");
+  assert.equal(guard.env.REQUESTED_COMMIT, "${{ inputs.commit }}");
+  if (process.platform === "win32") return;
+  const check = (requested, actual) => promisify(execFile)("bash", ["-euo", "pipefail", "-c", guard.run], { env: { ...process.env, REQUESTED_COMMIT: requested, GITHUB_SHA: actual } });
+  await check(NIGHTLY_HEAD, NIGHTLY_HEAD);
+  await assert.rejects(check(NIGHTLY_HEAD, "d".repeat(40)), error => error.code === 1 && /not the requested commit/.test(error.stdout));
 });

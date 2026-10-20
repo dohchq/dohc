@@ -1,4 +1,6 @@
 name: Desktop Release
+# The scheduled nightly job finds its run by the commit it requested.
+run-name: Desktop Release${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
 
 # Releases start only by dispatch and run only on self-hosted runners.
 # Cloud runners stay off (AGENTS.md). This workflow builds Windows and Linux.
@@ -33,6 +35,10 @@ on:
         required: true
         default: true
         type: boolean
+      commit:
+        description: Build only if main is at this commit. The scheduled nightly job sets it.
+        required: false
+        type: string
 
 # A second dispatch on a channel waits. Cancelling a publish in progress
 # could leave a release with only some of its files.
@@ -59,6 +65,19 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
+      # The scheduled nightly job requests the commit its verification passed.
+      # If main moved since, nothing builds or publishes.
+      - name: Check the requested commit
+        if: inputs.commit != ''
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          if [[ "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::main is at $GITHUB_SHA, not the requested commit $REQUESTED_COMMIT. Nothing builds."
+            exit 1
+          fi
+
       # A desktop build on Linux leaves the staged Markdown reader folder
       # read-only, so checkout could not clean this runner's workspace.
       - name: Let checkout remove an earlier build's reader folder

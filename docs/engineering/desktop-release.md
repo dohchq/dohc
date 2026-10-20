@@ -71,13 +71,17 @@ Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
 This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
 [Scheduled nightlies](#publish-nightlies-on-a-schedule) need both runners online at 04:00 UTC+8.
-On the release PC, start each runner when you sign in, and keep the PC awake.
-Locking the screen is fine. Signing out stops the Windows runner's desktop session.
+A runner that stays online runs any workflow job that targets its labels, including a pull request's.
+Before the repository is public, set Settings, Actions, General, "Approval for running fork pull request workflows from contributors" to "Require approval for all external contributors".
+Never approve a fork run that changes `.github/` or targets these runners' labels.
+Otherwise that run's code would run as you on the release PC, beside the toolchains the next signed build uses.
+
+On the release PC, start each runner when you sign in, and keep the PC awake. Stay signed in: signing out stops both runners.
 In PowerShell, with each runner's folder and the WSL distribution filled in:
 
 ```powershell
 $t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "<runner folder>\run.cmd" -WorkingDirectory "<runner folder>")
 Register-ScheduledTask -TaskName "dohc Linux runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -- bash -lc 'cd <runner folder in WSL> && ./run.sh'")
 ```
@@ -156,21 +160,23 @@ On the Mac mini, a LaunchAgent publishes each nightly with nobody at the Mac.
 Ice decided on 2026-10-20 that it publishes without asking each time.
 Every rule above still applies.
 
-At 04:00 local time, launchd updates a clean clone of `main` in `~/dohc-release/driver`.
-It then runs `node scripts/release-nightly.mjs run` from that clone. The job:
+At 04:00 local time, launchd fetches `main` into its own clone in `~/dohc-release/driver`.
+It discards anything else in that clone, then runs `node scripts/release-nightly.mjs run` from it.
+The job stops unless the clone is clean and on `main`. The job:
 
 1. Waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
-2. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
-3. Skips the night when the Mac's nightly verification has not passed on `main`'s head commit.
-4. Skips the night when no Windows or no Linux release runner is online.
-5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`. If `main` moved after the checks, it cancels that run.
-6. Waits up to 6 hours for the run. When the run publishes, it [adds the macOS files](#add-the-macos-files) to the new release.
+2. Adds the macOS files to the newest nightly if it published without them, after a failure or a lost run.
+3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
+4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
+5. Skips the night when no Windows or no Linux release runner is online.
+6. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`, and the run's title names it, so the job follows its own run.
+7. Follows the run for up to 6 hours. A run that still has not started publishing then is cancelled; a publish in progress never is. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release.
 
 The job comments on #2281 after each published nightly and each failure.
-It also comments when it skips for a reason someone must fix, such as an offline runner.
+It also comments when it skips for a reason someone must fix, such as an offline runner, and when launchd cannot update its clone.
 A night with nothing new posts nothing.
 The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
-Only one run happens at a time.
+Only one run happens at a time, and `install` and `uninstall` refuse while one runs, so the macOS command always locks the release keychain itself.
 
 The job needs all of these:
 
@@ -179,7 +185,13 @@ The job needs all of these:
 - `gh` signed in with admin access to `dohchq/dohc`, which reading the runners' status needs.
 - A signed-in session. launchd runs the job only there, where the login keychain is open.
 
-Install or remove the LaunchAgent from a checkout of `main`:
+Each night the job runs `main`'s code, and the release commit's dependency install scripts, with nobody watching.
+It runs them with your `gh` token and while the saved keychain password can be read.
+Anyone who can merge to `main` therefore controls what runs with those credentials.
+Keep `main` protected: require a review and allow no bypass, including for administrators.
+
+Install or remove the LaunchAgent from a login shell, in a checkout of `main` whose origin is `dohchq/dohc`.
+The LaunchAgent keeps the `PATH` of the shell that installs it, which must find `node`, `git`, `gh`, `pnpm`, and the Xcode tools:
 
 ```sh
 node scripts/release-nightly.mjs install
