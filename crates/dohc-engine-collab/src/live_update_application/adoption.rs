@@ -1535,7 +1535,7 @@ pub fn adopt_owner_committed(
                 }
                 None
             }
-            Some(prefix) => Some(require_succession(tx, &held, &key, prefix, imported_source.as_ref())?),
+            Some(prefix) => Some(require_succession(tx, &held, &key, prefix, imported_source.as_ref(), max_events)?),
         };
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
         require_local_replay_budget(tx, &key, max_bytes)?;
@@ -1841,6 +1841,8 @@ struct Succession {
     /// The lineage's immutable origin, which the successor keeps.
     root: String,
     prefix: RetainedPrefix,
+    /// The chain, walked once within its budget.
+    chain: ChainBindings,
     /// The chain's Carried deliveries, each at its original entry.
     carried: Vec<retirement::InheritedEntry>,
 }
@@ -1848,13 +1850,15 @@ struct Succession {
 /// A successor follows exactly its namespace's released chain tail, at the
 /// boundary that tail kept, while no namespace holds the lineage and its
 /// accepted history still ends there. Only a captured source names the
-/// activation it follows.
+/// activation it follows. The chain fits `max_events` before anything
+/// resolves through it.
 fn require_succession(
     tx: &Transaction<'_>,
     held: &Registration,
     key: &DocKey,
     prefix: &RetainedPrefix,
     source: Option<&super::activation::ImportedOwnerSource>,
+    max_events: usize,
 ) -> Result<Succession, ApplicationError> {
     let lineage = &held.binding.lineage_claim_id;
     let predecessor = prefix.predecessor_activation_id.as_str();
@@ -1875,16 +1879,20 @@ fn require_succession(
     {
         return Err(ApplicationError::Conflict);
     }
+    let chain = chain_bindings(tx, &held.namespace, key, lineage, predecessor, max_events)?;
+    let carried = retirement::inherited_in_chain(
+        tx,
+        &held.namespace,
+        key,
+        lineage,
+        predecessor,
+        &chain.activations,
+    )?;
     Ok(Succession {
         root,
         prefix: prefix.clone(),
-        carried: retirement::inherited_entries(
-            tx,
-            &held.namespace,
-            key,
-            lineage,
-            Some(predecessor),
-        )?,
+        chain,
+        carried,
     })
 }
 
@@ -1928,7 +1936,7 @@ struct RetainedOutboxes {
 /// before, so an arbitrary one refuses. The coverage takes no outbox at an
 /// earlier generation, which stays behind its restore fence. Any other
 /// outbox in this generation refuses the succession, even an empty one.
-/// A quarantined outbox counts only when nothing is pending in it and
+/// A quarantined outbox counts only when its totals show nothing pending and
 /// - a seed's provenance refusal quarantined it, at its own binding, and the
 ///   seed was strictly abandoned; or
 /// - an earlier succession retired it, and the binding it names is one an
@@ -1945,14 +1953,7 @@ fn retained_outbox_coverage(
     max_events: usize,
 ) -> Result<RetainedOutboxes, ApplicationError> {
     let b = &held.binding;
-    let chain = chain_bindings(
-        tx,
-        &held.namespace,
-        key,
-        &b.lineage_claim_id,
-        &succession.prefix.predecessor_activation_id,
-        max_events,
-    )?;
+    let chain = &succession.chain;
     require_historical(tx, held, key, &chain.bindings(), max_events)?;
     type Row = (
         String,
@@ -1965,11 +1966,12 @@ fn retained_outbox_coverage(
         Option<String>,
         i64,
         Option<i64>,
+        i64,
     );
     let rows: Vec<Row> = {
         let mut query = tx.prepare(
             "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,state,base_update_digest,
-                quarantine_reason,observed_binding_json,pending_bytes,oldest_entry_at_ms
+                quarantine_reason,observed_binding_json,pending_bytes,oldest_entry_at_ms,pending_entry_count
              FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
              ORDER BY outbox_id LIMIT ?5",
         ).map_err(read_sql)?;
@@ -1997,6 +1999,7 @@ fn retained_outbox_coverage(
                         r.get(7)?,
                         r.get(8)?,
                         r.get(9)?,
+                        r.get(10)?,
                     ))
                 },
             )
@@ -2013,7 +2016,9 @@ fn retained_outbox_coverage(
     // Whether the chain left an outbox at an earlier binding of this
     // generation.
     let mut moved = false;
-    for (id, path, selectors, generation, state, base, reason, observed, pending, oldest) in rows {
+    for (id, path, selectors, generation, state, base, reason, observed, pending, oldest, count) in
+        rows
+    {
         if generation != b.restore_fence_generation {
             continue;
         }
@@ -2031,7 +2036,7 @@ fn retained_outbox_coverage(
         if (!at_binding && !chain.contains(&binding)) || base != b.lineage_claim_id {
             return Err(ApplicationError::Conflict);
         }
-        let drained = pending == 0 && oldest.is_none();
+        let drained = pending == 0 && oldest.is_none() && count == 0;
         let observed = observed
             .map(|json| serde_json::from_str::<LiveObjectBinding>(&json))
             .transpose()
@@ -2043,9 +2048,10 @@ fn retained_outbox_coverage(
                 false
             }
             ("quarantined", Some(PROVENANCE_REFUSED))
-                if observed
-                    .as_ref()
-                    .is_none_or(|observed| *observed == binding) =>
+                if drained
+                    && observed
+                        .as_ref()
+                        .is_none_or(|observed| *observed == binding) =>
             {
                 abandoning.push(id.clone());
                 true
@@ -2075,6 +2081,7 @@ fn retained_outbox_coverage(
         &retained,
         &succession.prefix,
         &succession.carried,
+        &chain.activations,
         max_events,
     )?;
     let abandoned = |outbox: &String| {
@@ -2103,10 +2110,11 @@ fn retained_outbox_coverage(
 
 /// The bindings the adopted activations of a released chain held, each with
 /// the nearest and farthest distance from the chain's tail an activation
-/// held it at.
+/// held it at, and every activation the chain walk visited.
 struct ChainBindings {
     bindings: Vec<(LiveObjectBinding, usize, usize)>,
     index: std::collections::HashMap<LiveObjectBinding, usize>,
+    activations: std::collections::HashSet<String>,
 }
 
 impl ChainBindings {
@@ -2150,7 +2158,7 @@ fn chain_bindings(
                SELECT v.predecessor_activation_id,c.depth+1 FROM chain c JOIN live_owner_activations v
                  ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
                WHERE v.predecessor_activation_id IS NOT NULL LIMIT ?7)
-             SELECT c.depth,v.binding_json FROM chain c LEFT JOIN live_owner_activations v
+             SELECT c.depth,c.activation_id,v.binding_json FROM chain c LEFT JOIN live_owner_activations v
                ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
                AND v.workspace_id=?3 AND v.main_version_id=?4 AND v.object_id=?5 AND v.lineage_claim_id=?6
                AND v.released_at_ms IS NOT NULL AND v.evidence_digest IS NOT NULL
@@ -2171,18 +2179,26 @@ fn chain_bindings(
                 lineage,
                 limit
             ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .map_err(read_sql)?;
     let mut chain = ChainBindings {
         bindings: Vec::new(),
         index: std::collections::HashMap::new(),
+        activations: std::collections::HashSet::new(),
     };
     for (visited, row) in rows.enumerate() {
-        let (depth, json) = row.map_err(read_sql)?;
+        let (depth, activation, json) = row.map_err(read_sql)?;
         if visited >= max_events {
             return Err(over_budget());
         }
+        chain.activations.insert(activation);
         let Some(json) = json else { continue };
         let binding: LiveObjectBinding =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
@@ -2357,7 +2373,8 @@ fn renamed_from(
 fn reopen_outbox(tx: &Transaction<'_>, outbox_id: &str) -> Result<(), ApplicationError> {
     let reopened = tx.execute(
         "UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL
-         WHERE outbox_id=?1 AND state='quarantined' AND pending_bytes=0 AND oldest_entry_at_ms IS NULL",
+         WHERE outbox_id=?1 AND state='quarantined' AND pending_bytes=0 AND oldest_entry_at_ms IS NULL
+           AND pending_entry_count=0",
         [outbox_id],
     ).map_err(write_sql)?;
     if reopened != 1 {

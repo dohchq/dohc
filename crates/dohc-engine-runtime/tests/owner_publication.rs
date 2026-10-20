@@ -5460,7 +5460,10 @@ async fn a_successor_adopts_across_a_rename_through_the_host() {
             CancellationToken::new(),
         )
         .await;
-    assert!(moved_again.is_err(), "{moved_again:?}");
+    assert_eq!(
+        moved_again.map(|_| ()).map_err(|error| error.code()),
+        Err("live-document-binding-active")
+    );
     assert_eq!(outboxes(), expected);
     // The seed delivers, and a later native edit at the new path joins the
     // successor's outbox, under the delivery ID the relay derives from it.

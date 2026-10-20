@@ -153,9 +153,10 @@ fn coverage_does_not_depend_on_the_order_outboxes_are_named() {
     let covered = |f: &Fixture, outboxes: &[String]| {
         f.store
             .read_with(|conn| {
-                let lineage = &f.binding.lineage_claim_id;
-                let carried = retirement::inherited_entries(conn, "namespace", &f.key, lineage, Some(&prefix.predecessor_activation_id))?;
-                retirement::retained_coverage(conn, "namespace", &f.key, lineage, outboxes, &prefix, &carried, 100)
+                let (lineage, tail) = (&f.binding.lineage_claim_id, &prefix.predecessor_activation_id);
+                let chain = chain_bindings(conn, "namespace", &f.key, lineage, tail, 100)?.activations;
+                let carried = retirement::inherited_in_chain(conn, "namespace", &f.key, lineage, tail, &chain)?;
+                retirement::retained_coverage(conn, "namespace", &f.key, lineage, outboxes, &prefix, &carried, &chain, 100)
             })
             .unwrap()
     };

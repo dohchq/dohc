@@ -522,3 +522,121 @@ fn the_rename_walk_is_shared_and_bounded() {
     assert_eq!(walk(&["owner.md", "first.md"], 2).unwrap(), proved(&["owner.md", "first.md"]));
     assert_eq!(walk(&["first.md"], 1).unwrap(), proved(&["first.md"]));
 }
+
+/// `count` copies of activation `template` in `workspace`, `{prefix}-1` to
+/// `{prefix}-{count}`, linked in turn between `above` and the activation it
+/// followed.
+fn chain_copies(f: &mut Fixture, above: &str, template: &str, prefix: &str, count: usize, workspace: &str) {
+    write_unchecked(
+        f,
+        &format!(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TEMP TABLE below AS SELECT predecessor_activation_id AS id FROM live_owner_activations WHERE activation_id='{above}';
+             UPDATE live_owner_activations SET predecessor_activation_id=NULL WHERE activation_id='{above}';
+             CREATE TEMP TABLE copies AS WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count})
+               SELECT v.* FROM n JOIN live_owner_activations v ON v.activation_id='{template}' ORDER BY n.i;
+             UPDATE copies SET activation_id='{prefix}-'||rowid,workspace_id='{workspace}',
+               predecessor_activation_id=CASE WHEN rowid={count} THEN (SELECT id FROM below) ELSE '{prefix}-'||(rowid+1) END;
+             INSERT INTO live_owner_activations SELECT * FROM copies;
+             UPDATE live_owner_activations SET predecessor_activation_id='{prefix}-1' WHERE activation_id='{above}'"
+        ),
+    );
+}
+
+/// Sol's finding 1 on 4b3a2: the chain walk keeps its budget before anything
+/// resolves through it. S1 repeats at its binding past the budget, and S2
+/// inherits C1, which P, the chain's oldest activation, queued. S2 refuses
+/// with the budget error and no writes. Past the budget the chain leads
+/// through activations of another workspace, which no other read of the
+/// adoption sees, so a thousand more of them change its work only if a walk
+/// reads past the budget. Within the budget, the repeated chain adopts.
+#[test]
+fn the_chain_walk_stops_at_its_budget_before_inherited_entries_resolve() {
+    let tail = |f: &Fixture| f.cut.retained_prefix.as_ref().unwrap().predecessor_activation_id.clone();
+    let (mut f, _) = carried_across_two_renames();
+    let s1 = tail(&f);
+    chain_copies(&mut f, &s1, &s1, "repeated", 2, "workspace");
+    f.adopt().unwrap();
+    let (mut f, _) = carried_across_two_renames();
+    let s1 = tail(&f);
+    chain_copies(&mut f, &s1, &s1, "repeated", 100, "workspace");
+    chain_copies(&mut f, "repeated-100", &s1, "near", 1, "elsewhere");
+    let work = |f: &mut Fixture| {
+        let before = rows(f, &SUCCESSION_WRITES);
+        let counted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        f.store.count_work(Some(std::sync::Arc::downgrade(&counted))).unwrap();
+        let refused = f.adopt();
+        f.store.count_work(None).unwrap();
+        assert!(
+            matches!(refused, Err(ApplicationError::InvalidInput("owner adoption retained outbox coverage exceeds its budget"))),
+            "{refused:?}"
+        );
+        assert_eq!(rows(f, &SUCCESSION_WRITES), before);
+        counted.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let near = work(&mut f);
+    chain_copies(&mut f, "repeated-100", &s1, "far", 1_000, "elsewhere");
+    assert_eq!(work(&mut f), near, "the walk reads nothing past its budget");
+}
+
+/// A fixture a successor adopts as it is, by the case it shows.
+type QuarantineFixture = (&'static str, fn() -> Fixture);
+
+/// Sol's finding 2 on 4b3a2: a quarantined outbox counts only when all three
+/// of its pending totals show it drained, whichever permitted reason
+/// quarantined it, at the successor's binding or at an earlier one its chain
+/// held. Each fixture adopts as it is; one inconsistent total refuses it with
+/// no writes.
+#[test]
+fn every_pending_total_must_show_a_quarantined_outbox_drained() {
+    let fixtures: [QuarantineFixture; 4] = [
+        ("succession-retired at the successor's binding", || carried_across_renames_to("owner.md").0),
+        ("succession-retired at an earlier binding", || carried_across_two_renames().0),
+        ("provenance-refused at the successor's binding", || {
+            let mut f = quarantined_seed_released().0;
+            successor(&mut f);
+            f
+        }),
+        ("provenance-refused at an earlier binding", || {
+            let mut f = quarantined_seed_released().0;
+            rename(&mut f, "notes/renamed.md", "renamed");
+            successor(&mut f);
+            f
+        }),
+    ];
+    let totals = [
+        ("pending bytes", "pending_bytes=5"),
+        ("an oldest entry", "oldest_entry_at_ms=1"),
+        ("a pending count", "pending_entry_count=1"),
+    ];
+    for (case, fixture) in fixtures {
+        fixture().adopt().unwrap();
+        for (total, damage) in totals {
+            let mut f = fixture();
+            write_unchecked(&mut f, &format!("UPDATE owner_ydoc_outboxes SET {damage} WHERE state='quarantined'"));
+            let before = rows(&f, &SUCCESSION_WRITES);
+            let adopted = f.adopt();
+            assert!(matches!(adopted, Err(ApplicationError::Conflict)), "{case}, {total}: {adopted:?}");
+            assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}, {total}");
+        }
+    }
+}
+
+/// The reopening itself checks every pending total, whatever coverage
+/// proved: one inconsistent total leaves the outbox quarantined.
+#[test]
+fn reopening_checks_every_pending_total() {
+    let (mut f, _) = quarantined_seed_released();
+    let outbox: String = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+        .unwrap();
+    let reopen = |f: &mut Fixture| f.store.write_with(&NoFaults, |tx| reopen_outbox(tx, &outbox));
+    for damage in ["pending_bytes=5", "oldest_entry_at_ms=1", "pending_entry_count=1"] {
+        write_unchecked(&mut f, &format!("UPDATE owner_ydoc_outboxes SET {damage}"));
+        assert!(matches!(reopen(&mut f), Err(ApplicationError::Conflict)), "{damage}");
+        assert_eq!(outbox_states(&f)[0].2, "quarantined", "{damage}");
+        write_unchecked(&mut f, "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL,pending_entry_count=0");
+    }
+    assert!(matches!(reopen(&mut f), Ok(TxnOutcome::Committed(()))));
+}
