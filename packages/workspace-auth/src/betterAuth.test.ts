@@ -296,6 +296,22 @@ describeWithPostgres("closed sign-up", () => {
     expect(await nameOf(user.id)).toBe("");
   });
 
+  it("keeps each concurrent setup's name to its own account", async () => {
+    const closed = closedAuth("admitted");
+    const named = `${unique()}@dohc.test`;
+    const unnamed = `${unique()}@dohc.test`;
+    const first = await closed.api.signUpEmail({ body: { email: named, password: "attacker-password-aaa", name: "Mallory" } });
+    const second = await closed.api.signUpEmail({ body: { email: unnamed, password: "attacker-password-aaa", name: "Trudy" } });
+
+    const responses = await Promise.all([
+      submitResetPage(closed, named, { newPassword: "owner-password-bbb", name: "Ada" }),
+      submitResetPage(closed, unnamed, { newPassword: "owner-password-ccc" }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(await nameOf(first.user.id)).toBe("Ada");
+    expect(await nameOf(second.user.id)).toBe("");
+  });
+
   it("refuses an email address as a name and keeps the link usable", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
