@@ -971,6 +971,7 @@ fn pass(
         store,
         &mut WriterDocCache::new(),
         "ws",
+        None,
         faults,
         &NoLiveLeases,
     )
@@ -2173,6 +2174,7 @@ fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
             &mut store,
             &mut WriterDocCache::new(),
             "ws",
+            None,
             &NoFaults,
             &LiveSession("other-object"),
         )
@@ -3875,6 +3877,7 @@ fn a_backfill_is_ready_only_once_its_waiting_work_applies() {
             &mut store,
             &mut WriterDocCache::new(),
             "ws",
+            None,
             &NoFaults,
             &LiveSession("doc-b"),
         )
@@ -3982,6 +3985,7 @@ fn a_pass_another_commit_overtook_cannot_commit() {
             &mut store,
             &mut WriterDocCache::new(),
             "ws",
+            None,
             &NoFaults,
             &LiveSession("doc-b"),
         )

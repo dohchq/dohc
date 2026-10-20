@@ -351,7 +351,9 @@ pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_collab::live_update_application::{IncomingCoordinate, ReleasedLineageBinding};
+    use dohc_engine_collab::live_update_application::{
+        IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+    };
 
     /// A released lineage's hold is retryable state that carries its
     /// binding: a share pull aborts on it, nothing records it as a refusal,
@@ -366,6 +368,7 @@ mod tests {
             current_path: Some("private/plan.md".into()),
             restore_generation: Some(0),
             incoming: IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
                 origin_id: "desktop".into(),
@@ -373,7 +376,7 @@ mod tests {
                 relay_seq: 9,
             },
             head_digest: "b".repeat(64),
-            tails: Vec::new(),
+            tails: ProtectedTails::Invalid,
         }));
         assert_eq!(error.code(), "retryable-state");
         assert_eq!(error.share_disposition(), ShareDisposition::Abort);

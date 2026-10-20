@@ -1956,6 +1956,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &ordered,
             durable_origins,
             Holding::ByOrigin,
+            None,
             faults,
             leases,
         )?;
@@ -2036,12 +2037,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// cursor, so a row that could not apply before is tried again. A
     /// response under a new scope applies nothing; the pass adopts the scope
     /// and returns no cursor. The returned cursor stays pending until the
-    /// caller materializes the pass and commits it.
+    /// caller materializes the pass and commits it. `relay_namespace` is the
+    /// feed's, as the host's trusted configuration names it.
     pub fn pull_hosted_workspace(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
         workspace_id: &str,
+        relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
@@ -2200,6 +2203,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &ops,
             durable,
             Holding::ByDocument { behind, unready },
+            relay_namespace,
             faults,
             leases,
         )?;
@@ -2427,7 +2431,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// Apply a pass's ops in order and settle what they left pending. An op
     /// that cannot apply yet holds the ops behind it; when a round makes no
     /// progress, work held for a durable reason is retained so the cursor can
-    /// move past it, and any other hold fails the pass.
+    /// move past it, and any other hold fails the pass. `relay_namespace`
+    /// names the feed, when the pull's trusted configuration names one.
     #[allow(clippy::too_many_arguments)]
     fn apply_pulled(
         &self,
@@ -2439,6 +2444,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         ordered: &[ReplicationEnvelope],
         mut durable: BTreeSet<String>,
         mut holding: Holding,
+        relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<AppliedPass, RelayError> {
@@ -2481,7 +2487,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let routed = match holding.held_before_routing(store, op)? {
                     Some(reason) => Err(SyncError::RetryableState { reason }),
                     None => crate::router::apply_replication_envelope_in_batch(
-                        store, cache, op, faults, leases, true,
+                        store,
+                        cache,
+                        op,
+                        faults,
+                        leases,
+                        true,
+                        relay_namespace,
                     ),
                 };
                 // The pass keeps only the hold's reason; its binding is not

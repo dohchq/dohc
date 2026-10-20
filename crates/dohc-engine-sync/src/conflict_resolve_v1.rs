@@ -5863,6 +5863,7 @@ mod tests {
             &NoFaults,
             &crate::NoLiveLeases,
             true,
+            None,
         )
         .unwrap();
         store
@@ -5937,6 +5938,7 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
                 true,
+                None,
             )
             .unwrap();
         }
@@ -6008,6 +6010,7 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
                 true,
+                None,
             )
             .unwrap();
         }
@@ -6076,6 +6079,7 @@ mod tests {
                     &NoFaults,
                     &crate::NoLiveLeases,
                     true,
+                    None,
                 )
                 .unwrap();
                 let active_update = active.doc.plaintext_insert(0, "active ");
@@ -6091,6 +6095,7 @@ mod tests {
                     &NoFaults,
                     &crate::NoLiveLeases,
                     true,
+                    None,
                 )
                 .unwrap();
                 assert_eq!(
@@ -6174,6 +6179,7 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
                 true,
+                None,
             )
             .unwrap();
         }

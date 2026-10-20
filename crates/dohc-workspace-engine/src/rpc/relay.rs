@@ -1506,6 +1506,7 @@ impl EngineService {
                 RelayOperation::PullHosted {
                     workspace_id: open.workspace_id.clone(),
                     root: open.root.clone(),
+                    relay_namespace: self.configured_relay_namespace(),
                     now_ms: now_ms()?,
                 },
                 "sync.pullHosted",

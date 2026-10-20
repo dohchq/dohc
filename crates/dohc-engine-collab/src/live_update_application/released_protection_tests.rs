@@ -1,6 +1,7 @@
 /// The synced update each protection decision here is made for.
 fn incoming() -> IncomingCoordinate {
     IncomingCoordinate {
+        relay_namespace: Some("namespace".into()),
         replication_epoch: "epoch".into(),
         stream_identity: "stream".into(),
         origin_id: "desktop".into(),
@@ -12,8 +13,11 @@ fn incoming() -> IncomingCoordinate {
 /// The binding a hold of the incoming update names, or none while nothing
 /// protects the lineage.
 fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
-    let incoming = incoming();
-    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming };
+    protected_from(f, &incoming())
+}
+
+fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<ReleasedLineageBinding> {
+    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
     match f.store.read_with(|conn| protection(conn, &key)).unwrap() {
         Protection::Unprotected => None,
         Protection::Protected { binding, head } => {
@@ -23,16 +27,29 @@ fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
     }
 }
 
+/// Every protected tail the window names.
+fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
+    match binding.tails {
+        ProtectedTails::Listed(tails) => tails,
+        ProtectedTails::Invalid => panic!("a window that reads"),
+    }
+}
+
 fn coverage(f: &Fixture) -> Vec<RetainedCoverage> {
-    protected(f).expect("protected").tails.into_iter().map(|tail| tail.coverage).collect()
+    listed(protected(f).expect("protected")).into_iter().map(|tail| tail.coverage).collect()
 }
 
 /// The unproven work of the one tail that protects the lineage.
 fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
     match <[RetainedCoverage; 1]>::try_from(coverage(f)) {
-        Ok([RetainedCoverage::Unproven { unproven, .. }]) => unproven,
+        Ok([RetainedCoverage::Unproven(unproven)]) => unproven,
         other => panic!("one tail with readable evidence: {other:?}"),
     }
+}
+
+/// What the release of the fixture's tail bound.
+fn owner_release() -> Option<TailRelease> {
+    Some(TailRelease { path: "owner.md".into(), restore_generation: 0 })
 }
 
 fn carried(delivery: &CarriedDelivery) -> RetainedContribution {
@@ -66,13 +83,20 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
             restore_generation: Some(0),
             incoming: incoming(),
             head_digest: hex_sha256(&local_doc(&f).encode_full_state()),
-            tails: vec![ProtectedTail {
+            tails: ProtectedTails::Listed(vec![ProtectedTail {
                 namespace: "namespace".into(),
                 activation_id: "adoption".into(),
-                coverage: RetainedCoverage::Unproven { path: "owner.md".into(), restore_generation: 0, unproven },
-            }],
+                release: owner_release(),
+                coverage: RetainedCoverage::Unproven(unproven),
+            }]),
         }
     );
+    // The feed's namespace is the binding's own: another names another hold.
+    let elsewhere = IncomingCoordinate { relay_namespace: Some("elsewhere".into()), ..incoming() };
+    let moved_feed = protected_from(&f, &elsewhere).expect("protected");
+    assert_eq!(moved_feed.incoming, elsewhere);
+    assert_ne!(moved_feed, binding, "only the incoming namespace changed");
+    assert_eq!(ReleasedLineageBinding { incoming: incoming(), ..moved_feed }, binding);
 
     let (mut f, _, carried_deliveries) = resumed_after_catch_up(true, 1);
     let seed = accept_seed(&mut f, 7);
@@ -106,6 +130,9 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
 /// or invalid evidence never establishes nothing retained. A saved receipt
 /// that never applied, with no Carried listing, protects; a tail record, a
 /// Carried entry or a terminal entry that does not read protects as invalid.
+/// So does evidence that would otherwise set work aside: a native source
+/// without its activation, an application of the same delivery with other
+/// bytes, and a saved receipt the matching proof contradicts.
 #[test]
 fn unproven_or_unreadable_retained_evidence_protects() {
     let mut f = released_without_carried();
@@ -121,7 +148,7 @@ fn unproven_or_unreadable_retained_evidence_protects() {
     assert!(matches!(unproven.as_slice(), [RetainedContribution::Outbox { .. }]), "{unproven:?}");
 
     type Damaged = (&'static str, fn() -> Fixture);
-    let damages: [Damaged; 3] = [
+    let damages: [Damaged; 8] = [
         ("an unreadable tail record", || {
             let mut f = released_without_carried();
             write_unchecked(&mut f, "UPDATE live_owner_activations SET released_boundary_json='{}' WHERE activation_id='adoption'");
@@ -140,9 +167,44 @@ fn unproven_or_unreadable_retained_evidence_protects() {
                 UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=NULL,terminal_reason='refused'");
             f
         }),
+        ("a native source naming no activation", || {
+            let mut f = released_without_carried();
+            write_unchecked(&mut f, "UPDATE owner_ydoc_outbox_entries
+                SET native_source_json=json_remove(native_source_json,'$.adoptionId') WHERE native_source_json IS NOT NULL");
+            f
+        }),
+        ("a native source naming an activation the lineage no longer has", || {
+            let mut f = released_without_carried();
+            write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+                UPDATE live_owner_activations SET activation_id='renamed' WHERE activation_id='adoption'");
+            f
+        }),
+        ("a Carried delivery applied with other bytes", || {
+            let (mut f, _, c1, _) = released_at_b();
+            write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+                CREATE TEMP TABLE copied AS SELECT * FROM live_device_update_applications WHERE journal_cursor=3;
+                UPDATE copied SET delivery_id='{}',journal_cursor={};
+                INSERT INTO live_device_update_applications SELECT * FROM copied",
+                c1.receipt.delivery_id, c1.receipt.journal_cursor));
+            f
+        }),
+        ("an outbox entry applied with other bytes", || {
+            let mut f = released_without_carried();
+            write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+                UPDATE live_device_update_applications SET update_digest='{}'", "0".repeat(64)));
+            f
+        }),
+        ("a saved receipt its application and history contradict", || {
+            let mut f = released_without_carried();
+            write_unchecked(&mut f, "UPDATE owner_ydoc_outbox_entries
+                SET accepted_receipt_json=json_set(accepted_receipt_json,'$.journalCursor',4) WHERE accepted_receipt_json IS NOT NULL");
+            f
+        }),
     ];
     for (case, damaged) in damages {
-        assert_eq!(coverage(&damaged()), [RetainedCoverage::Invalid], "{case}");
+        let binding = protected(&damaged()).unwrap_or_else(|| panic!("{case}: protected"));
+        let coverage: Vec<RetainedCoverage> = listed(binding).into_iter().map(|tail| tail.coverage).collect();
+        assert_eq!(coverage, [RetainedCoverage::Invalid], "{case}");
     }
 }
 
@@ -155,11 +217,11 @@ fn a_binding_lists_every_protected_namespace() {
         CREATE TEMP TABLE copied AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
         UPDATE copied SET relay_database_namespace='other';
         INSERT INTO live_owner_activations SELECT * FROM copied");
-    let tails = protected(&f).expect("protected").tails;
+    let tails = listed(protected(&f).expect("protected"));
     let named: Vec<(&str, &str)> = tails.iter().map(|tail| (tail.namespace.as_str(), tail.activation_id.as_str())).collect();
     assert_eq!(named, [("namespace", "adoption"), ("other", "adoption")]);
     for tail in &tails {
-        let RetainedCoverage::Unproven { unproven, .. } = &tail.coverage else {
+        let RetainedCoverage::Unproven(unproven) = &tail.coverage else {
             panic!("{}: readable", tail.namespace);
         };
         assert!(unproven.contains(&carried(&c1)) && unproven.contains(&carried(&c2)), "{}: {unproven:?}", tail.namespace);
@@ -223,7 +285,9 @@ fn measure_protected_inspection_over_half_a_mebibyte() {
 }
 
 /// An update lands off a protected tail's binding at another path, or after
-/// a restore its release did not bind.
+/// a restore its release did not bind. Invalid coverage keeps the release
+/// binding; a release or window that does not read cannot show an update
+/// stays on it.
 #[test]
 fn an_update_moves_off_a_tail_at_another_path_or_restore() {
     let (f, _, _, _) = released_at_b();
@@ -238,5 +302,53 @@ fn an_update_moves_off_a_tail_at_another_path_or_restore() {
     ] {
         let moved = ReleasedLineageBinding { current_path: current_path.map(str::to_owned), restore_generation, ..binding.clone() };
         assert!(moved.moved(current_path.unwrap_or("owner.md")), "{case}");
+    }
+
+    let (mut f, _, c1, _) = released_at_b();
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        DELETE FROM owner_ydoc_outbox_entries WHERE delivery_id='{}'", c1.receipt.delivery_id));
+    let invalid = protected(&f).unwrap();
+    let [tail] = listed(invalid.clone()).try_into().unwrap();
+    assert_eq!((tail.release, tail.coverage), (owner_release(), RetainedCoverage::Invalid));
+    assert!(!invalid.moved("owner.md"), "invalid coverage at its release");
+    let restored = ReleasedLineageBinding { restore_generation: Some(1), ..invalid };
+    assert!(restored.moved("owner.md"), "invalid coverage after a restore");
+
+    let mut f = released_without_carried();
+    write_unchecked(&mut f, "UPDATE live_owner_activations SET released_restore_generation=NULL WHERE activation_id='adoption'");
+    let unbound = protected(&f).expect("a release that does not read protects");
+    let [tail] = listed(unbound.clone()).try_into().unwrap();
+    assert_eq!((tail.release, tail.coverage), (None, RetainedCoverage::Invalid));
+    assert!(unbound.moved("owner.md"), "a release that does not read");
+}
+
+/// Opus's 1a-2 finding 3: evidence of the window itself that does not read,
+/// two tails in one namespace or a current activation never adopted,
+/// protects the lineage as invalid, and no update can show it stays on it.
+/// Storage failures stay errors.
+#[test]
+fn a_window_that_does_not_read_protects_as_invalid() {
+    let twin = |f: &mut Fixture, update: &str| {
+        write_unchecked(f, &format!("PRAGMA foreign_keys=OFF;
+            CREATE TEMP TABLE twin AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
+            UPDATE twin SET activation_id='twin'{update};
+            INSERT INTO live_owner_activations SELECT * FROM twin"));
+    };
+    let two_tails = || {
+        let mut f = released_without_carried();
+        twin(&mut f, "");
+        f
+    };
+    let unadopted = || {
+        let mut f = released_without_carried();
+        twin(&mut f, ",released_at_ms=NULL,evidence_digest=NULL");
+        f
+    };
+    for (case, f) in [("two tails in one namespace", two_tails()), ("a current activation never adopted", unadopted())] {
+        let window = f.store.read_with(|conn| settled_base::released_window(conn, &f.key, &f.binding.lineage_claim_id));
+        assert!(window.is_err(), "{case}: {window:?}");
+        let binding = protected(&f).unwrap_or_else(|| panic!("{case}: protected"));
+        assert_eq!(binding.tails, ProtectedTails::Invalid, "{case}");
+        assert!(binding.moved("owner.md"), "{case}");
     }
 }

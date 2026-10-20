@@ -735,7 +735,13 @@ pub(super) fn private_tail(
         &b.lineage_claim_id,
         chain,
     )? {
-        if super::retirement::applied(conn, &held.namespace, &inherited.entry.delivery_id)? {
+        if super::retirement::applied(
+            conn,
+            &held.namespace,
+            &key,
+            &b.lineage_claim_id,
+            &inherited.receipt,
+        )? {
             continue;
         }
         if inherited.entry.source.native_sequence > head {

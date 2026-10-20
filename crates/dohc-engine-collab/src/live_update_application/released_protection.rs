@@ -11,6 +11,9 @@ use crate::Ydoc;
 /// its coordinate there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingCoordinate {
+    /// The relay namespace the host's trusted configuration names for the
+    /// feed; none on a pull no configured host serves.
+    pub relay_namespace: Option<String>,
     pub replication_epoch: String,
     pub stream_identity: String,
     pub origin_id: String,
@@ -42,7 +45,16 @@ pub struct ReleasedLineageBinding {
     pub incoming: IncomingCoordinate,
     /// The SHA-256 of the head's full state before the update.
     pub head_digest: String,
-    pub tails: Vec<ProtectedTail>,
+    pub tails: ProtectedTails,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectedTails {
+    /// Every protected namespace's tail, in namespace order.
+    Listed(Vec<ProtectedTail>),
+    /// The window's own evidence does not read: a current activation, or a
+    /// namespace's tail, that cannot be named.
+    Invalid,
 }
 
 /// A released chain tail whose retained work protects its lineage.
@@ -50,20 +62,25 @@ pub struct ReleasedLineageBinding {
 pub struct ProtectedTail {
     pub namespace: String,
     pub activation_id: String,
+    /// What the tail's release bound; none when it does not read.
+    pub release: Option<TailRelease>,
     pub coverage: RetainedCoverage,
+}
+
+/// The path and restore generation a tail's release bound.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TailRelease {
+    pub path: String,
+    pub restore_generation: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RetainedCoverage {
-    /// The tail's release bound `path` and `restore_generation`, and this
-    /// work, in canonical order, lacks proof of application or terminal
+    /// This work, in canonical order, lacks proof of application or terminal
     /// coverage.
-    Unproven {
-        path: String,
-        restore_generation: i64,
-        unproven: Vec<RetainedContribution>,
-    },
-    /// Its evidence is missing, conflicting or corrupt.
+    Unproven(Vec<RetainedContribution>),
+    /// Its evidence, or the release that bound it, is missing, conflicting
+    /// or corrupt.
     Invalid,
 }
 
@@ -96,62 +113,91 @@ pub enum Protection {
 
 impl ReleasedLineageBinding {
     /// Whether an update at `path` would land off what a protected tail's
-    /// release bound: another path, or a restore since.
+    /// release bound: another path, or a restore since. A release no
+    /// evidence names cannot show the update stays on it.
     pub fn moved(&self, path: &str) -> bool {
         let here = |bound: &str| self.current_path.as_deref() == Some(bound);
+        let ProtectedTails::Listed(tails) = &self.tails else {
+            return true;
+        };
         !here(path)
-            || self.tails.iter().any(|tail| match &tail.coverage {
-                RetainedCoverage::Unproven {
-                    path,
-                    restore_generation,
-                    ..
-                } => !here(path) || self.restore_generation != Some(*restore_generation),
-                RetainedCoverage::Invalid => false,
+            || tails.iter().any(|tail| match &tail.release {
+                Some(release) => {
+                    !here(&release.path)
+                        || self.restore_generation != Some(release.restore_generation)
+                }
+                None => true,
             })
+    }
+}
+
+/// The value `result` reads, or none when its evidence does not read.
+/// Storage failures stay errors.
+fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, ApplicationError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            error @ (ApplicationError::Storage(_)
+            | ApplicationError::Collab(CollabError::Storage(_))),
+        ) => Err(error),
+        Err(_) => Ok(None),
     }
 }
 
 /// Whether the released window protects the head of `key`'s lineage from
 /// the incoming update, and the binding a hold of it names. A tail whose
-/// retained work all has proof leaves the lineage unprotected; one whose
-/// evidence does not read protects it. Storage failures stay errors.
+/// retained work all has proof leaves the lineage unprotected; a window or
+/// tail whose evidence does not read protects it. Storage failures stay
+/// errors.
 pub fn protection(
     conn: &Connection,
     key: &ProtectionKey<'_>,
 ) -> Result<Protection, ApplicationError> {
-    let mut tails = Vec::new();
-    for (namespace, activation_id) in
-        super::settled_base::released_window(conn, key.doc, key.lineage_claim_id)?
-    {
-        let coverage = match super::retirement::unproven_retained(
-            conn,
-            &namespace,
-            key.doc,
-            key.lineage_claim_id,
-            &activation_id,
-        ) {
-            Ok((_, _, unproven)) if unproven.is_empty() => continue,
-            Ok((path, restore_generation, unproven)) => RetainedCoverage::Unproven {
-                path,
-                restore_generation,
-                unproven,
-            },
-            Err(
-                error @ (ApplicationError::Storage(_)
-                | ApplicationError::Collab(CollabError::Storage(_))),
-            ) => return Err(error),
-            Err(_) => RetainedCoverage::Invalid,
-        };
-        tails.push(ProtectedTail {
-            namespace,
-            activation_id,
-            coverage,
-        });
-    }
-    if tails.is_empty() {
-        return Ok(Protection::Unprotected);
-    }
-    let doc = key.doc;
+    let (doc, lineage) = (key.doc, key.lineage_claim_id);
+    let tails = match readable(super::settled_base::released_window(conn, doc, lineage))? {
+        None => ProtectedTails::Invalid,
+        Some(window) => {
+            let mut tails = Vec::new();
+            for (namespace, activation_id) in window {
+                let release = readable(super::retirement::released_binding(
+                    conn,
+                    &namespace,
+                    doc,
+                    lineage,
+                    &activation_id,
+                ))?
+                .map(|(path, restore_generation)| TailRelease {
+                    path,
+                    restore_generation,
+                });
+                let unproven = match release {
+                    Some(_) => readable(super::retirement::unproven_retained(
+                        conn,
+                        &namespace,
+                        doc,
+                        lineage,
+                        &activation_id,
+                    ))?,
+                    None => None,
+                };
+                let coverage = match unproven {
+                    Some(unproven) if unproven.is_empty() => continue,
+                    Some(unproven) => RetainedCoverage::Unproven(unproven),
+                    None => RetainedCoverage::Invalid,
+                };
+                tails.push(ProtectedTail {
+                    namespace,
+                    activation_id,
+                    release,
+                    coverage,
+                });
+            }
+            if tails.is_empty() {
+                return Ok(Protection::Unprotected);
+            }
+            ProtectedTails::Listed(tails)
+        }
+    };
     let current_path = conn
         .query_row(
             "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",

@@ -522,6 +522,14 @@ impl EngineService {
         discovery_json(&discovery.namespace, &discovery.host, workspaces)
     }
 
+    /// The relay namespace the configured host serves, if one is configured.
+    /// With one, only its own connection reaches the ordinary methods.
+    pub(super) fn configured_relay_namespace(&self) -> Option<String> {
+        self.configured_live_host
+            .get()
+            .map(|host| host.namespace.clone())
+    }
+
     pub(super) fn configured_ordinary_namespace(
         &self,
         ctx: &RequestContext,
@@ -530,9 +538,7 @@ impl EngineService {
         if !self.configured_ordinary_request(ctx, request) {
             return Err(invalid("ordinary service connection unavailable"));
         }
-        self.configured_live_host
-            .get()
-            .map(|host| host.namespace.clone())
+        self.configured_relay_namespace()
             .ok_or_else(|| invalid("ordinary service namespace unavailable"))
     }
 

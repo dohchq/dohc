@@ -1893,12 +1893,15 @@ enum Incoming<'a> {
 /// the row could destroy what the tail retains: any replacement, and an
 /// update that lands off the tail's binding or that structural inspection
 /// does not admit. The hold carries the binding and records no refusal.
+/// `relay_namespace` is the feed's, as the pull's trusted configuration
+/// names it.
 fn hold_released_lineage(
     tx: &rusqlite::Connection,
     key: &DocKey,
     lineage: &str,
     op: &ReplicationEnvelope,
     relay_seq: i64,
+    relay_namespace: Option<&str>,
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     use dohc_engine_collab::live_update_application::{
@@ -1914,6 +1917,7 @@ fn hold_released_lineage(
         .map_err(SyncError::corrupt)?;
     let (replication_epoch, stream_identity) = identity.clone().unwrap_or_default();
     let coordinate = IncomingCoordinate {
+        relay_namespace: relay_namespace.map(str::to_owned),
         replication_epoch,
         stream_identity,
         origin_id: op.origin_id.clone(),
@@ -4368,9 +4372,11 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false)
+    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
 }
 
+/// `relay_namespace` names the feed a pull read `envelope` from, when the
+/// pull's trusted configuration names one.
 pub(crate) fn apply_ydoc_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -4378,6 +4384,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
+    relay_namespace: Option<&str>,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
     if envelope.op_kind != "ydoc.update" {
@@ -4781,6 +4788,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     &lineage,
                     op,
                     relay_seq,
+                    relay_namespace,
                     Incoming::Replacement,
                 )?;
             }
@@ -5246,6 +5254,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                             lineage,
                             op,
                             relay_seq,
+                            relay_namespace,
                             Incoming::Replacement,
                         )?;
                     }
@@ -5306,6 +5315,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 &payload.lineage_claim_id,
                 op,
                 relay_seq,
+                relay_namespace,
                 Incoming::Update {
                     bytes: &remote.bytes,
                     path: &update_path,

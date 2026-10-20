@@ -618,19 +618,50 @@ pub(crate) fn chain_refusal(
     Ok(chained_retiring(conn, namespace, doc, lineage, tail, &source.adoption_id)?.is_some())
 }
 
-/// Whether this host applied `delivery` in `namespace`.
+/// Whether this host applied exactly `receipt` to the document's lineage in
+/// `namespace`. An application of its delivery to another document or
+/// lineage, of other bytes, or at another coordinate conflicts.
 pub(crate) fn applied(
     conn: &Connection,
     namespace: &str,
-    delivery: &str,
+    doc: &DocKey,
+    lineage: &str,
+    receipt: &LiveUpdateReceipt,
 ) -> Result<bool, ApplicationError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
-           AND delivery_id=?2)",
-        params![namespace, delivery],
-        |row| row.get(0),
-    )
-    .map_err(read_sql)
+    let row: Option<(String, String, String, String, String, i64, i64)> = conn
+        .query_row(
+            "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,update_digest,journal_cursor,
+                accepting_host_epoch
+             FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2",
+            params![namespace, receipt.delivery_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((workspace, version, object, applied_lineage, digest, cursor, epoch)) = row else {
+        return Ok(false);
+    };
+    if workspace != doc.workspace_id
+        || version != doc.version_id
+        || object != doc.object_id
+        || applied_lineage != lineage
+        || digest != receipt.update_digest
+        || cursor != receipt.journal_cursor
+        || epoch != receipt.accepting_host_epoch
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(true)
 }
 
 /// The order the released chain a lineage's activation follows still asks
@@ -676,7 +707,7 @@ pub(crate) fn retained_suffix(
     if outstanding {
         for inherited in inherited_entries(conn, namespace, doc, lineage, Some(&tail))? {
             let cursor = inherited.receipt.journal_cursor;
-            if !applied(conn, namespace, &inherited.receipt.delivery_id)?
+            if !applied(conn, namespace, doc, lineage, &inherited.receipt)?
                 && earliest_carried.is_none_or(|earliest| cursor < earliest)
             {
                 earliest_carried = Some(cursor);
@@ -689,20 +720,15 @@ pub(crate) fn retained_suffix(
     }))
 }
 
-/// What the released chain ending at `tail` retains that no proof covers:
-/// each Carried delivery its manifest lists that no host applied here, and
-/// each other outbox entry of the chain that is pending, saved a receipt
-/// nothing here applied or accepted, or holds neither a receipt nor a strict
-/// terminal representation. Beside it, the path and restore generation the
-/// tail's release bound. Missing or conflicting evidence refuses; it never
-/// reads as nothing retained.
-pub(crate) fn unproven_retained(
+/// The path and restore generation the release of `tail`, a released
+/// activation of the document's lineage, bound.
+pub(crate) fn released_binding(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
     tail: &str,
-) -> Result<(String, i64, Vec<RetainedContribution>), ApplicationError> {
+) -> Result<(String, i64), ApplicationError> {
     let activation = activation_by_id(conn, namespace, tail)?
         .filter(|found| found.released && found.key == *doc && found.lineage_claim_id == lineage)
         .ok_or(ApplicationError::Conflict)?;
@@ -716,13 +742,33 @@ pub(crate) fn unproven_retained(
             |row| row.get(0),
         )
         .map_err(read_sql)?;
-    let generation = generation.ok_or(ApplicationError::Corrupt)?;
+    Ok((
+        binding.current_path,
+        generation.ok_or(ApplicationError::Corrupt)?,
+    ))
+}
+
+/// What the released chain ending at `tail` retains that no proof covers:
+/// each Carried delivery its manifest lists that no host applied here, and
+/// each other outbox entry of the chain that is pending, saved a receipt
+/// nothing here applied or accepted, or holds neither a receipt nor a strict
+/// terminal representation. Every entry of the lineage is validated before
+/// it is set aside: its native source, and the exact application or accepted
+/// receipt that proves it. Missing or conflicting evidence refuses; it never
+/// reads as nothing retained.
+pub(crate) fn unproven_retained(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: &str,
+) -> Result<Vec<RetainedContribution>, ApplicationError> {
     let mut unproven = Vec::new();
     let mut listed = BTreeSet::new();
     for inherited in inherited_entries(conn, namespace, doc, lineage, Some(tail))? {
         let receipt = inherited.receipt;
         listed.insert(receipt.delivery_id.clone());
-        if !applied(conn, namespace, &receipt.delivery_id)? {
+        if !applied(conn, namespace, doc, lineage, &receipt)? {
             unproven.push(RetainedContribution::Carried {
                 delivery_id: receipt.delivery_id,
                 update_digest: receipt.update_digest,
@@ -730,44 +776,42 @@ pub(crate) fn unproven_retained(
             });
         }
     }
+    let chain = conn
+        .prepare(
+            "WITH RECURSIVE chain(activation_id) AS (SELECT ?1 UNION
+               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
+                 ON v.relay_database_namespace=?2 AND v.activation_id=c.activation_id
+               WHERE v.predecessor_activation_id IS NOT NULL)
+             SELECT activation_id FROM chain",
+        )
+        .map_err(read_sql)?
+        .query_map(params![tail, namespace], |row| row.get(0))
+        .map_err(read_sql)?
+        .collect::<Result<BTreeSet<String>, _>>()
+        .map_err(read_sql)?;
     type Row = (
         String,
         i64,
         String,
         String,
+        String,
+        Option<String>,
+        Option<i64>,
         bool,
         Option<String>,
         Option<String>,
     );
     let rows = conn
         .prepare(
-            "WITH RECURSIVE chain(activation_id) AS (SELECT ?5 UNION
-               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
-                 ON v.relay_database_namespace=?6 AND v.activation_id=c.activation_id
-               WHERE v.predecessor_activation_id IS NOT NULL)
-             SELECT e.outbox_id,e.sequence,e.delivery_id,e.update_digest,e.pending,
-                e.accepted_receipt_json,e.terminal_reason
+            "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
+                length(CAST(e.native_source_json AS BLOB)),e.pending,e.accepted_receipt_json,e.terminal_reason
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
-               AND (e.native_source_json IS NULL
-                 OR json_extract(e.native_source_json,'$.adoptionId') IN (SELECT activation_id FROM chain))
-               AND NOT (e.pending=0 AND e.accepted_receipt_json IS NOT NULL AND (
-                 EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?6
-                   AND a.delivery_id=e.delivery_id AND a.update_digest=e.update_digest)
-                 OR EXISTS(SELECT 1 FROM live_accepted_updates h WHERE h.relay_database_namespace=?6
-                   AND h.delivery_id=e.delivery_id AND h.update_sha256=e.update_digest)))
              ORDER BY e.outbox_id,e.sequence",
         )
         .map_err(read_sql)?
         .query_map(
-            params![
-                doc.workspace_id,
-                doc.version_id,
-                doc.object_id,
-                lineage,
-                tail,
-                namespace
-            ],
+            params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -777,21 +821,63 @@ pub(crate) fn unproven_retained(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
         .map_err(read_sql)?
         .collect::<Result<Vec<Row>, _>>()
         .map_err(read_sql)?;
-    for (outbox_id, sequence, delivery_id, update_digest, pending, receipt, terminal) in rows {
+    for (
+        outbox_id,
+        sequence,
+        append_key,
+        delivery_id,
+        update_digest,
+        source,
+        length,
+        pending,
+        receipt,
+        terminal,
+    ) in rows
+    {
+        // A native entry of another activation of the lineage is that
+        // activation's work; one whose source names nothing it can be is not.
+        if let Some(json) = source {
+            let source = native_source(
+                &json,
+                length.unwrap_or(0),
+                &append_key,
+                doc,
+                lineage,
+                &update_digest,
+            )?;
+            if !chain.contains(&source.adoption_id) {
+                if !lineage_activation(conn, doc, lineage, &source.adoption_id)? {
+                    return Err(ApplicationError::Conflict);
+                }
+                continue;
+            }
+        }
         if listed.contains(&delivery_id) {
             continue;
         }
         if !pending {
             if let Some(receipt) = &receipt {
                 let saved = saved_receipt(receipt)?;
+                saved.validate().map_err(|_| ApplicationError::Corrupt)?;
                 if saved.delivery_id != delivery_id || saved.update_digest != update_digest {
                     return Err(ApplicationError::Conflict);
+                }
+                let accepted =
+                    accepted_receipt(conn, namespace, doc, lineage, &delivery_id, &update_digest)?;
+                if accepted.as_ref().is_some_and(|accepted| *accepted != saved) {
+                    return Err(ApplicationError::Conflict);
+                }
+                if applied(conn, namespace, doc, lineage, &saved)? || accepted.is_some() {
+                    continue;
                 }
             } else if terminal.is_some() {
                 if strictly_terminal(conn, namespace, doc, lineage, tail, &outbox_id, sequence)? {
@@ -808,7 +894,30 @@ pub(crate) fn unproven_retained(
         });
     }
     unproven.sort();
-    Ok((binding.current_path, generation, unproven))
+    Ok(unproven)
+}
+
+/// Whether `activation_id` names an activation of the document's lineage in
+/// any namespace.
+fn lineage_activation(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+    activation_id: &str,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_owner_activations WHERE workspace_id=?1 AND main_version_id=?2
+           AND object_id=?3 AND lineage_claim_id=?4 AND activation_id=?5)",
+        params![
+            doc.workspace_id,
+            doc.version_id,
+            doc.object_id,
+            lineage,
+            activation_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
 }
 
 /// Whether the entry at `sequence` of `outbox_id` ended in a strict terminal
@@ -1970,7 +2079,13 @@ fn classify(
             }
             continue;
         }
-        if applied(conn, namespace, &entry.delivery_id)? {
+        if applied(
+            conn,
+            namespace,
+            &retiring.doc,
+            &retiring.lineage_claim_id,
+            &receipt,
+        )? {
             return Err(ApplicationError::Conflict);
         }
         carried.push(CarriedDelivery {
@@ -2155,7 +2270,7 @@ pub(super) fn retained_coverage(
                 || saved.delivery_id != delivery
                 || saved.update_digest != digest
                 || saved.journal_cursor <= through
-                || applied(conn, namespace, &delivery)?
+                || applied(conn, namespace, doc, lineage, saved)?
             {
                 return Err(ApplicationError::Conflict);
             }

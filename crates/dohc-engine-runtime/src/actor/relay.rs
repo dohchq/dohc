@@ -161,10 +161,12 @@ pub enum RelayOperation {
     /// One pass of the hosted feed. Its cursor commits with
     /// `CommitHostedCursor` once its changed paths are materialized. A pass
     /// that adopts a new scope, and every commit, then park the documents
-    /// that left the scope, as `root` holds them.
+    /// that left the scope, as `root` holds them. `relay_namespace` is the
+    /// feed's, as the configured host names it.
     PullHosted {
         workspace_id: String,
         root: std::path::PathBuf,
+        relay_namespace: Option<String>,
         now_ms: i64,
     },
     CommitHostedCursor {
@@ -2716,10 +2718,17 @@ fn run_relay_operation(
         RelayOperation::PullHosted {
             workspace_id,
             root,
+            relay_namespace,
             now_ms,
         } => {
-            let pass =
-                client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
+            let pass = client.pull_hosted_workspace(
+                store,
+                doc_cache,
+                &workspace_id,
+                relay_namespace.as_deref(),
+                &NoFaults,
+                leases,
+            )?;
             // A pass without a cursor adopted a new scope.
             if pass.pending_cursor.is_none() {
                 park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;

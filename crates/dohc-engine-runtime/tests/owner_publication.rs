@@ -6199,7 +6199,8 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
     }
 }
 
-/// One hosted pass of the host over `client`'s feed.
+/// One hosted pass of the host over `client`'s feed, in the relay namespace
+/// its owner activations ran in.
 fn hosted_pass(
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
@@ -6210,6 +6211,7 @@ fn hosted_pass(
             store,
             cache,
             "workspace",
+            Some("relay"),
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,
         )
@@ -6277,7 +6279,8 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
             "{case}: {:?}",
             pass.pending_cursor
         );
-        // The hold carries the binding admission built.
+        // The hold carries the binding admission built. An apply outside a
+        // pull names no feed namespace.
         let held = dohc_engine_sync::apply_replication_envelope(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
@@ -6291,6 +6294,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         assert_eq!(
             binding.incoming,
             IncomingCoordinate {
+                relay_namespace: None,
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
                 origin_id: fold.origin_id.clone(),
@@ -6300,8 +6304,11 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
             "{case}"
         );
         assert_eq!(binding.head_digest, hex_sha256(&native), "{case}");
-        let [tail] = binding.tails.as_slice() else {
+        let ProtectedTails::Listed(tails) = &binding.tails else {
             panic!("{case}: {:?}", binding.tails);
+        };
+        let [tail] = tails.as_slice() else {
+            panic!("{case}: {tails:?}");
         };
         assert_eq!(
             (tail.namespace.as_str(), tail.activation_id.as_str()),
@@ -6309,7 +6316,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
             "{case}"
         );
         assert!(
-            matches!(&tail.coverage, RetainedCoverage::Unproven { unproven, .. }
+            matches!(&tail.coverage, RetainedCoverage::Unproven(unproven)
                 if matches!(unproven.as_slice(), [RetainedContribution::Carried { update_digest, .. }] if *update_digest == w.retained_digest)),
             "{case}: {:?}",
             tail.coverage
@@ -6712,6 +6719,194 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
         applied.primary
     );
     assert!(w.text().contains("Safe") && w.text().contains(RETAINED));
+    w.close().await;
+}
+
+/// Write `sql` past the store's own checks, as a damaged store could hold it.
+fn write_unchecked(w: &RetainedWindow, sql: &str) {
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch(&format!(
+        "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; {sql}"
+    ))
+    .unwrap();
+}
+
+/// Sol's 1a-2 finding 2: once the document's durable restore generation or
+/// path moves past what the tail's release bound, even an update that only
+/// adds content holds, whether the tail's coverage reads or not. A release
+/// that does not read holds an update at an unchanged path and generation.
+#[tokio::test]
+async fn a_released_window_holds_a_safe_append_once_its_binding_moves() {
+    const RENAMED: &str = "notes/renamed.md";
+    let restored = |w: &RetainedWindow| {
+        write_unchecked(
+            w,
+            &format!(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
+                   operation_id,input_json,receipt_json,proposal_json,application_json,application_delivery_id,
+                   resume_receipt_json,resume_settlement_id,resume_evidence_digest)
+                 VALUES ('workspace','main','object','relay','restore',
+                   '{{\"oldBinding\":{{\"lineageClaimId\":\"{}\",\"restoreFenceGeneration\":0}},\"newFence\":1}}',
+                   '{{}}','{{}}','{{}}','restore-delivery','{{}}','settlement','{}')",
+                w.lineage,
+                "a".repeat(64)
+            ),
+        );
+    };
+    let renamed = |w: &RetainedWindow| {
+        write_unchecked(
+            w,
+            &format!("UPDATE path_aliases SET path='{RENAMED}' WHERE object_id='object'"),
+        );
+    };
+    let uncovered = |w: &RetainedWindow| {
+        write_unchecked(
+            w,
+            &format!(
+                "DELETE FROM owner_ydoc_outbox_entries WHERE update_digest='{}'",
+                w.retained_digest
+            ),
+        );
+    };
+    let unbound = |w: &RetainedWindow| {
+        write_unchecked(
+            w,
+            "UPDATE live_owner_activations SET released_restore_generation=NULL",
+        );
+    };
+    type Damage = fn(&RetainedWindow);
+    // Each case: its damage, the path the update lands at, and whether the
+    // tail's coverage still reads.
+    let cases: [(&str, &[Damage], &str, bool); 5] = [
+        ("restored", &[restored], WINDOW_PATH, true),
+        ("renamed", &[renamed], RENAMED, true),
+        (
+            "restored, coverage invalid",
+            &[uncovered, restored],
+            WINDOW_PATH,
+            false,
+        ),
+        (
+            "renamed, coverage invalid",
+            &[uncovered, renamed],
+            RENAMED,
+            false,
+        ),
+        (
+            "a release that does not read",
+            &[unbound],
+            WINDOW_PATH,
+            false,
+        ),
+    ];
+    for (case, damages, path, readable) in cases {
+        let mut w = retained_window(Retained::Carried).await;
+        let safe = {
+            let doc = Ydoc::wire();
+            doc.apply(&w.native()).unwrap();
+            doc.richdoc_append_paragraph("Safe")
+        };
+        assert_eq!(
+            dohc_engine_collab::inspect_update(&w.head(), &safe),
+            dohc_engine_collab::UpdateInspection::Admissible,
+            "{case}"
+        );
+        for damage in damages {
+            damage(&w);
+        }
+        w.store.put_binary_blob(&safe).unwrap();
+        let mut op = ydoc_row("safe", &safe, &w.lineage, path, false);
+        op.relay_seq = Some(20);
+        let native = w.native();
+        let held = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
+            panic!("{case}: {held:?}");
+        };
+        let ProtectedTails::Listed(tails) = &binding.tails else {
+            panic!("{case}: {:?}", binding.tails);
+        };
+        let [tail] = tails.as_slice() else {
+            panic!("{case}: {tails:?}");
+        };
+        assert_eq!(
+            tail.coverage != RetainedCoverage::Invalid,
+            readable,
+            "{case}: {:?}",
+            tail.coverage
+        );
+        assert_eq!(
+            tail.release.is_some(),
+            case != "a release that does not read",
+            "{case}"
+        );
+        assert_eq!(w.native(), native, "{case}");
+        assert!(!journaled(&w.store, &op), "{case}");
+        w.close().await;
+    }
+}
+
+/// Opus's 1a-2 finding 3: window evidence that does not read, here two
+/// tails in one namespace, holds only its document. An update that would
+/// otherwise apply waits; a neighbour in the same pass applies, and the pass
+/// commits.
+#[tokio::test]
+async fn a_window_that_does_not_read_holds_only_its_document() {
+    let mut w = retained_window(Retained::Carried).await;
+    execute(
+        &mut w.store,
+        "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+        VALUES ('workspace','neighbour','notes/neighbour.md','ready',1)",
+    );
+    write_unchecked(
+        &w,
+        &format!(
+            "CREATE TEMP TABLE twin AS SELECT * FROM live_owner_activations WHERE activation_id='{}';
+             UPDATE twin SET activation_id='twin';
+             INSERT INTO live_owner_activations SELECT * FROM twin",
+            w.first.activation_id
+        ),
+    );
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("Safe")
+    };
+    let feed = HostedFeed::new(&[("neighbour", "notes/neighbour.md"), ("object", WINDOW_PATH)]);
+    let held = feed.serve(
+        ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false),
+        safe,
+    );
+    let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let native = w.native();
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 1, "the neighbour");
+    assert!(journaled(&w.store, &created));
+    assert!(!journaled(&w.store, &held));
+    assert!(stopped_before(&pass, &held), "{:?}", pass.pending_cursor);
+    assert_eq!(w.native(), native);
+    let committed = client
+        .commit_hosted_cursor(
+            &mut w.store,
+            "workspace",
+            pass.pending_cursor.as_ref().unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
     w.close().await;
 }
 
