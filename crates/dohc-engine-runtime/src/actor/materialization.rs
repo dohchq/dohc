@@ -145,6 +145,7 @@ impl ActorHandle {
                     progress: progress.as_deref(),
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -178,6 +179,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -219,6 +221,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -446,6 +449,9 @@ pub(super) struct MaterializationReplayScope<'a> {
     /// Preserve unseen stale relay writes only when this capture released a hold.
     /// Paths are keyed by `dohc_engine_files::floor::path_collision_key`.
     pub(super) released_hold_paths: Option<&'a std::collections::HashSet<String>>,
+    /// The caller planned every selected job just now against the active
+    /// heads, so its deletes already account for heads at other spellings.
+    pub(super) planned_against_active_heads: bool,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -701,11 +707,14 @@ pub(super) fn replay_pending_materializations(
         // Replay changes disk and the job ledger, never active tips.
         let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut paths_loaded = false;
-        // A file stored under another spelling of a delete's path, as a disk
-        // that ignores case or normalization allows, belongs to the active
-        // head at that spelling. The delete completes without removing it.
+        // A delete planned earlier must not remove a file that an active head
+        // at another spelling now reaches, as on a disk that ignores case or
+        // normalization. That head owns the file, so the delete completes
+        // without removing it, unless the head's own write is still pending.
         let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
-            if !dohc_engine_files::stored_under_other_spelling(root_dir, &job.target_path) {
+            if scope.planned_against_active_heads
+                || std::fs::canonicalize(root_dir.join(&job.target_path)).is_err()
+            {
                 return Ok::<_, RuntimeError>(false);
             }
             let key = dohc_engine_files::floor::path_collision_key(&job.target_path);

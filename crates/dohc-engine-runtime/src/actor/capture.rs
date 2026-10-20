@@ -1168,6 +1168,7 @@ impl ActorHandle {
                         progress: None,
                         file_outcomes_settled: true,
                         released_hold_paths: Some(&released_hold_paths),
+                        planned_against_active_heads: false,
                     },
                     now_ms,
                     &dohc_engine_storage::NoFaults,

@@ -269,7 +269,11 @@ describe("merge materialization order", () => {
   });
 
   // The engine places each text merge on disk before the next one starts.
-  it("merges a text file's old spelling before its new one", async () => {
+  it.each([
+    ["merges a text file's old spelling before its new one", "notes.md", "Notes.md", ["notes.md", "Notes.md"]],
+    ["keeps path order for a rename to another name", "b.md", "a.md", ["a.md", "b.md"]],
+    ["merges a normalization respelling's old spelling first", "caf\u00e9.md", "cafe\u0301.md", ["caf\u00e9.md", "cafe\u0301.md"]],
+  ])("%s", async (_name, from, to, order) => {
     const root = await createTestScratch("dohc-text-merge-order-");
     const loopback = new VersionedLoopbackEngine();
     const send = loopback.sendRequest.bind(loopback);
@@ -283,8 +287,8 @@ describe("merge materialization order", () => {
       }
       return await send(request);
     });
-    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "notes.md", text: "old\n" });
-    await write(root, "notes.md", "old\n");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: from, text: "old\n" });
+    await write(root, from, "old\n");
     const sessions = mockLiveSessions(loopback);
     const stores = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
@@ -296,19 +300,19 @@ describe("merge materialization order", () => {
       await stores.store.deleteTextFile({
         workspaceId: WORKSPACE_ID,
         versionId: draftId,
-        path: "notes.md",
+        path: from,
         metadata: { origin: "api" },
       });
       loopback.seedTextFile({
         workspace: WORKSPACE_ID,
         versionId: draftId,
-        path: "Notes.md",
+        path: to,
         text: "new\n",
       });
       await engine.switchVersion("main");
 
       await engine.mergeVersionIntoMain(draftId);
-      expect(merged).toEqual(["notes.md", "Notes.md"]);
+      expect(merged).toEqual(order);
     } finally {
       await engine.stop();
     }

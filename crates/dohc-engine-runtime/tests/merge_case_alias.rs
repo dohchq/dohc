@@ -52,7 +52,12 @@ fn secret_write(version: &str, path: &str, moment: &str, now_ms: i64) -> SecretW
     }
 }
 
-async fn secret_merge_replay(write_completed: bool, delete_first: bool, legacy_write: bool) {
+async fn secret_merge_replay(
+    write_completed: bool,
+    delete_first: bool,
+    legacy_write: bool,
+    placed: &str,
+) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -154,7 +159,7 @@ async fn secret_merge_replay(write_completed: bool, delete_first: bool, legacy_w
     if !delete_first {
         // The desktop's merge places deletes before writes (#2240).
         std::fs::remove_file(root.join("foo.env")).unwrap();
-        std::fs::write(root.join("Foo.env"), "TOKEN=target").unwrap();
+        std::fs::write(root.join(placed), "TOKEN=target").unwrap();
     }
     let actor = supervisor.open(&db, 6).unwrap().actor;
     if legacy_write {
@@ -200,22 +205,29 @@ async fn secret_merge_replay(write_completed: bool, delete_first: bool, legacy_w
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_reopen_replay() {
-    secret_merge_replay(false, false, false).await;
+    secret_merge_replay(false, false, false, "Foo.env").await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_replay_after_write_completed() {
-    secret_merge_replay(true, false, false).await;
+    secret_merge_replay(true, false, false, "Foo.env").await;
+}
+
+/// On macOS a write over equal bytes keeps the stored spelling, so the file
+/// is still stored as `foo.env` when the old spelling's delete replays.
+#[tokio::test]
+async fn secret_case_only_merge_survives_replay_with_old_spelling_stored() {
+    secret_merge_replay(false, false, false, "foo.env").await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_delete_first_survives_reopen() {
-    secret_merge_replay(false, true, false).await;
+    secret_merge_replay(false, true, false, "Foo.env").await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_delete_first_waits_for_legacy_write() {
-    secret_merge_replay(false, true, true).await;
+    secret_merge_replay(false, true, true, "Foo.env").await;
 }
 
 #[tokio::test]
@@ -316,7 +328,7 @@ fn disk_names(root: &Path) -> Vec<String> {
 /// Main has `notes.md`; the draft edits it and renames it to `Notes.md`.
 /// The desktop merges the path Main loses first. With `replay`, both merge
 /// jobs are left pending, as after a crash, and run on reopen.
-async fn text_case_only_merge(replay: bool) {
+async fn text_case_only_merge(replay: bool, text: &str) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -332,7 +344,7 @@ async fn text_case_only_merge(replay: bool) {
         fork(&mut store);
         let mut texts = VersionedTextStore::new(&mut store);
         texts
-            .write_text(&text_write("draft", "notes.md", "new", "edit"), &NoFaults)
+            .write_text(&text_write("draft", "notes.md", text, "edit"), &NoFaults)
             .unwrap();
         texts
             .rename_text_file(
@@ -404,7 +416,10 @@ async fn text_case_only_merge(replay: bool) {
     // Capture respells a head whose file is stored under another spelling,
     // so the stored name must be the new one.
     assert_eq!(disk_names(&root), ["Notes.md"]);
-    assert_eq!(std::fs::read(root.join("Notes.md")).unwrap(), b"new");
+    assert_eq!(
+        std::fs::read(root.join("Notes.md")).unwrap(),
+        text.as_bytes()
+    );
     let store = EngineStore::open(&db, 7).unwrap();
     assert!(
         store
@@ -416,18 +431,24 @@ async fn text_case_only_merge(replay: bool) {
 
 #[tokio::test]
 async fn text_case_only_merge_keeps_the_new_spelling() {
-    text_case_only_merge(false).await;
+    text_case_only_merge(false, "new").await;
 }
 
 #[tokio::test]
 async fn text_case_only_merge_survives_reopen_replay() {
-    text_case_only_merge(true).await;
+    text_case_only_merge(true, "new").await;
 }
 
-/// A switch's delete that couldn't finish replays after the person renamed
-/// the file only by its capitals and capture recorded that spelling (#2299).
 #[tokio::test]
-async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
+async fn text_case_only_merge_with_equal_bytes_keeps_the_new_spelling() {
+    text_case_only_merge(false, "old").await;
+    text_case_only_merge(true, "old").await;
+}
+
+/// A switch's delete of `path` that couldn't finish replays after the person
+/// renamed `from` to `to` on disk and capture recorded the file at `renamed`
+/// (#2299).
+async fn pending_switch_delete_after_rename(path: &str, from: &str, to: &str, renamed: &str) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -439,11 +460,14 @@ async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
         texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
         fork(&mut store);
         VersionedTextStore::new(&mut store)
-            .write_text(&text_write("main", "notes.md", "text", "base"), &NoFaults)
+            .write_text(&text_write("main", path, "text", "base"), &NoFaults)
             .unwrap();
         complete_pending_jobs(&mut store);
     }
-    std::fs::write(root.join("notes.md"), "text").unwrap();
+    if let Some((folder, _)) = path.rsplit_once('/') {
+        std::fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    std::fs::write(root.join(path), "text").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).unwrap().actor;
     let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
@@ -467,12 +491,12 @@ async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
         let pending = store.list_pending_materialization_jobs().unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].job_id.starts_with("version-switch-mat_"));
-        std::fs::rename(root.join("notes.md"), root.join("Notes.md")).unwrap();
+        std::fs::rename(root.join(from), root.join(to)).unwrap();
         // Capture records the renamed file, with the bytes the delete expects.
-        let mut renamed = text_write("draft", "Notes.md", "text", "renamed");
-        renamed.now_ms = 3;
+        let mut capture = text_write("draft", renamed, "text", "renamed");
+        capture.now_ms = 3;
         VersionedTextStore::new(&mut store)
-            .write_text(&renamed, &NoFaults)
+            .write_text(&capture, &NoFaults)
             .unwrap();
     }
     let actor = supervisor.open(&db, 4).unwrap().actor;
@@ -481,8 +505,13 @@ async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
         .await
         .unwrap();
     supervisor.close(&db).unwrap();
-    assert_eq!(disk_names(&root), ["Notes.md"]);
-    assert_eq!(std::fs::read(root.join("Notes.md")).unwrap(), b"text");
+    let stored = format!("{to}{}", &path[from.len()..]);
+    let mut folder = root.path().to_path_buf();
+    for segment in stored.split('/') {
+        assert_eq!(disk_names(&folder), [segment]);
+        folder.push(segment);
+    }
+    assert_eq!(std::fs::read(folder).unwrap(), b"text");
     let store = EngineStore::open(&db, 5).unwrap();
     assert!(
         store
@@ -490,4 +519,33 @@ async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn pending_switch_delete_keeps_a_file_renamed_by_case() {
+    pending_switch_delete_after_rename("notes.md", "notes.md", "Notes.md", "Notes.md").await;
+}
+
+#[tokio::test]
+async fn pending_switch_delete_keeps_a_file_in_a_folder_renamed_by_case() {
+    pending_switch_delete_after_rename("drafts/notes.md", "drafts", "Drafts", "Drafts/notes.md")
+        .await;
+}
+
+/// The person respells the file back to the old spelling while the head at
+/// the new one is still live.
+#[tokio::test]
+async fn pending_switch_delete_keeps_a_file_respelled_back() {
+    pending_switch_delete_after_rename("notes.md", "notes.md", "notes.md", "Notes.md").await;
+}
+
+#[tokio::test]
+async fn pending_switch_delete_keeps_a_file_renamed_by_normalization() {
+    pending_switch_delete_after_rename(
+        "caf\u{e9}.md",
+        "caf\u{e9}.md",
+        "cafe\u{301}.md",
+        "cafe\u{301}.md",
+    )
+    .await;
 }

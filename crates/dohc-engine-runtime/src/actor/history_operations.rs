@@ -567,6 +567,7 @@ fn place_undo_members(
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             now,
             faults,
