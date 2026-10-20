@@ -1095,9 +1095,18 @@ async fn forward_lock_proof(lock_at_commit: bool) {
     if lock_at_commit {
         let writer = writer.clone();
         let lock_once = lock_once.clone();
-        probes().lock().unwrap().entry(f.ws.clone()).or_default().hook = Some(Arc::new(move |_, _| {
+        probes()
+            .lock()
+            .unwrap()
+            .entry(f.ws.clone())
+            .or_default()
+            .hook = Some(Arc::new(move |_, _| {
             if lock_once.fetch_add(1, Ordering::SeqCst) == 0 {
-                writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE").unwrap();
+                writer
+                    .lock()
+                    .unwrap()
+                    .execute_batch("BEGIN IMMEDIATE")
+                    .unwrap();
             }
         }));
     }

@@ -356,16 +356,23 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let outcome = self.run(move |store, _| {
-                let _admission = serial;
-                #[cfg(test)]
-                let _turn = tests::Turn::start(&reserve_ws, "reserve");
-                save(store, &r, false, &initial, f.as_ref())
-            }).await;
+            let outcome = self
+                .run(move |store, _| {
+                    let _admission = serial;
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&reserve_ws, "reserve");
+                    save(store, &r, false, &initial, f.as_ref())
+                })
+                .await;
             match outcome {
                 Ok(()) => break,
                 Err(error) if error.code() == "file-locked" => {
-                    Self::wait_undo_checkpoint(&token, &mut reserve_locked_since, checkpoint.clone()).await?;
+                    Self::wait_undo_checkpoint(
+                        &token,
+                        &mut reserve_locked_since,
+                        checkpoint.clone(),
+                    )
+                    .await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -733,7 +740,12 @@ impl ActorHandle {
                 if committed.5 {
                     #[cfg(test)]
                     super::history_operations::turns::tests::checkpoint_wait(&workspace).await;
-                    Self::wait_undo_checkpoint(&token, &mut commit_locked_since, checkpoint.clone()).await?;
+                    Self::wait_undo_checkpoint(
+                        &token,
+                        &mut commit_locked_since,
+                        checkpoint.clone(),
+                    )
+                    .await?;
                 } else {
                     commit_locked_since = None;
                 }
@@ -753,31 +765,36 @@ impl ActorHandle {
         let mut reply_locked_since = None;
         loop {
             let (workspace, receipt, result, faults) = (
-                workspace.clone(), receipt.clone(), result.clone(), faults.clone(),
+                workspace.clone(),
+                receipt.clone(),
+                result.clone(),
+                faults.clone(),
             );
-        let serial = tokio::select! {
-            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = session_ops.clone().lock_owned() => guard,
-        };
-        let outcome = self.run(move |store, _| {
-            let _admission = serial;
-            #[cfg(test)]
-            let _turn = tests::Turn::start(&workspace, "reply");
-            save(store, &receipt, !stopped, &result, faults.as_ref())?;
-            store
-                .read_with(|conn| {
-                    conn.execute_batch(
+            let serial = tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = session_ops.clone().lock_owned() => guard,
+            };
+            let outcome = self
+                .run(move |store, _| {
+                    let _admission = serial;
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&workspace, "reply");
+                    save(store, &receipt, !stopped, &result, faults.as_ref())?;
+                    store
+                        .read_with(|conn| {
+                            conn.execute_batch(
                         "DELETE FROM rewrite_alias_watch; DELETE FROM rewrite_alias_changes;",
                     )
+                        })
+                        .map_err(StorageError::corrupt_public)?;
+                    Ok(())
                 })
-                .map_err(StorageError::corrupt_public)?;
-            Ok(())
-        })
-        .await;
+                .await;
             match outcome {
                 Ok(()) => break,
                 Err(error) if error.code() == "file-locked" => {
-                    Self::wait_undo_checkpoint(&token, &mut reply_locked_since, checkpoint.clone()).await?;
+                    Self::wait_undo_checkpoint(&token, &mut reply_locked_since, checkpoint.clone())
+                        .await?;
                 }
                 Err(error) => return Err(error),
             }
