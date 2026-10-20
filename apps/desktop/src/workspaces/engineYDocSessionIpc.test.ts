@@ -815,6 +815,77 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it("names a save the engine refused over a missing file as a file deleted outside dohc", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-deleted-"));
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      const failures = () => sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure);
+      const stale = new DaemonRefusalError({ code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" }, undefined);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: stale }));
+      expect(failures().at(-1)).toEqual({ reason: "deleted" });
+      // A missing file the engine did not refuse for is a document that has
+      // no file yet.
+      h.capturedOpen()?.onSaveState?.("settling", 2, "start");
+      h.capturedOpen()?.onSaveState?.("error", 2, "outcome", false, undefined, new Error("disk full"));
+      expect(failures().at(-1)).toEqual({ reason: null });
+      await h.ipc.shutdown();
+
+      // A shared view's file is its host's to put back.
+      let sharedOpen: Parameters<EngineYDocSessionCapture["openYDocSession"]>[0] | undefined;
+      const shared = harness(providerSession(), { rootPath: root, sharedCaptureFor: async () => ({
+        openYDocSession: async (input) => { sharedOpen = input; return providerSession(); },
+      }) });
+      shared.setReadOnly(true);
+      const viewer = new FakeSender(8);
+      expect((await shared.ipc.open(viewer, openPayload)).available).toBe(true);
+      sharedOpen?.onSaveState?.("error", 1, "outcome", false, undefined, stale);
+      expect(viewer.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1)).toEqual({ reason: null });
+      await shared.ipc.shutdown();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("saves a deleted file again only from the window that holds it, including after its tab closed", async () => {
+    const close = vi.fn(async () => undefined);
+    const h = harness(providerSession({ close }));
+    const saveDeletedFileAgain = vi.fn(async () => true);
+    h.capture.saveDeletedFileAgain = saveDeletedFileAgain;
+    const sender = new FakeSender(7);
+    const again = { workspaceId: "workspace-1", path: "notes/a.md", recreateFile: true as const };
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).not.toHaveBeenCalled();
+
+    await h.ipc.open(sender, openPayload);
+    await expect(h.ipc.retrySave(new FakeSender(8), again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).not.toHaveBeenCalled();
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("settled");
+    expect(saveDeletedFileAgain).toHaveBeenCalledWith("notes/a.md");
+    expect(h.session.settleNow).not.toHaveBeenCalled();
+
+    // The tab closes and the close is refused: the session still holds the
+    // text. Save it again saves it, then finishes the close.
+    close.mockRejectedValueOnce(new Error("conflict-stale-target"));
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("settled");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(2);
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    await h.ipc.shutdown();
+
+    // A shared view's file is its host's to put back.
+    const shared = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: async () => providerSession() }) });
+    shared.capture.saveDeletedFileAgain = saveDeletedFileAgain;
+    shared.setReadOnly(true);
+    expect((await shared.ipc.open(sender, openPayload)).available).toBe(true);
+    await expect(shared.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    await shared.ipc.shutdown();
+  });
+
   // A Finder lock refuses writes with EPERM, as a macOS privacy refusal does,
   // but the file still reads, so it is read-only, not a privacy refusal.
   it.runIf(process.platform === "darwin")("names a file locked in Finder read-only", async () => {

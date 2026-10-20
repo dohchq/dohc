@@ -42,6 +42,7 @@ import {
   MenuCommand,
   CrashReportChangedEvent,
   NoticesChangedEvent,
+  LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
   FolderAppAnswer,
   ShareHandoffStatus,
@@ -534,6 +535,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(chatDispatchNoticeOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
+  onLiveDraftRecoveryChanged: (listener) =>
+    onEvent(CHANNELS.liveDraftRecoveryChanged, LiveDraftRecoveryChangedEvent, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>

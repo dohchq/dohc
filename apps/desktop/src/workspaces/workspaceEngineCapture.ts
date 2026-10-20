@@ -90,6 +90,7 @@ import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { createFile } from "./workspaceFiles";
 import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
@@ -474,8 +475,12 @@ export type WorkspaceEngineYDocProviderSession = Omit<
 };
 
 // The session this layer holds, which keeps the evict the public one drops.
+// `setTextAside` puts the text of a document whose file was deleted outside
+// dohc in Notices and answers a handle to that write, or null without a draft
+// store.
 type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   evict(): Promise<void>;
+  setTextAside(): Promise<string | null>;
 };
 
 // Whether a document's file has existed. Once true, never false. One object
@@ -592,6 +597,15 @@ export interface WorkspaceEngineCapture {
     // error a failed settle met; capture sends no read-only cause.
     onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: undefined, failure?: unknown) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
+  // Save it again: the person chose to write a document back to its file
+  // after the file was deleted outside dohc. The engine refuses every other
+  // save over a deleted file, so this is the one thing that brings it back.
+  // Puts back the file the engine last recorded at the path, empty when it
+  // recorded none as New File leaves it, then saves the document over it.
+  // A file that is there again is left as it is, and the save decides. A
+  // session whose tab closed still holds the document when its close was
+  // refused. Answers false, writing nothing, when no session holds it.
+  saveDeletedFileAgain(path: string): Promise<boolean>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -794,7 +808,13 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
-  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
+  // Sets a document's text aside in Notices and answers a handle to that
+  // write. `discardUnsentState` removes the draft by that handle once a save
+  // wrote the text, unless a later write wrote the same draft again.
+  // `reason` says why the text is set aside, when that is not that a save was
+  // interrupted.
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc; reason?: "deleted" }) => Promise<string>;
+  discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
@@ -974,8 +994,9 @@ function settleFailureSaveState(error: unknown): EngineYDocSaveState {
 // The engine refuses a pending write whose preimage no longer matches the
 // file: the external program edited it before releasing its lock. No amount
 // of waiting changes that, so a retry ladder aimed at the lock has nothing
-// left to wait for.
-function isConflictStaleTargetCause(error: unknown): boolean {
+// left to wait for. A settle over a file deleted outside dohc gets the same
+// refusal.
+export function isConflictStaleTargetCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
 }
 
@@ -1888,6 +1909,22 @@ export function createWorkspaceEngineCapture(
     armRemovalSuppression: (expected: boolean, deletedSeq: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+  // Set-aside drafts of a deleted file's text that a newer draft or a save
+  // replaced, and that the draft store has not removed yet. Every later draft
+  // step and the capture's stop try again, so none lingers as a duplicate.
+  // Each is a handle to one write: the store keeps a draft that a later write
+  // wrote again, so a removal here never deletes text that is current.
+  const obsoleteDrafts = new Set<string>();
+  const discardObsoleteDrafts = async (): Promise<void> => {
+    for (const draft of [...obsoleteDrafts]) {
+      try {
+        await options.discardUnsentState?.(draft);
+        obsoleteDrafts.delete(draft);
+      } catch (error) {
+        onError("discard of a set-aside draft", error);
+      }
+    }
+  };
 
   function borrowRecordSession(entry: LiveYDocSession): RecordEditSession {
     const owner = entry.publicSession;
@@ -2594,6 +2631,23 @@ export function createWorkspaceEngineCapture(
       fileFact.existed = true;
     };
     const settleCovers = new Map<string, number>();
+    // Puts text in Notices through the app's draft store, and answers a
+    // handle to the write. A refusal tells the person, since the text is then only in
+    // the open document.
+    const preserveText = async (doc: Y.Doc, contentKind: YdocContentKind | undefined, reason?: "deleted"): Promise<string> => {
+      try {
+        if (!sessionObjectId || contentKind === undefined || !options.preserveUnsentState) {
+          throw new Error("Y.Doc recovery has no object identity.");
+        }
+        return await options.preserveUnsentState({ path: input.path, objectId: sessionObjectId, contentKind, doc, ...(reason ? { reason } : {}) });
+      } catch (error) {
+        const name = input.path.split("/").at(-1) ?? input.path;
+        const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
+        onError(`draft preservation of ${input.path}`, error);
+        input.onEditRefused?.("draft-preservation", message);
+        throw error;
+      }
+    };
     const settleOwed = (): boolean =>
       !settleForgiven && updatesSettled < updatesCounted;
     const openGeneration = async (
@@ -2680,18 +2734,7 @@ export function createWorkspaceEngineCapture(
               retired.destroy();
             },
             preserveUnsentState: options.preserveUnsentState ? async doc => {
-              try {
-                if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
-                await options.preserveUnsentState!({
-                  path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
-                });
-              } catch (error) {
-                const name = input.path.split("/").at(-1) ?? input.path;
-                const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
-                onError(`draft preservation of ${input.path}`, error);
-                input.onEditRefused?.("draft-preservation", message);
-                throw error;
-              }
+              await preserveText(doc, opened?.contentKind);
             } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id, lane) => {
@@ -3416,6 +3459,11 @@ export function createWorkspaceEngineCapture(
       get doc() {
         if (canonicalDoc === null) throw closedError();
         return canonicalDoc;
+      },
+      setTextAside() {
+        if (!options.preserveUnsentState) return Promise.resolve(null);
+        if (canonicalDoc === null) return Promise.reject(closedError());
+        return preserveText(canonicalDoc, contentKind, "deleted");
       },
       initialUpdate,
       ...(objectId ? { objectId } : {}),
@@ -4399,6 +4447,30 @@ export function createWorkspaceEngineCapture(
           if (digest.kind === "unverifiable") return false;
           return digest.kind === "changed" || digest.sha256 !== settled;
         };
+        // While its file is deleted outside dohc, the document's text is only
+        // in this session: once the session is released, capture retires the
+        // path and the document's history goes with it. So from the first
+        // save refused over the missing file until a save writes the file,
+        // Notices keeps a draft of the newest text, through a crash or any
+        // close. The steps run in order, and each one retries the removal of
+        // drafts a newer one replaced.
+        let currentDraft: string | null = null;
+        let draftSteps: Promise<void> = Promise.resolve();
+        const draftStep = (step: () => Promise<void>): void => {
+          draftSteps = draftSteps.then(step).then(discardObsoleteDrafts);
+        };
+        const setTextAside = (): void => draftStep(async () => {
+          if (entry === null || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return;
+          // A draft the store refused has told the person.
+          const draft = await entry.session.setTextAside().catch(() => null);
+          if (draft === null) return;
+          if (currentDraft !== null) obsoleteDrafts.add(currentDraft);
+          currentDraft = draft;
+        });
+        const retireTextSetAside = (): void => draftStep(async () => {
+          if (currentDraft !== null) obsoleteDrafts.add(currentDraft);
+          currentDraft = null;
+        });
         const onSettled = async (
           result: {
             sha256: string;
@@ -4538,6 +4610,8 @@ export function createWorkspaceEngineCapture(
             return false;
           }
           reportSaveState("saved", takeSaveToken(token, generation), "outcome");
+          // The file holds the text, so its draft goes.
+          retireTextSetAside();
           return true;
         };
         // Claim exactly what this settle can carry. The daemon serves one
@@ -4587,6 +4661,7 @@ export function createWorkspaceEngineCapture(
           if (!(error instanceof YdocOwnerDraftPendingError)) {
             onError(`ydoc settle of ${input.path}`, error);
           }
+          if (isConflictStaleTargetCause(error)) setTextAside();
           reportSaveState(
             settleFailureSaveState(error),
             saveToken,
@@ -5262,7 +5337,13 @@ export function createWorkspaceEngineCapture(
         let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
         const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
           if (shuttingDown && quitClose) return quitClose;
-          const closing = shuttingDown && closeInFlight ? closeInFlight : attemptCloseEntry(opts);
+          // A close waits for the draft its refused save sets aside, and
+          // tries again to remove drafts a newer one replaced.
+          const closing = shuttingDown && closeInFlight ? closeInFlight
+            : attemptCloseEntry(opts).finally(() => {
+              draftStep(async () => undefined);
+              return draftSteps;
+            });
           closeInFlight = closing;
           if (shuttingDown) quitClose = closing;
           const completed = (): void => {
@@ -5801,6 +5882,24 @@ export function createWorkspaceEngineCapture(
     },
 
     observationDrainFailed() { observationDrainUnavailable = true; },
+
+    async saveDeletedFileAgain(path) {
+      // On the chain, so no version operation moves the session between the
+      // check and the write.
+      const entry = await enqueueResult(`save ${path} again`, async () => {
+        const live = liveYDocSessions.get(path);
+        if (!live || live.orphaned) return null;
+        const engine = await engineStore();
+        const head = await engine.readTextFile({ workspaceId, versionId: live.versionId, path });
+        await createFile(rootPath, path, head?.text ?? "", { exclusive: true }).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        });
+        return live;
+      });
+      if (!entry) return false;
+      await entry.session.settleNow();
+      return true;
+    },
 
     setActiveAgentRun(submitted) {
       // The run as submitted; a caller changing its object later changes nothing here.
@@ -7732,6 +7831,7 @@ export function createWorkspaceEngineCapture(
         daemonCaptureHealthTimer = null;
       }
       await chain;
+      await discardObsoleteDrafts();
       try {
         if (store) {
           try {
