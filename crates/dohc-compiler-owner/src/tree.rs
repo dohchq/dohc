@@ -1,6 +1,6 @@
 //! The processes one build started, and how the owner measures and stops them.
 use crate::sys::{self, Identity, Pid, Signalled, State};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -11,6 +11,8 @@ pub trait Table {
     fn children(&mut self, parent: Pid) -> io::Result<Vec<Pid>>;
     fn state(&mut self, pid: Pid) -> io::Result<State>;
     fn footprint(&mut self, pid: Pid) -> io::Result<Option<u64>>;
+    /// How many of the user's task slots a live `pid` takes.
+    fn threads(&mut self, pid: Pid) -> io::Result<u64>;
     fn kill(&mut self, pid: Pid) -> io::Result<Signalled>;
     /// Collects every exited child of the owner. True while the owner still
     /// has a child, or may have one.
@@ -33,6 +35,9 @@ impl Table for System {
     fn footprint(&mut self, pid: Pid) -> io::Result<Option<u64>> {
         sys::footprint(pid)
     }
+    fn threads(&mut self, pid: Pid) -> io::Result<u64> {
+        sys::threads(pid)
+    }
     fn kill(&mut self, pid: Pid) -> io::Result<Signalled> {
         sys::kill(pid)
     }
@@ -49,10 +54,17 @@ struct Census {
     /// False when any part of the table could not be read. An incomplete
     /// census never proves the tree is empty.
     complete: bool,
+    /// Listed processes that already exited: zombies no one has reaped.
+    unreaped: usize,
 }
 
 pub struct Sample {
     pub processes: usize,
+    /// The user's task slots the tree takes: each live process's threads,
+    /// and every process it has not reaped. Each one counts against the
+    /// user's limit, so a tree that hoards them can stop the user's other
+    /// programs from starting a process or thread.
+    pub tasks: u64,
     pub footprint: u64,
 }
 
@@ -108,6 +120,7 @@ impl<T: Table> Tree<T> {
         // Known descendants this census could not inspect. They stay known.
         let mut unchecked: HashMap<Pid, Identity> = HashMap::new();
         let mut unreadable: Vec<Pid> = Vec::new();
+        let mut unreaped: HashSet<Pid> = HashSet::new();
         while let Some((pid, expected)) = queue.pop() {
             if pid == self.owner || found.contains_key(&pid) || unreadable.contains(&pid) {
                 continue;
@@ -123,6 +136,10 @@ impl<T: Table> Tree<T> {
                         Ok(pids) => queue.extend(pids.into_iter().map(|child| (child, None))),
                         Err(error) => fail(error)?,
                     }
+                }
+                // Listed but gone: it exited, and its parent has not reaped it.
+                Ok(State::Gone) if expected.is_none() => {
+                    unreaped.insert(pid);
                 }
                 Ok(State::Gone) => {}
                 Err(error) => {
@@ -144,21 +161,29 @@ impl<T: Table> Tree<T> {
             found.entry(pid).or_insert(identity);
         }
         self.known = found;
-        Ok(Census { live, complete })
+        Ok(Census {
+            live,
+            complete,
+            unreaped: unreaped.len(),
+        })
     }
 
-    /// The number of live processes and their summed physical footprint. Any
-    /// unreadable entry is an error, never a smaller figure.
+    /// The number of live processes, the task slots the tree takes, and the
+    /// processes' summed physical footprint. Any unreadable entry is an
+    /// error, never a smaller figure.
     pub fn measure(&mut self) -> io::Result<Sample> {
         let census = self.census(true)?;
         let mut footprint: u64 = 0;
+        let mut tasks = census.unreaped as u64;
         for &pid in &census.live {
             if let Some(bytes) = self.table.footprint(pid)? {
                 footprint = footprint.saturating_add(bytes);
             }
+            tasks = tasks.saturating_add(self.table.threads(pid)?);
         }
         Ok(Sample {
             processes: census.live.len(),
+            tasks,
             footprint,
         })
     }
@@ -233,6 +258,8 @@ mod tests {
         killed: Vec<Pid>,
         /// A child of the owner that no listing shows.
         unlisted_child: bool,
+        /// Threads of a live pid, when more than one.
+        threads: HashMap<Pid, u64>,
     }
 
     impl Table for Fake {
@@ -254,6 +281,9 @@ mod tests {
         }
         fn footprint(&mut self, pid: Pid) -> io::Result<Option<u64>> {
             Ok(self.live.contains_key(&pid).then_some(1))
+        }
+        fn threads(&mut self, pid: Pid) -> io::Result<u64> {
+            Ok(self.threads.get(&pid).copied().unwrap_or(1))
         }
         fn kill(&mut self, pid: Pid) -> io::Result<Signalled> {
             if self.live.remove(&pid).is_none() {
@@ -305,6 +335,24 @@ mod tests {
             tree.table.killed.is_empty(),
             "an unverified identity gets no signal"
         );
+    }
+
+    #[test]
+    fn threads_and_unreaped_processes_count_as_tasks() {
+        const UNREAPED: Pid = 103;
+        let table = Fake {
+            group: vec![WORKER, UNREAPED],
+            children: HashMap::from([(WORKER, vec![ESCAPED, UNREAPED])]),
+            live: HashMap::from([
+                (WORKER, identity(WORKER, 1)),
+                (ESCAPED, identity(ESCAPED, 2)),
+            ]),
+            threads: HashMap::from([(WORKER, 12)]),
+            ..Fake::default()
+        };
+        let sample = Tree::new(OWNER, table).measure().unwrap();
+        // 12 threads, 1 thread, and one exited process listed twice.
+        assert_eq!((sample.processes, sample.tasks), (2, 14));
     }
 
     #[test]

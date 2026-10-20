@@ -27,6 +27,9 @@ Electron main sets the bounds in `main.ts`. `compilerProcessSupervisor.ts` enfor
 | Kill on close | Closing the job kills it | Stdin EOF makes the owner kill its tree. The supervisor kills the owner's process group as a fallback | As on macOS. The worker also dies when the owner dies |
 | Files and network | No isolation. The supervisor scrubs the environment | Seatbelt, below | Landlock and seccomp, below |
 
+On macOS and Linux the owner also counts the tree's task slots, which the user's process limit counts: each live process's threads on Linux, and every exited process no one has reaped.
+More than 1,024 stops the build as the process bound does, so a tree that hoards threads or zombies cannot leave the user's other programs unable to start one.
+
 ## macOS and Linux containment is weaker than a Windows job
 
 The memory and process bounds are detection thresholds, not ceilings.
@@ -110,20 +113,22 @@ Ubuntu 24.04's 6.8 kernel has ABI 4, so the seccomp filters also cover what Land
 The seccomp filters:
 
 - refuse `socket` entirely, so the tree has no network and cannot reach D-Bus or another local service through a Unix socket. Node and esbuild talk over `socketpair` and pipes;
-- refuse every signal, through `kill`, `tkill`, `tgkill`, both `sigqueue` calls and `pidfd_send_signal`. Seatbelt lets the tree signal processes inside its sandbox, but seccomp cannot tell those apart from the desktop or another program of the same user. Node and esbuild need no signal to compile, and the owner does all stopping;
+- refuse every signal, through `kill`, `tkill`, `tgkill`, both `sigqueue` calls and `pidfd_send_signal`. Seatbelt lets the tree signal processes inside its sandbox, but seccomp cannot tell those apart from the desktop or another program of the same user. Node and esbuild need no signal to compile: Go's runtime in esbuild then schedules its goroutines cooperatively, and the owner does all stopping;
 - refuse async I/O ownership, which signals without `kill`, and changes to another process's limits and scheduling;
 - refuse changes to a file's mode, owner, extended attributes and times, which Landlock does not mediate, and truncation by path, which it mediates only from ABI 3;
-- refuse reads of extended attributes by path, which can hold a download's source address;
+- refuse reads of extended attributes, which can hold a download's source address, and Linux 6.17's `file_getattr` and `file_setattr`;
 - refuse System V shared memory, message queues and semaphores, and POSIX message queues, which other programs of the user may hold;
+- refuse `statmount` and `listmount`, which name the user's mounted volumes;
 - refuse `inotify` and `fanotify`, which would report activity on paths outside the sandbox;
 - refuse tracing, other processes' memory, keyrings, BPF, perf events, `userfaultfd`, `unshare`, `setns`, and `clone` with a new namespace;
 - answer `io_uring` and `clone3` with ENOSYS. `io_uring` can open sockets and files without the calls the filters check, and Node's libuv falls back to ordinary calls. `clone3` passes its flags where a filter cannot read them, and glibc falls back to `clone`;
+- answer every call newer than Linux 6.17's `file_setattr` with ENOSYS, so a later kernel cannot add one the filters do not know;
 - refuse every x32 call, which shares the x86-64 audit architecture but numbers syscalls differently.
 
 Landlock does not mediate path metadata, so as on macOS a confined worker can learn whether a path exists.
 It cannot read `/proc`, so unlike on macOS it cannot read other processes' arguments.
 Landlock cannot refuse an executable mapping of a file the worker wrote, as Seatbelt does, so a worker that gains code execution can load native code from its build directory.
-Through the dynamic loader or a memory file, it can also run any program it can read. Each still runs inside the same rules and the owner's tree.
+Through the dynamic loader it can also run any program it can read, and through a memory file any code it writes. Each still runs under the same rules and inside the owner's tree.
 That still needs a memory-safety exploit in V8 or esbuild first.
 Node stops at startup when the system's OpenSSL configuration exists but stays unreadable, so the owner sets `OPENSSL_CONF` to `/dev/null`. The compiler needs no OpenSSL configuration.
 

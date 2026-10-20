@@ -168,10 +168,11 @@ fn resident_kilobytes(status: &str) -> io::Result<Option<u64>> {
     Ok(kilobytes)
 }
 
-/// How many threads /proc lists for `pid`. 0 once it is gone.
-fn threads(pid: Pid) -> io::Result<usize> {
+/// How many threads /proc lists for `pid`, each one of the user's task
+/// slots. 0 once it is gone.
+pub fn threads(pid: Pid) -> io::Result<u64> {
     match std::fs::read_dir(format!("/proc/{pid}/task")) {
-        Ok(tasks) => Ok(tasks.count()),
+        Ok(tasks) => Ok(tasks.count() as u64),
         Err(error) if gone(&error) => Ok(0),
         Err(error) => Err(error),
     }
@@ -373,6 +374,13 @@ mod tests {
             report("new namespace", outcome(cloned as c_int));
             let cloned = libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<u8>(), 0);
             report("clone3", outcome(cloned as c_int));
+            // file_setattr, from Linux 6.17, and a number no kernel has yet.
+            let attributes = libc::syscall(469, libc::AT_FDCWD, path.as_ptr(), 0, 0, 0);
+            report("file attributes", outcome(attributes as c_int));
+            report("newer call", outcome(libc::syscall(1000) as c_int));
+            // glibc's mq_unlink turns EPERM into EACCES, so this asks the kernel.
+            let unlinked = libc::syscall(libc::SYS_mq_unlink, c"dohc".as_ptr());
+            report("remove a queue", outcome(unlinked as c_int));
             report("signal owner", outcome(libc::kill(owner, 0)));
             report("signal own group", outcome(libc::kill(0, 0)));
             report("signal everyone", outcome(libc::kill(-1, 0)));
@@ -478,6 +486,9 @@ mod tests {
                 "watch a path=EPERM",
                 "new namespace=EPERM",
                 "clone3=ENOSYS",
+                "file attributes=EPERM",
+                "newer call=ENOSYS",
+                "remove a queue=EPERM",
                 "signal owner=EPERM",
                 "signal own group=EPERM",
                 "signal everyone=EPERM",

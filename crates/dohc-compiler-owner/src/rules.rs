@@ -1,14 +1,16 @@
 //! The Landlock rules and seccomp filters that confine the worker and esbuild
 //! on Linux, in place of the macOS Seatbelt profile.
 //!
-//! The tree may run only the installed Node, esbuild and the dynamic loader,
-//! read those, the compiler root and the system libraries, and read and write
-//! its own build directory, where it can run nothing. It cannot open a
-//! socket, so it has no network and cannot reach D-Bus or any other local
-//! service. It cannot signal any process, trace one or change its limits,
-//! even on a kernel too old for Landlock to scope signals, and cannot change
-//! a file's mode, owner, attributes or times. Path metadata stays readable
-//! everywhere, as on macOS, because Landlock does not mediate reading it.
+//! The tree may execute only the installed Node, esbuild and the dynamic
+//! loader, read those, the compiler root and the system libraries, and read
+//! and write its own build directory, where it can execute nothing. Through
+//! the loader or a memory file, code it already runs can start other code,
+//! still under these rules. It cannot open a socket, so it has no network and
+//! cannot reach D-Bus or any other local service. It cannot signal any
+//! process, trace one or change its limits, even on a kernel too old for
+//! Landlock to scope signals, and cannot change a file's mode, owner,
+//! attributes or times. Path metadata stays readable everywhere, as on macOS,
+//! because Landlock does not mediate reading it.
 //! See docs/engineering/app-compiler.md.
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd,
@@ -125,10 +127,16 @@ fn landlock(root: &Path, node: &Path, build: &Path) -> Result<RulesetCreated, St
     Ok(rules)
 }
 
+/// The newest call these filters were written against: `file_setattr`, in
+/// Linux 6.17. Any later call looks absent, so a kernel that adds one cannot
+/// open a gap the filters do not know about.
+const NEWEST_SYSCALL: u32 = 469;
+
 /// Calls that look absent, so callers fall back to ones the next filter
 /// checks. io_uring can open sockets and files without those calls, and
 /// Node's libuv then uses ordinary ones. clone3 passes its flags in memory a
-/// filter cannot read, and glibc then uses clone, whose flags it can.
+/// filter cannot read, and glibc then uses clone, whose flags it can. Calls
+/// newer than `NEWEST_SYSCALL` look absent too.
 fn absent_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
     use libc::{ENOSYS, SYS_clone3, SYS_io_uring_enter, SYS_io_uring_register, SYS_io_uring_setup};
     let rules = [
@@ -146,7 +154,31 @@ fn absent_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         SeccompAction::Errno(ENOSYS as u32),
         std::env::consts::ARCH.try_into()?,
     )?;
-    Ok(guard_x32(filter.try_into()?))
+    use seccompiler::sock_filter;
+    let mut guarded = vec![
+        // Load the syscall number.
+        sock_filter {
+            code: 0x20,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        },
+        // Newer than the filters know.
+        sock_filter {
+            code: 0x25,
+            jt: 0,
+            jf: 1,
+            k: NEWEST_SYSCALL,
+        },
+        sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ERRNO | ENOSYS as u32,
+        },
+    ];
+    guarded.extend(BpfProgram::try_from(filter)?);
+    Ok(guard_x32(guarded))
 }
 
 /// The calls the tree may not make, on any kernel. Landlock mediates neither
@@ -157,8 +189,8 @@ fn absent_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
 /// inside the tree as Seatbelt does.
 fn refused_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
     use libc::*;
-    // libc 0.2.189 omits these. Linux 6.6 and 6.13 number them alike on every
-    // architecture.
+    // libc 0.2.189 omits these. Linux 6.6 through 6.17 number them alike on
+    // every architecture.
     #[cfg(target_arch = "aarch64")]
     #[allow(non_upper_case_globals)]
     const SYS_fchmodat2: c_long = 452;
@@ -170,6 +202,14 @@ fn refused_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
     const SYS_listxattrat: c_long = 465;
     #[allow(non_upper_case_globals)]
     const SYS_removexattrat: c_long = 466;
+    #[allow(non_upper_case_globals)]
+    const SYS_statmount: c_long = 457;
+    #[allow(non_upper_case_globals)]
+    const SYS_listmount: c_long = 458;
+    #[allow(non_upper_case_globals)]
+    const SYS_file_getattr: c_long = 468;
+    #[allow(non_upper_case_globals)]
+    const SYS_file_setattr: c_long = 469;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     for syscall in [
         // No sockets at all. Node and esbuild talk over socketpair and pipes.
@@ -201,6 +241,10 @@ fn refused_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         SYS_llistxattr,
         SYS_getxattrat,
         SYS_listxattrat,
+        SYS_fgetxattr,
+        SYS_flistxattr,
+        SYS_file_getattr,
+        SYS_file_setattr,
         SYS_utimensat,
         SYS_truncate,
         // System V IPC and POSIX message queues, which other programs of the
@@ -218,6 +262,10 @@ fn refused_syscalls() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         SYS_semtimedop,
         SYS_semctl,
         SYS_mq_open,
+        SYS_mq_unlink,
+        // Mount points, which name the user's volumes.
+        SYS_statmount,
+        SYS_listmount,
         SYS_inotify_init1,
         SYS_inotify_add_watch,
         SYS_fanotify_init,

@@ -183,6 +183,12 @@ pub fn close_inherited_descriptors_on_exec() -> io::Result<()> {
     Ok(())
 }
 
+/// One: the user's process limit on macOS counts processes, whatever their
+/// threads.
+pub fn threads(_pid: Pid) -> io::Result<u64> {
+    Ok(1)
+}
+
 /// The Seatbelt profile, as SBPL source.
 pub type Sandbox = CString;
 

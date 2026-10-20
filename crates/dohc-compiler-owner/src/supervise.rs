@@ -16,6 +16,9 @@ use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
+/// The most task slots the tree may take: threads on Linux, and processes
+/// no one has reaped. A real compile takes a few dozen.
+const MAX_TASKS: u64 = 1024;
 /// How long teardown may keep signalling before the owner reports failure.
 const TEARDOWN_BUDGET: Duration = Duration::from_secs(2);
 const CHUNK: usize = 64 * 1024;
@@ -160,7 +163,9 @@ fn watch(
         }
         match tree.measure() {
             Ok(sample) if sample.footprint > args.memory_bytes => return Outcome::Memory,
-            Ok(sample) if sample.processes > args.max_processes => return Outcome::Processes,
+            Ok(sample) if sample.processes > args.max_processes || sample.tasks > MAX_TASKS => {
+                return Outcome::Processes;
+            }
             Ok(_) => {}
             Err(error) => return Outcome::Unmeasurable(error),
         }
