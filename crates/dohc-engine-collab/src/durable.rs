@@ -3129,7 +3129,10 @@ pub fn read_pristine_seed_lineage_source(
     })
 }
 
-fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
+pub(crate) fn last_settled_sha(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT last_settled_sha FROM ydoc_docs \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",

@@ -27,7 +27,7 @@ type Cache = {tuple: unknown[]; canonicalSha: string; result: Resolution}
 const resolved = new WeakMap<Y.Doc, Cache>()
 
 /** The journal decides whether an unverified active witness must refuse or drop. */
-export function resolveMarkdownSource(doc: Y.Doc, canonical: string, validatedWitness?: ReturnType<typeof readMarkdownSourceWitness>): Resolution {
+export function resolveMarkdownSource(doc: Y.Doc, canonical: string, validatedWitness?: ReturnType<typeof readMarkdownSourceWitness>, fatalUnexpectedErrors = false): Resolution {
   const meta = doc.getMap('meta')
   if (!SOURCE_META_KEYS.some(key => meta.has(key))) return {kind: 'absent'}
   const tuple = SOURCE_META_KEYS.map(key => meta.get(key))
@@ -49,7 +49,7 @@ export function resolveMarkdownSource(doc: Y.Doc, canonical: string, validatedWi
             ? {kind: 'verified', markdown: witness.source}
             : {kind: 'unverified'}
         } finally { imported.destroy() }
-      } catch { result = {kind: 'import-failed'} }
+      } catch (error) { if (fatalUnexpectedErrors) throw error; result = {kind: 'import-failed'} }
     }
   }
   resolved.set(doc, {tuple, canonicalSha, result})
