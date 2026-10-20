@@ -1510,10 +1510,12 @@ async fn pending_edit_chain_cancels_together_without_false_conflicts() {
         .run(move |store, _| {
             let mut input = write(&ws, "source-0000", "source-0000.md", &body, "later-edit");
             input.now_ms = crate::links::now_ms() + 1;
-            store.write_with(&NoFaults,|tx| -> Result<(),DomainError> {
-                let result = write_text_in_tx(tx,&input)?;
-                let preimage = dohc_engine_storage::Preimage::Present(result.moment.before_blob_sha256.clone().unwrap());
-                dohc_engine_domain::enqueue_write(tx,&result,preimage,"authored")?;
+            store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
+                let result = write_text_in_tx(tx, &input)?;
+                let preimage = dohc_engine_storage::Preimage::Present(
+                    result.moment.before_blob_sha256.clone().unwrap(),
+                );
+                dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
                 Ok(())
             })?;
             Ok(())
@@ -1524,7 +1526,14 @@ async fn pending_edit_chain_cancels_together_without_false_conflicts() {
         std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
         BODY
     );
-    assert_eq!(f.actor.history_operation_pending_jobs(f.ws.clone(),OP.into()).await.unwrap().len(),2);
+    assert_eq!(
+        f.actor
+            .history_operation_pending_jobs(f.ws.clone(), OP.into())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     let result = f.undo().await.unwrap();
     assert!(result.not_restored.is_empty());
     assert_eq!(

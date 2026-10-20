@@ -114,15 +114,28 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     .await
     .unwrap();
     let open = service.open(Some(&handle)).unwrap();
-    open.actor.versioned_text_rename(
-        RenameTextFile {
-            workspace_id:WS.into(),version_id:"main".into(),from_path:"old.md".into(),
-            to_path:"new.md".into(),moment_id:"rename".into(),request_id:None,
-            metadata_origin:"api".into(),metadata_summary:None,metadata_correlation_id:Some(OP.into()),
-            author_json:None,now_ms:2,
-        },open.root.clone(),Arc::new(service.self_writes.scoped(&open.root)),
-        Arc::new(NoFaults),CancellationToken::new(),
-    ).await.unwrap();
+    open.actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.into(),
+                version_id: "main".into(),
+                from_path: "old.md".into(),
+                to_path: "new.md".into(),
+                moment_id: "rename".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: Some(OP.into()),
+                author_json: None,
+                now_ms: 2,
+            },
+            open.root.clone(),
+            Arc::new(service.self_writes.scoped(&open.root)),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     let started = Instant::now();
     let forward = rpc(&transport, &handle, "history.rewriteLinks", "forward").await;
     let forward_ns = started.elapsed().as_nanos();
@@ -143,10 +156,12 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
                     "later-edit",
                 );
                 input.now_ms = now_ms().unwrap() + 1;
-                store.write_with(&NoFaults,|tx| -> Result<(),DomainError> {
-                    let result = write_text_in_tx(tx,&input)?;
-                    let preimage = dohc_engine_storage::Preimage::Present(result.moment.before_blob_sha256.clone().unwrap());
-                    dohc_engine_domain::enqueue_write(tx,&result,preimage,"authored")?;
+                store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
+                    let result = write_text_in_tx(tx, &input)?;
+                    let preimage = dohc_engine_storage::Preimage::Present(
+                        result.moment.before_blob_sha256.clone().unwrap(),
+                    );
+                    dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
                     Ok(())
                 })?;
                 Ok(())
