@@ -29,7 +29,7 @@ pub(crate) fn candidates(
          UNION SELECT object_id FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND (status='unindexed' OR parser_generation<>?4))
          SELECT candidate.object_id,MIN(a.path),MAX(coalesce(s.status='unindexed',0))
          FROM candidates candidate
-         JOIN path_aliases a ON a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=candidate.object_id
+         JOIN path_aliases a INDEXED BY idx_path_aliases_workspace_object ON a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=candidate.object_id
          LEFT JOIN link_sources s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id
          GROUP BY candidate.object_id"
     ).map_err(sql)?;

@@ -753,6 +753,7 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     // tests the read boundary with collisions that normal writes cannot create.
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch("CREATE TABLE path_aliases(workspace_id,version_id,object_id,path);
+        CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id,object_id);
         CREATE TABLE link_sources(workspace_id,version_id,object_id,index_key,status,parser_generation);
         CREATE TABLE link_pending(workspace_id,version_id,object_id);
         CREATE TABLE link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key);
@@ -838,4 +839,47 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     let other = incoming::candidates(&c, "other", "main", "target.md", &["wikilink"]).unwrap();
     assert!(other.sources.is_empty());
     assert_eq!(other.unchecked, vec!["source.md"]);
+}
+
+#[test]
+fn incoming_pending_candidates_do_not_rescan_the_workspace_per_source() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "target", "target.md", "", 1);
+    drain(&mut s);
+    const SOURCES: u64 = 1024;
+    s.write_with(&NoFaults, |tx| {
+        for n in 0..SOURCES {
+            let object = format!("pending-{n:04}");
+            tx.execute(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,1)",
+                [&object],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main',?1,?2)",
+                params![object, format!("pending-{n:04}.md")],
+            ).map_err(sql)?;
+        }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(count(&s, "link_pending"), SOURCES as i64);
+    let work = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&work))).unwrap();
+    let result = lookup(&s, "target.md");
+    s.count_work(None).unwrap();
+    assert!(result.unchecked.is_empty());
+    let expected: Vec<_> = (0..SOURCES)
+        .map(|n| (format!("pending-{n:04}"), format!("pending-{n:04}.md")))
+        .collect();
+    assert_eq!(result.sources, expected);
+    let steps = work.load(Ordering::Relaxed) * 1000;
+    assert!(
+        steps < SOURCES * 256,
+        "incoming candidates used {steps} SQLite VM steps for {SOURCES} pending sources"
+    );
 }
