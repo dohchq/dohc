@@ -160,7 +160,9 @@ async fn stays_open_oracle_kills_closing_write_sessions_in_the_fence() {
     let error = mutant.expect_err("close-write-session mutation survived");
     assert!(error.is_panic());
     let panic = error.into_panic();
-    let message = panic.downcast_ref::<String>().map(String::as_str)
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied());
     assert_eq!(message, Some("Undo closed the write member's session"));
     if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {

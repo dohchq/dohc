@@ -108,17 +108,20 @@ mod tests {
     use super::*;
     #[test]
     fn target_edit_preserves_the_existing_xml_element_and_concurrent_edits() {
-        let doc=Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc,"[[old#part|label]]").unwrap();
-        let element=doc.wikilink_elements()[0].clone();
-        let peer=Ydoc::wire();peer.apply(&doc.encode_full_state()).unwrap();
-        let concurrent=peer.richdoc_append_paragraph("unrelated typing");
-        let (text,spans)=doc.wikilink_spans().unwrap();
-        assert_eq!(&text[spans[0].0.clone()],"old#part");
-        doc.stage_wikilink_targets("[[new#part|label]]",&[(spans[0].1,"new#part".into())]).unwrap();
-        element.insert_attribute(&mut doc.doc.transact_mut(),"label","edited label");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "[[old#part|label]]")
+            .unwrap();
+        let element = doc.wikilink_elements()[0].clone();
+        let peer = Ydoc::wire();
+        peer.apply(&doc.encode_full_state()).unwrap();
+        let concurrent = peer.richdoc_append_paragraph("unrelated typing");
+        let (text, spans) = doc.wikilink_spans().unwrap();
+        assert_eq!(&text[spans[0].0.clone()], "old#part");
+        doc.stage_wikilink_targets("[[new#part|label]]", &[(spans[0].1, "new#part".into())])
+            .unwrap();
+        element.insert_attribute(&mut doc.doc.transact_mut(), "label", "edited label");
         doc.apply(&concurrent).unwrap();
-        let text=doc.project_richdoc().unwrap();
+        let text = doc.project_richdoc().unwrap();
         assert!(text.contains("[[new#part|edited label]]"));
         assert!(text.contains("unrelated typing"));
     }

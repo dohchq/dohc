@@ -297,7 +297,11 @@ async fn adopted_open_source_stays_untouched_and_adoption_before_undo_refuses() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_update_and_history_moment_commit_or_roll_back_together() {
     for crash in 0..3 {
-        let point = if crash == 1 { FaultPoint::StorageBeforePersist } else { FaultPoint::StorageAfterCommitBeforeAck };
+        let point = if crash == 1 {
+            FaultPoint::StorageBeforePersist
+        } else {
+            FaultPoint::StorageAfterCommitBeforeAck
+        };
         let mut f = Fixture::new(1, 1);
         let (lease, _) = f.open_document("source-0000").await;
         let ws = f.ws.clone();
@@ -318,7 +322,9 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
                 let mut input = write(&ws, "source-0000", "source-0000.md", &after, "atomic-open");
                 input.metadata_correlation_id = Some(OP.into());
                 let fault = dohc_engine_testkit::ScriptedFaults::crash_at(point);
-            if crash == 0 { super::super::super::link_documents::CRASH_AFTER_APPEND.set(true); }
+                if crash == 0 {
+                    super::super::super::link_documents::CRASH_AFTER_APPEND.set(true);
+                }
                 let outcome = super::super::super::versioned::with_local_file_mutation_cache_reset(
                     cache,
                     || {
@@ -410,27 +416,53 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
     f.settle_document("source-0000").await;
     let doc = f.document("source-0000").await;
     let update = doc.richdoc_append_paragraph("undo typing");
-    let request=format!("{}-undo",f.ws);
-    let (receive,barrier)=undo_probe::pause_inverse(&request);
-    let (actor,serial)=(f.actor.clone(),f.serial.clone());
-    let typing=async move {
-        tokio::task::spawn_blocking(move ||receive.recv().unwrap()).await.unwrap();
-        let before=undo_probe::turn_count(&request);let start=Instant::now();
-        let _guard=serial.lock().await;
-        let future=actor.ydoc_record_update(key,"source-0000.md".into(),ContentKind::Richdoc,Regime::LocalOnly,
-            update,None,None,None,false,None,Some("queued-undo-typing".into()),11,
-            Arc::new(NoFaults),CancellationToken::new(),None);
+    let request = format!("{}-undo", f.ws);
+    let (receive, barrier) = undo_probe::pause_inverse(&request);
+    let (actor, serial) = (f.actor.clone(), f.serial.clone());
+    let typing = async move {
+        tokio::task::spawn_blocking(move || receive.recv().unwrap())
+            .await
+            .unwrap();
+        let before = undo_probe::turn_count(&request);
+        let start = Instant::now();
+        let _guard = serial.lock().await;
+        let future = actor.ydoc_record_update(
+            key,
+            "source-0000.md".into(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            update,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some("queued-undo-typing".into()),
+            11,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        );
         tokio::pin!(future);
         std::future::poll_fn(|cx| {
-            assert!(future.as_mut().poll(cx).is_pending(),"update answered while actor was paused");
+            assert!(
+                future.as_mut().poll(cx).is_pending(),
+                "update answered while actor was paused"
+            );
             std::task::Poll::Ready(())
-        }).await;
-        tokio::task::spawn_blocking(move ||barrier.wait()).await.unwrap();
+        })
+        .await;
+        tokio::task::spawn_blocking(move || barrier.wait())
+            .await
+            .unwrap();
         future.await.unwrap();
-        (undo_probe::turn_count(&request)-before,start.elapsed().as_nanos())
+        (
+            undo_probe::turn_count(&request) - before,
+            start.elapsed().as_nanos(),
+        )
     };
-    let (result,(undo_gap,undo_wait))=tokio::join!(f.undo_open(),typing);
-    let result=result.unwrap();
+    let (result, (undo_gap, undo_wait)) = tokio::join!(f.undo_open(), typing);
+    let result = result.unwrap();
 
     assert!(undo_gap <= 1);
     assert_eq!(result.not_restored, vec!["source-0000.md"]);

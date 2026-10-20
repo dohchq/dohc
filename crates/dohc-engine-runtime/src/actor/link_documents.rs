@@ -235,7 +235,9 @@ pub(super) fn write(
             input.now_ms,
         )?;
         #[cfg(test)]
-        if CRASH_AFTER_APPEND.replace(false) { return Err(RuntimeError::OperationCrashed); }
+        if CRASH_AFTER_APPEND.replace(false) {
+            return Err(RuntimeError::OperationCrashed);
+        }
         let result = write_text_in_tx(tx, input)?;
         dohc_engine_domain::enqueue_write(tx, &result, Preimage::Present(expected.into()), "ydoc")?;
         crate::search::upsert_file_search_index(
