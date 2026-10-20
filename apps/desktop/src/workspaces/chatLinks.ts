@@ -1,13 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
-import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { ChatScope } from "../ipc/chatScope";
 import type { RegistryEntry } from "./registryStore";
 import type { EngineFileResolver } from "./resolveEngineFiles";
-import type { createActorPresentationRequest } from "./actorPresentation";
+import { chatLinkMessageForPresentation, type createActorPresentationRequest } from "./actorPresentation";
 import { recordedShareSelector } from "./shareViewRecords";
 import { workspaceFileRefs } from "./workspaceFileReferenceScopes";
 
@@ -103,12 +102,7 @@ export function createChatLinksReader(deps: {
             check();
           }
           const author = row.author;
-          const message: Pick<ChatMessage, "author" | "authorUserId" | "authorActorKey"> = {
-            author: { kind: author.authorKind, displayName: author.authorDisplayName },
-            ...(author.authorUserId === undefined ? {} : { authorUserId: author.authorUserId }),
-            ...(author.authorActorKey === undefined ? {} : { authorActorKey: author.authorActorKey }),
-          };
-          const presentation = await present(message, row.threadId);
+          const presentation = await present(chatLinkMessageForPresentation(author), row.threadId);
           check();
           entries.push({
             file: {

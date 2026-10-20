@@ -4790,7 +4790,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     },
   }),
   links: workspaceLinks,
-  chatLinks: (workspace,input) => workspaceChatLinks(workspace.workspaceId,input),
+  chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   listWorkspaces,
@@ -6075,16 +6075,21 @@ const workspaceChatFileMentions = createChatFileMentionsReader({
   principalGeneration: () => credentialCacheGeneration,
 });
 
-const workspaceChatLinks=createChatLinksReader({
- requireChatScope:chatScope.requireChatScope,syncWorkspaceSharedChannels,readWorkspace:findWorkspace,
- principalGeneration:()=>credentialCacheGeneration,
- currentAttachment:id=>workspaceAuthorities.currentBinding(id).attachmentId,resolveEngineFiles,
- presentationRequest:async(scope,check)=>{
-  await warmCredentialCache();check();
-  const agentColors=await agentColorsForPresentation(stateDir());check();
-  return createActorPresentationRequest({agentColors,store:scope.store,readWorkspace:()=>findWorkspace(scope.workspace.workspaceId),
-   assertCurrent:check,installationId:localInstallationId(),credentials:cachedCredentials});
- },
+const workspaceChatLinks = createChatLinksReader({
+  requireChatScope: chatScope.requireChatScope, syncWorkspaceSharedChannels, readWorkspace: findWorkspace,
+  principalGeneration: () => credentialCacheGeneration,
+  currentAttachment: id => workspaceAuthorities.currentBinding(id).attachmentId,
+  resolveEngineFiles,
+  presentationRequest: async (scope, check) => {
+    await warmCredentialCache();
+    check();
+    const agentColors = await agentColorsForPresentation(stateDir());
+    check();
+    return createActorPresentationRequest({
+      agentColors, store: scope.store, readWorkspace: () => findWorkspace(scope.workspace.workspaceId),
+      assertCurrent: check, installationId: localInstallationId(), credentials: cachedCredentials,
+    });
+  },
 });
 
 function registerIpcHandlers(): void {

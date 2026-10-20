@@ -2348,4 +2348,4 @@ export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { ret
 
 export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
 
-export async function chatLinks(ctx:ToolContext,input:ChatLinksInput){return requestCli(ctx,"chatLinks",ChatLinksInput.parse(input));}
+export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

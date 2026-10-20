@@ -480,8 +480,8 @@ export class ChatsLiveAdapter {
 
   async linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage> {
     this.assertWorkspace(input.workspaceId);
-    const {workspaceId:_workspaceId,...params}=input;
-    return this.request(CHATS_METHOD.conversationLinks,params);
+    const { workspaceId: _workspaceId, ...params } = input;
+    return this.request(CHATS_METHOD.conversationLinks, params);
   }
 
   async fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage> {

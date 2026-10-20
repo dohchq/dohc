@@ -3486,9 +3486,9 @@ async function dispatchMentionAndLinkReads(
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
-  if(request.verb==="chatLinks"){
-    if(!options.chatLinks)throw new CliCommandError("Chat links are unavailable.");
-    return options.chatLinks(workspace,{channelWireId:request.args.channelWireId,cursor:request.args.cursor});
+  if (request.verb === "chatLinks") {
+    if (!options.chatLinks) throw new CliCommandError("Chat links are unavailable.");
+    return options.chatLinks(workspace, { channelWireId: request.args.channelWireId, cursor: request.args.cursor });
   }
   if (request.verb === "chatFileMentions") {
     if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");

@@ -152,10 +152,10 @@ export const chatOperations = {
     payload: SetChatReactionPayload, result: SetChatReactionResult,
   },
   chatLinks: {
-    capabilityId:"chat.read", channel:"desktop:chat-links",
-    scope:"workspace", guard:"active-workspace",
-    inactiveMessage:"Chats stopped because this window changed workspaces.",
-    payload:ChatLinksPayload, result:ChatLinksResult,
+    capabilityId: "chat.read", channel: "desktop:chat-links",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Chats stopped because this window changed workspaces.",
+    payload: ChatLinksPayload, result: ChatLinksResult,
   },
   chatFileMentionsPage: {
     capabilityId: "chat.read", channel: "desktop:chat-file-mentions-page",

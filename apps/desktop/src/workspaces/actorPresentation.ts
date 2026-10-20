@@ -1,3 +1,4 @@
+import type { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { createHmac, randomBytes } from "node:crypto";
 import { actorHueInput, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
@@ -167,5 +168,15 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
     input.assertCurrent();
     return authors.map(author => presentationFor(input.workspaceId, deriveMomentActor(author, context, "").key,
       () => JSON.stringify(["unknown", author]), own, colors()));
+  };
+}
+
+export function chatLinkMessageForPresentation(
+  author: NonNullable<ChatLinksEnginePage>["entries"][number]["author"],
+): DisplayMessage {
+  return {
+    author: { kind: author.authorKind, displayName: author.authorDisplayName },
+    ...(author.authorUserId === undefined ? {} : { authorUserId: author.authorUserId }),
+    ...(author.authorActorKey === undefined ? {} : { authorActorKey: author.authorActorKey }),
   };
 }

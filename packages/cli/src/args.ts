@@ -1,4 +1,4 @@
-import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
