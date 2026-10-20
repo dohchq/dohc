@@ -126,7 +126,9 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if matches!(
         error,
-        RuntimeError::ChatMentionAccessChanged | RuntimeError::ChatMentionVersionChanged
+        RuntimeError::ChatMentionAccessChanged
+            | RuntimeError::ChatMentionVersionChanged
+            | RuntimeError::ChatConversationLinksChanged
     ) {
         return WireError::new(ErrorCode::Conflict, error.code());
     }

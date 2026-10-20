@@ -170,6 +170,7 @@ type RegistrationWork =
 enum Command {
     Run(ActorWork),
     WakeLinks,
+    ConversationLinksRequested,
     /// Work that may release live application registrations in the same step.
     RunWithRegistrations(RegistrationWork),
     LiveApplication(Box<live_application::Request>),
@@ -559,6 +560,13 @@ impl ActorHandle {
         }
         unreachable!()
     }
+    pub(crate) async fn request_conversation_links(&self) -> Result<(), RuntimeError> {
+        self.tx
+            .send(Command::ConversationLinksRequested)
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)
+    }
+
     pub fn hold_link_drain(&self) -> LinkDrainHold {
         self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
         LinkDrainHold {
@@ -883,6 +891,7 @@ fn worker_main(
     // Publish before link startup, then let queued foreground commands win.
     // An idle reopened store must also resume its durable drain without a
     // foreground request; link-drain holds still postpone startup and slices.
+    let mut conversation_links_requested = false;
     let mut links_started = false;
     let mut links = None;
     let mut timer = None;
@@ -919,6 +928,21 @@ fn worker_main(
                     // whether the hold prevented worker and timer creation.
                     link_metrics.lock().unwrap().idle_slots += 1;
                 }
+                let conversation_delay = if conversation_links_requested
+                    && matches!(mode, ActorOpenMode::ReadWrite)
+                    && link_drain_holds.load(Ordering::Acquire) == 0
+                {
+                    match crate::conversation_links::tick(&mut store) {
+                        Ok(true) => std::time::Duration::ZERO,
+                        Ok(false) => std::time::Duration::MAX,
+                        Err(error) => {
+                            eprintln!("conversation links repair retained: {error}");
+                            std::time::Duration::from_millis(250)
+                        }
+                    }
+                } else {
+                    std::time::Duration::MAX
+                };
                 match (&mut links, &timer) {
                     (Some(worker), Some(timer))
                         if link_drain_holds.load(Ordering::Acquire) == 0 =>
@@ -932,7 +956,7 @@ fn worker_main(
                         );
                         #[cfg(feature = "fault-injection")]
                         phase.field("link_drain_holds", link_drain_holds.load(Ordering::Acquire));
-                        let delay = worker.tick(&mut store);
+                        let delay = worker.tick(&mut store).min(conversation_delay);
                         #[cfg(feature = "fault-injection")]
                         {
                             phase.finish("completed");
@@ -956,6 +980,7 @@ fn worker_main(
                             })
                         }
                     }
+                    _ if conversation_delay.is_zero() => continue,
                     _ => rx.blocking_recv(),
                 }
             }
@@ -982,6 +1007,7 @@ fn worker_main(
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
+            Command::ConversationLinksRequested => conversation_links_requested = true,
             Command::RunWithRegistrations(work) => {
                 work(&mut store, &mut doc_cache, &mut live_applications);
             }

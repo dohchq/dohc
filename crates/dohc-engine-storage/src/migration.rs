@@ -3337,6 +3337,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("file_search_key.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 64,
+        id: "v2-chat-conversation-file-links",
+        sql: include_str!("conversation_file_links.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// The ordinary pull pass whose applied pages await their terminal commit.
@@ -4378,6 +4384,10 @@ mod tests {
             (
                 "v2-file-search-key",
                 "60447cc5e4274b65f3f9e71a830288acfc896ac0899d471e8bcebaf754519695",
+            ),
+            (
+                "v2-chat-conversation-file-links",
+                "dc23bbf88b48b0bbc9f66757183f826a1f11ef87766f33006db7d7109810ed04",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
