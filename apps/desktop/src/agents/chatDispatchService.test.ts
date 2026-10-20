@@ -3753,5 +3753,43 @@ describe("chatDispatchService", () => {
       fixture.spawnCalls[0]!.process.emitExit(null, "SIGKILL");
       await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
     });
+
+    it("drops the owed notice of a requeued request unseen when dohc could not drop it at once", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const runNotices = fixture.serviceOptions.runNotices!;
+      let failRemove = true;
+      const service = createChatDispatchService({
+        ...fixture.serviceOptions,
+        runNotices: {
+          ...runNotices,
+          owed: {
+            ...runNotices.owed,
+            remove: async (workspaceId, runId) => {
+              if (failRemove) {
+                failRemove = false;
+                throw new Error("dohc stopped before it dropped the notice");
+              }
+              await runNotices.owed.remove(workspaceId, runId);
+            },
+          },
+        },
+      });
+      try {
+        const trigger = await createAgentThread(fixture, { body: "Plan day 8", authorUserId: "user_local" });
+        service.start();
+        await service.scanWorkspace(WORKSPACE_ID);
+        // The drop failed after the requeue landed; settling the owed
+        // notice finds the request back in line and drops it unseen.
+        expect(failRemove).toBe(false);
+        expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("pending");
+        expect(await owedRuns(fixture)).toEqual([]);
+        expect(fixture.notices).toEqual([]);
+      } finally {
+        await service.stop();
+      }
+    });
   });
 });

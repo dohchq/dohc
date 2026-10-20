@@ -51,6 +51,9 @@ describe("useWorkspaceTrust", () => {
     await act(async () => { reads.get("a")!.resolve({ workspaceId: "a", trusted: false }); });
     await act(async () => { await hook.result.current.requestTrust(); });
     expect(bridgeMock.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "a" });
+    // After a send, the request says it is automatic, so main opens it once.
+    await act(async () => { await hook.result.current.requestTrust(true); });
+    expect(bridgeMock.requestWorkspaceTrust).toHaveBeenLastCalledWith({ workspaceId: "a", automatic: true });
     expect(hook.result.current.trusted).toBe(true);
     await act(async () => { await hook.result.current.restrict(); });
     await waitFor(() => expect(hook.result.current.trusted).toBe(false));

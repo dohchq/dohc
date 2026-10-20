@@ -6977,6 +6977,7 @@ function registerIpcHandlers(): void {
       operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
     stopAgents: (workspaceId) => chatDispatchService.stopForRestrictedMode(workspaceId),
     onAsk: (workspaceId) => chatDispatchService.trustAsked(workspaceId),
+    wasAsked: (workspaceId) => chatDispatchService.trustWasAsked(workspaceId),
     notifyChanged: notifyWorkspaceTrustChanged,
   }));
 

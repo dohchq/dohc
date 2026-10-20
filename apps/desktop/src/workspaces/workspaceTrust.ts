@@ -93,6 +93,14 @@ export function createWorkspaceTrust(dependencies: {
   // even when the file could not be written, until the person trusts them.
   const restricted = new Set<string>();
   const revocations = new Map<string, number>();
+  // A listener never interrupts a trust or a revoke.
+  const changed = (workspaceId: string, trusted: boolean) => {
+    try {
+      dependencies.onChange?.(workspaceId, trusted);
+    } catch (error) {
+      console.warn("[desktop] a workspace trust listener failed", error);
+    }
+  };
   // Writes go one at a time, so the last one lands last.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -158,7 +166,7 @@ export function createWorkspaceTrust(dependencies: {
   function revoke(workspaceId: string): void {
     restricted.add(workspaceId);
     revocations.set(workspaceId, (revocations.get(workspaceId) ?? 0) + 1);
-    dependencies.onChange?.(workspaceId, false);
+    changed(workspaceId, false);
   }
 
   // Writes Restricted Mode to the file. A failed write leaves the workspace
@@ -205,7 +213,7 @@ export function createWorkspaceTrust(dependencies: {
         // of the file.
         if (revokedMeanwhile()) return false;
         restricted.delete(workspace.workspaceId);
-        dependencies.onChange?.(workspace.workspaceId, true);
+        changed(workspace.workspaceId, true);
         return true;
       });
     },

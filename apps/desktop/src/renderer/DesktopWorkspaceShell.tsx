@@ -1813,9 +1813,9 @@ export function DesktopWorkspaceShell(props: {
   const workspaceTrust = useWorkspaceTrust(workspaceId, workspaceIsReady && !shareView, (error, retry) =>
     reportShellError(TRUST_READ_FAILED_MESSAGE, error, retry));
   const { requestTrust: requestWorkspaceTrust } = workspaceTrust;
-  const trustWorkspace = useCallback(async () => {
+  const trustWorkspace = useCallback(async (automatic?: true) => {
     try {
-      await requestWorkspaceTrust();
+      await requestWorkspaceTrust(automatic);
     } catch (error) {
       reportShellError("dohc could not trust this workspace.", error, () => void trustWorkspace());
     }
@@ -1824,7 +1824,7 @@ export function DesktopWorkspaceShell(props: {
   // A send that asks an agent Restricted Mode holds opens main's dialog, only
   // for the workspace this shell still shows.
   const trustForHeldAgent = useCallback((forWorkspaceId: string) => {
-    if (forWorkspaceId === workspaceId) void trustWorkspace();
+    if (forWorkspaceId === workspaceId) void trustWorkspace(true);
   }, [trustWorkspace, workspaceId]);
   // The engine's newest file moment, whatever the History page holds: 50
   // newer Collection changes, or a moment that arrived with an old date,

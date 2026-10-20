@@ -22,6 +22,10 @@ async function harness(input: {
   stopAgents?: (workspaceId: string) => Promise<void>;
   // Hears the dialog open.
   onAsk?: (workspaceId: string) => void;
+  // Hears every trust change.
+  onChange?: (workspaceId: string, trusted: boolean) => void;
+  // Keeps whether the dialog was shown, as dispatch does.
+  asked?: Set<string>;
   // Runs before each write of the trust file, to hold it.
   writeGate?: { hold: (() => Promise<void>) | null };
 } = {}) {
@@ -32,6 +36,7 @@ async function harness(input: {
   const file = join(scratch, "profile", "workspace-trust.json");
   const trust = createWorkspaceTrust({
     file,
+    ...(input.onChange ? { onChange: input.onChange } : {}),
     writeText: async (path, text) => {
       await input.writeGate?.hold?.();
       if (input.failWrites?.value) throw new Error("disk full");
@@ -56,7 +61,10 @@ async function harness(input: {
     stopAppCommands: (held) =>
       input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
     stopAgents: input.stopAgents ?? (async () => undefined),
-    ...(input.onAsk ? { onAsk: input.onAsk } : {}),
+    ...(input.onAsk || input.asked ? {
+      onAsk: (workspaceId: string) => { input.asked?.add(workspaceId); input.onAsk?.(workspaceId); },
+    } : {}),
+    ...(input.asked ? { wasAsked: (workspaceId: string) => input.asked!.has(workspaceId) } : {}),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
@@ -66,6 +74,8 @@ async function harness(input: {
     leave: () => { current = false; },
     read: () => handlers.readWorkspaceTrust(payload, context),
     request: () => handlers.requestWorkspaceTrust(payload, context),
+    // As the renderer asks after a send whose agent Restricted Mode holds.
+    requestAutomatic: () => handlers.requestWorkspaceTrust({ ...payload, automatic: true }, context),
     restrict: () => handlers.restrictWorkspace(payload, context),
   };
 }
@@ -326,5 +336,39 @@ describe("main's workspace trust operations", () => {
     await trusted.request();
     expect(asked).toEqual(["trip", "trip"]);
     expect(h.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops and saves a restrict, and keeps a grant, whatever a trust listener throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ answer: true, onChange: () => { throw new Error("listener failed"); } });
+    await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    const stop = vi.fn(async () => undefined);
+    await devServer(h, stop);
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("opens an automatic question only until it was shown, and Trust workspace the person clicks always", async () => {
+    const asked = new Set<string>();
+    const h = await harness({ answer: false, asked });
+    // Two windows' sends: the second answer arrives after the person chose Stay.
+    await h.requestAutomatic();
+    await h.requestAutomatic();
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    await h.request();
+    expect(h.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts the question as asked only once the dialog was shown", async () => {
+    const asked = new Set<string>();
+    const h = await harness({ answer: false, asked });
+    h.confirm.mockRejectedValueOnce(new Error("The window closed before the dialog opened."));
+    await expect(h.requestAutomatic()).rejects.toThrow("The window closed");
+    expect(asked.size).toBe(0);
+    await h.requestAutomatic();
+    expect(h.confirm).toHaveBeenCalledTimes(2);
+    expect(asked).toEqual(new Set(["trip"]));
   });
 });

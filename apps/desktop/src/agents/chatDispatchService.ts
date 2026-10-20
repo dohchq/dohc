@@ -695,13 +695,28 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           const linked = await dispatch.listRunMessages(workspaceId, runId, durableDispatchRequest);
           outcome = linked.length === 0 ? "no-reply" : "finished";
         }
-        await noticeRun(workspace, run, outcome);
+        // A request Restricted Mode stopped whose requeue landed before
+        // dohc could drop the notice runs again, so the notice is stale.
+        if (outcome !== "restricted" || !(await runsAgain(dispatch, run))) {
+          await noticeRun(workspace, run, outcome);
+        }
       }
       await notices.owed.remove(workspaceId, runId);
     } catch (error) {
       reportError(error);
       scheduleRecoveryScan(workspace);
     }
+  }
+
+  // Whether a run's request is back in line, or a later run in its thread
+  // has started since.
+  async function runsAgain(dispatch: AwaitableAgentDispatchStore, run: AgentRunRecord): Promise<boolean> {
+    const [pending, latest] = await Promise.all([
+      dispatch.listPending(run.workspaceId),
+      dispatch.latestRunForThread(run.workspaceId, run.threadId),
+    ]);
+    return pending.some((each) => each.triggerMessageId === run.triggerMessageId) ||
+      (latest !== null && latest.runId !== run.runId && latest.startedAtMs >= run.startedAtMs);
   }
 
   // Posts every notice this workspace still owes, after a crash or a failed
@@ -1475,6 +1490,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   function trustAsked(workspaceId: string): void {
     told(workspaceId).asked = true;
   }
+  const trustWasAsked = (workspaceId: string): boolean => toldOfRestriction.get(workspaceId)?.asked === true;
 
   // The workspace was trusted or restricted: a later hold tells the person
   // again, and their next held message asks again.
@@ -1893,6 +1909,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopForRestrictedMode,
     waitsForTrust,
     trustAsked,
+    trustWasAsked,
     trustChanged,
     resumeThreadDispatch,
     dispatchStateForThread,

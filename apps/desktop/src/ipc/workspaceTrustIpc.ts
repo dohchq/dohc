@@ -34,8 +34,10 @@ export function workspaceTrustHandlers<
   isSharedView(workspaceId: string): boolean;
   // Main's dialog, over the window that asked. True only on Trust workspace.
   confirm(event: Event, workspace: TrustedFolder): Promise<boolean>;
-  // The dialog is opening for the workspace.
+  // The dialog was shown for the workspace, whatever the answer.
   onAsk?(workspaceId: string): void;
+  // Whether it was shown since the workspace's trust last changed.
+  wasAsked?(workspaceId: string): boolean;
   // Stops every app command the workspace runs, and its previews. Rejects
   // when one did not stop.
   stopAppCommands(operation: Operation): Promise<void>;
@@ -52,8 +54,9 @@ export function workspaceTrustHandlers<
     // The grant names the folder the person was asked about. A folder put at
     // the path while the dialog was open does not match it.
     const folder = await dependencies.identify(workspace.rootPath);
+    const trusted = await dependencies.confirm(event, workspace);
     dependencies.onAsk?.(workspace.workspaceId);
-    if (!(await dependencies.confirm(event, workspace))) return;
+    if (!trusted) return;
     // The dialog can outlast the window's workspace.
     operation.assertCurrent();
     if (!(await trust.trust(workspace, { folder }))) return;
@@ -65,7 +68,7 @@ export function workspaceTrustHandlers<
       workspaceId: operation.workspace.workspaceId,
       trusted: await trust.isTrusted(operation.workspace),
     }),
-    requestWorkspaceTrust: async (_input, { event, operation }) => {
+    requestWorkspaceTrust: async (input, { event, operation }) => {
       const { workspace } = operation;
       const { workspaceId } = workspace;
       if (dependencies.isSharedView(workspaceId)) {
@@ -73,7 +76,9 @@ export function workspaceTrustHandlers<
       }
       if (!(await trust.isTrusted(workspace))) {
         let answer = asking.get(workspaceId);
-        if (!answer) {
+        // A question a send asked for automatically opens only until it
+        // was shown; Trust workspace the person clicks always opens it.
+        if (!answer && !(input.automatic && dependencies.wasAsked?.(workspaceId))) {
           answer = askAndTrust(event, operation).finally(() => asking.delete(workspaceId));
           asking.set(workspaceId, answer);
         }

@@ -6139,11 +6139,11 @@ export const workspaceTrustOperations = {
     inactiveMessage: "Open this workspace to see whether it is trusted.",
   },
   // Opens main's dialog. Trusted is true only when the person chose Trust
-  // workspace there.
+  // workspace there. Automatic: a send asked for it, not the person.
   requestWorkspaceTrust: {
     capabilityId: "workspace.trust.request",
     channel: "desktop:request-workspace-trust",
-    payload: WorkspaceIdPayload, result: WorkspaceTrustAnswer,
+    payload: WorkspaceIdPayload.extend({ automatic: z.literal(true).optional() }), result: WorkspaceTrustAnswer,
     guard: "active-workspace", scope: "workspace",
     inactiveMessage: "Open this workspace to trust it.",
   },
