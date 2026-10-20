@@ -1221,11 +1221,26 @@ export const ImportToDatabasePayload = z.object({
 export type ImportToDatabasePayload = z.infer<typeof ImportToDatabasePayload>;
 
 export const ImportToDatabaseResult = z.object({
+  operationId: HistoryOperationId,
   path: z.string(),
   tableName: z.string(),
   rowCount: z.number().int().nonnegative(),
 });
 export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
+export const UndoDatabaseImportPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: z.string().min(1) });
+export type UndoDatabaseImportPayload = z.infer<typeof UndoDatabaseImportPayload>;
+export const databaseImportOperations = {
+  importToDatabase: {
+    capabilityId: "data.import", channel: "desktop:import-to-database", scope: "workspace", guard: "trusted-sender",
+    handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "Import retains renderer and workspace admission." },
+    payload: ImportToDatabasePayload, result: ImportToDatabaseResult,
+  },
+  undoDatabaseImport: {
+    capabilityId: "data.import.undo", channel: "desktop:undo-database-import", scope: "workspace", guard: "trusted-sender",
+    handlerCheck: { check: "withRendererWorkspaceOperation + withExclusiveWorkspaceOperation", reason: "Main checks workspace ownership and unchanged bytes before recoverable deletion." },
+    payload: UndoDatabaseImportPayload, result: DeleteWorkspacePathResult,
+  },
+} as const satisfies OperationTable;
 
 // The renderer cannot import the engine client package, so the list lives
 // here and the type check keeps it complete.
@@ -6879,7 +6894,8 @@ export const serverAccountOperations = {
 } as const satisfies OperationTable;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof workspaceSyncOperations>,
+  extends OperationBridge<typeof databaseImportOperations>,
+    OperationBridge<typeof workspaceSyncOperations>,
     OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
@@ -6990,9 +7006,6 @@ export interface DohcDesktopBridge
   applyDatabaseEdit(
     payload: ApplyDatabaseEditPayload,
   ): Promise<DatabaseEditResult>;
-  importToDatabase(
-    payload: ImportToDatabasePayload,
-  ): Promise<ImportToDatabaseResult>;
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewAnswer>;

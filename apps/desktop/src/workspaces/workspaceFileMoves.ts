@@ -652,13 +652,13 @@ export async function deleteWorkspacePathByHand(
   operation: PathChangeOperation,
   path: string,
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
-  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean },
+  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean; markChanged?: () => void; admit?: () => Promise<void> },
 ): Promise<{ trashed: boolean } & Partial<OperationRecovery>> {
   const rootPath = operation.workspace.rootPath;
   assertWritable(operation);
   const { capture } = options;
   const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
-  const outcome = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
+  const change = async (markChanged: () => void) => {
     if (options.emptyFolderOnly) {
       assertWritable(operation);
       if (await removeEmptyWorkspaceFolder(rootPath, path)) markChanged();
@@ -666,6 +666,8 @@ export async function deleteWorkspacePathByHand(
     }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
     const trash = async (recorded: readonly string[]) => {
+      assertWritable(operation);
+      await options.admit?.();
       const plan = await stageDeleteRecovery(operationId, join(rootPath, endpoint), endpoint, recorded);
       let staged: string | undefined;
       const trashed = await deletePath(rootPath, endpoint, options.trashItem, path => { staged = path; });
@@ -702,7 +704,8 @@ export async function deleteWorkspacePathByHand(
         return { ...trashed, refused: undefined };
       },
       () => gone);
-  });
+  };
+  const outcome = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));
   if (outcome.refused !== undefined) {
     const where = outcome.trashed ? "the trash" : "the workspace trash, .dohc/trash";
     throw new Error(`${path} is in ${where}. ${outcome.refused}`);

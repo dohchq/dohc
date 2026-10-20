@@ -3000,6 +3000,15 @@ export function DesktopWorkspaceShell(props: {
     [closeTabsAfterFlush],
   );
 
+  // Every tab showing a file, in every group, as an import's Undo closes them.
+  const closePathTabs = useCallback(
+    (path: string) => {
+      void closeTabsAfterFlush(wbRef.current.editorGroups.flatMap((group) =>
+        group.tabs.filter((tab) => tab.path === path).map((tab) => ({ groupId: group.id, tab }))));
+    },
+    [closeTabsAfterFlush],
+  );
+
   const commitAfterTabFlush = useCallback(
     (
       groupId: string,
@@ -5751,12 +5760,14 @@ export function DesktopWorkspaceShell(props: {
                 onRunApp={openAppTab}
                 onButtonError={reportButtonError}
                 onButtonNotice={showSuccessNotice}
+                onClosePath={closePathTabs}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)
                 }
+                receivedShare={!!shareView || isMountedSharePath(tabPath)}
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
                   : { onSharePath })}

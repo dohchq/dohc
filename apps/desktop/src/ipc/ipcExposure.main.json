@@ -302,6 +302,7 @@
     "desktop:typing-recovery",
     "desktop:unblock-relay-share-discussion-principal",
     "desktop:undo-collection-automation-run",
+    "desktop:undo-database-import",
     "desktop:undo-history-operation",
     "desktop:undo-relay-share",
     "desktop:undo-stop-and-restore",
@@ -320,6 +321,8 @@
     "desktop:write-workspace-text"
   ],
   "guards": {
+    "desktop:import-to-database": "trusted-sender",
+    "desktop:undo-database-import": "trusted-sender",
     "desktop:list-workspace-versions": "active-workspace",
     "desktop:create-workspace-version": "active-workspace",
     "desktop:switch-workspace-version": "active-workspace",
