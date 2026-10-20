@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use dohc_engine_protocol::{
     error::ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
@@ -1542,20 +1542,20 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
     .await;
     assert_eq!(running["dispatch"]["state"], json!("running"));
 
-    let refused = second_transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                100,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "rpc-chat-round-8",
-                }),
-            ),
-        )
-        .await;
+    let refused = call_with_busy_retry(
+        &second_transport,
+        RequestContext::unbounded(),
+        request(
+            100,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "rpc-chat-round-8",
+            }),
+        ),
+    )
+    .await;
     let refused = refused.expect_err("a second service must not attach to the shared actor");
     assert_eq!(refused.code, ErrorCode::WorkspaceUnavailable);
     assert_eq!(refused.message, "workspace database is already attached");

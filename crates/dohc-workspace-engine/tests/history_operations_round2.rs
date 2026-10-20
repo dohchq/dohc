@@ -7,7 +7,7 @@ use dohc_engine_domain::{
     DomainError, RenameTextFile, VersionedTextStore, WriteText, rename_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults};
@@ -80,18 +80,18 @@ async fn fixture(
         .unwrap();
     drop(store);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let response = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WS}),
-            ),
-        )
-        .await
-        .unwrap();
+    let response = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WS}),
+        ),
+    )
+    .await
+    .unwrap();
     let handle = serde_json::from_value(response.result["workspace"].clone()).unwrap();
     reconcile_until_settled(&transport, &handle, 10).await;
     (scratch, transport, handle)
@@ -154,19 +154,19 @@ async fn undo_rpc_proof(n: usize) {
     wait_for_undo_placement(&transport, &handle, OP, "undo").await;
     assert!(result.get("moments").is_none());
     let compensation = result["compensationOperationId"].as_str().unwrap();
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            keyed_request(
-                24,
-                "history.undo",
-                Some(handle.clone()),
-                "undo-the-undo",
-                json!({"operationId":compensation}),
-            ),
-        )
-        .await
-        .unwrap_err();
+    let refused = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            24,
+            "history.undo",
+            Some(handle.clone()),
+            "undo-the-undo",
+            json!({"operationId":compensation}),
+        ),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(refused.message, "invalid-input");
 
     let mut cursor: Option<Value> = None;
@@ -232,19 +232,19 @@ async fn history_operation_unknown_id_leaves_live_session_open() {
     let (_scratch, transport, handle) = fixture(1).await;
     let session = call(&transport,&handle,20,"ydoc.open",
         json!({"versionId":"main","path":"live.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            keyed_request(
-                21,
-                "history.undo",
-                Some(handle.clone()),
-                "unknown",
-                json!({"operationId":"dohc-operation:unknown"}),
-            ),
-        )
-        .await
-        .unwrap_err();
+    let error = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            21,
+            "history.undo",
+            Some(handle.clone()),
+            "unknown",
+            json!({"operationId":"dohc-operation:unknown"}),
+        ),
+    )
+    .await
+    .unwrap_err();
     assert!(error.message.contains("operation unavailable"));
     let doc = Ydoc::wire();
     let update =

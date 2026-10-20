@@ -189,16 +189,16 @@ it("watch refusal preserves the authorized response",async()=>{
 it.skipIf(process.env.DOHC_R4_READ_PERF!=="1")("measures the authorized read service at 50 KB and 1 MB",async()=>{
   const results:unknown[]=[];
   for(const size of [51_200,1_048_576]) {
-    const f=await fixture(),text="x".repeat(size),input={grantId:"link",generation:1,principal:{kind:"link" as const}};
+    const f=await fixture(),text="x".repeat(size),input={grantId:"link",generation:1};
     const service=f.storage.createReplicaLinkReadService(f.source,f.watches,f.activity,createShareReadQueries(f.storage,500,LINK_KEY).newestFilteredOpFreshness,LINK_KEY);
     try {
-      f.publish(text);const cursor=service.inventory(input,()=>{}).nextCursor,digest=sha256(text);
+      f.publish(text);const cursor=service.inventory(input,()=>input).nextCursor,digest=sha256(text);
       for(const includeBytes of [false,true]) {
         const samples:number[]=[];
         for(let i=0;i<110;i++) {
           const start=performance.now();
-          if(includeBytes)expect(service.blob(input,()=>{},digest)!.bytes!.byteLength).toBe(size);
-          else expect(service.feed(input,()=>{},cursor,100).ops).toEqual([]);
+          if(includeBytes)expect(service.blob(input,()=>input,digest)!.bytes!.byteLength).toBe(size);
+          else expect(service.feed(input,()=>input,cursor,100).ops).toEqual([]);
           if(i>=10)samples.push(performance.now()-start);
         }
         samples.sort((a,b)=>a-b);
@@ -210,15 +210,15 @@ it.skipIf(process.env.DOHC_R4_READ_PERF!=="1")("measures the authorized read ser
 });
 
 it.skipIf(process.env.DOHC_R4_COST!=="1")("R4 review: measures 5000-file current and chunk authorization",async()=>{
-  const f=await fixture(),input={grantId:"link",generation:1,principal:{kind:"link" as const}};
+  const f=await fixture(),input={grantId:"link",generation:1};
   const service=f.storage.createReplicaLinkReadService(f.source,f.watches,f.activity,createShareReadQueries(f.storage,500,LINK_KEY).newestFilteredOpFreshness,LINK_KEY);
   try {
     f.publish();const first=f.latest.files[0]!;
     f.latest.files=Array.from({length:5000},(_,i)=>({...first,objectId:"o"+i,path:"docs/"+String(i).padStart(5,"0")+".md"}));
-    const blob=service.blob(input,()=>{},sha256("live"))!;
-    const guard="guard" in blob ? blob.guard as ()=>unknown : ()=>service.blob(input,()=>{},sha256("live"),false);
+    const blob=service.blob(input,()=>input,sha256("live"))!;
+    const guard="guard" in blob ? blob.guard as ()=>unknown : ()=>service.blob(input,()=>input,sha256("live"),false);
     const results=[];
-    for(const [operation,run] of [["current-5000",()=>service.inventory(input,()=>{})],["chunk-guard-5000",guard]] as const){
+    for(const [operation,run] of [["current-5000",()=>service.inventory(input,()=>input)],["chunk-guard-5000",guard]] as const){
       const samples=[];for(let i=0;i<110;i++){const start=performance.now();run();if(i>=10)samples.push(performance.now()-start);}
       samples.sort((a,b)=>a-b);results.push({operation,n:100,p50:samples[49],p95:samples[94],p99:samples[98]});
     }
