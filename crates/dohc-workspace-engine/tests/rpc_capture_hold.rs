@@ -504,7 +504,10 @@ async fn undo_after_outside_write_at_old_path_refuses_without_stalling_capture()
     )
     .await
     .expect_err("the outside file occupies the old path");
-    println!("Undo after outside write: {:?} {refusal:?}", started.elapsed());
+    println!(
+        "Undo after outside write: {:?} {refusal:?}",
+        started.elapsed()
+    );
     assert!(refusal.message.contains("old path occupied"), "{refusal:?}");
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
