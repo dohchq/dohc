@@ -443,6 +443,7 @@ dependencies = [
  "file-id",
  "fs4",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

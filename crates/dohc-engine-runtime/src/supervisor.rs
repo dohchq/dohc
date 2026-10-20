@@ -537,44 +537,90 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
 }
 
 /// Give the store and any journal beside it mode 0600 and, on a Mac, no ACL
-/// entries. A mode and an ACL belong to the file, not its name, so a hard
-/// link another user made while the store's folder was open to them reads
-/// nothing afterwards. A link at any of these names, or anything but a file,
-/// is refused. On a Mac, a network volume keeps its server's modes and ACLs,
-/// so nothing changes there. The files are never opened: closing a
-/// descriptor on one would drop the locks SQLite holds on it. A file SQLite
-/// creates later takes the store's mode and none of the private folder's
-/// entries.
+/// entries, and create a missing store with mode 0600 so SQLite gives its
+/// journals that mode too. A mode and an ACL belong to the file, not its
+/// name, so a hard link another user made while the store's folder was open
+/// to them reads nothing afterwards. Each step works through the folder's
+/// descriptor and never follows a link at a file's name; a link there, or
+/// anything but a file, is refused. The files are never opened for reading
+/// or writing: closing such a descriptor would drop the locks SQLite holds on
+/// them. On a Mac, a network volume keeps its server's modes and ACLs, so
+/// nothing changes there.
 #[cfg(unix)]
 fn restrict_store_files(db_path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    restrict_store_files_with(db_path, |_| {})
+}
+
+/// [`restrict_store_files`], with a seam just before each change of mode.
+#[cfg(unix)]
+fn restrict_store_files_with(
+    db_path: &Path,
+    before_chmod: impl Fn(&std::ffi::OsStr),
+) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    let (Some(parent), Some(name)) = (db_path.parent(), db_path.file_name()) else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
+    #[cfg(target_vendor = "apple")]
+    if !dohc_macos_files::is_local_at(parent)? {
+        return Ok(());
+    }
+    let folder = rustix::fs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let create = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
+    match rustix::fs::openat(
+        &folder,
+        name,
+        create | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ) {
+        Ok(_) | Err(rustix::io::Errno::EXIST) => {}
+        Err(err) => return Err(err.into()),
+    }
     for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut name = db_path.as_os_str().to_owned();
-        name.push(suffix);
-        let path = Path::new(&name);
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
+        let mut file = name.to_owned();
+        file.push(suffix);
+        let stat = match rustix::fs::statat(&folder, &file, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(err) => return Err(err.into()),
         };
-        if !metadata.is_file() {
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "an engine store file is a link or not a file",
             ));
         }
         #[cfg(target_vendor = "apple")]
-        {
-            if !dohc_macos_files::is_local_at(path)? {
-                continue;
-            }
-            dohc_macos_files::remove_acl_entries_at(path)?;
-        }
-        if metadata.permissions().mode() & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        dohc_macos_files::remove_acl_entries_at(&parent.join(&file))?;
+        if stat.st_mode & 0o077 != 0 {
+            before_chmod(&file);
+            chmod_private(&folder, &file)?;
         }
     }
     Ok(())
+}
+
+/// Give `name` in `folder` mode 0600. On a Mac this never follows a link at
+/// the name. Linux has no such call, so a link put there since the caller's
+/// check is followed; only a user who can write the store's private folder
+/// could put one there.
+#[cfg(unix)]
+fn chmod_private(folder: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Mode};
+    #[cfg(target_vendor = "apple")]
+    let flags = AtFlags::SYMLINK_NOFOLLOW;
+    #[cfg(not(target_vendor = "apple"))]
+    let flags = AtFlags::empty();
+    Ok(rustix::fs::chmodat(
+        folder,
+        name,
+        Mode::RUSR | Mode::WUSR,
+        flags,
+    )?)
 }
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock
@@ -706,6 +752,50 @@ mod tests {
         std::fs::remove_file(&linked).unwrap();
         supervisor.open(&db, 0).unwrap();
         supervisor.close(&db).unwrap();
+    }
+
+    /// A new store starts at mode 0600, so SQLite gives its journals 0600
+    /// too.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_store_and_its_journals_are_private_from_the_first_open() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        let wal = with_suffix(&db, "-wal");
+        assert!(wal.exists());
+        for file in [db.clone(), wal, with_suffix(&db, "-shm")] {
+            assert_eq!(mode(&file), 0o600, "{}", file.display());
+        }
+        supervisor.close(&db).unwrap();
+    }
+
+    /// A journal swapped for a link after it was checked is not followed: the
+    /// mode change lands on the link, never on the file it names.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_link_swapped_in_before_the_mode_change_is_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().unwrap();
+        let folder = scratch.path().join("engine");
+        std::fs::create_dir(&folder).unwrap();
+        let db = folder.join("engine.db");
+        let wal = with_suffix(&db, "-wal");
+        std::fs::write(&wal, b"").unwrap();
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let unrelated = scratch.path().join("unrelated");
+        std::fs::write(&unrelated, b"mine").unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let swap = |name: &std::ffi::OsStr| {
+            if name.to_string_lossy().ends_with("-wal") {
+                std::fs::remove_file(&wal).unwrap();
+                std::os::unix::fs::symlink(&unrelated, &wal).unwrap();
+            }
+        };
+        super::restrict_store_files_with(&db, swap).unwrap();
+        assert_eq!(mode(&unrelated), 0o644);
+        assert_eq!(mode(&db), 0o600, "the missing store is created private");
     }
 
     /// A link at the store or at a journal is refused before SQLite opens
