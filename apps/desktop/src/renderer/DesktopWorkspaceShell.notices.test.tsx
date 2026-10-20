@@ -2751,7 +2751,7 @@ describe("unavailable MCP launcher settings", () => {
     bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
     bridge.endAgentRun.mockImplementationOnce(async () => {
       activeRun = null;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2763,7 +2763,7 @@ describe("unavailable MCP launcher settings", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     await user.click(screen.getByTestId("notice-center-toggle"));
-    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs.json, then try again.");
+    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     const row = notice.closest("li");
     if (!row) throw new Error("The agent failure has no Notices row.");
     await user.click(within(row).getByRole("button", { name: "Try again" }));

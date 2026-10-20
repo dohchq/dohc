@@ -1473,7 +1473,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
       throw cause;
@@ -1497,7 +1497,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={vi.fn()} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
@@ -1518,7 +1518,7 @@ describe("SettingsDialog", () => {
     const recovery = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     bridge.getAgentRunStatus
       .mockResolvedValueOnce({ activeRun: { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" }, lastRun: null })
@@ -1541,7 +1541,7 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
@@ -1577,7 +1577,7 @@ describe("SettingsDialog", () => {
   it("reports an agent history mutation refusal through the notice hook", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.startAgentRun.mockRejectedValueOnce(cause);
     render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
@@ -1624,7 +1624,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
       throw cause;
@@ -1681,7 +1681,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1863,7 +1863,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     try {
       bridge.endAgentRun.mockImplementationOnce(async () => {
         runActive = false;
@@ -1897,7 +1897,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("dohc could not read this workspace's agent run history. Check .dohc/agent-runs.json, then try again.");
+    const cause = new Error("dohc could not read this workspace's agent run history. Check .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1936,7 +1936,7 @@ describe("SettingsDialog", () => {
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
     const recovery = deferred<{ activeRun: null; lastRun: null }>();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockRejectedValueOnce(cause);
     bridge.getAgentRunStatus
       .mockImplementationOnce(async () => ({

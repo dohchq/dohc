@@ -7,7 +7,7 @@ import { createRegistryStore, type RegistryEntry } from "../workspaces/registryS
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
-import { createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
+import { agentRunsFileName, createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -140,7 +140,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     ended, setAgentRun, requireWorkspace, requireCapture,
     ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
     detection, handlers, groupSizes, invoke,
-    durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
+    durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs", agentRunsFileName("install-local")), "utf8")),
     switchWorkspace: async () => {
       const other = { ...physical, workspaceId: "workspace-b", attachmentId: Symbol("other") };
       await renderers.open(sender, other, "document-1");
