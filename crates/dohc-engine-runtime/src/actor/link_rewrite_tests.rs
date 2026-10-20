@@ -561,14 +561,14 @@ struct CrashNth {
 struct CrashAfterDocuments {
     store: Mutex<EngineStore>,
     request: String,
-    documents: usize,
+    documents: i64,
 }
 impl FaultInjector for CrashAfterDocuments {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         if point != FaultPoint::StorageAfterCommitBeforeAck {
             return FaultAction::Continue;
         }
-        let documents: Option<usize> = self.store.lock().unwrap().read_with(|conn| {
+        let documents: Option<i64> = self.store.lock().unwrap().read_with(|conn| {
             conn.query_row(
                 "SELECT json_extract(payload_hash,'$[2].documents') FROM engine_requests WHERE request_id=?1 AND kind='history-link-rewrites'",
                 [&self.request],
