@@ -4,8 +4,8 @@ use common::Scratch;
 use dohc_engine_files::{
     BatchIngestResult, CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError,
     ImportPriority, IngestOutcome, IngestReason, ReconcileController, ReconcileRun,
-    RespelledRetire, Respelling, ScanBounds, Scanner, apply_reconcile_plan_cancellable,
-    apply_then_ack,
+    RespelledRetire, Respelling, RetireOutcome, ScanBounds, Scanner,
+    apply_reconcile_plan_cancellable, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +20,9 @@ struct IdempotentSink {
     fail: BTreeSet<String>,
     not_owned: BTreeSet<String>,
     deferred: BTreeSet<String>,
+    /// Paths whose file is gone when the sink reads it for an ingest, and
+    /// whose record a live session holds.
+    gone_and_held: BTreeSet<String>,
     /// Report this sha for a path instead of the plan's (models a re-reading
     /// sink that captured newer bytes than the scan hashed).
     reread_sha: BTreeMap<String, String>,
@@ -45,6 +48,9 @@ impl CaptureSink for IdempotentSink {
         if self.deferred.contains(path) {
             return Ok(IngestOutcome::Deferred);
         }
+        if self.gone_and_held.contains(path) {
+            return Ok(IngestOutcome::RetireDeferred);
+        }
         let actual = self
             .reread_sha
             .get(path)
@@ -60,13 +66,16 @@ impl CaptureSink for IdempotentSink {
         })
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         self.calls.push(path.to_owned());
         if self.fail.contains(path) {
             return Err(CaptureError { reason: "injected" });
         }
+        if self.deferred.contains(path) {
+            return Ok(RetireOutcome::Deferred);
+        }
         self.content.remove(path);
-        Ok(())
+        Ok(RetireOutcome::Retired)
     }
 }
 
@@ -85,7 +94,7 @@ impl CaptureSink for TwoAtATimeSink {
         self.0.ingest(path, size, sha256, media_type, reason)
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         self.0.retire(path)
     }
 
@@ -132,9 +141,9 @@ impl CaptureSink for ReportingBatchSink {
         })
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         self.ordinary_calls.push(path.to_owned());
-        Ok(())
+        Ok(RetireOutcome::Retired)
     }
 
     fn ingest_batch(&mut self, _ops: &[CaptureOp]) -> Option<BatchIngestResult> {
@@ -262,6 +271,104 @@ fn deferred_ingest_stays_unrecorded_without_degrading_and_returns_on_a_rescan() 
     apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("ack retry");
     assert_eq!(controller.tracked_len(), 2);
     assert!(controller.deferred_paths().is_empty());
+}
+
+#[test]
+fn deferred_retire_keeps_the_path_without_degrading_and_retires_on_a_rescan() {
+    let ws = Scratch::new();
+    ws.write("open.md", b"open");
+    ws.write("b.md", b"b");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let mut sink = IdempotentSink::default();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("capture");
+
+    ws.remove("open.md");
+    ws.remove("b.md");
+    sink.deferred.insert("open.md".to_owned());
+    controller.mark_dirty();
+    let plan = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare deletes"),
+    );
+    let result = apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+
+    assert_eq!(result.deferred_paths, ["open.md"]);
+    assert_eq!(result.deferred_retires, ["open.md"]);
+    assert!(result.failed_applies.is_empty());
+    assert!(!result.degraded, "a live session's path is not a failure");
+    assert!(sink.content.contains_key("open.md"), "the record stays");
+    assert_eq!(controller.tracked_len(), 1, "only b.md was retired");
+    assert_eq!(controller.deferred_paths(), ["open.md"]);
+    assert!(
+        !controller.is_dirty(),
+        "a deferred path must not keep the layer rescanning while the session lasts"
+    );
+
+    // Once the session lets go, a requested rescan retires the path.
+    controller.mark_dirty();
+    sink.deferred.clear();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
+    apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("ack retry");
+    assert!(sink.content.is_empty());
+    assert_eq!(controller.tracked_len(), 0);
+    assert!(controller.deferred_paths().is_empty());
+}
+
+// A change was planned, but the file was gone when the sink read it and a
+// live session holds its record. The entry stays so a later scan retires it.
+#[test]
+fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
+    let ws = Scratch::new();
+    ws.write("open.md", b"before");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let mut sink = IdempotentSink::default();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("capture");
+
+    ws.write("open.md", b"changed");
+    controller.mark_dirty();
+    let plan = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare change"),
+    );
+    assert!(matches!(plan.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "open.md"));
+    ws.remove("open.md");
+    sink.gone_and_held.insert("open.md".to_owned());
+    let result = apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+
+    assert_eq!(result.deferred_paths, ["open.md"]);
+    assert_eq!(result.deferred_retires, ["open.md"]);
+    assert!(result.failed_applies.is_empty());
+    assert!(!result.degraded, "a live session's path is not a failure");
+    assert_eq!(controller.tracked_len(), 1, "the entry stays");
+    assert_eq!(controller.deferred_paths(), ["open.md"]);
+    assert!(!controller.is_dirty());
+
+    controller.mark_dirty();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
 }
 
 #[test]
@@ -791,7 +898,7 @@ impl CaptureSink for WaitingSink {
         self.inner.ingest(path, size, sha256, media_type, reason)
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         self.inner.retire(path)
     }
 
@@ -804,7 +911,7 @@ impl CaptureSink for WaitingSink {
             self.inner.0.calls.push(path.to_owned());
             return Ok(RespelledRetire::Waits);
         }
-        self.retire(path).map(|()| RespelledRetire::Retired)
+        self.retire(path).map(RespelledRetire::from)
     }
 
     fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {

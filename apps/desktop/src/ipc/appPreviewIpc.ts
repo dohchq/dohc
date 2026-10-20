@@ -22,6 +22,7 @@ export function registerAppPreviewIpcHandlers<
   appCatalog: StartSitePreviewDependencies<Event, Sender, Workspace>["catalog"];
   appPreviews: StartSitePreviewDependencies<Event, Sender, Workspace>["lifecycle"];
   isSharedView: StartSitePreviewDependencies<Event, Sender, Workspace>["isSharedView"];
+  assertMayRunAppCode: StartSitePreviewDependencies<Event, Sender, Workspace>["assertMayRunAppCode"];
   executeAppPreview: StartSitePreviewDependencies<Event, Sender, Workspace>["execute"];
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, message: string,
@@ -30,7 +31,7 @@ export function registerAppPreviewIpcHandlers<
 }): void {
   const {
     registerHandler, assertTrustedSender, senderWorkspaceAuthority,
-    appCatalog, appPreviews, isSharedView, executeAppPreview,
+    appCatalog, appPreviews, isSharedView, assertMayRunAppCode, executeAppPreview,
     withRendererWorkspaceOperation,
   } = dependencies;
 
@@ -66,6 +67,7 @@ export function registerAppPreviewIpcHandlers<
     catalog: appCatalog,
     lifecycle: appPreviews,
     isSharedView,
+    assertMayRunAppCode,
     execute: executeAppPreview,
   });
   registerHandler(CHANNELS.startSitePreview, startAppPreview);
