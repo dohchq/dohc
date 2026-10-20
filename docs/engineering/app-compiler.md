@@ -28,7 +28,8 @@ Electron main sets the bounds in `main.ts`. `compilerProcessSupervisor.ts` enfor
 | Files and network | No isolation. The supervisor scrubs the environment | Seatbelt, below | Landlock and seccomp, below |
 
 On macOS and Linux the owner also counts the tree's task slots, which the user's process limit counts: each live process's threads on Linux, and every exited process no one has reaped.
-More than 1,024 stops the build as the process bound does, so a tree that hoards threads or zombies cannot leave the user's other programs unable to start one.
+More than 1,024 stops the build as the process bound does, so the owner stops a tree that hoards threads or zombies.
+Like the other bounds it is sampled, so a fast loop can pass 1,024 before the next sample. It is a detection threshold, not a ceiling.
 
 ## macOS and Linux containment is weaker than a Windows job
 
