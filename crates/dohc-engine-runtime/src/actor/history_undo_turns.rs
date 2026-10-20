@@ -264,9 +264,9 @@ impl ActorHandle {
             })
             .await?;
         let read_db = db.clone();
-        let (prior, pending) = tokio::task::spawn_blocking(move || {
+        let (mut inverse_store, prior, pending) = tokio::task::spawn_blocking(move || {
             let store = EngineStore::open_read_only(&read_db)?;
-            store.read_with(|conn| -> Result<_, RuntimeError> {
+            let (prior, pending) = store.read_with(|conn| -> Result<_, RuntimeError> {
                 let prior = load(conn, &w, &o, &r, a.as_deref())?;
                 let mut jobs = Vec::new();
                 if prior.is_none() {
@@ -279,7 +279,8 @@ impl ActorHandle {
                         .map_err(StorageError::corrupt_public)?.collect::<Result<_,_>>().map_err(StorageError::corrupt_public)?;
                 }
                 Ok((prior,jobs))
-            })
+            })?;
+            Ok::<_, RuntimeError>((store, prior, pending))
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)??;
@@ -525,14 +526,13 @@ impl ActorHandle {
                 .ok_or_else(corrupt)?
                 .clone();
             let disk_root = root.clone();
-            let (read_db, p) = (db.clone(), plan.clone());
-            let (disk, policy, inverse) = tokio::task::spawn_blocking(move || {
+            let p = plan.clone();
+            let (disk, policy, inverse, reader) = tokio::task::spawn_blocking(move || {
                 let inverse = (|| -> Result<Option<String>, RuntimeError> {
                     if member.effect.operation != "write" {
                         return Ok(None);
                     }
-                    let store = EngineStore::open_read_only(&read_db)?;
-                    store
+                    inverse_store
                         .read_with(|conn| {
                             link_inverse_input(conn, &p.workspace, &p.version, &member.effect)
                         })
@@ -542,10 +542,12 @@ impl ActorHandle {
                     disk_check(&disk_root, &member),
                     crate::search::read_engine_search_policy(&disk_root),
                     inverse,
+                    inverse_store,
                 )
             })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
+            inverse_store = reader;
             let _capture = gates[0].clone().lock_owned().await;
             let _sessions = gates[1].clone().lock_owned().await;
             let (p, f) = (plan.clone(), faults.clone());
