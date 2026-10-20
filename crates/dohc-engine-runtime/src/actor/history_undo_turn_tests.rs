@@ -1349,8 +1349,8 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         );
     }
     assert!(
-        (2000usize.div_ceil(16)..=2000).contains(&times.len()),
-        "p95 includes every nonempty inverse turn"
+        (2000usize.div_ceil(16)..2000).contains(&times.len()),
+        "at least one turn must commit multiple members"
     );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }

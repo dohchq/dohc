@@ -856,19 +856,22 @@ impl VersionFence {
                 return Err(unsettled_fork_error(content_kind));
             }
 
+            let mut unpublished = std::collections::HashSet::new();
             if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
-                let jobs = open
-                    .actor
-                    .history_operation_pending_jobs(open.workspace_id.clone(), operation_id.clone())
-                    .await
-                    .map_err(map_runtime)?;
-                if !jobs.is_empty() {
+                let (preimages, jobs) = open.actor.history_undo_pending_publication(
+                    open.workspace_id.clone(), operation_id.clone(), open.root.clone(), token.clone(),
+                ).await.map_err(map_runtime)?;
+                unpublished.extend(preimages.into_keys());
+                for jobs in jobs.chunks(16) {
+                    if token.is_cancelled() {
+                        return Err(map_runtime(dohc_engine_runtime::RuntimeError::Cancelled));
+                    }
                     open.actor
                         .materialize_replay_selected_for_fence(
                             open.root.clone(),
                             open.workspace_id.clone(),
                             Arc::new(self_writes.scoped(&open.root)),
-                            jobs,
+                            jobs.iter().cloned().collect(),
                             now_ms()?,
                         )
                         .await
@@ -899,7 +902,7 @@ impl VersionFence {
                 &self_writes.scoped(&open.root),
                 capture_author_json,
                 match &intent {
-                    VersionFenceIntent::Undo { operation_id, .. } => Some(operation_id.as_str()),
+                    VersionFenceIntent::Undo { operation_id, .. } => Some((operation_id.as_str(), &unpublished)),
                     _ => None,
                 },
                 reconcile_provenance,
@@ -1705,3 +1708,8 @@ mod tests {
             .expect("workspace close");
     }
 }
+
+
+#[cfg(test)]
+#[path = "link_rewrite_rpc_tests.rs"]
+mod link_rewrite_rpc_tests;

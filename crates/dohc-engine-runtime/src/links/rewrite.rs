@@ -2,10 +2,7 @@ use super::{
     parser,
     resolver::{self, Resolver},
 };
-use std::{
-    ops::Range,
-    time::{Duration, Instant},
-};
+use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Target {
@@ -120,8 +117,16 @@ pub(crate) fn forward(
     Some((replace(text, &edits), count))
 }
 
+// Charge frontier steps and matching comparisons across both diff levels.
+// Linear scans and containment keep ordinary paragraph insertions cheap.
+const DIFF_STEPS: usize = 8_000_000;
+fn step(remaining: &mut usize) -> Option<()> {
+    *remaining = remaining.checked_sub(1)?;
+    Some(())
+}
+
 // Myers' bidirectional frontiers find a split using linear memory.
-fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, usize)> {
+fn bisect<T: PartialEq>(a: &[T], b: &[T], remaining: &mut usize) -> Option<(usize, usize)> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let limit = (n + m + 1) / 2;
     let offset = limit + 1;
@@ -133,13 +138,8 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, u
     let odd = delta % 2 != 0;
     let (mut fs, mut fe, mut rs, mut re) = (0, 0, 0, 0);
     for d in 0..=limit {
-        if Instant::now() >= deadline {
-            return None;
-        }
         for k in ((-d + fs)..=(d - fe)).step_by(2) {
-            if Instant::now() >= deadline {
-                return None;
-            }
+            step(remaining)?;
             let slot = (offset + k) as usize;
             let mut x = if k == -d || (k != d && forward[slot - 1] < forward[slot + 1]) {
                 forward[slot + 1]
@@ -148,6 +148,7 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, u
             };
             let mut y = x - k;
             while x < n && y < m && a[x as usize] == b[y as usize] {
+                step(remaining)?;
                 x += 1;
                 y += 1;
             }
@@ -168,9 +169,7 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, u
             }
         }
         for k in ((-d + rs)..=(d - re)).step_by(2) {
-            if Instant::now() >= deadline {
-                return None;
-            }
+            step(remaining)?;
             let slot = (offset + k) as usize;
             let mut x = if k == -d || (k != d && reverse[slot - 1] < reverse[slot + 1]) {
                 reverse[slot + 1]
@@ -179,6 +178,7 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, u
             };
             let mut y = x - k;
             while x < n && y < m && a[(n - x - 1) as usize] == b[(m - y - 1) as usize] {
+                step(remaining)?;
                 x += 1;
                 y += 1;
             }
@@ -206,11 +206,8 @@ fn bisect<T: PartialEq>(a: &[T], b: &[T], deadline: Instant) -> Option<(usize, u
 fn matching<T: PartialEq>(
     a: &[T],
     b: &[T],
-    deadline: Instant,
+    remaining: &mut usize,
 ) -> Option<Vec<(Range<usize>, usize)>> {
-    if Instant::now() >= deadline {
-        return None;
-    }
     let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
     let suffix = a[prefix..]
         .iter()
@@ -225,28 +222,28 @@ fn matching<T: PartialEq>(
     let (left, right) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
     if !left.is_empty()
         && !right.is_empty()
-        && let Some((x, y)) = bisect(left, right, deadline)
-        && (x, y) != (0, 0)
-        && (x, y) != (left.len(), right.len())
     {
-        for (r, start) in matching(&left[..x], &right[..y], deadline)? {
-            ranges.push((r.start + prefix..r.end + prefix, start + prefix));
-        }
-        for (r, start) in matching(&left[x..], &right[y..], deadline)? {
-            ranges.push((r.start + prefix + x..r.end + prefix + x, start + prefix + y));
+        let (x, y) = bisect(left, right, remaining)?;
+        if (x, y) != (0, 0) && (x, y) != (left.len(), right.len()) {
+            for (r, start) in matching(&left[..x], &right[..y], remaining)? {
+                ranges.push((r.start + prefix..r.end + prefix, start + prefix));
+            }
+            for (r, start) in matching(&left[x..], &right[y..], remaining)? {
+                ranges.push((r.start + prefix + x..r.end + prefix + x, start + prefix + y));
+            }
         }
     }
     if suffix > 0 {
         ranges.push((a.len() - suffix..a.len(), b.len() - suffix));
     }
-    (Instant::now() < deadline).then_some(ranges)
+    Some(ranges)
 }
 
 /// Diff lines first, then characters only inside the changed line hunks.
 fn unchanged_ranges(
     before: &str,
     after: &str,
-    deadline: Instant,
+    remaining: &mut usize,
 ) -> Option<Vec<(Range<usize>, usize)>> {
     let a: Vec<_> = before.split_inclusive('\n').collect();
     let b: Vec<_> = after.split_inclusive('\n').collect();
@@ -261,7 +258,7 @@ fn unchanged_ranges(
     let (ao, bo) = (offsets(&a), offsets(&b));
     let mut ranges = Vec::new();
     let (mut x, mut y) = (0, 0);
-    for (r, start) in matching(&a, &b, deadline)?
+    for (r, start) in matching(&a, &b, remaining)?
         .into_iter()
         .chain([(a.len()..a.len(), b.len())])
     {
@@ -284,7 +281,7 @@ fn unchanged_ranges(
                 for (cr, cs) in matching(
                     &left.chars().collect::<Vec<_>>(),
                     &right.chars().collect::<Vec<_>>(),
-                    deadline,
+                    remaining,
                 )? {
                     ranges.push((ao[x] + ac[cr.start]..ao[x] + ac[cr.end], bo[y] + bc[cs]));
                 }
@@ -318,16 +315,17 @@ pub(crate) fn inverse_budgeted(
     after: &str,
     head: &str,
 ) -> Result<Option<String>, ()> {
-    inverse_until(before, after, head, Instant::now() + Duration::from_secs(1))
+    let mut remaining = DIFF_STEPS;
+    inverse_with_steps(before, after, head, &mut remaining)
 }
 
-fn inverse_until(
+fn inverse_with_steps(
     before: &str,
     after: &str,
     head: &str,
-    deadline: Instant,
+    remaining: &mut usize,
 ) -> Result<Option<String>, ()> {
-    let unchanged = unchanged_ranges(after, head, deadline).ok_or(())?;
+    let unchanged = unchanged_ranges(after, head, remaining).ok_or(())?;
     Ok(inverse_in_ranges(before, after, head, unchanged))
 }
 
@@ -488,30 +486,26 @@ mod tests {
     }
 
     #[test]
-    fn megabyte_append_is_restored_or_left_unmatched_within_the_diff_budget() {
+    fn megabyte_append_preserves_the_unchanged_target() {
         let after = "a short note ending [[new]]";
         let head = format!("{after}{}", " appended text".repeat(80_660));
         assert!(head.len() >= 1024 * 1024);
-        match inverse_budgeted("a short note ending [[old]]", after, &head) {
-            Ok(Some(restored)) => assert_eq!(restored, head.replacen("[[new]]", "[[old]]", 1)),
-            Err(()) => {} // Expired hunks never supply a guessed target position.
-            Ok(None) => panic!("an unchanged target must map unless its diff budget expires"),
+        assert_eq!(
+            inverse_budgeted("a short note ending [[old]]", after, &head),
+            Ok(Some(head.replacen("[[new]]", "[[old]]", 1)))
+        );
+    }
+
+    #[test]
+    fn difficult_hunks_exhaust_real_steps_deterministically() {
+        let after = format!("{}[[new]]{}", "a".repeat(8192), "b".repeat(8192));
+        let before = after.replace("[[new]]", "[[old]]");
+        let head = format!("{}[[new]]{}", "c".repeat(8192), "d".repeat(8192));
+        for _ in 0..2 {
+            let mut remaining = DIFF_STEPS;
+            assert_eq!(inverse_with_steps(&before, &after, &head, &mut remaining), Err(()));
+            assert_eq!(remaining, 0, "the search must spend the real budget");
         }
-        assert!(unchanged_ranges(after, &head, Instant::now()).is_none());
-        let difficult = format!(
-            "{}[[new]]{}",
-            "b".repeat(512 * 1024),
-            "c".repeat(512 * 1024)
-        );
-        assert!(
-            inverse_until(
-                "a short [[old]] note",
-                "a short [[new]] note",
-                &difficult,
-                Instant::now()
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -534,7 +528,8 @@ mod tests {
                         };
                     }
                 }
-                let matches = matching(a, b, Instant::now() + Duration::from_secs(1)).unwrap();
+                let mut remaining = DIFF_STEPS;
+                let matches = matching(a, b, &mut remaining).unwrap();
                 assert_eq!(
                     matches.iter().map(|(r, _)| r.len()).sum::<usize>(),
                     lcs[a.len()][b.len()],
@@ -552,8 +547,9 @@ mod tests {
         let inputs = ["", "a", "b", "aa", "ab", "ba", "bb", "😀a", "a😀"];
         for a in inputs {
             for b in inputs {
+                let mut remaining = DIFF_STEPS;
                 for (range, start) in
-                    unchanged_ranges(a, b, Instant::now() + Duration::from_secs(1)).unwrap()
+                    unchanged_ranges(a, b, &mut remaining).unwrap()
                 {
                     assert_eq!(
                         &a[range.clone()],
