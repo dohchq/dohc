@@ -318,12 +318,7 @@ pub(crate) fn inverse_budgeted(
     after: &str,
     head: &str,
 ) -> Result<Option<String>, ()> {
-    inverse_until(
-        before,
-        after,
-        head,
-        Instant::now() + Duration::from_secs(1),
-    )
+    inverse_until(before, after, head, Instant::now() + Duration::from_secs(1))
 }
 
 fn inverse_until(

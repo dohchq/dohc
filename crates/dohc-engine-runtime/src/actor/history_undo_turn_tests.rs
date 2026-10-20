@@ -1394,13 +1394,13 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
                 }
                 && w.writes
                     <= if forward {
-                        2 + 112 * w.sources
+                        (if p.phase == "admission" { 3 } else { 2 }) + 112 * w.sources
                     } else {
                         16 + 496 * w.inverses.max(1)
                     }
                 && w.rows
                     <= if forward {
-                        8 + 96 * w.sources
+                        (if p.phase == "admission" { 16 } else { 8 }) + 96 * w.sources
                     } else {
                         32 + 480 * w.inverses.max(1)
                     },
