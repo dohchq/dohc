@@ -394,7 +394,10 @@ export function AboutLinks(props: {
   const chats = useSectionRead<ChatLinksView>(key, `about-chat-links:${path}`, notices);
   const { begin: beginLinks, cancel: cancelLinks } = links;
   const { begin: beginChats, cancel: cancelChats } = chats;
-  // What each list shows now, for a read that keeps or extends it.
+  // What each list holds, for a read that keeps or extends it: the newest
+  // answer, set as it lands and again as it renders. Show more pressed or
+  // seen after a page lands, but before React draws it, reads after that
+  // page, never after the one its own render held.
   const shownLinks = useRef<ReadyLinks | null>(null);
   shownLinks.current = links.view.status === "ready" ? links.view : null;
   const shownChats = useRef<ReadyChatLinks | null>(null);
@@ -428,11 +431,19 @@ export function AboutLinks(props: {
         // index finished before the page after them.
         gathering: building ? (kept?.gathering ?? 0) + 1 : (from.after?.gathering ?? 0),
       };
+      shownLinks.current = landed;
       request.settle(landed);
     } catch (error) {
-      if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
-      else request.fail(failedOver(kept), ipcErrorMessage(error, LINKS_FAILED), error,
-        () => void loadLinks({ again: shownLinks.current ?? undefined }));
+      if (!request.current()) return;
+      if (isWorkspaceUpdatingError(error)) {
+        shownLinks.current = gatheringOn(kept);
+        request.settle(shownLinks.current);
+      } else {
+        const view = failedOver(kept);
+        shownLinks.current = view.status === "ready" ? view : null;
+        request.fail(view, ipcErrorMessage(error, LINKS_FAILED), error,
+          () => void loadLinks({ again: shownLinks.current ?? undefined }));
+      }
     } finally {
       if (request.current() && readEnds(linksGuard.current, landed !== null) && landed?.next) void loadLinks({ after: landed });
     }
@@ -453,20 +464,28 @@ export function AboutLinks(props: {
         cursor = page?.nextCursor ?? undefined;
       } while (cursor && rows.size < (from.again?.rows.length ?? 0));
       landed = { status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 };
+      shownChats.current = landed;
       request.settle(landed);
     } catch (error) {
       if (!request.current()) return;
       // A cursor that lost the access or version its rows were read under
       // takes those rows with it, and the list reads once from the start.
       if (isChatMentionPageChanged(error) && !from.restarted) {
+        shownChats.current = null;
         request.settle(LOADING);
         void loadChats({ restarted: true });
         return;
       }
       const kept = from.after ?? from.again;
-      if (isWorkspaceUpdatingError(error)) request.settle(gatheringOn(kept));
-      else request.fail(failedOver(kept), ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
-        () => void loadChats({ again: shownChats.current ?? undefined }));
+      if (isWorkspaceUpdatingError(error)) {
+        shownChats.current = gatheringOn(kept);
+        request.settle(shownChats.current);
+      } else {
+        const view = failedOver(kept);
+        shownChats.current = view.status === "ready" ? view : null;
+        request.fail(view, ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
+          () => void loadChats({ again: shownChats.current ?? undefined }));
+      }
     } finally {
       if (request.current() && readEnds(chatsGuard.current, landed !== null) && landed?.next) void loadChats({ after: landed });
     }
@@ -534,11 +553,13 @@ export function AboutLinks(props: {
       toggleRef={toggleRef}
       onOpenLink={openLink}
       onOpenChat={props.onOpenChat ?? OPENS_NO_CHAT}
-      onMoreLinks={(shown, seen) => {
-        if (asksMore(linksGuard.current, seen)) void loadLinks({ after: shown });
+      onMoreLinks={(seen) => {
+        const shown = shownLinks.current;
+        if (shown?.next && asksMore(linksGuard.current, seen)) void loadLinks({ after: shown });
       }}
-      onMoreChats={(shown, seen) => {
-        if (asksMore(chatsGuard.current, seen)) void loadChats({ after: shown });
+      onMoreChats={(seen) => {
+        const shown = shownChats.current;
+        if (shown?.next && asksMore(chatsGuard.current, seen)) void loadChats({ after: shown });
       }}
       onRetryLinks={() => void loadLinks({})}
       onRetryChats={() => void loadChats({})}
@@ -743,9 +764,11 @@ export function AboutLinksView(props: {
   toggleRef?: RefObject<HTMLButtonElement | null>;
   onOpenLink: (path: string, line: number) => void;
   onOpenChat: (mention: ChatFileMentionRecord) => void;
-  // `seen` when a Show more row came into view rather than being pressed.
-  onMoreLinks: (shown: ReadyLinks, seen?: boolean) => void;
-  onMoreChats: (shown: ReadyChatLinks, seen?: boolean) => void;
+  // The page after the newest answer the owner holds, which may be newer than
+  // the one drawn here. `seen` when a Show more row came into view rather
+  // than being pressed.
+  onMoreLinks: (seen?: boolean) => void;
+  onMoreChats: (seen?: boolean) => void;
   onRetryLinks: () => void;
   onRetryChats: () => void;
 }) {
@@ -781,9 +804,9 @@ export function AboutLinksView(props: {
             <AboutMore testId="about-links-more" watch={links.rows}
               onMore={(focused) => {
                 if (focused) focusAddedLink();
-                props.onMoreLinks(links);
+                props.onMoreLinks();
               }}
-              onSeen={() => props.onMoreLinks(links, true)} />
+              onSeen={() => props.onMoreLinks(true)} />
           ) : null}
         </>
       )}
@@ -802,9 +825,9 @@ export function AboutLinksView(props: {
             <AboutMore testId="about-chat-links-more" watch={chats.rows}
               onMore={(focused) => {
                 if (focused) focusAddedChat();
-                props.onMoreChats(chats);
+                props.onMoreChats();
               }}
-              onSeen={() => props.onMoreChats(chats, true)} />
+              onSeen={() => props.onMoreChats(true)} />
           ) : null}
         </>
       )}

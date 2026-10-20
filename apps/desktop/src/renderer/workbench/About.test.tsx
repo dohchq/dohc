@@ -620,6 +620,38 @@ function observeAllInView() {
   };
 }
 
+// IntersectionObserver reported by hand. `watching` waits until React has
+// run the effect that observes `target`, with an observer other than
+// `before`; `report` says the row came into view.
+type Observed = { callback: IntersectionObserverCallback; target: Element | null; live: boolean };
+function observeByHand() {
+  const observers: Observed[] = [];
+  vi.stubGlobal("IntersectionObserver", class {
+    private readonly record: Observed;
+    constructor(callback: IntersectionObserverCallback) {
+      this.record = { callback, target: null, live: true };
+      observers.push(this.record);
+    }
+    observe(target: Element) {
+      this.record.target = target;
+    }
+    disconnect() {
+      this.record.live = false;
+    }
+  });
+  return {
+    watching: (target: Element, before?: Observed) => waitFor(() => {
+      const live = observers.filter((entry) => entry.live);
+      expect(live).toHaveLength(1);
+      expect(live[0]).not.toBe(before);
+      expect(live[0]!.target).toBe(target);
+      return live[0]!;
+    }),
+    report: (observer: Observed) =>
+      observer.callback([{ isIntersecting: true, target: observer.target! } as IntersectionObserverEntry], {} as IntersectionObserver),
+  };
+}
+
 // Lets every answer, render and observer report that is already due land.
 async function settleAll() {
   for (let round = 0; round < 6; round += 1) await act(async () => {});
@@ -713,37 +745,50 @@ describe("About Links", () => {
   });
 
   it("reads the next page when Show more scrolls into view, and past a page with no rows", async () => {
-    const observers: Array<{ callback: IntersectionObserverCallback; target: Element | null; live: boolean }> = [];
-    vi.stubGlobal("IntersectionObserver", class {
-      private readonly record: (typeof observers)[number];
-      constructor(callback: IntersectionObserverCallback) {
-        this.record = { callback, target: null, live: true };
-        observers.push(this.record);
-      }
-      observe(target: Element) { this.record.target = target; }
-      disconnect() { this.record.live = false; }
-    });
-    const seen = () => act(() => {
-      const observer = observers.filter((entry) => entry.live).at(-1)!;
-      observer.callback([{ isIntersecting: true, target: observer.target! } as IntersectionObserverEntry], {} as IntersectionObserver);
-    });
+    const intersection = observeByHand();
     bridgeMock.linksIn
       .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
       .mockResolvedValueOnce(linksPage([], { nextCursor: "two" }))
       .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
     render(<Links />);
-    await waitFor(() => expect(linkRows()).toHaveLength(1));
-    const more = screen.getByTestId("about-links-more");
+    const more = await screen.findByTestId("about-links-more");
+    // React makes the observer in an effect, after the first page is drawn.
+    const first = await intersection.watching(more);
+    act(() => intersection.report(first));
 
-    seen();
-    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
-    await act(async () => {});
-    // The empty page left Show more in view: the same row, observed again
-    // for the new answer, reads on when it is seen.
+    // The empty page leaves Show more in view. Once it lands, the same row is
+    // observed again, and reads on when it is seen.
+    const second = await intersection.watching(more, first);
     expect(screen.getByTestId("about-links-more")).toBe(more);
-    expect(observers.filter((entry) => entry.live)).toHaveLength(1);
-    seen();
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one"]);
+    act(() => intersection.report(second));
     await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", "two"]);
+  });
+
+  it("reads after the page that just landed when Show more is seen before React draws it", async () => {
+    const intersection = observeByHand();
+    const second = deferred<LinksPage>();
+    bridgeMock.linksIn
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "one" }))
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValueOnce(linksPage([link("notes/beta.md", 5)]));
+    render(<Links />);
+    const more = await screen.findByTestId("about-links-more");
+    const observer = await intersection.watching(more);
+    act(() => intersection.report(observer));
+    expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+
+    // React draws nothing inside one act until it ends. The page lands, which
+    // clears its Notices identity, and Show more is seen again before React
+    // draws that page.
+    const landedBefore = notices.clear.mock.calls.length;
+    await act(async () => {
+      second.resolve(linksPage([], { nextCursor: "two" }));
+      await vi.waitFor(() => expect(notices.clear.mock.calls.length).toBeGreaterThan(landedBefore));
+      intersection.report(observer);
+    });
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(3));
     expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", "two"]);
   });
 
