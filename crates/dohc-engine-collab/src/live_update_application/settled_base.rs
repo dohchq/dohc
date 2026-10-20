@@ -121,6 +121,13 @@ pub enum ReleasedCapture {
 /// The proof input one disk capture may read: a checkpoint and its suffix.
 pub const RELEASED_CAPTURE_PROOF_BYTES: usize = 2 * crate::limits::MAX_YDOC_UPDATE_BYTES;
 
+/// Every namespace holding an activation of a document lineage. Each capture
+/// of a document with a Y.Doc and no current activation runs it.
+pub(super) const LINEAGE_NAMESPACES_SQL: &str =
+    "SELECT DISTINCT relay_database_namespace FROM live_owner_activations
+     WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
+     ORDER BY relay_database_namespace";
+
 /// Decide, before capture records `text` at `path`, what it may do with the
 /// lineage's Y.Doc `head`. Only the released window is decided here: no
 /// activation of the lineage is current in any namespace, and a persisted
@@ -142,11 +149,7 @@ pub fn released_capture(
         return Ok(ReleasedCapture::Ordinary);
     }
     let namespaces = conn
-        .prepare(
-            "SELECT DISTINCT relay_database_namespace FROM live_owner_activations
-             WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
-             ORDER BY relay_database_namespace",
-        )
+        .prepare(LINEAGE_NAMESPACES_SQL)
         .map_err(read_sql)?
         .query_map(
             params![key.workspace_id, key.version_id, key.object_id, lineage],

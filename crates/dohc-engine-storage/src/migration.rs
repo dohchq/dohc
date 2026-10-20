@@ -3336,6 +3336,8 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// activation of its lineage's adoption. A retirement records the exact
 /// activation and restore generation it began for, before it ends any of the
 /// activation's runtime, and keeps that row until the activation's release.
+/// Capture finds a document lineage's released tails across namespaces by
+/// `live_owner_activations_document`.
 const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
 CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
     (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
@@ -3399,6 +3401,8 @@ CREATE UNIQUE INDEX live_owner_activations_successor ON live_owner_activations
     (relay_database_namespace,predecessor_activation_id) WHERE predecessor_activation_id IS NOT NULL;
 CREATE INDEX live_owner_activations_lineage ON live_owner_activations
     (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id);
+CREATE INDEX live_owner_activations_document ON live_owner_activations
+    (workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace);
 CREATE TABLE live_owner_retirements (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
     activation_id TEXT NOT NULL CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024),
@@ -4446,7 +4450,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "f2c32ddab5a8e72b268129df84ddb9f89c0b9879e24e5672026ca4cd35c0ba31",
+                "c265f32b4f1695fb6f67318d918354cda0568db492d9a679504a502adb2b0200",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4634,6 +4638,24 @@ mod tests {
                 ("c".into(), None),
             ],
             "a binding names the adoption of its own lineage only"
+        );
+        let document: (i64, String) = conn
+            .query_row(
+                "SELECT l.partial,(SELECT group_concat(name,',') FROM
+                    (SELECT name FROM pragma_index_info('live_owner_activations_document') ORDER BY seqno))
+                 FROM pragma_index_list('live_owner_activations') l WHERE l.name='live_owner_activations_document'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            document,
+            (
+                0,
+                "workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace"
+                    .into()
+            ),
+            "every activation of a document lineage is found by its document"
         );
 
         // `baseline` is the relay sequence and registration time, each present or absent.

@@ -197,6 +197,41 @@ fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     assert!(diverged(disk_capture(&f, &edited_on_disk(&f), &local_doc(&f))), "caught-up content a moment holds");
 }
 
+/// Sol's 4b2i-3 ruling: the namespaces of a document lineage come from
+/// `live_owner_activations_document`, never a scan, across a history of
+/// several namespaces and documents with many released activations, with and
+/// without statistics.
+#[test]
+fn a_lineage_finds_its_namespaces_by_its_document_index() {
+    let mut f = Fixture::new();
+    let lineage = f.binding.lineage_claim_id.clone();
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<2399)
+        INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+            object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,
+            host_coordinate_json,released_at_ms,released_restore_generation,released_accepted_cursor,
+            released_boundary_json,carried_manifest_json)
+        SELECT 'relay-'||(i%4),'released-'||i,'workspace','main',iif(i%8=0,'object','document-'||(i%8)),'{lineage}',
+            '{{}}','moment','source',0,'{{}}',i,0,0,'{{}}','[]' FROM n"));
+    for analyze in ["", "ANALYZE"] {
+        write_unchecked(&mut f, analyze);
+        let plan = f
+            .store
+            .read_with(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {}", settled_base::LINEAGE_NAMESPACES_SQL))?
+                    .query_map(params!["workspace", "main", "object", lineage], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(
+            plan,
+            ["SEARCH live_owner_activations USING COVERING INDEX live_owner_activations_document \
+              (workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?)"],
+            "{analyze}"
+        );
+    }
+}
+
 /// A proven base the head differs from, not an unproven one.
 fn diverged(decided: Result<ReleasedCapture, ApplicationError>) -> bool {
     matches!(decided, Err(ApplicationError::Conflict))
