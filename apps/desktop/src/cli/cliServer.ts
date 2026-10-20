@@ -2515,6 +2515,7 @@ async function dispatchWorkspace(
           const threads = await listCliChannelThreads(context, channel);
           withThreads.push({
             id: channel.id,
+            channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }),
             name: channel.name,
             slug: channel.slug,
             kind: cliGroupKind(channel.kind),
@@ -3031,7 +3032,10 @@ async function dispatchWorkspace(
 
   switch (request.verb) {
     case "groups":
-      return { groups: channels.map(({ cli }) => cli) };
+      return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
+        ...cli,
+        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }),
+      }))) };
 
     case "threads": {
       const channel = resolveChannel(request.args.group, channels);

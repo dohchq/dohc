@@ -66,12 +66,12 @@ describe("executeCli", () => {
       argv: ["chat", "groups", "--json"],
       cwd: "/workspace",
       env: {},
-      request: async () => ({ groups: [group] }),
+      request: async () => ({ groups: [{ ...group, channelWireId: "wire" }] }),
     });
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [group] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [{ ...group, channelWireId: "wire" }] }, null, 2)}\n`,
     });
   });
 
@@ -204,7 +204,7 @@ describe("executeCli", () => {
           state: "added" as const,
         };
       }
-      return { groups: [group] };
+      return { groups: [{ ...group, channelWireId: "wire" }] };
     };
     const common = {
       cwd: "/workspace",

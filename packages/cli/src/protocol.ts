@@ -661,7 +661,7 @@ const cliGrepMatchSchema = z
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
 const groupsResultSchema = z
-  .object({ groups: z.array(cliGroupSchema) })
+  .object({ groups: z.array(cliGroupSchema.extend({ channelWireId: z.string().min(1).max(500).nullable() }).strict()) })
   .strict();
 const threadsResultSchema = z
   .object({
@@ -932,6 +932,7 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
         z
           .object({
             id: rawChannelIdSchema,
+            channelWireId: z.string().min(1).max(500).nullable(),
             name: z.string().min(1),
             slug: z.string().min(1),
             kind: z.enum(["group", "dm", "agent"]),

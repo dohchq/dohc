@@ -418,7 +418,9 @@ describe("document request schemas", () => {
 
 it("preserves a group's purpose and each thread's lane", () => {
   const group = { id: "c:team", name: "Team", slug: "team", kind: "group", purpose: "Plan the launch" };
-  expect(parseCliResult("groups", { groups: [group] })).toEqual({ groups: [group] });
+  const listed = { ...group, channelWireId: "wire" };
+  expect(parseCliResult("groups", { groups: [listed] })).toEqual({ groups: [listed] });
+  expect(() => parseCliResult("groups", { groups: [group] })).toThrow();
   const threads = ["posts", "chat"].map((lane, index) => ({
     id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
   }));

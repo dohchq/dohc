@@ -51,7 +51,7 @@
     },
     {
       "name": "dohc_chat_links",
-      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from chats, and continue nextCursor until null. Coverage can be partial.",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3662,7 +3662,7 @@
     },
     {
       "name": "dohc_chat_links",
-      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from chats, and continue nextCursor until null. Coverage can be partial.",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4414,7 +4414,7 @@
     },
     {
       "name": "dohc_chat_links",
-      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from chats, and continue nextCursor until null. Coverage can be partial.",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5166,7 +5166,7 @@
     },
     {
       "name": "dohc_chat_links",
-      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from chats, and continue nextCursor until null. Coverage can be partial.",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
       "inputSchema": {
         "type": "object",
         "properties": {

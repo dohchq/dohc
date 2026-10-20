@@ -1132,7 +1132,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: { ...CHAT_VERBS, links: {
       capabilityId:"chat.read", summary:"Read one page of files mentioned in a chat.", operands:"",
       flags:[
-        {name:"--channel-wire-id",value:"id",text:"The chat's wire ID. Required."},
+        {name:"--channel-wire-id",value:"id",text:"From chat groups --json. Required."},
         {name:"--cursor",value:"cursor",text:"Continue the previous page."},
       ],
       parse:input=>{

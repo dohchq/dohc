@@ -1,3 +1,4 @@
+import { chatLinks as mcpChatLinks, listGroups as mcpListGroups } from "@dohc/mcp/tools";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
 import { createShareRosters } from "../automations/shareRoster";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
@@ -559,6 +560,27 @@ describe("CLI socket server", () => {
     expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
       args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } } })).toMatchObject({ ok: false });
     expect(object).toHaveBeenCalledOnce();
+  });
+
+  it("discovers chat wire IDs through CLI and MCP before asking for Links", async () => {
+    const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    const full = await mcpListGroups(ctx);
+    expect(full.ok).toBe(true);
+    if (!full.ok) throw Error(full.reason);
+    const channelWireId = groups.groups[0]!.channelWireId;
+    expect(channelWireId).toBeTruthy();
+    expect(full.groups.some(group => group.channelWireId === channelWireId)).toBe(true);
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+    const cli = await executeCli({
+      argv: ["chat", "links", "--channel-wire-id", channelWireId!], cwd: workspaceRoot, env: {},
+      request: value => invoke(value.verb, value.args),
+    });
+    expect(cli.exitCode).toBe(0);
+    expect(await mcpChatLinks(ctx, { channelWireId: channelWireId! })).toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
+    for (const [, input] of read.mock.calls) expect(input.channelWireId).toBe(channelWireId);
   });
 
   it("labels success without changing token admission, read-only authority, actor gates or results", async () => {
