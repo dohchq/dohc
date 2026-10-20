@@ -128,6 +128,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       disposeDatabase: vi.fn(async () => { log.push("database-stop"); }),
       closeRelay: vi.fn(async () => { log.push("relay-close"); }),
       stopEngine: vi.fn(async () => { log.push("engine-stop"); }),
+      reportQuit: vi.fn(),
     },
   };
   configure?.(dependencies);
@@ -907,6 +908,7 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledWith(0);
+    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith("[desktop] quit: shutdown finished in 0 ms");
   });
 
   it.each([0, 1] as const)("exits once with deadline status %s without closing a store beneath a held producer", async (deadlineExitCode) => {
@@ -925,6 +927,7 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
+    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith(`[desktop] quit: shutdown ran past its ${WILL_QUIT_BUDGET_MS} ms budget`);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     held.resolve();
     await vi.advanceTimersByTimeAsync(0);
