@@ -498,6 +498,48 @@ struct AgentAuthorWire<'a> {
 }
 
 impl EngineService {
+    pub(super) async fn history_rewrite_links(
+        &self,
+        ctx: &RequestContext,
+        request: dohc_engine_protocol::wire::Request,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            operation_id: String,
+            author: Option<Value>,
+        }
+        let params: Params = parse(request.params)?;
+        let handle = request.workspace.as_ref();
+        let open = self.open(handle)?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "history.rewriteLinks needs the workspace's owning handle",
+            ));
+        }
+        let request_key = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
+        let author = crate::rpc::request::validated_author(params.author.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "history.rewriteLinks",
+            open.actor.history_rewrite_links(
+                open.workspace_id.clone(),
+                params.operation_id,
+                request_key,
+                author,
+                open.root.clone(),
+                self.leases.scoped(&open.root),
+                std::sync::Arc::clone(&open.session_ops),
+                std::sync::Arc::new(dohc_engine_runtime::NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(result)
+    }
+
     pub(super) async fn moments_list(
         &self,
         ctx: &RequestContext,

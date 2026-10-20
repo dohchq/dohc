@@ -1108,7 +1108,7 @@ fn batch_rechecks_stale_items_and_retains_partial_suffix_progress() {
     let mut staged = s.read_with(|c| {
         let mut stmt = c.prepare("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending ORDER BY pending_id").map_err(sql)?;
         let jobs = stmt.query_map([], |r| Ok(Work { id:r.get(0)?,revision:r.get(1)?,workspace:r.get(2)?,version:r.get(3)?,object:r.get(4)?,queued_at_ms:r.get(5)? })).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
-        jobs.into_iter().map(|w| { let h=head(c,&w,true)?; Ok(Staged::new(parser::parse(w,h)?)) }).collect::<Result<std::collections::VecDeque<_>,StorageError>>()
+        jobs.into_iter().map(|w| { let h=head(c,&w,true,false)?; Ok(Staged::new(parser::parse(w,h)?)) }).collect::<Result<std::collections::VecDeque<_>,StorageError>>()
     }).unwrap();
     write(&mut s, "stale", "stale.md", "[[new]]", 5);
     retry_file_locked("link batch staging", || {
