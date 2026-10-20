@@ -70,7 +70,8 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites closed links and un
     // Undo starts while forward materialization still has queued work.
     const undo = () => owner.undoHistoryOperation({}, {workspaceId: workspace.workspaceId, operationId});
     const undoStart = performance.now();
-    expect(await undo()).toMatchObject({ok: true, tracked: {state: "restored", momentCount: 3}});
+    // A successful Undo can still be publishing its compensation jobs.
+    expect(await undo()).toMatchObject({ok: true, tracked: {state: expect.stringMatching(/^restor(?:ed|ing)$/), momentCount: 3}});
     console.info("link-rewrite-ipc-timing", JSON.stringify({renameMs, passMs, undoMs: performance.now() - undoStart}));
     for (const name of ["one.md", "two.md", "open.md"]) {
       await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[old#part|label]]\n");
