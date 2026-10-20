@@ -1,3 +1,4 @@
+import { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
@@ -32,6 +33,7 @@ export const CHATS_METHOD = {
   reactionSet: "chats.reactions.set",
   reactionsList: "chats.reactions.list",
   attachmentsListForThread: "chats.attachments.listForThread",
+  conversationLinks: "chats.conversations.listLinks",
   attachmentsListFileMentions: "chats.attachments.listFileMentions",
   mentionsListForHandle: "chats.mentions.listForHandle",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
@@ -380,6 +382,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;
   [CHATS_METHOD.reactionsList]: ChatThreadPageParams;
   [CHATS_METHOD.attachmentsListForThread]: ChatThreadPageParams;
+  [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatPageParams;
@@ -423,7 +426,7 @@ export type ChatsMethodParamsMap = {
 
 export type ChatsMethodResultMap = {
   [M in ChatsMethod]: M extends typeof CHATS_METHOD.attachmentsListFileMentions
-    ? ChatFileMentionsPage : (typeof ChatsResultSchemas)[M]["Type"];
+    ? ChatFileMentionsPage : M extends typeof CHATS_METHOD.conversationLinks ? ChatLinksEnginePage : (typeof ChatsResultSchemas)[M]["Type"];
 };
 
 function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
@@ -788,6 +791,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.attachmentsListForThread]: pageSchema({
     attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   }),
+  [CHATS_METHOD.conversationLinks]: Schema.Unknown,
   [CHATS_METHOD.attachmentsListFileMentions]: Schema.Unknown,
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
@@ -912,6 +916,7 @@ export function decodeChatsResult<M extends ChatsMethod>(
   if (!Object.hasOwn(ChatsResultSchemas, method)) {
     throw new ProtocolShapeError(`Unsupported chats method: ${method}`);
   }
+  if (method === CHATS_METHOD.conversationLinks) return ChatLinksEnginePage.parse(value) as ChatsMethodResultMap[M];
   if (method === CHATS_METHOD.attachmentsListFileMentions) {
     return ChatFileMentionsPage.parse(value) as ChatsMethodResultMap[M];
   }

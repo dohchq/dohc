@@ -1,3 +1,4 @@
+import type { createChatLinksReader } from "../workspaces/chatLinks";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
@@ -180,6 +181,7 @@ export function registerChatsIpcHandlers<
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
+  chatLinks: ReturnType<typeof createChatLinksReader>;
   resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   activity: { queueCloudSync(workspaceId: string): void };
   desktopChatBookmarks: {
@@ -1006,6 +1008,7 @@ export function registerChatsIpcHandlers<
     markChatThreadRead,
     listChatReactions,
     setChatReaction,
+    chatLinks: ({workspaceId,...input}, {operation}) => dependencies.chatLinks(workspaceId,input,operation.assertCurrent),
     chatFileMentionsPage,
     listChatMessages,
     sendChatMessage,

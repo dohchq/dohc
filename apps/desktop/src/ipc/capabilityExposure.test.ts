@@ -75,9 +75,9 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(14);
   });
-  it("records all 23 chat operations with their sender-workspace admission", () => {
+  it("records all 24 chat operations with their sender-workspace admission", () => {
     const channels = [
-      "list-file-chats", "chat-file-mentions-page", "list-chat-bookmarks", "save-chat-bookmark",
+      "list-file-chats", "chat-file-mentions-page", "chat-links", "list-chat-bookmarks", "save-chat-bookmark",
       "archive-chat-bookmark", "create-file-chat", "list-chat-messages", "get-chat-thread-revision",
       "send-chat-message", "list-chat-thread-decisions", "resolve-chat-decision", "list-chat-thread-attachments",
       "list-chat-channels", "list-chat-follows", "set-chat-follow", "list-personal-chat-feed",
@@ -88,7 +88,7 @@ describe("main inventories", () => {
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
     for (const row of chatRows) {
       const chatRefusal = [
-        "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:list-chat-messages",
+        "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:chat-links", "desktop:list-chat-messages",
         "desktop:send-chat-message", "desktop:list-personal-chat-feed", "desktop:list-channel-threads",
         "desktop:start-channel-thread",
       ].includes(row.channel);

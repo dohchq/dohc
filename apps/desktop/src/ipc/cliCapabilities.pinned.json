@@ -1,6 +1,8 @@
 {
   "socket": {
-    "accessRefresh": ["access.refresh"],
+    "accessRefresh": [
+      "access.refresh"
+    ],
     "accessObject": [
       "access.object.read"
     ],
@@ -197,6 +199,9 @@
     ],
     "fileDuplicate": [
       "file.duplicate"
+    ],
+    "chatLinks": [
+      "chat.read"
     ]
   },
   "public": {
@@ -283,6 +288,7 @@
     "links resolve": "links.resolve",
     "links edges": "links.edges",
     "chat file-mentions": "chat.read",
-    "file duplicate": "file.duplicate"
+    "file duplicate": "file.duplicate",
+    "chat links": "chat.read"
   }
 }

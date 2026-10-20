@@ -90,6 +90,15 @@ No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
+### `dohc_chat_links`
+
+Read one bounded page of accessible files mentioned in a chat. Use channelWireId from chats, and continue nextCursor until null. Coverage can be partial.
+
+- `channelWireId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] } | null`.
+
 ### `dohc_chat_file_mentions`
 
 Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.
@@ -914,6 +923,19 @@ Use at most one of --all, --group, or --thread.
 - `--thread <thread>`: Export one thread.
 
 With `--json`, prints `{ schemaVersion, files: { threadId, path }[] }`.
+
+#### `dohc chat links`
+
+```sh
+dohc chat links [options]
+```
+
+Read one page of files mentioned in a chat.
+
+- `--channel-wire-id <id>`: The chat's wire ID. Required.
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] }` or `null`.
 
 #### `dohc chat file-mentions`
 

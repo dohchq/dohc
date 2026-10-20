@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
@@ -21,6 +22,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | ({ verb: "chatLinks" } & ChatLinksInput)
   | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
   | ({ verb: "linksIn" } & InInput)
@@ -1127,7 +1129,17 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: { ...CHAT_VERBS, "file-mentions": {
+    verbs: { ...CHAT_VERBS, links: {
+      capabilityId:"chat.read", summary:"Read one page of files mentioned in a chat.", operands:"",
+      flags:[
+        {name:"--channel-wire-id",value:"id",text:"The chat's wire ID. Required."},
+        {name:"--cursor",value:"cursor",text:"Continue the previous page."},
+      ],
+      parse:input=>{
+        noExtraArgs(input.operands,"chat links");
+        return {verb:"chatLinks",...ChatLinksInput.parse({channelWireId:lastValue(input,"--channel-wire-id"),cursor:lastValue(input,"--cursor")})};
+      },
+    }, "file-mentions": {
       capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
       operands: "", flags: [
         { name: "--subject", value: "subject", text: "A file path or objectId as JSON." },

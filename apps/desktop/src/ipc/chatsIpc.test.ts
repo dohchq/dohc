@@ -175,6 +175,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   registerChatsIpcHandlers<Event["sender"], Event, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
+    chatLinks: vi.fn(async () => null),
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace, currentCredentialGeneration: () => 0,
     stateDir: () => stateDirectory,

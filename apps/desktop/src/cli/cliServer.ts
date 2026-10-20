@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
@@ -341,6 +342,7 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  chatLinks?(workspace:CliRegistryWorkspace,input:ChatLinksInput):Promise<ChatLinksPage>;
   chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
   links?: {
     edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
@@ -3479,11 +3481,15 @@ async function dispatchWorkspace(
 }
 
 async function dispatchMentionAndLinkReads(
-  request: Extract<CliRequest, { verb: "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
+  request: Extract<CliRequest, { verb: "chatLinks" | "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
   options: CliServerOptions,
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if(request.verb==="chatLinks"){
+    if(!options.chatLinks)throw new CliCommandError("Chat links are unavailable.");
+    return options.chatLinks(workspace,{channelWireId:request.args.channelWireId,cursor:request.args.cursor});
+  }
   if (request.verb === "chatFileMentions") {
     if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");
     return options.chatFileMentions(workspace, { subject: request.args.subject, cursor: request.args.cursor });
@@ -3595,7 +3601,7 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
+      : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
         ? await dispatchMentionAndLinkReads(request, options)
         : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);

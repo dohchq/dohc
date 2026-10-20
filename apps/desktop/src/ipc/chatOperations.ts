@@ -32,6 +32,7 @@ import {
   ListChatReactionsResult,
   SetChatReactionPayload,
   SetChatReactionResult,
+  ChatLinksPayload, ChatLinksResult,
   ChatFileMentionsPagePayload,
   ChatFileMentionsPageResult,
   ListChatMessagesPayload,
@@ -149,6 +150,12 @@ export const chatOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "This workspace is no longer active.",
     payload: SetChatReactionPayload, result: SetChatReactionResult,
+  },
+  chatLinks: {
+    capabilityId:"chat.read", channel:"desktop:chat-links",
+    scope:"workspace", guard:"active-workspace",
+    inactiveMessage:"Chats stopped because this window changed workspaces.",
+    payload:ChatLinksPayload, result:ChatLinksResult,
   },
   chatFileMentionsPage: {
     capabilityId: "chat.read", channel: "desktop:chat-file-mentions-page",

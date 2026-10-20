@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
@@ -1901,6 +1902,9 @@ export const ChatMessageRecord = z.object({
   attachments: z.array(ChatAttachmentRecord).optional(),
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
+
+export const ChatLinksPayload = ChatLinksInput.extend({workspaceId:WORKSPACE_ID});
+export const ChatLinksResult = ChatLinksPage;
 
 export const ChatFileMentionsPagePayload = ChatFileMentionsInput.extend({ workspaceId: WORKSPACE_ID });
 export const ChatFileMentionRecord = ChatFileMentionEntry;
