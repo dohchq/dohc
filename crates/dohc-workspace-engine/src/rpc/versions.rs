@@ -792,6 +792,7 @@ impl VersionFence {
             .map(|m| m.object_id.clone())
             .collect();
         let resync = self.link_document_resync(handle);
+        let is_open = self.link_document_is_open(handle);
         let undo_objects = undo_group.as_ref().map(|members| {
             members
                 .iter()
@@ -1037,14 +1038,6 @@ impl VersionFence {
                                 .map_err(|e| map_runtime(e.into()))
                         })
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
-                    let live_sessions = sessions.clone();
-                    let live_handle = handle.clone();
-                    let is_open: dohc_engine_runtime::actor::DocumentIsOpen =
-                        Arc::new(move |key| {
-                            lock(&live_sessions).values().any(|session| {
-                                session.workspace == live_handle && session.key == *key
-                            })
-                        });
                     let placement_now = now_ms()?;
                     drop(_barriers);
                     let result = Box::pin(open.actor.history_undo_in_turns(
