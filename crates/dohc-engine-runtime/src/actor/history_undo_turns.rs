@@ -1,4 +1,5 @@
 use super::*;
+use crate::CancellationToken;
 use dohc_engine_domain::{
     undo_compensation_moments_in, undo_member_in_tx, undo_progress_key, undo_request_fingerprint,
 };
