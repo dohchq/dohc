@@ -44,20 +44,34 @@ fn aggregate_page(s: &EngineStore, cursor: Option<String>) -> Value {
     }).unwrap()
 }
 
-fn median_page(mut run: impl FnMut() -> Value) -> (u128,Value) {
-    let mut times=Vec::new();let mut result=run();
-    for _ in 0..7 {let start=Instant::now();result=run();times.push(start.elapsed().as_micros());}
-    times.sort_unstable();(times[3],result)
+fn median_page(mut run: impl FnMut() -> Value) -> (u128, Value) {
+    let mut times = Vec::new();
+    let mut result = run();
+    for _ in 0..7 {
+        let start = Instant::now();
+        result = run();
+        times.push(start.elapsed().as_micros());
+    }
+    times.sort_unstable();
+    (times[3], result)
 }
 
 /// Run only under the campaign lock. Release mode, with no per-opcode hook.
-#[tokio::test(flavor="multi_thread",worker_threads=2)]
-#[ignore="scheduled conversation Links measurement"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "scheduled conversation Links measurement"]
 async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pages() {
-    assert!(!cfg!(debug_assertions),"run the measurement with --release");
-    let mut results=Vec::new();
-    for (history,unrelated,distinct) in [(1_000_i64,0_i64,256_i64),(10_000,0,256),(10_000,10_000,256),(10_000,0,2048)] {
-        let (scratch,mut s)=fixture();
+    assert!(
+        !cfg!(debug_assertions),
+        "run the measurement with --release"
+    );
+    let mut results = Vec::new();
+    for (history, unrelated, distinct) in [
+        (1_000_i64, 0_i64, 256_i64),
+        (10_000, 0, 256),
+        (10_000, 10_000, 256),
+        (10_000, 0, 2048),
+    ] {
+        let (scratch, mut s) = fixture();
         s.write_with(&NoFaults,|c| {
             for i in 0..distinct {
                 let object=format!("f-{i:04}");
@@ -87,51 +101,122 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
             for i in 0..3 {insert.execute(params![format!("small-{i}"),"small","small-message",format!("f-{i:04}"),Option::<String>::None,i]).map_err(sql)?;}
             Ok::<_,StorageError>(())
         }).unwrap();
-        demand(&mut s,"z-small");demand(&mut s,"a");
-        let start=Instant::now();let mut small_us=0;let mut slices=0;let mut max_slice_us=0;let mut reopen_us=0;
+        demand(&mut s, "z-small");
+        demand(&mut s, "a");
+        let start = Instant::now();
+        let mut small_us = 0;
+        let mut slices = 0;
+        let mut max_slice_us = 0;
+        let mut reopen_us = 0;
         loop {
-            let begin=Instant::now();let pending=tick(&mut s).unwrap();max_slice_us=max_slice_us.max(begin.elapsed().as_micros());
-            if !pending {break;}
-            slices+=1;
-            if slices==2 {
-                small_us=start.elapsed().as_micros();
-                assert_eq!(page(&s,"z-small",None).unwrap()["indexBuilding"],false);
+            let begin = Instant::now();
+            let pending = tick(&mut s).unwrap();
+            max_slice_us = max_slice_us.max(begin.elapsed().as_micros());
+            if !pending {
+                break;
+            }
+            slices += 1;
+            if slices == 2 {
+                small_us = start.elapsed().as_micros();
+                assert_eq!(page(&s, "z-small", None).unwrap()["indexBuilding"], false);
                 let after:String=s.read_with(|c|c.query_row("SELECT seed_after FROM chat_conversation_file_link_state WHERE channel_id='a'",[],|r|r.get(0))).unwrap();
-                assert!(after.is_empty(),"small request must finish first");
+                assert!(after.is_empty(), "small request must finish first");
             }
-            if slices==5 && history>=10_000 {
-                drop(s);let begin=Instant::now();s=EngineStore::open(&engine_db_path(&scratch).unwrap(),2).unwrap();reopen_us=begin.elapsed().as_micros();
+            if slices == 5 && history >= 10_000 {
+                drop(s);
+                let begin = Instant::now();
+                s = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+                reopen_us = begin.elapsed().as_micros();
             }
         }
-        let seed_us=start.elapsed().as_micros();
-        let (first_us,first)=median_page(||page(&s,"a",None).unwrap());
-        let (next_us,next)=median_page(||page(&s,"a",Some(first["nextCursor"].as_str().unwrap().into())).unwrap());
-        let (aggregate_us,aggregate)=median_page(||aggregate_page(&s,None));
-        let (aggregate_next_us,aggregate_next)=median_page(||aggregate_page(&s,Some(aggregate["nextCursor"].as_str().unwrap().into())));
-        assert_eq!(first["entries"],aggregate["entries"]);assert_eq!(next["entries"],aggregate_next["entries"]);
-        assert!(first.to_string().len()<=64*1024 && next.to_string().len()<=64*1024);
-        let aggregate_plan=s.read_with(|c|c.prepare(&format!("EXPLAIN QUERY PLAN {AGGREGATE}")).unwrap().query_map(params!["ws","a",i64::MAX,"",""],|r|r.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
+        let seed_us = start.elapsed().as_micros();
+        let (first_us, first) = median_page(|| page(&s, "a", None).unwrap());
+        let (next_us, next) = median_page(|| {
+            page(&s, "a", Some(first["nextCursor"].as_str().unwrap().into())).unwrap()
+        });
+        let (aggregate_us, aggregate) = median_page(|| aggregate_page(&s, None));
+        let (aggregate_next_us, aggregate_next) = median_page(|| {
+            aggregate_page(&s, Some(aggregate["nextCursor"].as_str().unwrap().into()))
+        });
+        assert_eq!(first["entries"], aggregate["entries"]);
+        assert_eq!(next["entries"], aggregate_next["entries"]);
+        assert!(first.to_string().len() <= 64 * 1024 && next.to_string().len() <= 64 * 1024);
+        let aggregate_plan = s
+            .read_with(|c| {
+                c.prepare(&format!("EXPLAIN QUERY PLAN {AGGREGATE}"))
+                    .unwrap()
+                    .query_map(params!["ws", "a", i64::MAX, "", ""], |r| {
+                        r.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
         let page_plan=s.read_with(|c|c.prepare("EXPLAIN QUERY PLAN SELECT file_key,attachment_id,thread_id,message_id,mentioned_at_ms FROM chat_conversation_file_links WHERE workspace_id='ws' AND channel_id='a' AND invalid=0 AND (mentioned_at_ms,attachment_id,file_key)<(999999,'z','z') ORDER BY mentioned_at_ms DESC,attachment_id DESC,file_key DESC LIMIT 101").unwrap().query_map([],|r|r.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
-        assert!(page_plan.iter().all(|p|!p.contains("TEMP B-TREE")));
-        let mut expected=std::collections::BTreeSet::new();let mut cursor=None;
-        loop {let p=page(&s,"a",cursor).unwrap();for e in p["entries"].as_array().unwrap(){expected.insert(e["file"]["objectId"].as_str().unwrap().to_owned());}
-            cursor=p["nextCursor"].as_str().map(str::to_owned);if cursor.is_none(){break;}}
-        // Main's mention page does not have migration 64's hydration index.
-        exec(&mut s,"DROP INDEX conversation_file_link_alias;");drop(s);
-        let supervisor=WorkspaceSupervisor::new();let actor=supervisor.open_read_only_counting(&engine_db_path(&scratch).unwrap(),None).unwrap().actor;
-        let start=Instant::now();let mut cursor=None;let mut pages=0;let mut records=0;let mut bytes=0;let mut found=std::collections::BTreeSet::new();
+        assert!(page_plan.iter().all(|p| !p.contains("TEMP B-TREE")));
+        let mut expected = std::collections::BTreeSet::new();
+        let mut cursor = None;
         loop {
-            let p=actor.chat_file_mentions_page("ws".into(),None,"scope".into(),0,cursor,CancellationToken::new()).await.unwrap();
-            pages+=1;bytes+=p.to_string().len();
-            for e in p["entries"].as_array().unwrap(){records+=1;if e["channelId"]=="a"{found.insert(e["attachment"]["objectId"].as_str().unwrap().to_owned());}}
-            cursor=p["nextCursor"].as_str().map(str::to_owned);if cursor.is_none(){break;}
+            let p = page(&s, "a", cursor).unwrap();
+            for e in p["entries"].as_array().unwrap() {
+                expected.insert(e["file"]["objectId"].as_str().unwrap().to_owned());
+            }
+            cursor = p["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
         }
-        let drain_us=start.elapsed().as_micros();assert_eq!(found,expected);drop(actor);drop(supervisor);
+        // Main's mention page does not have migration 64's hydration index.
+        exec(&mut s, "DROP INDEX conversation_file_link_alias;");
+        drop(s);
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor
+            .open_read_only_counting(&engine_db_path(&scratch).unwrap(), None)
+            .unwrap()
+            .actor;
+        let start = Instant::now();
+        let mut cursor = None;
+        let mut pages = 0;
+        let mut records = 0;
+        let mut bytes = 0;
+        let mut found = std::collections::BTreeSet::new();
+        loop {
+            let p = actor
+                .chat_file_mentions_page(
+                    "ws".into(),
+                    None,
+                    "scope".into(),
+                    0,
+                    cursor,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            pages += 1;
+            bytes += p.to_string().len();
+            for e in p["entries"].as_array().unwrap() {
+                records += 1;
+                if e["channelId"] == "a" {
+                    found.insert(e["attachment"]["objectId"].as_str().unwrap().to_owned());
+                }
+            }
+            cursor = p["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let drain_us = start.elapsed().as_micros();
+        assert_eq!(found, expected);
+        drop(actor);
+        drop(supervisor);
         results.push(json!({"history":history,"unrelated":unrelated,"distinctFiles":distinct,"fixture":{"threads":33,"orphans":64,"tiedTimestampGroup":5,"unprovedPathOnly":1,"sparseEvery":7,"longLabelEvery":11},
             "projection":{"firstUs":first_us,"continuationUs":next_us,"firstBytes":first.to_string().len(),"continuationBytes":next.to_string().len(),"firstRecords":first["entries"].as_array().unwrap().len(),"continuationRecords":next["entries"].as_array().unwrap().len(),"plan":page_plan},
             "aggregate":{"firstUs":aggregate_us,"continuationUs":aggregate_next_us,"hydration":"production helper; same record and byte limits","plan":aggregate_plan},
             "multiConversationSeed":{"requestOrder":["z-small","a"],"smallUs":small_us,"totalUs":seed_us,"slices":slices,"maxSliceUs":max_slice_us,"reopenUs":reopen_us},
             "actualMentionDrain":{"pages":pages,"records":records,"bytes":bytes,"us":drain_us}}));
     }
-    println!("CONVERSATION_LINKS_MEASUREMENT {}",serde_json::to_string(&results).unwrap());
+    println!(
+        "CONVERSATION_LINKS_MEASUREMENT {}",
+        serde_json::to_string(&results).unwrap()
+    );
 }
