@@ -2818,10 +2818,12 @@ async function dispatchWorkspace(
     }
 
     case "fileDuplicate": {
+      if (context.readOnly) return {ok: false, reason: "Duplicate requires the owning workspace. Open it to continue."};
       if (request.args.actor !== "agent") return {ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".'};
       if (!context.duplicateFile) return {ok: false, reason: "Restart dohc before duplicating this file."};
       return await onceForRequestId(context, options, request.args.requestId, ["fileDuplicate", request.args.path, request.args.agent ?? null], async () => {
-        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(request.args.agent, context, options), request.args.requestId)
+          .catch(error => pathFreeFailure(error, "dohc could not duplicate the file."));
         if (result.ok) await notifyWrite(options, context);
         return { done: result.ok, result };
       }, completion);

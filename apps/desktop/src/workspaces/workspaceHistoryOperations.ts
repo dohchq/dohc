@@ -170,7 +170,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       if (move && "noUndo" in move) throw new Error(move.noUndo);
       if (move && move.from !== move.to && move.from.toLowerCase() === move.to.toLowerCase()) throw new Error(caseOnlyMoveReason);
       const floor = options.agent ? await agentFloor(rootPath, move ? true : !record?.result)
-        : record ? personFloor(rootPath) : move ? personFloor(rootPath, moveWord(move.from, move.to)) : await agentFloor(rootPath);
+        : record ? personFloor(rootPath) : move ? personFloor(rootPath, moveWord(move.from, move.to)) : null;
       if (move && floor) await moveRecoveryFloor(move, floor);
       if (record && floor) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       let cursor: HistoryCursor | undefined, deleted = false;
@@ -193,6 +193,8 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       } };
       if (move) return undoMoveRecovery(rootPath, move, author, history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
       if (!record && members.length === 1 && members[0]!.operation === "write") {
+        const duplicateFloor = await agentFloor(rootPath);
+        await duplicateFloor(members[0]!.path);
         const result = await history.undoHistoryOperation({workspaceId, operationId: input.operationId, requestId: `duplicate-undo:${input.operationId}`, author: {...author}});
         markChanged();
         return {ok: true as const, tracked: {state: result.materialized ? "restored" as const : "restoring" as const, momentCount: result.momentCount}, restored: [],

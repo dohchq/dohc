@@ -445,7 +445,7 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "links"
+  const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
     ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
     : command === "chat"
     ? name === "file-mentions" ? "chatFileMentions" : name
@@ -462,7 +462,7 @@ function verbReturns(command: string, name: string): string {
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
     // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => !["history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["file", "history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;

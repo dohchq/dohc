@@ -763,7 +763,8 @@ mod tests {
         let supervisor = Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
         let service = crate::EngineService::with_supervisor(supervisor);
         let opened = service.workspace_open(&dohc_engine_protocol::transport::RequestContext::unbounded(), serde_json::json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"duplicate-forged","captureMode":"none"})).await.unwrap();
-        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let handle: dohc_engine_protocol::wire::WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).unwrap();
         let result = service
             .capture_duplicate_file(
                 Some(handle.clone()),
