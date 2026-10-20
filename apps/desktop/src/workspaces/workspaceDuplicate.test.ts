@@ -2,6 +2,7 @@ import { mkdtemp, writeFile, mkdir, rm, copyFile, symlink, readFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import type { WorkspaceEngineCapture, AuthoredPathChanges } from "./workspaceEngineCapture";
@@ -60,7 +61,7 @@ it("refuses folders, links, excluded files, and unretained files", async () => {
 it.each([true, false])("reconciles a lost reply before retrying Duplicate, committed=%s", async committed => {
   const f = await fixture();
   let copyPath = "";
-  vi.mocked(f.engine.duplicateFile).mockImplementationOnce(async (_from, to) => {copyPath = to; if (committed) await writeFile(join(f.rootPath, to), "committed"); throw new Error("daemon exited after commit");});
+  vi.mocked(f.engine.duplicateFile).mockImplementationOnce(async (_from, to) => {copyPath = to; if (committed) await writeFile(join(f.rootPath, to), "committed"); return duplicateWithRecovery(to, async () => {throw new Error("daemon exited after commit");});});
   await expect(f.run()).rejects.toThrow("check the saved operation");
   const {readdir} = await import("node:fs/promises");
   const directory = join(f.rootPath, ".dohc/duplicate-pending");
@@ -72,3 +73,33 @@ it.each([true, false])("reconciles a lost reply before retrying Duplicate, commi
   expect(f.engine.duplicateFile).toHaveBeenCalledTimes(committed ? 1 : 2);
   expect(await readdir(directory)).toEqual([]);
 });
+
+it.each(["Restart dohc before duplicating this file.", "Undo in progress", "This action is unavailable for shared live files."])(
+  "passes definite refusals through: %s", async message => {
+    const f = await fixture();
+    vi.mocked(f.engine.duplicateFile).mockRejectedValue(new Error(message));
+    await expect(f.run()).rejects.toThrow(message);
+  },
+);
+it.each(["undone", "deleted", "renamed", "superseded", "missing-on-disk"])(
+  "drops a stale receipt when its copy is %s and makes a new copy", async state => {
+    const f = await fixture();
+    let oldPath = "";
+    vi.mocked(f.engine.duplicateFile).mockImplementationOnce(async (_from, to) => {
+      oldPath = to;
+      await writeFile(join(f.rootPath, to), "committed");
+      return duplicateWithRecovery(to, async () => {throw new Error("lost reply");});
+    });
+    await expect(f.run()).rejects.toThrow("could not confirm");
+    const {readdir} = await import("node:fs/promises");
+    const dir = join(f.rootPath, ".dohc/duplicate-pending");
+    const receipt = JSON.parse(await readFile(join(dir, (await readdir(dir))[0]!), "utf8"));
+    if (state !== "superseded") await rm(join(f.rootPath, oldPath));
+    vi.mocked(f.engine.readDuplicate).mockResolvedValue(state === "missing-on-disk" ? {path: oldPath} : null);
+    const next = await f.run();
+    expect(next.operationId).not.toBe(receipt.operationId);
+    expect(f.engine.duplicateFile).toHaveBeenCalledTimes(2);
+    expect(await readFile(join(f.rootPath, next.path), "utf8")).toBe("Settled");
+    expect(await readdir(dir)).toEqual([]);
+  },
+);

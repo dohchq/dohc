@@ -4902,3 +4902,20 @@ it("names the run's person as capture's author, whoever is signed in here", asyn
   });
   await engine.stop();
 });
+
+it("checks one root copy name with one bounded identity lookup, including binary History-only files", async () => {
+  const root = await createTestScratch("duplicate-bounded-name-");
+  const loopback = new VersionedLoopbackEngine();
+  loopback.seedBinaryFile({workspace: WORKSPACE_ID, path: "copy.png", bytes: [0, 255], objectId: "binary-copy"});
+  const requests: Request[] = [];
+  const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback, requests)});
+  try {
+    await engine.changePathsAs(["source.png"], {operation: "duplicate", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", author: RESTORER}, async held => {
+      requests.length = 0;
+      expect(await held.hasPath("copy.png")).toBe(true);
+      expect(requests.map(request => [request.method, request.params])).toEqual([
+        ["files.resolve", {versionId: "main", targets: [{path: "copy.png"}]}],
+      ]);
+    }, () => []);
+  } finally {await engine.stop();}
+});

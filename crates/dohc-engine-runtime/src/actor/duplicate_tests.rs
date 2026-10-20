@@ -269,19 +269,23 @@ async fn duplicate_undo_replays_across_authors_with_first_attribution() {
     place(&mut store, root.path(), &copy);
     let first_author = r#"[{"kind":"human","humanId":"person"}]"#;
     let second_author = r#"[{"kind":"agent","agentId":"agent","onBehalfOf":"person"}]"#;
-    store.read_with(|conn| {
-        let fingerprint = |operation, author| {
-            dohc_engine_domain::undo_request_fingerprint(conn, WS, operation, Some(author)).unwrap()
-        };
-        assert_eq!(
-            fingerprint(OP, first_author),
-            fingerprint(OP, second_author)
-        );
-        assert_ne!(
-            fingerprint("dohc-operation:other", first_author),
-            fingerprint("dohc-operation:other", second_author)
-        );
-    });
+    store
+        .read_with(|conn| {
+            let fingerprint = |operation, author| {
+                dohc_engine_domain::undo_request_fingerprint(conn, WS, operation, Some(author))
+                    .unwrap()
+            };
+            assert_eq!(
+                fingerprint(OP, first_author),
+                fingerprint(OP, second_author)
+            );
+            assert_ne!(
+                fingerprint("dohc-operation:other", first_author),
+                fingerprint("dohc-operation:other", second_author)
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
     let first = test_undo_in_turns(
         &mut store,
         WS,
@@ -326,7 +330,9 @@ async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
         .await
         .unwrap();
     place(&mut store, root.path(), &copy);
-    store.write_with(&NoFaults, |tx| tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES('relay','adoption',?1,'main',?2,'claim','{\"currentPath\":\"copy.md\"}',?3,'sha',8,0,0,'evidence','coverage',0,0,0,'{}','{}',100,100)", params![WS,copy.moments[0].object_id,copy.moments[0].moment_id]).map_err(StorageError::persist_public)).unwrap();
+    let claim = store.put_binary_blob(b"lineage").unwrap();
+    let digest = dohc_engine_storage::hex_sha256(b"Original");
+    store.write_with(&NoFaults, |tx| tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES('relay','adoption',?1,'main',?2,?4,'{\"currentPath\":\"copy.md\"}',?3,?5,8,0,0,'evidence','coverage',0,0,0,'{}','{}',100,100)", params![WS,copy.moments[0].object_id,copy.moments[0].moment_id,claim,digest]).map_err(StorageError::persist_public)).unwrap();
     let error = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap_err();
     assert!(
         matches!(error, RuntimeError::Domain(DomainError::UndoRefused {ref path,reason:"This copy is a shared live file. Continue editing at its current location"}) if path == "copy.md"),

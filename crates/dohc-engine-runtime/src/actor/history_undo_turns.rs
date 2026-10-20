@@ -350,7 +350,7 @@ impl ActorHandle {
                 let existing = store.read_with(|conn| -> Result<_,RuntimeError> {
                     let row: Option<(String,i64)> = conn.query_row("SELECT payload_hash,result_seq FROM engine_requests WHERE request_id=?1",[&p.request],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StorageError::corrupt_public)?;
                     if let Some((hash,cursor))=row {
-                        if hash!=undo_request_fingerprint(tx,&p.workspace,&p.operation,p.author.as_deref())? { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
+                        if hash!=undo_request_fingerprint(conn,&p.workspace,&p.operation,p.author.as_deref())? { return Err(DomainError::IdempotencyKeyReuseMismatch.into()); }
                         return Ok(Some(usize::try_from(cursor).map_err(|_| corrupt())?));
                     }
                     Ok(None)

@@ -1,3 +1,4 @@
+import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
@@ -6064,20 +6065,26 @@ export function createWorkspaceEngineCapture(
               },
               readDuplicate: async operationId => {
                 const operation = await engine.readHistoryOperation({workspaceId, operationId});
-                if (operation.kind !== "file-duplicate") return null;
+                if (operation.kind !== "file-duplicate" || operation.versionId !== versionId) return null;
                 const page = await engine.readHistoryPage({workspaceId, operationId, versionId: operation.versionId, limit: 1});
                 const member = page.moments[0];
                 if (!member) throw new Error("dohc could not read the pending Duplicate. Open the workspace again, then try again.");
+                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path: member.path}]});
+                const current = resolved.results[0];
+                if (current?.status !== "found" || current.objectId !== member.objectId) return null;
+                const latest = await engine.readHistoryPage({workspaceId, versionId, objectId: member.objectId, limit: 1});
+                if (latest.moments[0]?.momentId !== member.momentId) return null;
                 return {path: member.path};
               },
               hasPath: async path => {
-                const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : undefined;
-                return (await engine.listTextFileMetadata({workspaceId, versionId, ...(parent ? {under: parent} : {})})).some(head => head.path === path);
+                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path}]});
+                return resolved.results[0]?.status === "found";
               },
               duplicateFile: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);
-                if (!engine.duplicateFileUnderHold) throw new Error("Restart dohc before duplicating this file.");
-                return engine.duplicateFileUnderHold({holdId, fromPath, toPath, author: {...authored.author}});
+                const duplicate = engine.duplicateFileUnderHold;
+                if (!duplicate) throw new Error("Restart dohc before duplicating this file.");
+                return duplicateWithRecovery(toPath, () => duplicate.call(engine, {holdId, fromPath, toPath, author: {...authored.author}}));
               },
               moveFile: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);

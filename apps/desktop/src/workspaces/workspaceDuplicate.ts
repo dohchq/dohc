@@ -64,10 +64,13 @@ export async function duplicateWorkspaceFile(
           const target = await admitPath(workspace.rootPath, previous.path);
           if (previous.path !== pending.path || !allowed(target.path) || !allowed(target.physical)) throw new Error("dohc could not confirm the pending Duplicate. Check its operation in History.");
           const materialized = await lstat(join(workspace.rootPath, previous.path)).then(entry => entry.isFile(), error => {if (error.code === "ENOENT") return false; throw error;});
-          assertWritable();
-          markChanged();
-          return {path: previous.path, materialized, operationId: pending.operationId, undo: {available: true as const}};
+          if (materialized) {
+            assertWritable();
+            markChanged();
+            return {path: previous.path, materialized, operationId: pending.operationId, undo: {available: true as const}};
+          }
         }
+        await rm(pendingPath, {force: true});
       }
       const folder = posix.dirname(source.physical), extension = posix.extname(source.physical), stem = posix.basename(source.physical, extension);
       let target = "";
@@ -84,10 +87,7 @@ export async function duplicateWorkspaceFile(
       if (!(await engine.recordDisk(source.physical, [source.physical])).includes(source.physical)) throw new Error("History cannot retain this file. Choose a smaller file.");
       assertWritable();
       await savePending(pendingPath, {workspaceId: workspace.workspaceId, source: source.physical, path: target, operationId});
-      let copied;
-      try {copied = await engine.duplicateFile(source.physical, target);}
-      catch (cause) {throw new Error(
-        "dohc could not confirm Duplicate for " + target + ". Open the workspace again, then try Duplicate again. dohc will check the saved operation before making another copy.", {cause});}
+      const copied = await engine.duplicateFile(source.physical, target);
 
       markChanged();
       return {path: copied.path, materialized: copied.materialized, operationId, undo: {available: true as const}};

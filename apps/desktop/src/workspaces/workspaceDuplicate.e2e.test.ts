@@ -1,3 +1,5 @@
+import {createHash} from "node:crypto";
+import {VersionedLiveAdapter} from "@dohc/workspace-engine-client";
 import {readFile, writeFile, unlink} from "node:fs/promises";
 import {join} from "node:path";
 import {expect, it} from "vitest";
@@ -17,7 +19,8 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
   const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0});
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const capture = createWorkspaceEngineCapture({workspaceId,rootPath,attachmentId:Symbol("duplicate-timing"),rustEngineSessions:sessions,settleDebounceMs:600_000,onError:()=>undefined});
+  const attachmentId = Symbol("duplicate-timing");
+  const capture = createWorkspaceEngineCapture({workspaceId,rootPath,attachmentId,rustEngineSessions:sessions,settleDebounceMs:600_000,onError:()=>undefined});
   const editor = new Y.Doc();
   const operation = {workspace:{workspaceId,rootPath},assertCurrent(){}};
   const author = {kind:"human",humanId:"person"} as const;
@@ -41,6 +44,21 @@ it.skipIf(engine.missing)("Duplicate returns after settlement and placement with
     console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:20,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
     expect(samples[9]).toBeLessThanOrEqual(500);
     expect(samples[18]).toBeLessThanOrEqual(1000);
+    const interrupted = await duplicateWorkspaceFile(operation,"source.md",author,capture);
+    const receiptPath = join(rootPath,".dohc/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
+    await writeFile(receiptPath,JSON.stringify({workspaceId,source:"source.md",path:interrupted.path,operationId:interrupted.operationId}));
+    const undone = await sessions.run({workspaceId,rootPath,attachmentId}, async binding => {
+      const adapter = new VersionedLiveAdapter(binding.client,binding.workspace,{workspaceId});
+      return adapter.undoHistoryOperation({workspaceId,operationId:interrupted.operationId,requestId:"undo-receipt-copy",author});
+    });
+    expect(undone.materialized).toBe(true);
+    await capture.changePathsAs(["source.md"],{operation:"duplicate",author,operationId:"dohc-operation:33333333-3333-4333-8333-333333333333"},async held=>{
+      expect(await held.readDuplicate(interrupted.operationId)).toBeNull();
+    },()=>[]);
+    const repeated = await duplicateWorkspaceFile(operation,"source.md",author,capture);
+    expect(repeated.operationId).not.toBe(interrupted.operationId);
+    expect(repeated.materialized).toBe(true);
+    expect(await readFile(join(rootPath,repeated.path),"utf8")).toBe(editor.getText("plainText").toString());
     const binary=await duplicateWorkspaceFile(operation,"source.png",author,capture);
     expect(binary.materialized).toBe(true);
     // Remove disk without a capture pass: only History reserves this name.
