@@ -9,7 +9,7 @@ import {
 
 // The resolver for a workspace's internal metadata directory (<root>/.dohc).
 // Every main-process writer of internal metadata (ui-state.json,
-// agent-runs.json) must resolve the directory through here — never join
+// agent-runs/) must resolve the directory through here — never join
 // "<root>/.dohc" by hand. The trap this closes: a malicious attached
 // workspace can carry `.dohc -> /some/user-writable/outside-dir` (a symlink
 // with a valid manifest copied inside), and a naive join-then-write would
