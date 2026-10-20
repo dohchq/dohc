@@ -224,6 +224,7 @@ impl ActorHandle {
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
         });
         let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
+        #[cfg(test)]
         let admission_ws = workspace.clone();
         let serial = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
@@ -240,12 +241,7 @@ impl ActorHandle {
                     }
                     .into());
                 }
-                let version = VersionedTextStore::new(store)
-                    .get_active_version(&admission_ws)?
-                    .version_id;
-                store.read_with(|conn| {
-                    crate::links::cache::revision(conn, &admission_ws, &version)
-                })?;
+                store.read_with(crate::links::cache::track_revisions)?;
                 Ok(store.database_path().to_path_buf())
             })
             .await?;

@@ -48,11 +48,7 @@ impl Prepared {
         resolver
     }
 }
-pub(crate) fn revision(
-    conn: &Connection,
-    ws: &str,
-    version: &str,
-) -> Result<(i64, i64), StorageError> {
+pub(crate) fn track_revisions(conn: &Connection) -> Result<(), StorageError> {
     // TEMP state is connection-local, transactional, and also works on read-only stores.
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS link_resolver_revision(workspace_id TEXT,version_id TEXT,revision INTEGER NOT NULL,PRIMARY KEY(workspace_id,version_id));
@@ -63,7 +59,14 @@ pub(crate) fn revision(
          CREATE TEMP TRIGGER IF NOT EXISTS resolver_alias_update AFTER UPDATE ON main.path_aliases WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id OR OLD.path IS NOT NEW.path OR OLD.object_id IS NOT NEW.object_id BEGIN
            INSERT INTO link_resolver_revision VALUES(OLD.workspace_id,OLD.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1;
            INSERT INTO link_resolver_revision VALUES(NEW.workspace_id,NEW.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;"
-    ).map_err(sql)?;
+    ).map_err(sql)
+}
+pub(crate) fn revision(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+) -> Result<(i64, i64), StorageError> {
+    track_revisions(conn)?;
     let revision = conn.query_row("SELECT coalesce((SELECT revision FROM link_resolver_revision WHERE workspace_id=?1 AND version_id=?2),0)", params![ws, version], |r| r.get(0)).map_err(sql)?;
     // Other connections cannot run our TEMP triggers (notably a read-only actor).
     let external = conn

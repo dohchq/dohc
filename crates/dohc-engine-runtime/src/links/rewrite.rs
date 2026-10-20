@@ -389,13 +389,17 @@ mod tests {
                 "typed ".repeat(2000),
                 "more ".repeat(2000)
             ),
-            format!("[[new|{}]] tail", "label ".repeat(2000)),
+            format!("[[new|{}]] tail", "label ".repeat(300)),
             format!(
                 "{}[[new|label]] tail{}",
                 "before ".repeat(2000),
                 "after ".repeat(2000)
             ),
         ] {
+            assert!(
+                parser::extract(&head).is_ok(),
+                "fixture must fit the parser bounds"
+            );
             assert_eq!(
                 inverse("[[old|label]] tail", "[[new|label]] tail", &head).unwrap(),
                 head.replacen("[[new|", "[[old|", 1)
