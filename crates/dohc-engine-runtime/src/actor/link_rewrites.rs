@@ -47,10 +47,54 @@ struct Plan {
     operation: String,
     rename: OperationMoment,
     paths: Vec<String>,
+    aliases: String,
+    alias_revision: Mutex<Option<(i64, i64)>>,
     candidates: incoming::Candidates,
 }
 
-fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError> {
+fn alias_names(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+    old: &str,
+    new: &str,
+) -> Result<String, RuntimeError> {
+    // Compare only the basename families through which either name can resolve.
+    // The function uses the resolver's Unicode case folding, rather than SQLite lower().
+    conn.create_scalar_function(
+        "link_rewrite_stem",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let path = ctx.get::<String>(0)?;
+            Ok(crate::links::resolver::without_extension(&path)
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_lowercase())
+        },
+    )
+    .map_err(StorageError::corrupt_public)?;
+    let stem = |path: &str| {
+        crate::links::resolver::without_extension(path)
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    conn.query_row(
+        "SELECT json_group_array(path) FROM (
+        SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2
+          AND link_rewrite_stem(path) IN (?3,?4) ORDER BY path)",
+        params![ws, version, stem(old), stem(new)],
+        |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt_public)
+    .map_err(Into::into)
+}
+
+fn valid(conn: &Connection, ws: &str, plan: &Plan, actor: bool) -> Result<bool, RuntimeError> {
     if plan
         .state
         .stops
@@ -61,7 +105,27 @@ fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError>
         return Ok(false);
     }
     let undo: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",params![ws,plan.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-    Ok(!undo && conn.query_row(
+    if undo {
+        return Ok(false);
+    }
+    if actor {
+        let revision = crate::links::cache::revision(conn, ws, &plan.version)?;
+        let mut prior = plan.alias_revision.lock().unwrap();
+        if *prior != Some(revision) {
+            if alias_names(
+                conn,
+                ws,
+                &plan.version,
+                plan.rename.before_path.as_deref().unwrap_or(""),
+                &plan.rename.path,
+            )? != plan.aliases
+            {
+                return Ok(false);
+            }
+            *prior = Some(revision);
+        }
+    }
+    Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)
          AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?5)
          AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_order>?6 AND operation IN ('rename','delete'))",
@@ -160,7 +224,6 @@ impl ActorHandle {
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
         });
         let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
-        #[cfg(test)]
         let admission_ws = workspace.clone();
         let serial = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
@@ -177,6 +240,12 @@ impl ActorHandle {
                     }
                     .into());
                 }
+                let version = VersionedTextStore::new(store)
+                    .get_active_version(&admission_ws)?
+                    .version_id;
+                store.read_with(|conn| {
+                    crate::links::cache::revision(conn, &admission_ws, &version)
+                })?;
                 Ok(store.database_path().to_path_buf())
             })
             .await?;
@@ -224,14 +293,16 @@ impl ActorHandle {
                     .unchecked
                     .retain(|path| path != &rename.path && !path.starts_with("shared-with-me/"));
                 let plan = Plan {
-                    version,
+                    version: version.clone(),
                     operation: op.clone(),
                     state,
                     rename: (*rename).clone(),
+                    aliases: alias_names(conn, &ws, &version, old, &rename.path)?,
+                    alias_revision: Mutex::new(None),
                     paths,
                     candidates,
                 };
-                if !valid(conn, &ws, &plan)? {
+                if !valid(conn, &ws, &plan, false)? {
                     return Err(refuse().into());
                 }
                 Ok(plan)
@@ -306,7 +377,7 @@ impl ActorHandle {
                     let active = VersionedTextStore::new(store)
                         .get_active_version(&ws)?
                         .version_id;
-                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
+                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p, true))? {
                         return Ok((cursor, sources, skipped, false));
                     }
                     let mut next = cursor;
@@ -423,7 +494,7 @@ impl ActorHandle {
                     let active = VersionedTextStore::new(store)
                         .get_active_version(&ws)?
                         .version_id;
-                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
+                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p, true))? {
                         stopped = true;
                         return Ok(false);
                     }

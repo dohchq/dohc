@@ -1376,3 +1376,41 @@ async fn pending_rewrites_publish_before_undo_and_external_disk_edits_still_refu
         f.close().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn competing_alias_families_stop_and_resume_without_a_workspace_revision() {
+    for name in ["secondary/OLD.markdown", "secondary/NEW.mdx"] {
+        let f = Fixture::new(1, 1);
+        let name = name.to_owned();
+        probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, _| {
+            conn.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) SELECT workspace_id,version_id,?1,object_id FROM path_aliases WHERE path='new.md'",[&name]).unwrap();
+        }));
+        let reply = f
+            .pass("competing-family", Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(reply["documents"], 0);
+        assert_eq!(reply["complete"], false);
+        assert_eq!(reply["uncheckedCount"], 1);
+        assert_eq!(f.text("source-0000.md").await, BODY);
+        f.actor
+            .run(|store, _| {
+                store
+                    .read_with(|conn| {
+                        conn.execute("DELETE FROM path_aliases WHERE path LIKE 'secondary/%'", [])
+                    })
+                    .map_err(StorageError::persist_public)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = None;
+        let reply = f
+            .pass("competing-family", Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(reply["documents"], 1);
+        assert_eq!(reply["complete"], true);
+        f.close().await;
+    }
+}

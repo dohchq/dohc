@@ -48,13 +48,11 @@ impl Prepared {
         resolver
     }
 }
-// Never call inside write_with: rollback could reuse a revision with uncommitted aliases.
-pub(super) fn prepare(
+pub(crate) fn revision(
     conn: &Connection,
-    cache: &Arc<Mutex<Cache>>,
     ws: &str,
     version: &str,
-) -> Result<Prepared, StorageError> {
+) -> Result<(i64, i64), StorageError> {
     // TEMP state is connection-local, transactional, and also works on read-only stores.
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS link_resolver_revision(workspace_id TEXT,version_id TEXT,revision INTEGER NOT NULL,PRIMARY KEY(workspace_id,version_id));
@@ -71,6 +69,16 @@ pub(super) fn prepare(
     let external = conn
         .pragma_query_value(None, "data_version", |r| r.get(0))
         .map_err(sql)?;
+    Ok((revision, external))
+}
+// Never call inside write_with: rollback could reuse a revision with uncommitted aliases.
+pub(super) fn prepare(
+    conn: &Connection,
+    cache: &Arc<Mutex<Cache>>,
+    ws: &str,
+    version: &str,
+) -> Result<Prepared, StorageError> {
+    let (revision, external) = revision(conn, ws, version)?;
     let key = (ws.to_owned(), version.to_owned(), revision, external);
     let resolver = cache
         .lock()

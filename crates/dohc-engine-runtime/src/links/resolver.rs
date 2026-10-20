@@ -18,7 +18,7 @@ fn unique(map: &mut HashMap<String, Option<String>>, key: String, path: &str) {
         .or_insert_with(|| Some(path.to_owned()));
 }
 
-pub(super) fn without_extension(path: &str) -> &str {
+pub(crate) fn without_extension(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rfind('.') {
         Some(i) if i > 0 => &path[..path.len() - name.len() + i],
