@@ -1882,24 +1882,29 @@ pub fn admit_capture_in_tx(
 }
 
 /// What a synced row would do to the head's lineage.
-enum Incoming<'a> {
-    /// A base state, a delta of another lineage, or an imported delete,
-    /// rename, binary write or conflict resolution: never an ordinary update.
+pub(crate) enum Incoming<'a> {
+    /// A base state, a delta of another lineage, an imported delete, rename
+    /// or binary write, or a text write whose head is not the lineage's yet:
+    /// never an ordinary update.
     Replacement,
+    /// An imported text write that settles the head at `path`, a replacement
+    /// when that moves the document off its binding.
+    Write { path: &'a str },
     /// An ordinary update at `path`.
     Update { bytes: &'a [u8], path: &'a str },
 }
 
 /// Hold `op` while a released chain's tail protects the head's `lineage` and
-/// the row could destroy what the tail retains: any replacement, and an
-/// update that lands off the tail's binding or that structural inspection
-/// does not admit. The hold carries the binding and records no refusal.
+/// the row could destroy what the tail retains: any replacement, a write that
+/// moves the document, and an update that lands off the tail's binding or
+/// that structural inspection does not admit. The hold carries the binding
+/// and records no refusal.
 fn hold_released_lineage(
     tx: &rusqlite::Connection,
     key: &DocKey,
     lineage: &str,
     op: &ReplicationEnvelope,
-    relay_seq: i64,
+    relay_seq: Option<i64>,
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     use dohc_engine_collab::live_update_application::{
@@ -1919,7 +1924,7 @@ fn hold_released_lineage(
         stream_identity,
         origin_id: op.origin_id.clone(),
         origin_seq: op.origin_seq,
-        relay_seq,
+        relay_seq: relay_seq.unwrap_or_default(),
     };
     let protected = protection(
         tx,
@@ -1942,8 +1947,14 @@ fn hold_released_lineage(
             "a protected lineage's replica has no sync identity",
         ));
     }
+    if relay_seq.is_none() {
+        return Err(SyncError::RetryableState {
+            reason: "a row held for a released lineage has no relay sequence",
+        });
+    }
     let destructive = match incoming {
         Incoming::Replacement => true,
+        Incoming::Write { path } => binding.current_path.as_deref() != Some(path),
         Incoming::Update { bytes, path } => {
             binding.moved(path)
                 || dohc_engine_collab::inspect_update(&head, bytes)
@@ -1956,12 +1967,13 @@ fn hold_released_lineage(
     Ok(())
 }
 
-/// [`hold_released_lineage`] for an imported file operation that retires,
-/// replaces or rebinds `key`'s current lineage, if it has one.
-pub(crate) fn hold_released_replacement(
+/// [`hold_released_lineage`] for an imported file operation on `key`'s
+/// current lineage, if it has one.
+pub(crate) fn hold_released_file_operation(
     tx: &rusqlite::Connection,
     key: &DocKey,
     op: &ReplicationEnvelope,
+    incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     let Some(lineage) = dohc_engine_collab::read_marker_in(tx, key)
         .map_err(map_collab_hard_error)?
@@ -1969,14 +1981,7 @@ pub(crate) fn hold_released_replacement(
     else {
         return Ok(());
     };
-    hold_released_lineage(
-        tx,
-        key,
-        &lineage,
-        op,
-        op.relay_seq.unwrap_or_default(),
-        Incoming::Replacement,
-    )
+    hold_released_lineage(tx, key, &lineage, op, op.relay_seq, incoming)
 }
 
 /// The durable file head that must remain canonical after a non-Y.Doc
@@ -4804,7 +4809,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     &claim_key,
                     &lineage,
                     op,
-                    relay_seq,
+                    Some(relay_seq),
                     Incoming::Replacement,
                 )?;
             }
@@ -5269,7 +5274,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                             &key,
                             lineage,
                             op,
-                            relay_seq,
+                            Some(relay_seq),
                             Incoming::Replacement,
                         )?;
                     }
@@ -5329,7 +5334,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 &key,
                 &payload.lineage_claim_id,
                 op,
-                relay_seq,
+                Some(relay_seq),
                 Incoming::Update {
                     bytes: &remote.bytes,
                     path: &update_path,

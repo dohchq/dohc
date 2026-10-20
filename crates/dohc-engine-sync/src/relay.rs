@@ -4522,14 +4522,16 @@ impl Holding {
     }
 
     /// Stop a ready hosted document at `op`, whose conflict parent the feed
-    /// withholds or whose released lineage is unsettled: it can wait
-    /// indefinitely, so the document is held there and retains nothing, as
-    /// one that is not ready.
+    /// withholds, whose released lineage is unsettled, or whose resulting head
+    /// its lineage does not project yet: it can wait indefinitely, so the
+    /// document is held there and retains nothing, as one that is not ready.
     fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
                 reason,
-                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                crate::hosted::CONFLICT_PARENT_WITHHELD
+                    | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                    | "ydoc-resulting-head-pending"
             )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {

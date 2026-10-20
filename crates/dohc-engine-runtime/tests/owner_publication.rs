@@ -6179,6 +6179,38 @@ impl Desktop {
         self.journaled_update()
     }
 
+    /// The desktop's editor settles the document, and its next push exports
+    /// the settled head. Returns the settlement `moment.append` that journals,
+    /// with its text.
+    async fn settle(&mut self, lineage: &str) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        let settled = self
+            .actor
+            .ydoc_settle(
+                self.root.path().to_owned(),
+                window_key(),
+                WINDOW_PATH.into(),
+                ContentKind::Richdoc,
+                Some(lineage.into()),
+                None,
+                "desktop-session".into(),
+                Arc::new(()),
+                60,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap()
+            .settled()
+            .unwrap();
+        self.store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_sync::journal_moment_append_in_tx(tx, "workspace", &settled.moment_id)
+            })
+            .unwrap();
+        self.last_journaled("moment.append", "payloadAfterBlobSha256")
+    }
+
     async fn close(self) {
         self.supervisor.close_all().unwrap();
     }
@@ -6226,23 +6258,64 @@ impl HostedFeed {
         path: &str,
         text: &str,
     ) -> dohc_engine_sync::ReplicationEnvelope {
+        self.write(object_id, path, None, text)
+    }
+
+    /// The neighbour origin's next text write of `object_id` at `path`: one
+    /// that creates it, or one over `before`, the text its last write left.
+    fn write(
+        &self,
+        object_id: &str,
+        path: &str,
+        before: Option<&str>,
+        text: &str,
+    ) -> dohc_engine_sync::ReplicationEnvelope {
+        let origin_seq = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.origin_id == "neighbour")
+            .count() as i64;
         let sha = hex_sha256(text.as_bytes());
+        let mut payload = serde_json::json!({
+            "momentId": format!("moment-neighbour-{origin_seq}"), "versionId": "main",
+            "objectId": object_id, "objectCreatedAtMs": 1, "path": path, "recordedAtMs": 2_000,
+            "operation": "write", "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": path,
+            "metadata": {"origin": "sync"}, "beforePresent": "absent"
+        });
+        if let Some(before) = before {
+            let before_sha = hex_sha256(before.as_bytes());
+            let fields = payload.as_object_mut().unwrap();
+            for (name, value) in [
+                ("payloadBeforeBlobSha256", serde_json::json!(before_sha)),
+                ("payloadBeforePath", serde_json::json!(path)),
+                ("beforePresent", serde_json::json!("present")),
+                ("beforeObjectId", serde_json::json!(object_id)),
+                ("beforeVersionId", serde_json::json!("main")),
+                ("beforePath", serde_json::json!(path)),
+                ("beforeBlobSha256", serde_json::json!(before_sha)),
+                ("beforeContentKind", serde_json::json!("text")),
+                ("beforeUpdatedAtMs", serde_json::json!(2_000)),
+                (
+                    "beforeLatestMomentId",
+                    serde_json::json!(format!("moment-neighbour-{}", origin_seq - 1)),
+                ),
+            ] {
+                fields.insert(name.into(), value);
+            }
+        }
         self.serve(
             dohc_engine_sync::ReplicationEnvelope {
                 settlement_admission: None,
                 admitted_author_snapshot: None,
                 workspace_id: "workspace".into(),
                 origin_id: "neighbour".into(),
-                origin_seq: 0,
+                origin_seq,
                 relay_seq: None,
                 op_kind: "moment.append".into(),
-                payload: serde_json::json!({
-                    "momentId": "moment-neighbour", "versionId": "main", "objectId": object_id,
-                    "objectCreatedAtMs": 1, "path": path, "recordedAtMs": 2_000, "operation": "write",
-                    "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
-                    "payloadAfterBlobSha256": sha, "payloadAfterPath": path,
-                    "metadata": {"origin": "sync"}, "beforePresent": "absent"
-                }),
+                payload,
                 recorded_at_ms: 2_000,
             },
             text.as_bytes().to_vec(),
@@ -6926,12 +6999,19 @@ fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
 /// rebinds the lineage, and a neighbour in the same pass applies. Native
 /// state, retained records, attribution, the snapshot, settlement evidence
 /// and the files stay as they were, nothing is acknowledged, and successor
-/// capture finds the document not ready.
+/// capture finds the document not ready. The delete holds over the owner's
+/// own pending work too, and a row with no relay position is refused rather
+/// than held at an invented one.
 #[tokio::test]
 async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_chain_retains() {
-    for change in FILE_CHANGES {
-        let case = format!("{change:?}");
-        let mut w = retained_window(Retained::Carried).await;
+    for (change, retained) in [
+        (FileChange::Delete, Retained::Carried),
+        (FileChange::Delete, Retained::Own),
+        (FileChange::Rename, Retained::Carried),
+        (FileChange::Binary, Retained::Carried),
+    ] {
+        let case = format!("{change:?}, {retained:?}");
+        let mut w = retained_window(retained).await;
         execute(
             &mut w.store,
             "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
@@ -7002,6 +7082,27 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
             "{case}: {held:?}"
         );
         unchanged(&w, "the hold");
+        let unplaced = dohc_engine_sync::ReplicationEnvelope {
+            relay_seq: None,
+            ..op.clone()
+        };
+        let refused = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &unplaced,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(dohc_engine_sync::SyncError::RetryableState {
+                    reason: "a row held for a released lineage has no relay sequence"
+                })
+            ),
+            "{case}: {refused:?}"
+        );
+        unchanged(&w, "no relay position");
         let captured = w
             .actor
             .capture_imported_owner_activation(
@@ -7100,5 +7201,417 @@ async fn a_desktop_delete_rename_or_binary_write_applies_outside_the_window_or_w
                 host.close().await;
             }
         }
+    }
+}
+
+const NEIGHBOUR_PATH: &str = "notes/neighbour.md";
+
+/// The neighbour, a ready document of the host's scope.
+fn add_neighbour(store: &mut EngineStore) {
+    execute(
+        store,
+        "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+        VALUES ('workspace','neighbour','notes/neighbour.md','ready',1)",
+    );
+}
+
+/// Where the host's scope holds `object_id`.
+fn hosted_status(store: &EngineStore, object_id: &str) -> dohc_engine_sync::HostedDocumentStatus {
+    dohc_engine_sync::read_hosted_replica(store, "workspace")
+        .unwrap()
+        .unwrap()
+        .documents[object_id]
+        .status
+        .clone()
+}
+
+/// The host commits `pass`'s cursor.
+fn commit_pass(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    pass: &dohc_engine_sync::HostedPassOutcome,
+) {
+    let committed = client
+        .commit_hosted_cursor(
+            store,
+            "workspace",
+            pass.pending_cursor.as_ref().unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+}
+
+/// A safe update of the document over `heads`, another device's row.
+fn safe_row(
+    heads: &[&[u8]],
+    lineage: &str,
+    text: &str,
+) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+    let doc = Ydoc::wire();
+    for head in heads {
+        doc.apply(head).unwrap();
+    }
+    let bytes = doc.richdoc_append_paragraph(text);
+    (
+        ydoc_row("later", &bytes, lineage, WINDOW_PATH, false),
+        bytes,
+    )
+}
+
+/// The host's main cursor.
+fn main_cursor(store: &EngineStore) -> i64 {
+    dohc_engine_sync::read_hosted_replica(store, "workspace")
+        .unwrap()
+        .unwrap()
+        .main_cursor
+}
+
+/// Opus's review of round 4b2i-2, finding 1, the most ordinary path: in the
+/// released window the owner types in another paragraph on the desktop and
+/// its editor settles. The update only adds content, so it applies and the
+/// host writes the head it projects, the retained text with it. The
+/// settlement's preimage is then not the host's head, so it opens a sync
+/// conflict rather than settling the lineage to text without the retained
+/// work. Nothing stalls: a later row of the document and a neighbour apply,
+/// the pass commits, the cursor advances, and the next pass progresses.
+#[tokio::test]
+async fn a_desktop_edit_in_the_released_window_never_stalls_the_hosted_feed() {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let mut desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (update, update_bytes) = desktop.append(&w.lineage, "A desktop paragraph").await;
+    let (settlement, text) = desktop.settle(&w.lineage).await;
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let (later, later_bytes) = safe_row(
+        &[&w.native(), &update_bytes],
+        &w.lineage,
+        "After the settlement",
+    );
+    let update = feed.serve(update, update_bytes);
+    let settlement = feed.serve(settlement, text);
+    let later = feed.serve(later, later_bytes);
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 4, "{:?}", pass.pending_cursor);
+    assert_eq!(pass.conflicts_opened, 1, "the settlement");
+    for op in [&update, &settlement, &later, &created] {
+        assert!(journaled(&w.store, op), "{}", op.origin_id);
+    }
+    let projected = w.text();
+    assert!(
+        projected.contains("A desktop paragraph")
+            && projected.contains(RETAINED)
+            && projected.contains("After the settlement"),
+        "{projected}"
+    );
+    commit_pass(&mut w.store, &client, &pass);
+    assert_eq!(main_cursor(&w.store), created.relay_seq.unwrap());
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Ready
+    );
+    let edited = client.transport().write(
+        "neighbour",
+        NEIGHBOUR_PATH,
+        Some("A neighbour.\n"),
+        "A neighbour, edited.\n",
+    );
+    let again = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
+    assert!(journaled(&w.store, &edited));
+    commit_pass(&mut w.store, &client, &again);
+    assert_eq!(main_cursor(&w.store), edited.relay_seq.unwrap());
+    assert!(w.text().contains(RETAINED));
+    desktop.close().await;
+    w.close().await;
+}
+
+/// A text write over the host's head that leaves the document at `path` with
+/// `text`, from an origin that journaled no `ydoc.update` for it.
+fn host_write(
+    store: &EngineStore,
+    path: &str,
+    text: &str,
+) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+    let (sha, latest, updated): (String, String, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,latest_moment_id,updated_at_ms FROM snapshots WHERE object_id='object'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    let op = dohc_engine_sync::ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "workspace".into(),
+        origin_id: "writer".into(),
+        origin_seq: 0,
+        relay_seq: None,
+        op_kind: "moment.append".into(),
+        payload: serde_json::json!({
+            "momentId": "host-write", "versionId": "main", "objectId": "object",
+            "path": path, "recordedAtMs": 2_000, "operation": "write",
+            "payloadBeforeBlobSha256": sha, "payloadBeforePath": WINDOW_PATH,
+            "payloadAfterBlobSha256": hex_sha256(text.as_bytes()), "payloadAfterPath": path,
+            "metadata": {"origin": "sync"}, "beforePresent": "present", "beforeObjectId": "object",
+            "beforeVersionId": "main", "beforePath": WINDOW_PATH, "beforeBlobSha256": sha,
+            "beforeContentKind": "text", "beforeUpdatedAtMs": updated, "beforeLatestMomentId": latest
+        }),
+        recorded_at_ms: 2_000,
+    };
+    (op, text.as_bytes().to_vec())
+}
+
+/// Opus's review of round 4b2i-2, finding 1, where the pending reconcile is
+/// reached in the window: a bare text moment over the host's head, one the
+/// desktop journals with no `ydoc.update`, as a frontmatter edit can. Its
+/// text lacks the retained work, so the lineage never projects it, and the
+/// moment holds as the released lineage's: unjournaled, with a later row of
+/// the document behind it. A neighbour applies, the pass commits, and the
+/// next pass still lets the neighbour progress.
+#[tokio::test]
+async fn a_bare_text_moment_in_the_released_window_holds_only_its_document() {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let file = std::fs::read_to_string(w.root.path().join(WINDOW_PATH)).unwrap();
+    let (moment, text) = host_write(
+        &w.store,
+        WINDOW_PATH,
+        &format!("---\ntitle: Plan\n---\n{file}"),
+    );
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let (later, later_bytes) = safe_row(&[&w.native()], &w.lineage, "After the moment");
+    let moment = feed.serve(moment, text.clone());
+    let later = feed.serve(later, later_bytes);
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let (native, rows, files) = (w.native(), document_rows(&w.store), notes(&w.root));
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 1, "the neighbour");
+    assert!(journaled(&w.store, &created));
+    assert!(!journaled(&w.store, &moment) && !journaled(&w.store, &later));
+    assert!(stopped_before(&pass, &moment), "{:?}", pass.pending_cursor);
+    assert!(!pass.has_more, "no work retries hot");
+    commit_pass(&mut w.store, &client, &pass);
+    assert_eq!(main_cursor(&w.store), created.relay_seq.unwrap());
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
+    );
+    assert_eq!(
+        (w.native(), document_rows(&w.store), notes(&w.root)),
+        (native.clone(), rows.clone(), files.clone())
+    );
+    // The hold is the released lineage's, and writes nothing.
+    w.store.put_binary_blob(&text).unwrap();
+    let held = dohc_engine_sync::apply_replication_envelope(
+        &mut w.store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &moment,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    );
+    let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
+        panic!("{held:?}");
+    };
+    assert_eq!(binding.current_path.as_deref(), Some(WINDOW_PATH));
+    assert_eq!(binding.head_digest, hex_sha256(&native));
+    assert_eq!(
+        (w.native(), document_rows(&w.store), notes(&w.root)),
+        (native.clone(), rows, files)
+    );
+    let edited = client.transport().write(
+        "neighbour",
+        NEIGHBOUR_PATH,
+        Some("A neighbour.\n"),
+        "A neighbour, edited.\n",
+    );
+    let again = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
+    assert!(journaled(&w.store, &edited));
+    assert!(
+        stopped_before(&again, &moment) && !again.has_more,
+        "{again:?}"
+    );
+    commit_pass(&mut w.store, &client, &again);
+    assert_eq!(main_cursor(&w.store), edited.relay_seq.unwrap());
+    assert_eq!(w.native(), native);
+    assert!(w.text().contains(RETAINED));
+    w.close().await;
+}
+
+/// Sol's review of round 4b2i-2, finding 1: on a ready hosted document with
+/// nothing retained, a bare text moment whose head the lineage does not
+/// project waits for its rewrite. It stops its document alone, with a later
+/// row of it behind, as a released lineage's hold does: the neighbour applies,
+/// the pass commits, and the next pass still lets the neighbour progress.
+#[tokio::test]
+async fn a_pending_text_moment_stops_only_its_document() {
+    let base = owner_source_base();
+    let lineage = hex_sha256(&base);
+    let mut host = replica_of("origin", &base, &lineage, &[]).await;
+    execute(&mut host.store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq,scope_token)
+          VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'),'scope');
+        INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','ready',1)");
+    add_neighbour(&mut host.store);
+    let mut desktop = desktop_of(&base, &lineage, &[]).await;
+    desktop.append(&lineage, "A desktop paragraph").await;
+    // The relay serves the settlement alone: the host never sees its update.
+    let (moment, text) = desktop.settle(&lineage).await;
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let (later, later_bytes) = safe_row(&[&base], &lineage, "After the moment");
+    let moment = feed.serve(moment, text.clone());
+    let later = feed.serve(later, later_bytes);
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let (head, rows) = (
+        dohc_engine_collab::load_persisted(&host.store, &window_key())
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state(),
+        document_rows(&host.store),
+    );
+    let pass = hosted_pass(
+        &mut host.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 1, "the neighbour");
+    assert!(journaled(&host.store, &created));
+    assert!(!journaled(&host.store, &moment) && !journaled(&host.store, &later));
+    assert!(stopped_before(&pass, &moment), "{:?}", pass.pending_cursor);
+    assert!(!pass.has_more, "no work retries hot");
+    commit_pass(&mut host.store, &client, &pass);
+    assert_eq!(
+        hosted_status(&host.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
+    );
+    assert_eq!(document_rows(&host.store), rows);
+    // It waits for its rewrite, not for a released lineage.
+    host.store.put_binary_blob(&text).unwrap();
+    let pending = dohc_engine_sync::apply_replication_envelope(
+        &mut host.store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &moment,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    );
+    assert!(
+        matches!(
+            pending,
+            Err(dohc_engine_sync::SyncError::RetryableState {
+                reason: "ydoc-resulting-head-pending"
+            })
+        ),
+        "{pending:?}"
+    );
+    let edited = client.transport().write(
+        "neighbour",
+        NEIGHBOUR_PATH,
+        Some("A neighbour.\n"),
+        "A neighbour, edited.\n",
+    );
+    let again = hosted_pass(
+        &mut host.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
+    assert!(journaled(&host.store, &edited));
+    assert!(
+        stopped_before(&again, &moment) && !again.has_more,
+        "{again:?}"
+    );
+    commit_pass(&mut host.store, &client, &again);
+    let persisted = dohc_engine_collab::load_persisted(&host.store, &window_key())
+        .unwrap()
+        .unwrap()
+        .doc
+        .encode_full_state();
+    assert_eq!(persisted, head);
+    desktop.close().await;
+    host.close().await;
+}
+
+/// Sol's review of round 4b2i-2, finding 2: a text write that moves the
+/// document rebinds it as a rename does, whatever its text. With the text the
+/// host's lineage projects, and with other text, the write holds before any
+/// write, the protected state stays as it was, and a neighbour applies.
+#[tokio::test]
+async fn a_text_write_that_moves_the_document_holds_in_the_released_window() {
+    for equal in [true, false] {
+        let case = if equal {
+            "projected text"
+        } else {
+            "other text"
+        };
+        let mut w = retained_window(Retained::Carried).await;
+        add_neighbour(&mut w.store);
+        let text = if equal {
+            w.text()
+        } else {
+            "Moved elsewhere.\n".to_owned()
+        };
+        let (op, bytes) = host_write(&w.store, RENAMED_PATH, &text);
+        let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+        let op = feed.serve(op, bytes.clone());
+        let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let (native, rows, files) = (w.native(), document_rows(&w.store), notes(&w.root));
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        assert_eq!(pass.applied, 1, "{case}: the neighbour");
+        assert!(journaled(&w.store, &created), "{case}");
+        assert!(!journaled(&w.store, &op), "{case}: acknowledged");
+        assert!(
+            stopped_before(&pass, &op),
+            "{case}: {:?}",
+            pass.pending_cursor
+        );
+        commit_pass(&mut w.store, &client, &pass);
+        w.store.put_binary_blob(&bytes).unwrap();
+        let held = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
+            panic!("{case}: {held:?}");
+        };
+        assert_eq!(binding.current_path.as_deref(), Some(WINDOW_PATH), "{case}");
+        assert_eq!(w.native(), native, "{case}: native");
+        assert!(w.text().contains(RETAINED), "{case}: {}", w.text());
+        assert_eq!(document_rows(&w.store), rows, "{case}: records");
+        assert_eq!(notes(&w.root), files, "{case}: files");
+        w.close().await;
     }
 }
