@@ -86,7 +86,7 @@ export const SETTINGS_SECTIONS = [
     label: "Privacy",
     scope: "Mixed",
     group: "workspace",
-    keywords: ["permission", "external", "links", "safety", "usage", "error", "reports", "telemetry", "diagnostics", "crash"],
+    keywords: ["permission", "external", "links", "safety", "usage", "error", "reports", "telemetry", "diagnostics", "crash", "trust", "restricted", "mode"],
     Icon: Shield,
   },
   {

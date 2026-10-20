@@ -3985,7 +3985,8 @@ async fn a_settle_after_an_external_delete_refuses_and_the_file_stays_deleted() 
     // back. One document here settled before the delete and one did not, so
     // each settle expects a different head. Capture sees both deletes but
     // keeps both heads while the sessions hold them, so each settle finds
-    // the head it expects and no file.
+    // the head it expects and no file. Waiting for the sessions is not a
+    // capture failure, so capture settles healthy (dohc#2342).
     let scratch = ScratchDir::new().expect("scratch");
     let files = [
         ("notes/settled.md", "settled before the delete\n"),
@@ -4037,7 +4038,7 @@ async fn a_settle_after_an_external_delete_refuses_and_the_file_stays_deleted() 
     for (path, _) in files {
         std::fs::remove_file(scratch.path().join(path)).expect("delete outside dohc");
     }
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    wait_for_capture_to_settle_around_live_session(&transport, &handle, 100).await;
     for (id, (path, text)) in (200..).zip(files) {
         let head = call(
             &transport,

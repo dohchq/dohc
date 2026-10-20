@@ -620,6 +620,7 @@ mod saturation_tests {
                     not_owned_paths: Vec::new(),
                     failed_applies: Vec::new(),
                     deferred_paths: Vec::new(),
+                    deferred_retires: Vec::new(),
                     held_observations: Vec::new(),
                     crashed_after_durable_boundary: None,
                     degraded: false,
