@@ -156,11 +156,13 @@ fn busy_batch_fixture() -> (
     let (db, sink) = sink_for(&scratch, &supervisor);
     write_file(scratch.path(), "a.md", b"alpha");
     write_file(scratch.path(), "b.md", b"bravo");
-    let writer = Connection::open(&db).expect("fixture writer");
+    let writer =
+        Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("fixture writer");
     writer
         .execute_batch("CREATE TABLE retry_payload(body BLOB)")
         .unwrap();
-    let reader = Connection::open(&db).expect("pinned reader");
+    let reader =
+        Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("pinned reader");
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM retry_payload")
         .unwrap();

@@ -743,7 +743,10 @@ impl Host {
 
 /// The document's state on the hosted replica.
 fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
-    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     conn.query_row(
         "SELECT state FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2",
         [WORKSPACE, object_id],
@@ -754,7 +757,10 @@ fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
 
 /// The path of the document's head on the hosted replica.
 fn head_path(scratch: &ScratchDir, object_id: &str) -> Option<String> {
-    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     conn.query_row(
         "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
         [WORKSPACE, object_id],
@@ -765,7 +771,10 @@ fn head_path(scratch: &ScratchDir, object_id: &str) -> Option<String> {
 
 /// Journal a live Y.Doc update of `object_id` as its session would.
 fn journal_live_update(scratch: &ScratchDir, object_id: &str, path: &str, update: &[u8]) -> i64 {
-    let mut conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let mut conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let tx = conn.transaction().expect("transaction");
     let sha256 = dohc_engine_storage::put_binary_blob(&tx, update).expect("update blob");
     let key = dohc_engine_collab::DocKey::new(WORKSPACE, "main", object_id).expect("doc key");
@@ -1017,7 +1026,10 @@ async fn ordinary_relay_rpcs_leave_a_hosted_replica_untouched() {
         requests,
         "no refusal reached the relay"
     );
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let claim: (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT claim_state,claim_account_id FROM sync_identity WHERE workspace_id=?1",
@@ -1091,12 +1103,14 @@ async fn a_departed_document_parks_and_frees_its_file_for_its_replacement() {
     // The durability review: a commit lands whether or not parking after it
     // fails, and says both.
     let commits = || {
-        Connection::open(engine_db_path(&scratch).expect("db path"))
-            .expect("open db")
-            .query_row("SELECT cursor_commits FROM hosted_replicas", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("cursor commits")
+        Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&scratch).expect("db path")).as_ref(),
+        ))
+        .expect("open db")
+        .query_row("SELECT cursor_commits FROM hosted_replicas", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("cursor commits")
     };
     let before = commits();
     for _ in 0..2 {
@@ -1124,7 +1138,10 @@ async fn a_departed_document_parks_and_frees_its_file_for_its_replacement() {
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(host.pull().await["departed"], json!([]));
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let (objects, heads, conflicts): (i64, i64, i64) = conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM file_objects WHERE object_id='doc-b'), \
@@ -1172,7 +1189,10 @@ async fn a_parked_document_comes_back_with_its_file_when_it_returns() {
     host.sync().await;
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let (moments, parked): (i64, i64) = conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM moments WHERE object_id='doc-b'), \
@@ -1302,7 +1322,10 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     assert!(commit["retirement"].is_object(), "{commit}");
     assert_eq!(commit["departed"], json!(["doc-b"]));
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let (heads, retired): (i64, i64) = conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM snapshots), (SELECT COUNT(*) FROM hosted_retired_files)",
@@ -1382,7 +1405,10 @@ async fn retired_file_holds_its_path_while_a_folder_is_locked(locked: &str) {
 
     // doc-b parks; its file goes, but the locked folder cannot, across
     // passes.
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     for _ in 0..2 {
         host.sync().await;
         assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
@@ -1499,7 +1525,10 @@ async fn a_returning_document_is_held_off_another_documents_path_until_it_moves(
     assert_eq!(read("a.md"), None);
     assert_eq!(read("b.md").as_deref(), Some("hosted b"));
     assert_eq!(read("c.md").as_deref(), Some("hosted a"));
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let conflicts: i64 = conn
         .query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
         .expect("count");
@@ -2301,7 +2330,10 @@ async fn returning_document_matrix(stop: Stop) {
             .map(|row| (row.moved(), owner.text(&row.other()))),
     );
     assert_eq!(disk(scratch.path()), (settled, vec![]));
-    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let retired: i64 = conn
         .query_row("SELECT COUNT(*) FROM hosted_retired_files", [], |row| {
             row.get(0)
@@ -2601,14 +2633,16 @@ impl LiveHost {
             )
             .await
             .expect("provision live host");
-        let main_version_id = Connection::open(engine_db_path(scratch).expect("db path"))
-            .expect("open db")
-            .query_row(
-                "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
-                [WORKSPACE],
-                |row| row.get(0),
-            )
-            .expect("main version");
+        let main_version_id = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(scratch).expect("db path")).as_ref(),
+        ))
+        .expect("open db")
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("main version");
         Self {
             service,
             owner,
@@ -2668,7 +2702,10 @@ impl LiveHost {
 /// Each live binding the writer holds for the hosted replica, and whether it
 /// is available.
 fn native_bindings(scratch: &ScratchDir) -> Vec<(String, bool)> {
-    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let mut statement = conn
         .prepare(
             "SELECT object_id,available FROM live_device_application_bindings \
@@ -2759,15 +2796,17 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     .await;
 
     // Its accepted work stays, waiting for the relay.
-    let outbox: i64 = Connection::open(engine_db_path(&scratch).expect("db path"))
-        .expect("open db")
-        .query_row(
-            "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND imported=0 \
+    let outbox: i64 = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db")
+    .query_row(
+        "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND imported=0 \
              AND op_kind='ydoc.update' AND json_extract(payload_json,'$.objectId')='doc-a'",
-            [WORKSPACE],
-            |row| row.get(0),
-        )
-        .expect("outbox");
+        [WORKSPACE],
+        |row| row.get(0),
+    )
+    .expect("outbox");
     assert_eq!(outbox, 1);
 
     // Held, it registers nowhere until a commit settles it ready, and a
@@ -2826,14 +2865,16 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
 
 /// How many cursors the hosted replica has committed.
 fn cursor_commits(scratch: &ScratchDir) -> i64 {
-    Connection::open(engine_db_path(scratch).expect("db path"))
-        .expect("open db")
-        .query_row(
-            "SELECT cursor_commits FROM hosted_replicas WHERE workspace_id=?1",
-            [WORKSPACE],
-            |row| row.get(0),
-        )
-        .expect("cursor commits")
+    Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db")
+    .query_row(
+        "SELECT cursor_commits FROM hosted_replicas WHERE workspace_id=?1",
+        [WORKSPACE],
+        |row| row.get(0),
+    )
+    .expect("cursor commits")
 }
 
 /// A landed commit is never reported as failed. The commit that leaves held
@@ -3067,7 +3108,10 @@ impl SessionHost {
 /// Retain an activation of `object_id` at `path`, whose head holds `text`, as
 /// a capture leaves one in the store, and return its id.
 fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &str) -> String {
-    let mut conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let mut conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db");
     let tx = conn.transaction().expect("transaction");
     let baseline = dohc_engine_collab::Ydoc::wire().encode_full_state();
     let full_state = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, text);
@@ -3253,14 +3297,16 @@ async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
     });
     host.register(&binding).await.expect("register");
     let refused = |scratch: &ScratchDir| -> i64 {
-        Connection::open(engine_db_path(scratch).expect("db path"))
-            .expect("open db")
-            .query_row(
-                "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
-                [],
-                |row| row.get(0),
-            )
-            .expect("refusals")
+        Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(scratch).expect("db path")).as_ref(),
+        ))
+        .expect("open db")
+        .query_row(
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
+            [],
+            |row| row.get(0),
+        )
+        .expect("refusals")
     };
     let unready = || Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()));
 
@@ -3330,14 +3376,16 @@ async fn a_held_document_leaves_the_push_running_and_registers_once_it_departs()
     .await
     .expect("create");
     host.sync().await;
-    let main: String = Connection::open(engine_db_path(&scratch).expect("db path"))
-        .expect("open db")
-        .query_row(
-            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
-            [WORKSPACE],
-            |row| row.get(0),
-        )
-        .expect("main version");
+    let main: String = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("db path")).as_ref(),
+    ))
+    .expect("open db")
+    .query_row(
+        "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+        [WORKSPACE],
+        |row| row.get(0),
+    )
+    .expect("main version");
     let binding = json!({
         "workspaceId": WORKSPACE, "mainVersionId": main, "objectId": "doc-a",
         "lineageClaimId": "0".repeat(64), "currentPath": "a.md",

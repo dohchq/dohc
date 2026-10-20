@@ -426,8 +426,11 @@ fn restore_test(
     backup_path: &Path,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
-    let copy = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::backup)?;
+    let copy = Connection::open_with_flags(
+        crate::sqlite_path(backup_path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(StorageError::backup)?;
 
     let check: String = copy
         .pragma_query_value(None, "integrity_check", |row| row.get(0))
@@ -550,7 +553,7 @@ mod tests {
         let store = EngineStore::open_read_only(&path).unwrap();
         let snapshot = dir.join("snapshot.db");
         store.vacuum_into(&snapshot).unwrap();
-        let restored = rusqlite::Connection::open(&snapshot).unwrap();
+        let restored = rusqlite::Connection::open(crate::sqlite_path(snapshot.as_ref())).unwrap();
         let value: String = restored
             .query_row("SELECT body FROM backup_wal_proof WHERE id=1", [], |r| {
                 r.get(0)
@@ -643,7 +646,8 @@ mod tests {
                 let copy_path = dir.join(format!("copy-{index}-{missing}.db"));
                 store.vacuum_into(&copy_path).unwrap();
                 assert!(super::restore_test(&store, &copy_path, &NoFaults).unwrap());
-                let copy = rusqlite::Connection::open(&copy_path).unwrap();
+                let copy =
+                    rusqlite::Connection::open(crate::sqlite_path(copy_path.as_ref())).unwrap();
                 copy.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
                 copy.execute_batch(&if missing {
                     format!("DROP TABLE {table}")

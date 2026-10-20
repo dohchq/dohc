@@ -491,13 +491,14 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     )
     .await;
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
-    let conn = rusqlite::Connection::open(
-        scratch
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch
             .path()
             .join(".dohc")
             .join("engine")
-            .join("engine.db"),
-    )
+            .join("engine.db"))
+        .as_ref(),
+    ))
     .expect("open committed store");
     let asset_moments: i64 = conn
         .query_row(
@@ -2504,9 +2505,10 @@ struct TableFingerprint {
 struct SettleFingerprint(Vec<TableFingerprint>);
 
 fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerprint {
-    let connection =
-        rusqlite::Connection::open(engine_db_path(scratch).expect("engine database path"))
-            .expect("open engine database");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).expect("engine database path")).as_ref(),
+    ))
+    .expect("open engine database");
     let rows = |table: &'static str, workspace_scoped: bool| {
         let sql = if workspace_scoped {
             format!("SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY rowid")
@@ -5498,7 +5500,8 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
     let db_path = engine_db_path(&scratch).expect("engine database path");
-    let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("open engine database");
     connection
         .execute(
             "INSERT INTO sync_identity \
@@ -5750,7 +5753,8 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
     let db_path = engine_db_path(&scratch).expect("engine database path");
-    let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("open engine database");
     connection
         .execute(
             "INSERT INTO sync_identity \
@@ -6323,8 +6327,10 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
             "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
         })).await;
-        let connection = rusqlite::Connection::open(engine_db_path(&scratch).expect("db path"))
-            .expect("connection");
+        let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&scratch).expect("db path")).as_ref(),
+        ))
+        .expect("connection");
         match missing_proof {
             "disk-changed" => write_file(scratch.path(), path, b"External work.\n"),
             "head-moved" => {
@@ -6573,7 +6579,8 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     let opened = call(&transport, &handle, 2, "ydoc.open", json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
-    let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
+    let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("coverage fixture");
     let mut folded = vec![json!({"kind":"agent","agentId":"first","onBehalfOf":"person"})];
     while json!(&folded).to_string().len()
         < dohc_engine_collab::author_coverage::SETTLE_AUTHOR_BYTE_THRESHOLD
@@ -6590,7 +6597,8 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     call(&transport, &handle, 4, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let raw = rusqlite::Connection::open(&db).expect("inspect");
+        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("inspect");
         let covered:bool=raw.query_row("SELECT settled_update_seq=head_update_seq AND settle_prior_update_seq IS NULL AND pending_authors_json='[]' FROM ydoc_docs", [], |r|r.get(0)).expect("coverage");
         drop(raw);
         if covered {
@@ -6659,7 +6667,8 @@ async fn record_update_preserves_existing_human_automation_context() {
         "attribution": {"actorKind": "human", "onBehalfOf": "someone-else", "depth": 0},
     })).await;
 
-    let raw = rusqlite::Connection::open(&db).expect("read durable state");
+    let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("read durable state");
     let updates: i64 = raw
         .query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
         .expect("update count");
@@ -6715,7 +6724,8 @@ async fn attributed_declared_seed_does_not_credit_opening() {
         json!({"sessionId":opened["sessionId"]}),
     )
     .await;
-    let raw = rusqlite::Connection::open(&db).expect("inspect");
+    let raw =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("inspect");
     let authors:Option<String>=raw.query_row("SELECT author_json FROM moments WHERE path='seed.txt' ORDER BY moment_order DESC LIMIT 1",[],|row|row.get(0)).expect("moment");
     assert_eq!(authors, None, "opening does not confer authorship");
     drop(raw);

@@ -192,7 +192,8 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
         files.close().await;
     }
     supervisor.close(&db).expect("close actor");
-    let connection = rusqlite::Connection::open(&db).expect("open store observer");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open store observer");
     let (summary, correlation): (Option<String>, Option<String>) = connection
         .query_row(
             "SELECT metadata_summary, metadata_correlation_id FROM moments
@@ -323,7 +324,8 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
 
     files.close().await;
     supervisor.close(&db).expect("close actor");
-    let connection = rusqlite::Connection::open(&db).expect("open store observer");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open store observer");
     let moments = connection
         .query_row(
             "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = 'plan.md'",

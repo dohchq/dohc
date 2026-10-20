@@ -215,10 +215,10 @@ fn batch_keeps_joined_nulls_order_duplicates_and_caps() {
 fn batch_reader_keeps_metadata_snapshot_across_write_and_delete() {
     let scratch = dohc_test_scratch::ScratchDir::new_named("text-batch-snapshot").unwrap();
     let path = scratch.join("test.db");
-    let writer = Connection::open(&path).unwrap();
+    let writer = Connection::open(dohc_engine_storage::sqlite_path(path.as_ref())).unwrap();
     writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER,text TEXT); CREATE TABLE heads(sha TEXT); INSERT INTO blobs VALUES('old',3,'old'); INSERT INTO heads VALUES('old');").unwrap();
     // The second connection reads while the first commits a replacement and GC.
-    let reader = Connection::open(&path).unwrap();
+    let reader = Connection::open(dohc_engine_storage::sqlite_path(path.as_ref())).unwrap();
     let snapshot = text::ReadSnapshot::new(&reader).unwrap();
     let key: String = reader
         .query_row("SELECT sha FROM heads", [], |row| row.get(0))

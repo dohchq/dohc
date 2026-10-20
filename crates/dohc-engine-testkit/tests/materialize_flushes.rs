@@ -50,7 +50,7 @@ impl Workspace {
     /// connection sees committed rows.
     fn watch_ended_jobs(&self) -> Arc<Mutex<Vec<i64>>> {
         let reader = rusqlite::Connection::open_with_flags(
-            self.path(".dohc/engine/engine.db"),
+            dohc_engine_storage::sqlite_path((self.path(".dohc/engine/engine.db")).as_ref()),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .expect("reader");

@@ -771,7 +771,8 @@ async fn laned_outage_replay_does_not_attempt_origination_or_read_sync_control()
             }).unwrap();
         });
         let actor = supervisor.open(&db, 15).unwrap().actor;
-        let control = rusqlite::Connection::open(&db).unwrap();
+        let control =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         // Open validates the schema first; any subsequent origination probe fails.
         control
             .execute_batch("ALTER TABLE sync_relay_push_state RENAME TO unavailable_sync_control")

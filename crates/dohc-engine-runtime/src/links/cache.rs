@@ -133,10 +133,13 @@ mod tests {
     fn readonly_cache_observes_external_writes() {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
         let path = scratch.path().join("aliases.db");
-        let c = Connection::open(&path).unwrap();
+        let c = Connection::open(dohc_engine_storage::sqlite_path(path.as_ref())).unwrap();
         c.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE path_aliases(workspace_id TEXT,version_id TEXT,path TEXT,object_id TEXT); INSERT INTO path_aliases VALUES('ws','main','a.md','a');").unwrap();
-        let reader =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let reader = Connection::open_with_flags(
+            dohc_engine_storage::sqlite_path(path.as_ref()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
         let cache = Arc::default();
         let first = get(&reader, &cache, "main");
         c.execute_batch("UPDATE path_aliases SET path='b.md';")

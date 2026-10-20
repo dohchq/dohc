@@ -494,7 +494,8 @@ fn copy_store_snapshot(source: &std::path::Path, destination: &std::path::Path) 
             std::fs::remove_file(path).expect("remove prior test store");
         }
     }
-    let connection = rusqlite::Connection::open(source).expect("open source snapshot");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(source))
+        .expect("open source snapshot");
     connection
         .execute(
             "VACUUM INTO ?1",

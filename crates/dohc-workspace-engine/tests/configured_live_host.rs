@@ -181,7 +181,7 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
         serde_json::from_value(hosts.result["workspaces"][0]["workspaceHandle"].clone()).unwrap();
     let db = rusqlite::Connection::open_with_flags(
-        root.join(".dohc/engine/engine.db"),
+        dohc_engine_storage::sqlite_path((root.join(".dohc/engine/engine.db")).as_ref()),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -307,7 +307,7 @@ fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edi
     let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
         serde_json::from_value(hosts.result["workspaces"][0]["workspaceHandle"].clone()).unwrap();
     let main: String = rusqlite::Connection::open_with_flags(
-        &database,
+        dohc_engine_storage::sqlite_path(database.as_ref()),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap()

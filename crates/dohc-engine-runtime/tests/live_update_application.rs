@@ -193,7 +193,8 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
     ] {
         let (_scratch, db, supervisor, actor) = fixture();
         let (_owner, handle) = registered(&actor).await;
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let source = Ydoc::wire();
         let mut deliveries = Vec::new();
         for cursor in 1..=64 {
@@ -333,7 +334,8 @@ async fn failed_close_or_replacement_retains_durable_invalidation_for_retry() {
             .register("relay-A".into(), coordinate("connection"), binding("two"))
             .await
             .unwrap();
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         raw.execute_batch("CREATE TRIGGER refuse_second_invalidation BEFORE UPDATE OF available ON live_device_application_bindings WHEN OLD.object_id='two' AND NEW.available=0 BEGIN SELECT RAISE(ABORT, 'invalidation failure'); END;").unwrap();
         let result = if replace {
             actor

@@ -101,7 +101,8 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     )
     .await;
     let db = engine_db_path(&scratch).unwrap();
-    let mut connection = rusqlite::Connection::open(&db).unwrap();
+    let mut connection =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     connection
         .execute(
             "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) VALUES (?1,'share','0')",
@@ -226,7 +227,8 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         .find(|value| value["field"] == "Title")
         .unwrap();
     assert_eq!(title["value"], json!("Fourth"));
-    let connection = rusqlite::Connection::open(&db).unwrap();
+    let connection =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         assert_eq!(
             connection
@@ -239,7 +241,8 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     }
     drop(connection);
     call(&transport, &handle, 16, "workspace.close", json!({})).await;
-    let connection = rusqlite::Connection::open(&db).unwrap();
+    let connection =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         let count: i64 = connection
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -431,7 +434,7 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
     })).await;
     let db = engine_db_path(&scratch).unwrap();
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     let key = DocKey::new(WORKSPACE_ID, "main", empty["objectId"].as_str().unwrap()).unwrap();
     let seeded = dohc_engine_collab::load_doc_in(&conn, &key).expect("durable empty lineage");
     assert_eq!(seeded.project(ContentKind::Richdoc).unwrap().content, "");
@@ -540,7 +543,8 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
             assert_eq!(status["settled"], true, "{status}");
             assert_eq!(status["heldFiles"][0]["path"], "tasks/empty.md");
         }
-        let conn = rusqlite::Connection::open(&db).unwrap();
+        let conn =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let captured: String = conn
             .query_row(
                 "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
@@ -621,7 +625,7 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
         call(&transport, &handle, 240, "workspace.close", json!({})).await;
         return;
     }
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     if retires {
         assert!(
             dohc_engine_collab::read_marker_in(&conn, &key)
@@ -710,7 +714,7 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
     )
     .await;
     assert_eq!(query["records"].as_array().unwrap().len(), 3);
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     let adopted: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM collection_records WHERE adoption_state='adopted'",
@@ -957,7 +961,8 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
     seed_collection_state(&scratch);
 
     let db = engine_db_path(&scratch).expect("engine db path");
-    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let mut connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open history database");
     let tx = connection.transaction().expect("begin history seed");
     for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
         tx.execute(
@@ -1758,7 +1763,8 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             })
             .expect("bind adopted collection record");
         drop(store);
-        let connection = rusqlite::Connection::open(&db).expect("open identity connection");
+        let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("open identity connection");
         connection
             .execute(
                 "INSERT INTO sync_identity \
@@ -2463,7 +2469,8 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
         })
         .expect("reconcile big-number collections");
     drop(store);
-    let connection = rusqlite::Connection::open(&db).expect("open history database");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open history database");
     for case in &cases {
         connection
             .execute(
@@ -3000,7 +3007,8 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
         })
         .expect("bind adopted collection record");
     drop(store);
-    let connection = rusqlite::Connection::open(&db).expect("open seed connection");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open seed connection");
     let (object_id, head_moment_id) = connection
         .query_row(
             "SELECT object_id,latest_moment_id FROM snapshots \
@@ -3183,7 +3191,8 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
         })
         .expect("bind adopted collection record");
     drop(store);
-    let connection = rusqlite::Connection::open(&db).expect("open seed connection");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open seed connection");
     let (object_id, head_moment_id) = connection
         .query_row(
             "SELECT object_id,latest_moment_id FROM snapshots \
@@ -3348,7 +3357,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         })
         .expect("bind adopted collection record");
     drop(store);
-    let connection = rusqlite::Connection::open(&db).expect("open identity connection");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open identity connection");
     connection
         .execute(
             "INSERT INTO sync_identity \
@@ -3864,7 +3874,8 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
     seed_collection_state(&scratch);
 
     let db = engine_db_path(&scratch).expect("engine db path");
-    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let mut connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("open history database");
     let tx = connection.transaction().expect("begin history seed");
     let next_value = serde_json::to_string(&"x".repeat(VALUE_BYTES)).expect("history value");
     for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
@@ -4519,7 +4530,8 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
             "authors": [author],
         }),
     };
-    let connection = rusqlite::Connection::open(&db).expect("seed replication connection");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("seed replication connection");
     connection
         .execute(
             "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
@@ -4728,7 +4740,8 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     drop(transport);
 
     let outgoing = || {
-        let connection = rusqlite::Connection::open(&db).expect("read owner journal");
+        let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("read owner journal");
         let mut statement = connection
             .prepare(
                 "SELECT payload_json FROM replication_log \
@@ -4838,7 +4851,8 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         before_retry,
         "retries and restart must not add owner settlements"
     );
-    let connection = rusqlite::Connection::open(&db).expect("read durable imported moment");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        .expect("read durable imported moment");
     let counts: (i64, i64) = connection.query_row(
         "SELECT (SELECT count(*) FROM moments WHERE workspace_id=?1 AND moment_id=?2), \
          (SELECT count(*) FROM replication_log WHERE workspace_id=?1 AND origin_id=?3 AND imported=1)",
@@ -4868,7 +4882,7 @@ async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned(
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
     let db = engine_db_path(&scratch).unwrap();
-    rusqlite::Connection::open(&db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
         .unwrap()
         .execute(
             "INSERT INTO sync_identity \
@@ -4890,7 +4904,7 @@ async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned(
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     let count = |query: &str| -> i64 {
-        rusqlite::Connection::open(&db)
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
             .unwrap()
             .query_row(query, [], |row| row.get(0))
             .unwrap()

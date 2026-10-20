@@ -889,7 +889,8 @@ mod tests {
     async fn a_cancelled_restore_settlement_still_reconciles_its_collection() {
         let mut f = Fixture::new().await;
         let db = f._scratch.path().join(".dohc/engine/engine.db");
-        let mut raw = rusqlite::Connection::open(&db).unwrap();
+        let mut raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let tx = raw
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
@@ -919,7 +920,8 @@ mod tests {
             .await;
         let header = f.prepare_admitted().await;
         drop(f.restore("liveApplication.applyRestore", &header).await);
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         raw.execute("DELETE FROM snapshots WHERE object_id='schema'", [])
             .unwrap();
         drop(raw);
@@ -928,7 +930,8 @@ mod tests {
             serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
         assert_eq!(result["collectionReconcileRequired"], true);
         drop(settled);
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         assert_eq!(
             raw.query_row("SELECT COUNT(*) FROM collections", [], |r| r
                 .get::<_, i64>(0))
@@ -1166,8 +1169,10 @@ mod tests {
             .unwrap();
         assert_eq!(stopped_close.outcome, None);
         drop(f.restore("liveApplication.resumeRestore", &header).await);
-        let db =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let lineage = before.lineage_claim_id.as_ref().unwrap();
         let parked = json!({"versionId":"main","objectId":"object","path":"notes/a.md","contentKind":"richdoc","updateBlobSha256":lineage,"lineageClaimId":lineage,"isBaseState":false});
         db.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('workspace','parked-peer',1,'ydoc.update',?1,19,1)",[parked.to_string()]).unwrap();
@@ -1337,8 +1342,10 @@ mod tests {
     async fn restore_resume_refuses_a_pending_materialization_job_even_when_disk_matches() {
         let mut f = Fixture::new().await;
         let header = f.settled_resume_header().await;
-        let db =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let moment: String = db
             .query_row(
                 "SELECT moment_id FROM live_device_settlements WHERE settlement_id=?1",
@@ -1381,8 +1388,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(refusal.code, ErrorCode::LimitExceeded);
         assert_eq!(f.ingress.budget.available_permits(), capacity);
-        let db =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let saved: String = db
             .query_row(
                 "SELECT resume_receipt_json FROM live_restore_fences",
@@ -1471,8 +1480,10 @@ mod tests {
             drop(settled);
             assert_eq!(f.ingress.budget.available_permits(), capacity);
         }
-        let raw =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let count: i64 = raw
             .query_row(
                 "SELECT COUNT(*) FROM live_device_update_applications",
@@ -1488,8 +1499,10 @@ mod tests {
     #[tokio::test]
     async fn configured_restore_notices_survive_lost_reply_and_history_survives_reconciliation() {
         let mut f = Fixture::new().await;
-        let mut raw =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let mut raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let tx = raw
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
@@ -1535,8 +1548,10 @@ mod tests {
             "replay invents no new field history or commit facts"
         );
         // A removed schema leaves a stale index until the real reconciliation pass.
-        let raw =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         raw.execute("DELETE FROM snapshots WHERE object_id='schema'", [])
             .unwrap();
         assert_eq!(
@@ -1550,8 +1565,10 @@ mod tests {
         let result: Value =
             serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
         assert_eq!(result["collectionReconcileRequired"], true);
-        let raw =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (f._scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         assert_eq!(
             raw.query_row("SELECT COUNT(*) FROM collections", [], |r| r
                 .get::<_, i64>(0))
@@ -1574,7 +1591,8 @@ mod tests {
         std::fs::create_dir_all(f._scratch.path().join("tasks")).unwrap();
         std::fs::write(f._scratch.path().join("tasks/sibling.md"), "# Sibling\n").unwrap();
         let db = f._scratch.path().join(".dohc/engine/engine.db");
-        let mut raw = rusqlite::Connection::open(&db).unwrap();
+        let mut raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let tx = raw
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
@@ -1631,12 +1649,14 @@ mod tests {
             "sessionId":session,"seed":true,"expectedLineageClaimId":claim,
             "updateBase64":base64::engine::general_purpose::STANDARD.encode(sibling.encode_full_state())
         })).await);
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         raw.execute("DELETE FROM snapshots WHERE object_id='schema'", [])
             .unwrap();
         drop(raw);
         // A synchronized record retains its lineage when the editor closes.
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         assert_eq!(
             raw.execute(
                 "UPDATE ydoc_docs SET regime='replicated' WHERE object_id='sibling'",
@@ -1655,7 +1675,8 @@ mod tests {
         assert_eq!(result["collectionReconcileRequired"], true);
         assert!(f.service.leases.scoped(&root).is_held(&key));
         drop(settled);
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let state: String = raw
             .query_row(
                 "SELECT adoption_state FROM collection_records WHERE object_id='sibling'",
@@ -1707,7 +1728,8 @@ mod tests {
                 .any(|path| path == "tasks/sibling.md")
         );
         drop(opened);
-        let raw = rusqlite::Connection::open(&db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         let state: String = raw
             .query_row(
                 "SELECT adoption_state FROM collection_records WHERE object_id='sibling'",

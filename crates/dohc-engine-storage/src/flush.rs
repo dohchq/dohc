@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn a_drain_keeps_the_locks_sqlite_holds_on_the_database() {
         if let Some(db) = std::env::var_os(PROBE) {
-            let conn = rusqlite::Connection::open(db).unwrap();
+            let conn = rusqlite::Connection::open(crate::sqlite_path((db).as_ref())).unwrap();
             conn.busy_timeout(std::time::Duration::ZERO).unwrap();
             conn.pragma_update(None, "locking_mode", "EXCLUSIVE")
                 .unwrap();

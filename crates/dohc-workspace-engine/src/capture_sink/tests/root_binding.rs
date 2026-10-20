@@ -16,7 +16,8 @@ fn durable_row_counts(db: &Path) -> Vec<(&'static str, i64)> {
         "collection_field_history",
         "collection_relation_edges",
     ];
-    let conn = Connection::open(db).expect("open durable state database");
+    let conn = Connection::open(dohc_engine_storage::sqlite_path(db))
+        .expect("open durable state database");
     TABLES
         .iter()
         .map(|table| {

@@ -1671,8 +1671,10 @@ mod tests {
             response.result["ack"].clone(),
         )
         .unwrap();
-        let raw =
-            rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+        ))
+        .unwrap();
         let digest: String = raw
             .query_row(
                 "SELECT update_digest FROM live_device_update_applications",

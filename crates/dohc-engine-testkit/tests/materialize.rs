@@ -3290,7 +3290,7 @@ struct CountRowsAtRenames {
 impl AtomicReplacer for CountRowsAtRenames {
     fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
         let conn = rusqlite::Connection::open_with_flags(
-            &self.db,
+            dohc_engine_storage::sqlite_path(self.db.as_ref()),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .expect("read the store");

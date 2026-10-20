@@ -157,7 +157,8 @@ async fn uncaptured_historical_settlement_replay_keeps_saved_work_without_recapt
     let before = f.counts();
     let text = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
     {
-        let db = rusqlite::Connection::open(&f.db).unwrap();
+        let db =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
         db.execute(
             "DELETE FROM live_settlement_publication_states WHERE settlement_id=?1",
             [&first.settlement_id],
@@ -303,7 +304,7 @@ async fn restore_settlement_keeps_pending_artifact_and_rejects_damaged_anchor_be
         assert_eq!(f.counts(), (1, 2));
         f.assert_pending_absent_projection();
         if let Some(sql) = damage {
-            rusqlite::Connection::open(&f.db)
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref()))
                 .unwrap()
                 .execute(sql, [])
                 .unwrap();
@@ -328,7 +329,7 @@ async fn restore_settlement_checks_old_anchor_and_records_its_own_same_content_m
         let before = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
         let input = applied_restore(&f, None, 0).await;
         if damage {
-            rusqlite::Connection::open(&f.db)
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref()))
                 .unwrap()
                 .execute(
                     "UPDATE live_device_settlements SET markdown_digest=printf('%064d',0)",
@@ -406,7 +407,7 @@ async fn restore_settlement_preserves_collection_index_and_requests_id_reconcili
         )
         .await
         .unwrap();
-    let raw = rusqlite::Connection::open(&f.db).unwrap();
+    let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
     raw.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
     raw.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/example.md','object','adopted')",[]).unwrap();
     drop(raw);
@@ -922,7 +923,7 @@ impl Fixture {
     }
     fn read<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> T) -> T {
         let db = rusqlite::Connection::open_with_flags(
-            &self.db,
+            dohc_engine_storage::sqlite_path(self.db.as_ref()),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
@@ -1376,7 +1377,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     assert_eq!(fence_state(&f), (0, 1, 0));
     // Ordinary publication reaches the relay: it acknowledges the local
     // origin through the journal's high-water mark, as a completed push does.
-    rusqlite::Connection::open(&f.db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref()))
         .unwrap()
         .execute(
             "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' AND origin_id='owner-origin' GROUP BY workspace_id,origin_id ON CONFLICT(workspace_id,origin_id) DO UPDATE SET pushed_seq=MAX(pushed_seq,excluded.pushed_seq)",
@@ -2050,7 +2051,7 @@ async fn restore_fence_recovers_first_commit_after_reconnect_without_readoption(
     };
     let snapshot = || {
         let conn = rusqlite::Connection::open_with_flags(
-            &f.db,
+            dohc_engine_storage::sqlite_path(f.db.as_ref()),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
@@ -2209,7 +2210,7 @@ async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
             .unwrap();
         let snapshot = || {
             let conn = rusqlite::Connection::open_with_flags(
-                &f.db,
+                dohc_engine_storage::sqlite_path(f.db.as_ref()),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();
@@ -2366,7 +2367,8 @@ async fn accepted_frames_claim_once_through_settlement_and_capture() {
     };
     // Bind the bootstrapped record as adopted; its file reaches disk only
     // when the session settles.
-    let mut raw = rusqlite::Connection::open(&f.db).unwrap();
+    let mut raw =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
     let tx = raw
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
@@ -2642,7 +2644,7 @@ async fn configured_settlement_does_not_rearm_a_conflict_over_newer_completed_wo
     );
     let counts = f.counts();
     std::fs::remove_file(&path).unwrap();
-    let raw = rusqlite::Connection::open(&f.db).unwrap();
+    let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
     raw.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation,status,created_at_ms,completed_at_ms,operation) SELECT 'newer-job',workspace_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation+1,'complete',created_at_ms,completed_at_ms,operation FROM materialization_jobs LIMIT 1",[]).unwrap();
     drop(raw);
     assert!(
@@ -2744,7 +2746,7 @@ async fn configured_settlement_covers_distinct_valid_historical_selectors() {
         .unwrap();
     assert_eq!(settled.application_count, 1);
     f.assert_projection();
-    let raw = rusqlite::Connection::open(&f.db).unwrap();
+    let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
     raw.execute(
         "UPDATE live_device_update_applications SET selector_paths_json='[\"elsewhere\"]'",
         [],
@@ -2767,7 +2769,8 @@ async fn configured_settlement_refuses_missing_receipts_and_foreign_local_update
     ] {
         let f = Fixture::new().await;
         let terminal = f.apply(1, vec![0, 0]).await;
-        let raw = rusqlite::Connection::open(&f.db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
         raw.execute(damage, []).unwrap();
         drop(raw);
         assert!(
@@ -2821,7 +2824,8 @@ async fn configured_settlement_refuses_changed_binding_or_retained_receipt_path(
         let f = Fixture::new().await;
         let terminal = f.apply(1, vec![0, 0]).await;
         // Inject retained-evidence corruption between actor operations.
-        let raw = rusqlite::Connection::open(&f.db).unwrap();
+        let raw =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap();
         raw.execute(damage, []).unwrap();
         drop(raw);
         assert!(
@@ -3986,7 +3990,7 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
     let mut f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     // Finish publication before the authenticated stop/restore transition.
-    rusqlite::Connection::open(&f.db).unwrap().execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' GROUP BY workspace_id,origin_id",[]).unwrap();
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.db.as_ref())).unwrap().execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' GROUP BY workspace_id,origin_id",[]).unwrap();
     let input = applied_restore(&f, None, 0).await;
     let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
         .await

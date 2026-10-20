@@ -316,7 +316,9 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
     // The other workspace's text reaches this root only as a raw payload:
     // nothing versioned here references it.
     {
-        let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+        let connection =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+                .expect("sqlite");
         connection
             .execute(
                 "ATTACH DATABASE ?1 AS other_root",
@@ -420,7 +422,8 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
         "method is unavailable on a read-only workspace handle"
     );
     call(&transport, &read_only, 8, "workspace.close").await;
-    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("sqlite");
     let (payloads, references): (i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM blobs WHERE sha256 = ?1), \

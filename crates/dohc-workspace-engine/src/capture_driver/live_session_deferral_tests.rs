@@ -36,7 +36,7 @@ fn apply_context<'a>(
 }
 
 fn head_count(db: &Path, path: &str) -> i64 {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 AND path = ?2",
@@ -177,7 +177,7 @@ async fn a_batched_first_scan_defers_only_the_held_file() {
 }
 
 fn head_origin(db: &Path, path: &str) -> String {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT metadata_origin FROM snapshots WHERE workspace_id = ?1 AND path = ?2",
@@ -314,7 +314,8 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
         )
         .await
         .unwrap();
-    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let observer =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(harness.db.as_ref())).unwrap();
     let job_id: String = observer
         .query_row(
             "SELECT job_id FROM materialization_jobs WHERE status='pending' AND target_path=?1",
@@ -470,7 +471,8 @@ async fn fix4_unheld_capture_settles_stale_relay_without_conflict_copy() {
         )
         .await
         .unwrap();
-    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let observer =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(harness.db.as_ref())).unwrap();
     let job_id: String = observer
         .query_row(
             "SELECT job_id FROM materialization_jobs WHERE target_path=?1 AND job_id LIKE 'version-switch-mat_%'",
@@ -832,7 +834,7 @@ async fn unsettled_typing_on_a_held_file_is_kept_beside_the_outside_edit() {
 }
 
 fn head_text(db: &Path, path: &str) -> String {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
@@ -844,7 +846,7 @@ fn head_text(db: &Path, path: &str) -> String {
 }
 
 fn moment_count(db: &Path, path: &str) -> i64 {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = ?2",
@@ -933,7 +935,7 @@ fn seed_unsettled_typing(harness: &Harness, path: &str, seed: &str, typing: &str
 }
 
 fn head_correlation(db: &Path, path: &str) -> Option<String> {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT m.metadata_correlation_id FROM snapshots s \
@@ -948,7 +950,8 @@ fn head_correlation(db: &Path, path: &str) -> Option<String> {
 
 /// Every `<stem> (recovered …)` head in `main`, by path.
 fn recovered_heads(db: &Path) -> Vec<String> {
-    let conn = rusqlite::Connection::open(db).expect("open database observer");
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
+        .expect("open database observer");
     let mut statement = conn
         .prepare(
             "SELECT path FROM snapshots WHERE workspace_id = ?1 AND version_id = 'main' \
@@ -964,7 +967,7 @@ fn recovered_heads(db: &Path) -> Vec<String> {
 
 /// The newest write job aimed at `path`, with its status.
 fn write_job(db: &Path, path: &str) -> (String, String) {
-    rusqlite::Connection::open(db)
+    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db))
         .expect("open database observer")
         .query_row(
             "SELECT job_id, status FROM materialization_jobs \
@@ -1446,14 +1449,15 @@ async fn capture_file_hold_capture_and_idle_cost() {
             .unwrap(),
         );
         assert!(harness.capture(&files.handle()).await);
-        let held_count: i64 = rusqlite::Connection::open(&harness.db)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM capture_file_holds WHERE workspace_id=?1",
-                [WORKSPACE_ID],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let held_count: i64 =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(harness.db.as_ref()))
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM capture_file_holds WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )
+                .unwrap();
         assert_eq!(held_count, count as i64);
         let mut capture = Vec::new();
         let mut idle = Vec::new();
@@ -1500,10 +1504,16 @@ async fn capture_file_hold_capture_and_idle_cost() {
             }
         }
         println!("capture_phases held_files={count} scan_apply_ms={phases:?}");
-        let attempts: i64 = rusqlite::Connection::open(&harness.db)
-            .unwrap()
-            .query_row("SELECT COALESCE(SUM(attempt_count),0) FROM capture_file_holds WHERE workspace_id=?1", [WORKSPACE_ID], |row| row.get(0))
-            .unwrap();
+        let attempts: i64 = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            harness.db.as_ref(),
+        ))
+        .unwrap()
+        .query_row(
+            "SELECT COALESCE(SUM(attempt_count),0) FROM capture_file_holds WHERE workspace_id=?1",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
         assert_eq!(
             attempts, count as i64,
             "unchanged holds must not retry during measurement"
@@ -1694,16 +1704,17 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
         harness.capture(&files.handle()).await,
         "captured once the editor lets go"
     );
-    let recorded: (String, Option<String>) = rusqlite::Connection::open(&harness.db)
-        .expect("open database observer")
-        .query_row(
-            "SELECT s.path, m.author_json FROM snapshots s \
+    let recorded: (String, Option<String>) =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(harness.db.as_ref()))
+            .expect("open database observer")
+            .query_row(
+                "SELECT s.path, m.author_json FROM snapshots s \
              JOIN moments m ON m.moment_id = s.latest_moment_id \
              WHERE s.workspace_id = ?1 AND s.path = ?2",
-            [WORKSPACE_ID, NEW_FILE],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("the write's head and moment");
+                [WORKSPACE_ID, NEW_FILE],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the write's head and moment");
     assert_eq!(recorded, (NEW_FILE.to_owned(), Some(author.to_owned())));
 
     files.close().await;
@@ -2005,16 +2016,17 @@ async fn respelled_file_waits_for_its_lease(quarantine: bool) {
     assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
     files.handle().request_rescan();
     pass().await;
-    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
-        .expect("open database observer")
-        .prepare(
-            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
-        )
-        .expect("prepare")
-        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
-        .expect("moments")
-        .collect::<Result<_, _>>()
-        .expect("moments");
+    let moments: Vec<(String, String)> =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("open database observer")
+            .prepare(
+                "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+            )
+            .expect("prepare")
+            .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("moments")
+            .collect::<Result<_, _>>()
+            .expect("moments");
     let respelled: Vec<_> = moments
         .iter()
         .skip(1)
@@ -2101,16 +2113,17 @@ async fn a_respelled_synced_file_leaves_one_head() {
     pass().await;
     assert_eq!(head_count(&db, "notes.md"), 0, "the synced head retires");
     assert_eq!(head_count(&db, "Notes.md"), 1);
-    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
-        .expect("open database observer")
-        .prepare(
-            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
-        )
-        .expect("prepare")
-        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
-        .expect("moments")
-        .collect::<Result<_, _>>()
-        .expect("moments");
+    let moments: Vec<(String, String)> =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("open database observer")
+            .prepare(
+                "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+            )
+            .expect("prepare")
+            .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("moments")
+            .collect::<Result<_, _>>()
+            .expect("moments");
     let respelled: Vec<_> = moments
         .iter()
         .skip(1)
@@ -2185,14 +2198,15 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
         .await;
     files.handle().request_rescan();
     pass().await;
-    let deletes: Vec<String> = rusqlite::Connection::open(&db)
-        .expect("open database observer")
-        .prepare("SELECT path FROM moments WHERE workspace_id = ?1 AND operation = 'delete'")
-        .expect("prepare")
-        .query_map([WORKSPACE_ID], |row| row.get(0))
-        .expect("moments")
-        .collect::<Result<_, _>>()
-        .expect("moments");
+    let deletes: Vec<String> =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("open database observer")
+            .prepare("SELECT path FROM moments WHERE workspace_id = ?1 AND operation = 'delete'")
+            .expect("prepare")
+            .query_map([WORKSPACE_ID], |row| row.get(0))
+            .expect("moments")
+            .collect::<Result<_, _>>()
+            .expect("moments");
     assert_eq!(deletes, Vec::<String>::new());
 
     files.close().await;

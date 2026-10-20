@@ -230,7 +230,7 @@ impl EngineDbScan {
     /// When `secret_files` is empty (there would be nothing to prove), when the
     /// database cannot be read, or when a stored ciphertext is not found.
     pub fn assert_stored_ciphertext_scanned(&self, db_path: &Path) {
-        let connection = Connection::open(db_path)
+        let connection = Connection::open(dohc_engine_storage::sqlite_path(db_path))
             .unwrap_or_else(|error| panic!("reopen {} to read tips: {error}", db_path.display()));
         let mut statement = connection
             .prepare("SELECT version_id, path, ciphertext_base64 FROM secret_files")

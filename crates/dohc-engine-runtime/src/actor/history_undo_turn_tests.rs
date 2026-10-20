@@ -636,7 +636,10 @@ async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
         })
         .await
         .unwrap();
-    let reader = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+    let reader = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&root).unwrap()).as_ref(),
+    ))
+    .unwrap();
     reader
         .execute_batch("BEGIN; SELECT * FROM undo_pin_load")
         .unwrap();

@@ -34,13 +34,15 @@ impl Fixture {
         let files = FilesActor::spawn_async(root.to_path_buf(), ScanBounds::default())
             .await
             .unwrap();
-        let writer = rusqlite::Connection::open(&db).unwrap();
+        let writer =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         writer
             .execute_batch(
                 "PRAGMA wal_autocheckpoint=0; CREATE TABLE capture_retry_load(body BLOB)",
             )
             .unwrap();
-        let reader = rusqlite::Connection::open(&db).unwrap();
+        let reader =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
         reader
             .execute_batch("BEGIN; SELECT count(*) FROM capture_retry_load")
             .unwrap();
@@ -143,7 +145,8 @@ async fn apply_cancel_reaches_a_sink_already_waiting_on_store_busy() {
     )
     .await;
     let observed_waits = waits.load(Ordering::Relaxed);
-    let observer = rusqlite::Connection::open(&fixture.db).unwrap();
+    let observer =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(fixture.db.as_ref())).unwrap();
     let captured: i64 = observer
         .query_row(
             "SELECT count(*) FROM path_aliases WHERE workspace_id=?1",

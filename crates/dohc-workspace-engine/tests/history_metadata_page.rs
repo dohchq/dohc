@@ -238,7 +238,10 @@ fn history_migration_provides_the_time_index() {
 }
 
 fn insert_markers(scratch: &ScratchDir, markers: &[(&str, i64)]) {
-    let conn = rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .unwrap();
     conn.execute(
         "UPDATE versions SET created_at_ms=1000 WHERE version_id='main'",
         [],

@@ -161,7 +161,8 @@ fn live_local_echo_missing_or_corrupt_blob_stays_retryable() {
     for corrupt in [false, true] {
         let mut f = fixture(100);
         // Bypass foreign keys only on the corruption connection.
-        let corrupt_conn = rusqlite::Connection::open(&f.path).unwrap();
+        let corrupt_conn =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(f.path.as_ref())).unwrap();
         corrupt_conn
             .pragma_update(None, "foreign_keys", false)
             .unwrap();

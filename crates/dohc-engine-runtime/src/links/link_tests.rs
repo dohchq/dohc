@@ -1171,9 +1171,11 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
     write(&mut store, "seed", "seed.md", "seed", 2);
-    let reader =
-        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let reader = rusqlite::Connection::open_with_flags(
+        dohc_engine_storage::sqlite_path(db.as_ref()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM moments;")
         .unwrap();

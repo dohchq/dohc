@@ -812,8 +812,10 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
             state.pushed_workspace_ops.clone(),
         )
     };
-    let source_db = Connection::open(engine_db_path(&scratch).expect("source db path"))
-        .expect("open source db");
+    let source_db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("source db path")).as_ref(),
+    ))
+    .expect("open source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
     let mut peer = EngineStore::open(&engine_db_path(&peer_scratch).expect("peer db path"), 1_000)
         .expect("open peer");
@@ -920,8 +922,10 @@ async fn open_uncaptured_workspace_options(
 /// the blobs its operations name. The fake relay acknowledges a push without
 /// keeping it.
 fn publish_pushed_ops(relay: &FakeRelay, workspace_id: &str, source: &ScratchDir) {
-    let db =
-        Connection::open(engine_db_path(source).expect("source db path")).expect("open source db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(source).expect("source db path")).as_ref(),
+    ))
+    .expect("open source db");
     let mut state = relay.state.lock().expect("relay state");
     let origin_id: String = db
         .query_row(
@@ -1006,7 +1010,10 @@ fn resync_requests(
 // Ordinary editor settlements do not export a companion moment through this
 // uncaptured harness. Use the production exporter to exercise that wire pair.
 fn journal_editor_settlement(scratch: &ScratchDir, workspace: &str, moment: &str) {
-    let mut conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
+    let mut conn = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(scratch).unwrap()).as_ref(),
+    ))
+    .unwrap();
     // The engine writes this store at the same time. Wait for its write lock
     // as the engine's own connections do, rather than failing at once.
     conn.busy_timeout(Duration::from_millis(u64::from(
@@ -1205,7 +1212,10 @@ async fn assert_open_document_artifact_recovery_inner(
         let merged = Ydoc::wire();
         merged.apply(&resync.blob_egress.unwrap().bytes).unwrap();
         assert_eq!(merged.plaintext_string(), "Local: Before remote");
-        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        let db = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&a_scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
                 .get::<_, i64>(0))
@@ -1263,7 +1273,10 @@ async fn assert_open_document_artifact_recovery_inner(
         }
     );
     let repaired_blobs = if broken {
-        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        let db = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&a_scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         let saved=db.prepare("SELECT sha256,bytes FROM binary_blobs WHERE sha256 IN (SELECT json_extract(l.payload_json,'$.updateBlobSha256') FROM ydoc_deferred_updates d JOIN replication_log l USING(workspace_id,origin_id,origin_seq))").unwrap().query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
         db.execute("UPDATE binary_blobs SET bytes=zeroblob(byte_length) WHERE sha256 IN (SELECT json_extract(l.payload_json,'$.updateBlobSha256') FROM ydoc_deferred_updates d JOIN replication_log l USING(workspace_id,origin_id,origin_seq))",[]).unwrap();
         call(&b_transport,&b,&mut b_id,"versionedText.write",json!({"versionId":"main","objectId":"healthy","path":"healthy.md","text":"Healthy file","momentId":"healthy-moment","origin":"api","nowMs":210})).await;
@@ -1282,7 +1295,10 @@ async fn assert_open_document_artifact_recovery_inner(
     };
     let pending_attempt = exit.starts_with("pending-");
     if pending_attempt {
-        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        let db = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&a_scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         // The real live resync above integrated u1. Reset its completed write to pending.
         db.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.path=?1)", [path]).unwrap();
         db.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE path=?1 ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", [path]).unwrap();
@@ -1336,7 +1352,10 @@ async fn assert_open_document_artifact_recovery_inner(
     if integrated {
         if pending_attempt && exit == "evict" {
             pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
-            let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+            let db = Connection::open(dohc_engine_storage::sqlite_path(
+                (engine_db_path(&a_scratch).unwrap()).as_ref(),
+            ))
+            .unwrap();
             assert_eq!(
                 db.query_row(
                     "SELECT last_attempt_state FROM ydoc_pending_artifacts",
@@ -1359,12 +1378,18 @@ async fn assert_open_document_artifact_recovery_inner(
             a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;
         }
         if pending_attempt {
-            let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+            let db = Connection::open(dohc_engine_storage::sqlite_path(
+                (engine_db_path(&a_scratch).unwrap()).as_ref(),
+            ))
+            .unwrap();
             assert_eq!(db.query_row("SELECT j.status FROM materialization_jobs j JOIN snapshots s ON j.job_id='ydoc-mat_'||s.latest_moment_id WHERE s.path=?1",[path],|r|r.get::<_,String>(0)).unwrap(),"complete");
         }
         // workspace.open has replayed the pending file job; pull reconciles the attempt.
         pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
-        let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+        let db = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&a_scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
                 .get::<_, i64>(0))
@@ -1418,7 +1443,10 @@ async fn assert_open_document_artifact_recovery_inner(
         );
     }
     pull_materialize_and_commit(&a_transport, &a, &mut a_id, workspace).await;
-    let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&a_scratch).unwrap()).as_ref(),
+    ))
+    .unwrap();
     let head: String = db
         .query_row(
             "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.path=?1",
@@ -1433,7 +1461,10 @@ async fn assert_open_document_artifact_recovery_inner(
     };
     assert_eq!(head, expected, "{exit}");
     if !local_edit && !broken {
-        let c_db = Connection::open(engine_db_path(&c_scratch).unwrap()).unwrap();
+        let c_db = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(&c_scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         let snapshot = |conn: &Connection| {
             conn.query_row(
                 "SELECT latest_moment_id,blob_sha256,path FROM snapshots WHERE path=?1",
@@ -1867,7 +1898,10 @@ async fn open_document_settlement_does_not_park_other_device_work() {
     .expect("remote update event");
     assert_eq!(notice.payload["sessionId"], a_session);
     assert_eq!(notice.payload["resyncRequired"], true);
-    let db = Connection::open(engine_db_path(&a_scratch).unwrap()).unwrap();
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&a_scratch).unwrap()).as_ref(),
+    ))
+    .unwrap();
     let later_file: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM snapshots WHERE path='other.md'",
@@ -2027,7 +2061,10 @@ async fn open_document_settlement_does_not_park_other_device_work() {
             std::fs::read_to_string(scratch.path().join(path)).unwrap(),
             "A: Starting together. Typed on B."
         );
-        let conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
+        let conn = Connection::open(dohc_engine_storage::sqlite_path(
+            (engine_db_path(scratch).unwrap()).as_ref(),
+        ))
+        .unwrap();
         for table in ["conflicts", "relay_deferred_ops", "ydoc_deferred_updates"] {
             assert_eq!(
                 conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
@@ -2610,8 +2647,10 @@ async fn join_identity_adoption_is_local_idempotent_and_refuses_non_pristine_reb
         .await
         .expect_err("relay identity text must use the canonical form");
     assert_eq!(invalid.code, ErrorCode::InvalidParams);
-    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
-        .expect("open inspection connection");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("engine db path")).as_ref(),
+    ))
+    .expect("open inspection connection");
     let identity_count: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM sync_identity WHERE workspace_id=?1",
@@ -2892,7 +2931,8 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
     close(&transport, &handle, &mut id).await;
 
     let db_path = engine_db_path(&scratch).expect("engine db path");
-    let db = Connection::open(&db_path).expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("open engine db");
     let persisted: Option<String> = db
         .query_row(
             "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
@@ -2924,7 +2964,8 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
     )
     .await;
     close(&transport, &handle, &mut id).await;
-    let db = Connection::open(db_path).expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path((db_path).as_ref()))
+        .expect("open engine db");
     let persisted: String = db
         .query_row(
             "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
@@ -2974,7 +3015,7 @@ async fn commit_stopped_after_its_cursor_lands(expire: bool) {
     .await;
     let db_path = engine_db_path(&scratch).expect("engine db path");
     let stored_cursor = || {
-        Connection::open(&db_path)
+        Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
             .expect("open engine db")
             .query_row(
                 "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
@@ -3265,7 +3306,7 @@ async fn a_final_claim_refusal_wakes_capture_for_the_update_the_pull_held_back()
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
         .expect("main version");
     drop(store);
-    Connection::open(&db_path)
+    Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
         .expect("engine db")
         .execute(
             "INSERT INTO sync_identity \
@@ -3289,7 +3330,8 @@ async fn a_final_claim_refusal_wakes_capture_for_the_update_the_pull_held_back()
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     flush_capture(&transport, &handle, &mut id).await;
-    let db = Connection::open(&db_path).expect("engine db");
+    let db =
+        Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref())).expect("engine db");
     let count = |query: &str| -> i64 {
         db.query_row(query, [], |row| row.get(0))
             .expect("count rows")
@@ -3588,7 +3630,10 @@ async fn account_change_resets_only_refused_claims_without_contacting_relay() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     seed_local_identity(&transport, &handle, &mut id).await;
-    let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).unwrap()).as_ref(),
+    ))
+    .unwrap();
     for state in [Some("workspace-unavailable"), Some("pending"), None] {
         db.execute(
             "UPDATE sync_identity SET claim_state=?1 WHERE workspace_id=?2",
@@ -3793,8 +3838,10 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
     assert_eq!(pulled["skipped"], 1);
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
-        .expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("engine db path")).as_ref(),
+    ))
+    .expect("open engine db");
     let rows = db
         .prepare(
             "SELECT origin_id,origin_seq FROM replication_log \
@@ -3869,8 +3916,10 @@ async fn shared_channel_stale_selector_reports_refusal_and_advances_cursor() {
     );
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
-        .expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("engine db path")).as_ref(),
+    ))
+    .expect("open engine db");
     let cursor: Option<String> = db
         .query_row(
             "SELECT cursor FROM shared_channel_cursors WHERE workspace_id=?1 AND share_id=?2",
@@ -3983,7 +4032,8 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     let pending = pulled["pendingCursor"].clone();
 
     let db_path = engine_db_path(&scratch).expect("engine db path");
-    let db = Connection::open(&db_path).expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("open engine db");
     let cursor: Option<String> = db
         .query_row(
             "SELECT cursor FROM share_view_cursors WHERE workspace_id=?1 AND share_id=?2",
@@ -4013,7 +4063,8 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     )
     .await;
     close(&transport, &handle, &mut id).await;
-    let db = Connection::open(db_path).expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path((db_path).as_ref()))
+        .expect("open engine db");
     let cursor: String = db
         .query_row(
             "SELECT cursor FROM share_view_cursors WHERE workspace_id=?1 AND share_id=?2",
@@ -4241,8 +4292,10 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         .expect_err("corrupt replacement must reject the rename");
     assert_eq!(rename.code, ErrorCode::BlobInvalid);
 
-    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
-        .expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("engine db path")).as_ref(),
+    ))
+    .expect("open engine db");
     let old_exists: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM path_aliases \
@@ -4276,8 +4329,10 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
     assert_eq!(retried["changedPaths"].as_array().map(Vec::len), Some(2));
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
-        .expect("open engine db");
+    let db = Connection::open(dohc_engine_storage::sqlite_path(
+        (engine_db_path(&scratch).expect("engine db path")).as_ref(),
+    ))
+    .expect("open engine db");
     let paths: (bool, bool) = db
         .query_row(
             "SELECT \

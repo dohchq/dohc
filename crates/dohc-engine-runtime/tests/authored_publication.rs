@@ -394,16 +394,17 @@ async fn internal_job_prefixed_binary_ids_replay_as_authored_publications() {
             }
             supervisor.close(&db).unwrap();
             // The request records the supersession; nothing was set aside.
-            let (outcome, status): (Option<String>, String) = rusqlite::Connection::open(&db)
-                .unwrap()
-                .query_row(
-                    "SELECT r.publication_outcome, j.status FROM engine_requests r \
+            let (outcome, status): (Option<String>, String) =
+                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+                    .unwrap()
+                    .query_row(
+                        "SELECT r.publication_outcome, j.status FROM engine_requests r \
                      JOIN materialization_jobs j ON j.job_id = ?1 \
                      WHERE r.request_id = 'older' AND r.kind = 'versioned'",
-                    [dohc_engine_domain::binary_write_job_id(&moment)],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
+                        [dohc_engine_domain::binary_write_job_id(&moment)],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
             assert_eq!(status, "complete", "{moment}");
             assert_eq!(
                 outcome.as_deref() == Some("superseded"),

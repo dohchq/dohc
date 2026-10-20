@@ -847,7 +847,9 @@ mod tests {
         turns::tests::set_disk_observer(
             root.path().to_path_buf(),
             Some(Arc::new(move || {
-                let conn = rusqlite::Connection::open(&db).unwrap();
+                let conn =
+                    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+                        .unwrap();
                 conn.busy_timeout(std::time::Duration::ZERO).unwrap();
                 assert!(conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok());
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);

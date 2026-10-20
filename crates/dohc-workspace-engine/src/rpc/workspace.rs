@@ -1531,8 +1531,10 @@ mod tests {
     use std::time::Duration;
 
     fn engine_db(root: &std::path::Path) -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open(root.join(".dohc").join("engine").join("engine.db"))
-            .unwrap();
+        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+            (root.join(".dohc").join("engine").join("engine.db")).as_ref(),
+        ))
+        .unwrap();
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
         conn
     }
@@ -1791,7 +1793,8 @@ mod tests {
         let latest = latest.unwrap();
         service.workspace_close(Some(handle)).await.unwrap();
         let db_path = scratch.path().join(".dohc/engine/engine.db");
-        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mut conn =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref())).unwrap();
         let tx = conn.transaction().unwrap();
         dohc_engine_storage::enqueue_job(
             &tx,
@@ -2123,8 +2126,10 @@ mod tests {
         let engine_dir = scratch.path().join(".dohc").join("engine");
         std::fs::create_dir_all(&engine_dir).expect("engine dir");
         {
-            let conn =
-                rusqlite::Connection::open(engine_dir.join("engine.db")).expect("fabricate db");
+            let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+                (engine_dir.join("engine.db")).as_ref(),
+            ))
+            .expect("fabricate db");
             conn.execute_batch("CREATE TABLE notes (body TEXT);")
                 .expect("user table");
         }
@@ -2156,7 +2161,9 @@ mod tests {
         let db_path = engine_dir.join("engine.db");
         drop(dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fresh store"));
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open ledger");
+            let conn =
+                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+                    .expect("open ledger");
             conn.execute(
                 "UPDATE engine_migrations SET checksum = ?1 WHERE ordinal = 0",
                 ["0".repeat(64)],
@@ -2212,7 +2219,9 @@ mod tests {
         let db_path = engine_dir.join("engine.db");
         drop(dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fresh store"));
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open ledger");
+            let conn =
+                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+                    .expect("open ledger");
             conn.execute(
                 "INSERT INTO engine_migrations \
                  (ordinal, id, checksum, engine_build, protocol_version, \
@@ -2373,7 +2382,9 @@ mod tests {
             (true, false, true),
             (false, false, false),
         ] {
-            let conn = rusqlite::Connection::open(&db_path).expect("seed connection");
+            let conn =
+                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+                    .expect("seed connection");
             conn.execute("DELETE FROM automation_claims", [])
                 .expect("reset claims");
             if seed_claim {
@@ -2559,7 +2570,8 @@ mod tests {
 
         // A store whose ledger lacks the baseline row needs the migration
         // runner. A maintenance-free open must refuse it, not repair it.
-        let conn = rusqlite::Connection::open(&db_path).expect("fixture connection");
+        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+            .expect("fixture connection");
         conn.execute("DELETE FROM engine_migrations", [])
             .expect("remove the baseline ledger row");
         drop(conn);
@@ -2584,7 +2596,7 @@ mod tests {
         );
 
         let conn = rusqlite::Connection::open_with_flags(
-            &db_path,
+            dohc_engine_storage::sqlite_path(db_path.as_ref()),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .expect("read migration ledger");
@@ -2800,7 +2812,9 @@ mod tests {
             .unwrap();
         service.collections_changed(&ctx, &open).await;
         // A pull deletes the target while automation retains the source's session lease.
-        let observer = rusqlite::Connection::open(&open.db_path).unwrap();
+        let observer =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(open.db_path.as_ref()))
+                .unwrap();
         let count = || {
             observer
                 .query_row(

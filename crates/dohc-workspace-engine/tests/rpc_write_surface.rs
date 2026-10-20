@@ -423,8 +423,10 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
         assert_eq!(error.message, "version-not-found");
     }
 
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let created_rows: i64 = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM versioned_workspaces) + \
@@ -1238,8 +1240,10 @@ async fn rpc_secret_delete_enqueues_pending_disk_removal() {
     )
     .await;
 
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let job: (String, String, i64) = connection
         .query_row(
             "SELECT status, operation, target_generation FROM materialization_jobs \
@@ -1310,8 +1314,10 @@ async fn secret_open_replay_writes_decrypted_plaintext_and_completes_once() {
         std::fs::read_to_string(scratch.path().join("config/.env")).expect("plaintext file"),
         "TOKEN=plaintext-only\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -1550,8 +1556,10 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
         !target.exists(),
         "restore-to-absent removes the previously materialized plaintext"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let job: (String, String) = connection
         .query_row(
             "SELECT status, operation FROM materialization_jobs \
@@ -1768,8 +1776,10 @@ async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
         "MAIN=must-survive\n",
         "a non-active delete is DB-only"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -1878,8 +1888,10 @@ async fn non_active_secret_write_survives_until_activation_and_reopen() {
         std::fs::read_to_string(scratch.path().join(".env")).expect("active secret"),
         "ACTIVE=main\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -1933,8 +1945,10 @@ async fn non_active_secret_write_survives_until_activation_and_reopen() {
         std::fs::read_to_string(scratch.path().join(".env")).expect("activated secret"),
         "INACTIVE=other\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -1997,8 +2011,10 @@ async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
     .await;
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
 
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     connection
         .execute("PRAGMA foreign_keys = ON", [])
         .expect("enable foreign keys");
@@ -2040,8 +2056,10 @@ async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
         !scratch.path().join(".env").exists(),
         "deleted version's orphan must never reach disk"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let orphan_status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2214,8 +2232,10 @@ async fn replicated_apply_pending_secret_delete_reopens_without_bricking() {
     .await;
     assert_eq!(applied["changed"], true);
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2438,8 +2458,10 @@ async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() 
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
     // Tamper the now-historical write row. The active tip is absent, so replay
     // must skip it without attempting authenticated decryption.
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     connection
         .execute(
             "UPDATE secret_moments SET after_auth_tag_base64 = ?1 \
@@ -2469,8 +2491,10 @@ async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() 
         !scratch.path().join(".env").exists(),
         "same-version superseded secret was not materialized"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2519,8 +2543,10 @@ async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
     )
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     connection
         .execute(
             "UPDATE secret_files SET auth_tag_base64 = ?1 \
@@ -2550,8 +2576,10 @@ async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
         !scratch.path().join(".env").exists(),
         "failed authenticated decryption must not produce plaintext"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2635,8 +2663,10 @@ async fn secret_disk_symlink_at_path_does_not_brick_open() {
         "outside stays intact\n",
         "replay must never follow and overwrite the symlink target"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2718,8 +2748,10 @@ async fn secret_symlinked_parent_never_writes_outside_workspace() {
             .is_symlink(),
         "the refused parent symlink remains untouched"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2807,8 +2839,10 @@ async fn planted_secret_temp_symlink_is_never_followed() {
             .is_symlink(),
         "exclusive-create refusal must not clobber the planted entry"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2889,8 +2923,10 @@ async fn planted_secret_temp_regular_file_is_unlinked_for_recovery() {
         !temp.exists(),
         "the planted regular temp must be unlinked before exclusive-create retry"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -2968,8 +3004,10 @@ async fn crashed_secret_write_recovers_after_reopen() {
         "TOKEN=recovered-after-crash\n"
     );
     assert!(!temp.exists(), "crashed temp must be consumed by recovery");
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -3080,8 +3118,10 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
         std::fs::read_to_string(scratch.path().join(".env")).expect("materialized secret"),
         "TOKEN=symlinked-root-works\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -3170,8 +3210,10 @@ async fn secret_junctioned_parent_never_writes_outside_workspace() {
         !outside.path().join(".env").exists(),
         "plaintext must not escape through the junctioned parent"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -3246,8 +3288,10 @@ async fn active_secret_write_blocked_by_directory_stays_pending() {
         std::fs::read_to_string(target.join("keep.txt")).expect("sentinel"),
         "do not replace\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -3376,8 +3420,10 @@ async fn secret_directory_at_path_does_not_brick_open() {
         "do not recurse\n",
         "secret delete must never recurse into a directory"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -3504,8 +3550,10 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
         std::fs::read_to_string(target.join("keep.txt")).expect("directory sentinel"),
         "do not remove\n"
     );
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs \
@@ -4482,7 +4530,8 @@ async fn rollback_rejects_sync_record_only_moment() {
             )
             .expect("write");
     }
-    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("sqlite");
     connection
         .execute(
             "UPDATE moments SET sync_record_only = 1 WHERE moment_id = 'sync-marker'",
@@ -6017,7 +6066,9 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     // The other workspace's text reaches this root only as a raw payload:
     // nothing versioned here references it.
     {
-        let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+        let connection =
+            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+                .expect("sqlite");
         connection
             .execute(
                 "ATTACH DATABASE ?1 AS other_root",
@@ -6128,7 +6179,8 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     assert_eq!(historical_egress.bytes, text.as_bytes());
 
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
-    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
+        .expect("sqlite");
     let (payloads, references): (i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM blobs WHERE sha256 = ?1), \
@@ -6178,8 +6230,10 @@ async fn over_cap_blob_egress_announces_chunks_fin_and_reassembles_exactly() {
         }),
     )
     .await;
-    let connection =
-        rusqlite::Connection::open(_scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (_scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
     connection
         .execute(
@@ -6298,8 +6352,10 @@ async fn blob_capability_gate_prevents_unnegotiated_over_cap_hydration() {
         }),
     )
     .await;
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
     connection
         .execute(
@@ -6373,8 +6429,10 @@ async fn cancelled_blob_egress_never_produces_a_service_payload() {
         }),
     )
     .await;
-    let connection =
-        rusqlite::Connection::open(_scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (_scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
     connection
         .execute(
@@ -6482,8 +6540,10 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(happy["bytesBase64"], "BAMCAQ==");
 
     call(&transport, &handle_a, 6, "workspace.close", json!({})).await;
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     let conflict_bytes = [8_u8, 6, 7, 5, 3, 0, 9];
     let conflict_sha =
         dohc_engine_storage::put_binary_blob(&connection, &conflict_bytes).expect("conflict blob");
@@ -6566,7 +6626,9 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     let created_b: WorkspaceHandle =
         serde_json::from_value(created_b.result["workspace"].clone()).expect("workspace B handle");
     call(&transport, &created_b, 11, "workspace.close", json!({})).await;
-    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path_b.as_ref()))
+            .expect("sqlite");
     let snapshot_payload =
         dohc_engine_storage::put_binary_blob(&connection, &[4, 3, 2, 1]).expect("snapshot payload");
     assert_eq!(snapshot_payload, sha256.as_str().expect("snapshot sha"));
@@ -6618,7 +6680,9 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(conflict_refused.message, "file-not-found");
 
     call(&transport, &handle_b, 15, "workspace.close", json!({})).await;
-    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path_b.as_ref()))
+            .expect("sqlite");
     let (payloads, references): (i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM binary_blobs WHERE sha256 IN (?1, ?2)), \
@@ -6673,8 +6737,10 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
     assert_eq!(upper["bytesBase64"], "AQID");
 
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
-    let connection =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .expect("sqlite");
     // The FK to binary_blobs normally forbids this state — a broken reference
     // only arises from real corruption (partial restore, FK-off import), which
     // is exactly what the seed simulates.

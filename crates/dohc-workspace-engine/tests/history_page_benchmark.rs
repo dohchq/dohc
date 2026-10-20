@@ -65,8 +65,10 @@ async fn history_page_benchmark() {
         call(&transport, &handle, 1000+i, "versionedText.write", json!({"versionId":"main","path":"sparse.md","text":(["first","second","third"][i as usize]),"origin":"api","momentId":format!("sparse-{i}"),"nowMs":i+2})).await;
     }
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
-    let mut conn =
-        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    let mut conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
+        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
+    ))
+    .unwrap();
     {
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(moments)")
@@ -312,11 +314,11 @@ async fn benchmark_open_seeds_and_applies_the_pending_index_migration() {
     call(&transport, &handle, 3, "versionedText.write", json!({"versionId":"main","path":"bench.md","text":"body","origin":"api","momentId":"template","nowMs":1})).await;
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
     let db = scratch.path().join(".dohc/engine/engine.db");
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     conn.execute_batch("DROP INDEX idx_moments_history_time; DROP INDEX idx_moments_object_history_time; DELETE FROM engine_migrations WHERE id='v2-moments-history-time';").unwrap();
     drop(conn);
     let handle = open(&transport, &scratch, 5, false).await;
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_moments_history_time','idx_moments_object_history_time')", [], |r| r.get(0)).unwrap();
     assert_eq!(count, 2);
     drop(conn);

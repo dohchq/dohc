@@ -6616,7 +6616,7 @@ mod tests {
     }
 
     fn open_bare(path: &std::path::Path) -> Connection {
-        let conn = Connection::open(path).expect("open");
+        let conn = Connection::open(crate::sqlite_path(path)).expect("open");
         conn.pragma_update(None, "journal_mode", "WAL")
             .expect("wal");
         conn

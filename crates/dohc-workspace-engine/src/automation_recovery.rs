@@ -213,7 +213,8 @@ mod tests {
         {
             let _store = EngineStore::open(&db, OPENED_AT).expect("migrate");
         }
-        let conn = rusqlite::Connection::open(&db).expect("seed connection");
+        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+            .expect("seed connection");
         for (id, attempts, state) in [
             ("exhausted", 2, "running"),
             ("retry", 1, "running"),
