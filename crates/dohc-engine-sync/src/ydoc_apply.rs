@@ -1818,6 +1818,69 @@ pub fn prepare_local_ydoc_lineage_in_tx(
     })
 }
 
+/// What capture does with its prepared lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureLineage {
+    /// Fold the captured file into the lineage as ever.
+    Fold,
+    /// The file holds the bytes capture last recorded, over a released
+    /// chain's tail: keep the lineage as it is and write nothing.
+    KeepTail,
+}
+
+/// Decide, before capture ingests `text` at `path`, what it does with the
+/// prepared lineage. An adopted owner, in any relay and on any lineage of
+/// the document, refuses every rewrite of it, so a file that differs from
+/// the Y.Doc refuses here before any other branch. A lineage a released
+/// chain left with no current activation folds only as
+/// [`released_capture`](dohc_engine_collab::live_update_application::released_capture)
+/// allows. Each refusal leaves the capture to roll back.
+pub fn admit_capture_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedLocalYdocLineage,
+    path: &str,
+    text: &str,
+) -> Result<CaptureLineage, SyncError> {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationError, RELEASED_CAPTURE_PROOF_BYTES, ReleasedCapture, released_capture,
+    };
+    let key = &prepared.complete.key;
+    let Some((marker, head)) = prepared.complete.state.as_ref() else {
+        return Ok(CaptureLineage::Fold);
+    };
+    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)
+        .map_err(map_collab_hard_error)?
+    {
+        if prepared
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.content != text)
+        {
+            return Err(SyncError::LiveDocumentBindingActive);
+        }
+        return Ok(CaptureLineage::Fold);
+    }
+    let Some(lineage) = marker.lineage_claim_id.as_deref() else {
+        return Ok(CaptureLineage::Fold);
+    };
+    match released_capture(
+        tx,
+        key,
+        lineage,
+        path,
+        text,
+        head,
+        RELEASED_CAPTURE_PROOF_BYTES,
+    ) {
+        Ok(ReleasedCapture::Ordinary) => Ok(CaptureLineage::Fold),
+        Ok(ReleasedCapture::Unchanged) => Ok(CaptureLineage::KeepTail),
+        Err(ApplicationError::Storage(error)) => Err(SyncError::Storage(error)),
+        Err(_) => Err(SyncError::RetryableState {
+            reason: "ydoc-released-capture-unproven",
+        }),
+    }
+}
+
 /// The durable file head that must remain canonical after a non-Y.Doc
 /// mutation commits.
 pub enum ResultingHead<'a> {

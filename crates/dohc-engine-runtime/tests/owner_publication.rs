@@ -5123,3 +5123,499 @@ async fn resume_through_the_host(catch_up: bool) {
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
+
+const WINDOW_PATH: &str = "notes/plan.md";
+
+/// A document whose root activation adopted through the host and applied
+/// the owner's edit at B and, with `carried`, whose next two owner edits the
+/// relay accepted and the host never applied. Fields drop in order: the
+/// actor closes before its scratch tree goes.
+struct HostWindow {
+    owner: dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+    actor: ActorHandle,
+    supervisor: WorkspaceSupervisor,
+    store: EngineStore,
+    first: ImportedOwnerActivation,
+    coordinate: ApplicationHostCoordinate,
+    covered: LiveUpdateReceipt,
+    lineage: String,
+    base: Vec<u8>,
+    covered_bytes: Vec<u8>,
+    root: ScratchDir,
+}
+
+async fn adopted_window(carried: bool) -> HostWindow {
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let base: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+    let lineage = hex_sha256(&base);
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    execute(&mut store, "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1);
+        INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0);
+        INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','1','epoch','stream')");
+    import_envelope(&mut store, "owner-peer", 1, &base, &lineage, true);
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    let first = actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            window_key(),
+            WINDOW_PATH.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let binding = window_binding(&lineage);
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay".into(), coordinate.clone(), binding.clone())
+        .await
+        .unwrap();
+    handle
+        .adopt_owner(
+            imported_cut(&first, None),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let owned = Ydoc::wire();
+    owned.apply(&base).unwrap();
+    let covered_bytes = owned.richdoc_append_paragraph("Covered paragraph");
+    record_owned(&actor, &lineage, covered_bytes.clone(), "covered").await;
+    let covered = accept_latest(&actor, &store, 2).await;
+    assert!(matches!(
+        deliver_owned(&handle, &binding, &covered, covered_bytes.clone()).await,
+        ApplicationResult::Applied(..)
+    ));
+    if carried {
+        for (index, text) in ["Carried paragraph one", "Carried paragraph two"]
+            .into_iter()
+            .enumerate()
+        {
+            record_owned(
+                &actor,
+                &lineage,
+                owned.richdoc_append_paragraph(text),
+                &format!("carried-{index}"),
+            )
+            .await;
+            accept_latest(&actor, &store, 3 + index as i64).await;
+        }
+    }
+    HostWindow {
+        owner,
+        actor,
+        supervisor,
+        store,
+        first,
+        coordinate,
+        covered,
+        lineage,
+        base,
+        covered_bytes,
+        root,
+    }
+}
+
+fn window_key() -> DocKey {
+    DocKey::new("workspace", "main", "object").unwrap()
+}
+
+fn window_binding(lineage: &str) -> dohc_engine_collab::LiveObjectBinding {
+    dohc_engine_collab::LiveObjectBinding {
+        workspace_id: "workspace".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: lineage.into(),
+        current_path: WINDOW_PATH.into(),
+        selector_paths: vec![WINDOW_PATH.into()],
+        restore_fence_generation: 0,
+    }
+}
+
+fn execute(store: &mut EngineStore, sql: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(sql)
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
+}
+
+/// The owner's edit, recorded in the native Y.Doc.
+async fn record_owned(actor: &ActorHandle, lineage: &str, update: Vec<u8>, request: &str) {
+    actor
+        .ydoc_record_update(
+            window_key(),
+            WINDOW_PATH.into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            update,
+            Some("owner-origin".into()),
+            None,
+            Some(lineage.into()),
+            false,
+            None,
+            Some(request.into()),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+impl HostWindow {
+    /// Stop: the retirement settles the file at B, the document parks and the
+    /// activation releases. Then the document returns to the scope, with no
+    /// activation current.
+    async fn release(&mut self) {
+        let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+            namespace: "relay".into(),
+            max_deliveries: 8,
+            max_applications: 8,
+        };
+        let retirement = RetirementKey {
+            object_id: "object".into(),
+            lineage_claim_id: self.lineage.clone(),
+            activation_id: self.first.activation_id.clone(),
+            restore_fence_generation: 0,
+            accepted_through: 10,
+        };
+        self.owner
+            .begin_retirement(
+                scope.clone(),
+                self.coordinate.clone(),
+                retirement.clone(),
+                false,
+            )
+            .await
+            .unwrap();
+        self.owner
+            .settle_retirement(
+                scope.clone(),
+                self.coordinate.clone(),
+                retirement.clone(),
+                Some(self.covered.clone()),
+                100,
+                self.root.path().to_owned(),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                AdmittedNativeHistoryReconstruction {
+                    policy: adoption_reconstruction(),
+                    reservation: Arc::new(()),
+                },
+            )
+            .await
+            .unwrap();
+        execute(&mut self.store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+              VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
+            INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+        assert!(matches!(
+            self.owner
+                .release_activation(scope, self.coordinate.clone(), retirement, 40)
+                .await
+                .unwrap(),
+            Release::Released { .. }
+        ));
+        execute(
+            &mut self.store,
+            "UPDATE hosted_documents SET scope_generation=1,state='ready'",
+        );
+        let file = self.file();
+        assert!(
+            file.contains("Covered paragraph") && !file.contains("Carried"),
+            "{file}"
+        );
+    }
+
+    fn file(&self) -> String {
+        std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
+    }
+
+    /// A disk observation of `text` the capture sink watched change, with no
+    /// editor lease on the file.
+    async fn capture(
+        &self,
+        text: &str,
+    ) -> Result<dohc_engine_domain::WriteResult, dohc_engine_runtime::RuntimeError> {
+        self.actor
+            .capture_ingest(
+                dohc_engine_runtime::CaptureIngest {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    path: WINDOW_PATH.into(),
+                    text: text.into(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 60,
+                    request_id: None,
+                    claim_foreign_head: true,
+                },
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+    }
+
+    /// The native Y.Doc's whole state.
+    fn native(&self) -> Vec<u8> {
+        dohc_engine_collab::load_persisted(&self.store, &window_key())
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state()
+    }
+
+    /// Every row a capture could write, but the claimed origin of an
+    /// unchanged head.
+    fn written(&self) -> Vec<String> {
+        let mut rows: Vec<String> = [
+            "SELECT * FROM moments",
+            "SELECT workspace_id,version_id,object_id,path,content_kind,blob_sha256,latest_moment_id FROM snapshots",
+            "SELECT * FROM ydoc_docs",
+            "SELECT * FROM ydoc_updates",
+            "SELECT * FROM ydoc_snapshots",
+            "SELECT * FROM replication_log",
+            "SELECT * FROM owner_ydoc_outbox_entries",
+            "SELECT * FROM live_owner_activations",
+            "SELECT * FROM live_device_settlements",
+            "SELECT * FROM materialization_jobs",
+            "SELECT sha256 FROM binary_blobs",
+            "SELECT sha256 FROM blobs",
+        ]
+        .iter()
+        .flat_map(|sql| {
+            self.store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(sql)?;
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            let values = (0..columns)
+                                .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(format!("{sql}: {values:?}"))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        })
+        .collect();
+        rows.sort();
+        rows
+    }
+
+    /// A capture of `text` refuses and writes nothing, the native Y.Doc
+    /// structure unchanged.
+    async fn refuses(
+        &self,
+        text: &str,
+        refusal: fn(&dohc_engine_runtime::RuntimeError) -> bool,
+        case: &str,
+    ) {
+        let (native, written) = (self.native(), self.written());
+        let captured = self.capture(text).await;
+        assert!(
+            captured.as_ref().is_err_and(refusal),
+            "{case}: {:?}",
+            captured.map(|result| result.moment.moment_id)
+        );
+        assert_eq!(self.native(), native, "{case}");
+        assert_eq!(self.written(), written, "{case}");
+    }
+
+    async fn close(self) {
+        self.owner.close().await.unwrap();
+        self.supervisor.close_all().unwrap();
+    }
+}
+
+fn unproven(error: &dohc_engine_runtime::RuntimeError) -> bool {
+    matches!(
+        error,
+        dohc_engine_runtime::RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-released-capture-unproven"
+        })
+    )
+}
+
+fn binding_active(error: &dohc_engine_runtime::RuntimeError) -> bool {
+    matches!(
+        error,
+        dohc_engine_runtime::RuntimeError::Sync(
+            dohc_engine_sync::SyncError::LiveDocumentBindingActive
+        )
+    )
+}
+
+/// The released chain's file at B, edited on disk in each shape a person
+/// edits a file: inside a paragraph, in its frontmatter, with a block added,
+/// and with the paragraph that held the edit deleted.
+fn disk_edits(file: &str) -> [(&'static str, String); 4] {
+    [
+        (
+            "an inline edit",
+            file.replacen("Covered paragraph", "Covered and edited paragraph", 1),
+        ),
+        (
+            "a frontmatter change",
+            format!("---\ntitle: Plan\n---\n{file}"),
+        ),
+        ("an added block", format!("{file}\nAn added block.\n")),
+        (
+            "its paragraph deleted",
+            file.replacen("Covered paragraph", "", 1),
+        ),
+    ]
+}
+
+/// Sol's 4b2b-1 ruling, through the host's real capture: while an activation
+/// is adopted, a same-path disk edit refuses with no editor lease and no
+/// writes. Once it releases with C1 and C2 Carried and unapplied, the file at
+/// B unchanged keeps the Y.Doc and its tail with no writes, and every disk
+/// edit refuses with no writes and the native structure unchanged: over the
+/// Carried content, over the owner's own typing after the release, and over
+/// a peer's catch-up a moment records.
+#[tokio::test]
+async fn a_released_window_capture_never_rewrites_content_its_file_never_showed() {
+    let mut w = adopted_window(true).await;
+    let head = dohc_engine_collab::load_persisted(&w.store, &window_key())
+        .unwrap()
+        .unwrap()
+        .doc
+        .project(ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    w.refuses(
+        &format!("{head}\nA disk edit.\n"),
+        binding_active,
+        "an adopted owner",
+    )
+    .await;
+    w.release().await;
+    let file = w.file();
+    let (native, written) = (w.native(), w.written());
+    w.capture(&file).await.expect("the bytes capture recorded");
+    assert_eq!(w.native(), native, "the unchanged file keeps the tail");
+    assert_eq!(w.written(), written, "the unchanged file writes nothing");
+    for (case, text) in disk_edits(&file) {
+        assert_ne!(text, file, "{case}");
+        w.refuses(&text, unproven, case).await;
+    }
+    let typed = Ydoc::wire();
+    typed.apply(&w.native()).unwrap();
+    record_owned(
+        &w.actor,
+        &w.lineage,
+        typed.richdoc_append_paragraph("Typed after the release"),
+        "typed",
+    )
+    .await;
+    w.refuses(&format!("{file}\nA disk edit.\n"), unproven, "own typing")
+        .await;
+    let peer = Ydoc::wire();
+    peer.apply(&w.base).unwrap();
+    peer.apply(&w.covered_bytes).unwrap();
+    import_envelope(
+        &mut w.store,
+        "peer",
+        2,
+        &peer.richdoc_append_paragraph("Peer paragraph"),
+        &w.lineage,
+        false,
+    );
+    execute(&mut w.store, "UPDATE hosted_replicas SET main_cursor=2");
+    w.actor
+        .materialize_replay_pending(w.root.path().to_owned(), "workspace".into(), 50)
+        .await
+        .unwrap();
+    let caught_up = w.file();
+    assert!(caught_up.contains("Peer paragraph"), "{caught_up}");
+    w.refuses(
+        &format!("{caught_up}\nA disk edit.\n"),
+        unproven,
+        "a peer's catch-up",
+    )
+    .await;
+    // An owner adopted on another lineage of the document holds all of it,
+    // so a disk edit refuses as its rewrite would, before the window is read.
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch(&format!(
+        "PRAGMA foreign_keys=OFF;
+         CREATE TEMP TABLE other AS SELECT * FROM live_owner_activations WHERE activation_id='{}';
+         UPDATE other SET activation_id='other-lineage',lineage_claim_id='{}',released_at_ms=NULL,
+           released_restore_generation=NULL,released_accepted_cursor=NULL,released_boundary_json=NULL,
+           carried_manifest_json=NULL;
+         INSERT INTO live_owner_activations SELECT * FROM other",
+        w.first.activation_id,
+        "f".repeat(64)
+    ))
+    .unwrap();
+    drop(raw);
+    w.refuses(
+        &format!("{caught_up}\nA disk edit.\n"),
+        binding_active,
+        "another lineage's adopted owner",
+    )
+    .await;
+    w.close().await;
+}
+
+/// Sol's 4b2b-1 ruling: a released chain that Carried nothing settled its
+/// whole Y.Doc at B, so a disk edit of that file folds as ever.
+#[tokio::test]
+async fn a_released_window_capture_folds_over_a_proven_equal_base() {
+    let mut w = adopted_window(false).await;
+    w.release().await;
+    let edited = format!("{}\nA disk edit.\n", w.file());
+    let native = w.native();
+    w.capture(&edited).await.expect("a proven fold");
+    assert_ne!(w.native(), native);
+    let settled: String = w
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT last_settled_sha FROM ydoc_docs", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        settled,
+        hex_sha256(edited.as_bytes()),
+        "the Y.Doc holds the file"
+    );
+    w.close().await;
+}

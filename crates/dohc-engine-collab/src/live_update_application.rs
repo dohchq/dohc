@@ -56,6 +56,10 @@ pub use retirement::{
     Reconciliation, Release, ReleasePending, RetainedPrefix, RetainedPrefixBody, RetirementKey,
     RetirementScope, RetirementTarget,
 };
+mod settled_base;
+pub use settled_base::{
+    released_capture, ReleasedCapture, SettledBaseEvidence, RELEASED_CAPTURE_PROOF_BYTES,
+};
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,

@@ -899,20 +899,29 @@ pub(super) fn read_state(
     through: i64,
     policy: NativeHistoryReconstruction,
 ) -> Result<Ydoc, ApplicationError> {
-    native_state::read(conn, held, through, policy)
+    native_state::read(
+        conn,
+        held,
+        through,
+        policy,
+        &mut restore_content::Budget {
+            remaining: usize::MAX,
+        },
+    )
 }
 
 /// [`read_state`] for a reader no registration serves: the lineage's history
 /// in `namespace` selected by its durable identity alone, through a view that
 /// is never registered or live. `binding` and `coordinate` are the ones a
 /// durable record kept; only the document and lineage select the history.
+/// The blobs it replays are charged to `budget`.
 pub(super) fn read_state_by_identity(
     conn: &Connection,
     namespace: &str,
     binding: LiveObjectBinding,
     coordinate: ApplicationHostCoordinate,
     through: i64,
-    policy: NativeHistoryReconstruction,
+    budget: &mut restore_content::Budget,
 ) -> Result<Ydoc, ApplicationError> {
     let view = Registration {
         workspace_id: binding.workspace_id.clone(),
@@ -922,7 +931,10 @@ pub(super) fn read_state_by_identity(
         activation_id: None,
         live: false,
     };
-    read_state(conn, &view, through, policy)
+    let policy = NativeHistoryReconstruction {
+        working_reserve_bytes: budget.remaining,
+    };
+    native_state::read(conn, &view, through, policy, budget)
 }
 
 pub(super) fn read(

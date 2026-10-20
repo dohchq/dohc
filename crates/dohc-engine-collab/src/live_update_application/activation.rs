@@ -139,22 +139,22 @@ pub fn release_imported_owner_activation(
 /// Y.Doc: the file a released chain settled at its boundary B, while the
 /// Y.Doc also holds the Carried deliveries that chain left unapplied. The
 /// exact released tail keeps B and nothing applied since. Its settlement at
-/// B recorded the file's moment and bytes and the state vector of accepted
-/// state at B, which reconstructs and projects to the file. The chain's
-/// Carried updates, each resolved and validated, replay onto that state to
-/// exactly the local Y.Doc, with no missing dependency. Anything else refuses.
+/// B proves the file is accepted state at B. The chain's Carried updates,
+/// each resolved and validated, replay onto that state to exactly the local
+/// Y.Doc, with no missing dependency. The proof and the replay share one
+/// `max_bytes` budget. Anything else refuses.
 #[allow(clippy::too_many_arguments)]
-fn settled_at_boundary(
+pub(super) fn settled_at_boundary(
     conn: &rusqlite::Connection,
     namespace: &str,
     key: &DocKey,
     path: &str,
     lineage: &str,
     local: &Ydoc,
-    (moment, source_digest, source_length): (&str, &str, i64),
+    source: (&str, &str, i64),
     max_bytes: usize,
 ) -> Result<(), ApplicationError> {
-    let unexplained = || invalid("ordinary activation source does not match imported document");
+    let unexplained = super::settled_base::unexplained;
     if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
         return Err(unexplained());
     }
@@ -171,66 +171,19 @@ fn settled_at_boundary(
         .terminal_receipt
         .as_ref()
         .map_or(0, |receipt| receipt.journal_cursor);
-    type Settled = (i64, String, String, String, String, String, String);
-    let settled: Option<Settled> = conn.query_row(
-        "SELECT terminal_cursor,settlement_kind,moment_id,markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json
-         FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3
-           AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-        params![namespace, key.workspace_id, key.version_id, key.object_id, lineage],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
-    ).optional().map_err(read_sql)?;
-    let Some((terminal, kind, settled_moment, markdown, vector, binding, coordinate)) = settled
-    else {
-        return Err(unexplained());
+    let mut budget = super::restore_content::Budget {
+        remaining: max_bytes,
     };
-    let binding: LiveObjectBinding =
-        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
-    binding
-        .validate_canonical()
-        .map_err(|_| ApplicationError::Corrupt)?;
-    if terminal != through
-        || kind != "ordinary"
-        || settled_moment != moment
-        || markdown != source_digest
-        || binding.workspace_id != key.workspace_id
-        || binding.main_version_id != key.version_id
-        || binding.object_id != key.object_id
-        || binding.lineage_claim_id != lineage
-        || binding.current_path != path
-    {
-        return Err(unexplained());
-    }
-    let coordinate = serde_json::from_str(&coordinate).map_err(|_| ApplicationError::Corrupt)?;
-    let state = super::accepted_history::read_state_by_identity(
+    let (state, _) = super::settled_base::settled_base(
         conn,
         namespace,
-        binding,
-        coordinate,
-        through,
-        NativeHistoryReconstruction {
-            working_reserve_bytes: max_bytes,
-        },
+        key,
+        path,
+        lineage,
+        source,
+        Some(through),
+        &mut budget,
     )?;
-    if hex_sha256(&state.encode_state_vector()) != vector {
-        return Err(unexplained());
-    }
-    let projection = state.project(ContentKind::Richdoc)?.content;
-    let text = state
-        .settled_markdown_source(&projection, || {
-            conn.query_row(
-                "SELECT text FROM blobs WHERE sha256=?1",
-                [source_digest],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(read_sql)
-        })?
-        .unwrap_or(projection);
-    if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
-        return Err(unexplained());
-    }
-    let mut remaining = max_bytes;
     for inherited in
         super::retirement::inherited_entries(conn, namespace, key, lineage, Some(&tail))?
     {
@@ -246,10 +199,10 @@ fn settled_at_boundary(
             .map_err(read_sql)?
             .ok_or(ApplicationError::Conflict)?;
         let length = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
-        if length > remaining || length > crate::limits::MAX_YDOC_UPDATE_BYTES {
+        if length > crate::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(ApplicationError::ConfiguredByteBudgetExceeded);
         }
-        remaining -= length;
+        budget.charge(length)?;
         let bytes = get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)?;
         if hex_sha256(&bytes) != *digest {
             return Err(ApplicationError::Corrupt);

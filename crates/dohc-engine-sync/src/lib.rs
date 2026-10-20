@@ -130,9 +130,10 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    AlwaysLive, LeaseProbe, LocalHeadReconcile, NoLiveLeases, PreparedLocalYdocLineage,
-    ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement,
-    apply_ydoc_envelope, complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
+    AlwaysLive, CaptureLineage, LeaseProbe, LocalHeadReconcile, NoLiveLeases,
+    PreparedLocalYdocLineage, ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult,
+    YdocLineageReplacement, admit_capture_in_tx, apply_ydoc_envelope,
+    complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
     drain_deferred_ydoc_for_key, drain_deferred_ydoc_for_key_holding_cleanup,
     drain_deferred_ydoc_for_live_session, ensure_no_adopted_owner_under_path,
     fold_resolution_into_ydoc_in_tx, live_session_has_drainable_deferred_ydoc,
