@@ -1,4 +1,5 @@
 use dohc_engine_collab::DocKey;
+use dohc_engine_collab::live_update_application::PassTails;
 use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_markdown_path};
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
@@ -370,6 +371,27 @@ pub fn apply_moment_envelope_detailed(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
+    apply_moment_envelope_in_batch(
+        store,
+        envelope,
+        faults,
+        leases,
+        None,
+        &mut PassTails::default(),
+    )
+}
+
+/// `relay_namespace` names the feed a pull read `envelope` from, when the
+/// pull's trusted configuration names one, and `pass` holds the protected
+/// tails its pass already read.
+pub(crate) fn apply_moment_envelope_in_batch(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+    relay_namespace: Option<&str>,
+    pass: &mut PassTails,
+) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -454,6 +476,8 @@ pub fn apply_moment_envelope_detailed(
                 .then(|| leases.bound_claim(&key))
                 .flatten()
                 .as_deref(),
+            relay_namespace,
+            pass,
         )?;
         if let Some(before) = &withheld {
             crate::hosted::record_withheld_before_in_tx(
@@ -635,6 +659,10 @@ pub(crate) fn redelivered_conflicts_opened(
     })
 }
 
+/// `relay_namespace` names the feed a pull read `envelope` from, when the
+/// pull's trusted configuration names one, and `pass` holds the protected
+/// tails its pass already read.
+#[allow(clippy::too_many_arguments)]
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -643,6 +671,8 @@ fn apply_moment_append(
     mode: MomentApplyMode,
     content_held: bool,
     live_claim: Option<&str>,
+    relay_namespace: Option<&str>,
+    pass: &mut PassTails,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -787,6 +817,33 @@ fn apply_moment_append(
         return Err(SyncError::RetryableState {
             reason: "ydoc-session-live",
         });
+    }
+    // A delete, rename or binary write retires or rebinds the lineage, and a
+    // text write rebinds it when it moves the document.
+    if mode == MomentApplyMode::Ordinary {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append Y.Doc coordinates are invalid",
+        })?;
+        let incoming = if payload.operation == "write" && after_kind == ContentKind::Text {
+            crate::ydoc_apply::Incoming::Write {
+                path: &payload.payload_after_path,
+            }
+        } else {
+            crate::ydoc_apply::Incoming::Replacement
+        };
+        crate::ydoc_apply::hold_released_file_operation(
+            tx,
+            &key,
+            envelope,
+            relay_namespace,
+            pass,
+            incoming,
+        )?;
     }
 
     let mut owner_settlement = None;
@@ -1083,14 +1140,41 @@ fn apply_moment_append(
         };
         let mut record_facts = None;
         if mode == MomentApplyMode::Ordinary {
-            crate::reconcile_imported_resulting_head_in_tx(
+            match crate::reconcile_imported_resulting_head_in_tx(
                 tx,
                 &envelope.workspace_id,
                 &payload.version_id,
                 &payload.object_id,
                 resulting,
                 envelope.recorded_at_ms,
-            )?;
+            ) {
+                // A head the lineage does not project would replace it, so a
+                // protected lineage holds the moment as its own.
+                Err(
+                    pending @ SyncError::RetryableState {
+                        reason: "ydoc-resulting-head-pending",
+                    },
+                ) => {
+                    let key = DocKey::new(
+                        &envelope.workspace_id,
+                        &payload.version_id,
+                        &payload.object_id,
+                    )
+                    .map_err(|_| SyncError::InvalidInput {
+                        reason: "moment.append Y.Doc coordinates are invalid",
+                    })?;
+                    crate::ydoc_apply::hold_released_file_operation(
+                        tx,
+                        &key,
+                        envelope,
+                        relay_namespace,
+                        pass,
+                        crate::ydoc_apply::Incoming::Replacement,
+                    )?;
+                    return Err(pending);
+                }
+                reconciled => reconciled?,
+            }
             // A frontmatter edit can replicate as a bare moment.append when
             // the sender journaled no ydoc.update. The materialized disk
             // write is a suppressed self-write, so no capture apply indexes
@@ -1562,6 +1646,8 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         MomentApplyMode::ConflictParent,
         false,
         None,
+        None,
+        &mut PassTails::default(),
     )
 }
 

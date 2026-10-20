@@ -233,7 +233,14 @@ pub(crate) fn apply_replication_envelope_in_batch(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults, leases),
+            crate::moment_apply::apply_moment_envelope_in_batch(
+                store,
+                envelope,
+                faults,
+                leases,
+                relay_namespace,
+                pass,
+            ),
             |moment| RoutedApply {
                 conflicts_opened: moment.conflicts_opened,
                 materialization_changes: moment.materialization_changes,
