@@ -80,6 +80,7 @@ type CliCommandBody =
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
   | { verb: "historyUndo"; operationId: string }
+  | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationList"; collectionPath: string }
@@ -1149,6 +1150,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     summary: "Approve, open, and share apps.",
     notes: [workspaceNote],
     verbs: APP_VERBS,
+  },
+  file: {
+    summary: "Change workspace files.", notes: [workspaceNote],
+    verbs: {duplicate: {capabilityId: "file.duplicate", summary: "Duplicate one file beside its source.", operands: "<path>",
+      parse: input => {const [path, ...extra] = input.operands; if (!path) fail("file duplicate requires a path"); noExtraArgs(extra, "file duplicate"); return {verb: "fileDuplicate", path};}}},
   },
   history: {
     summary: "Read History changes and undo deletes, moves, and renames.",

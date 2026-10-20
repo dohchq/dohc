@@ -37,11 +37,11 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 pub use store::{
-    FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
-    ensure_operation_published_in, operation_moments_in, preflight_undo_operation_in,
-    replayed_undo_operation_in, undo_compensation_moments_in, undo_correlation_id,
-    undo_member_in_tx, undo_member_moment_id, undo_progress_key, undo_request_fingerprint,
-    validate_operation_id,
+    DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
+    duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_compensation_moments_in,
+    undo_correlation_id, undo_member_in_tx, undo_member_moment_id, undo_progress_key,
+    undo_request_fingerprint, validate_operation_id,
 };
 
 pub use automations::{

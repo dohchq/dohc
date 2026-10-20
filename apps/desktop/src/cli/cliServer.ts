@@ -317,6 +317,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
   historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
   historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
+  duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
@@ -2181,14 +2182,14 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
   }
   let paths: Awaited<ReturnType<typeof callerPaths>>;
   try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
-    if (request.verb === "fileMove" || request.verb === "fileDelete") {
+    if (request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate") {
       return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : "delete"} the file.`);
     }
     throw error;
@@ -2200,6 +2201,7 @@ async function dispatch(
       case "fileMove":
         rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
         break;
+      case "fileDuplicate":
       case "fileDelete":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
         break;
@@ -2809,6 +2811,15 @@ async function dispatchWorkspace(
       } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
     }
 
+    case "fileDuplicate": {
+      if (request.args.actor !== "agent") return {ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".'};
+      if (!context.duplicateFile) return {ok: false, reason: "Restart dohc before duplicating this file."};
+      return await onceForRequestId(context, options, request.args.requestId, ["fileDuplicate", request.args.path, request.args.agent ?? null], async () => {
+        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        if (result.ok) await notifyWrite(options, context);
+        return { done: result.ok, result };
+      }, completion);
+    }
     case "fileMove":
     case "fileDelete": {
       const change = request.verb === "fileMove" ? "move" : "delete";
@@ -3495,7 +3506,7 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
-  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete";
+  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate";
   const documentWriteRequest =
     request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
   const writeRequest =

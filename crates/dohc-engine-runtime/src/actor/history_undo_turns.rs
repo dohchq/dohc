@@ -114,7 +114,9 @@ fn disk_check(root: &Path, member: &Member) -> Result<DiskProof, RuntimeError> {
         reason,
     };
     let target = m.before_path.as_deref().unwrap_or(&m.path);
-    if probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent {
+    if m.operation != "write"
+        && probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent
+    {
         return Err(refuse(target, "old path occupied on disk").into());
     }
     let mut source = None;
@@ -313,7 +315,8 @@ impl ActorHandle {
                         .into_iter()
                         .map(|effect| {
                             let head = signature(conn, &w, &version, &effect.object_id)?;
-                            let sha = if effect.operation == "rename" {
+                            let sha = if effect.operation == "rename" || effect.operation == "write"
+                            {
                                 Some(rename_head_sha(conn, &w, &version, &effect.object_id)?)
                             } else {
                                 None
@@ -496,10 +499,10 @@ impl ActorHandle {
                     let checks = (|| -> Result<(),RuntimeError> {
                     let unchanged = store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
                     let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
-                    let vacant: bool = store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
+                    let vacant: bool = member.effect.operation == "write" || store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
                     let admitted = store.read_with(|conn| check_undo_ownership(conn,&p.workspace,&p.version,&member.effect));
                     let disk_changed = matches!(&disk,Err(RuntimeError::Domain(DomainError::UndoRefused {..}))) || disk.as_ref().is_ok_and(|(probe, source)| {
-                        probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp)
+                        (member.effect.operation != "write" && probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent) || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp)
                     });
                     let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || disk_changed;
                     if changed { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"source changed"}.into()) } else { admitted.and(disk.map(|_| ())) }

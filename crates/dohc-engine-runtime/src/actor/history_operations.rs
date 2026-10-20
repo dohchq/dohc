@@ -43,6 +43,73 @@ pub struct HistoryUndoResult {
 }
 
 impl ActorHandle {
+    pub async fn duplicate_file(
+        &self,
+        input: dohc_engine_domain::DuplicateFile,
+        root: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<HistoryOperation, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                let policy = crate::search::read_engine_search_policy(&root);
+                let outcome = store.write_with(
+                    faults.as_ref(),
+                    |tx| -> Result<HistoryOperation, RuntimeError> {
+                        dohc_engine_domain::ensure_no_pending_undo_in(tx, &input.workspace_id)?;
+                        let replay: bool = tx
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                                [format!("duplicate_{}", input.operation_id)],
+                                |r| r.get(0),
+                            )
+                            .map_err(StorageError::corrupt_public)?;
+                        if !replay {
+                            for path in [&input.from_path, &input.to_path] {
+                                dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                                    tx,
+                                    &input.workspace_id,
+                                    &input.version_id,
+                                    path,
+                                )?;
+                                super::capture::ensure_no_pending_undo_placement(
+                                    tx,
+                                    &input.workspace_id,
+                                    path,
+                                )?;
+                            }
+                        }
+                        let m = dohc_engine_domain::duplicate_file_in_tx(tx, &input)?;
+                        if !replay {
+                            publish_undo_member(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &policy,
+                                &m,
+                                input.now_ms,
+                            )?;
+                        }
+                        Ok(HistoryOperation {
+                            operation_id: input.operation_id.clone(),
+                            version_id: input.version_id.clone(),
+                            moments: dohc_engine_domain::operation_moments_in(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &input.operation_id,
+                            )?,
+                        })
+                    },
+                )?;
+                match outcome {
+                    TxnOutcome::Committed(result) => Ok(result),
+                    TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+                }
+            })
+        })
+        .await
+    }
+
     pub async fn preflight_history_undo(
         &self,
         ws: String,
@@ -1443,7 +1510,46 @@ fn publish_undo_member(
     now: i64,
 ) -> Result<(), DomainError> {
     let mut journal_eligibility = None;
-
+    if m.operation == dohc_engine_domain::MomentOp::Delete {
+        let sha = m
+            .before_binary_sha256
+            .as_ref()
+            .or(m.before_blob_sha256.as_ref())
+            .ok_or(DomainError::FileNotFound)?;
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
+        enqueue_delete_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id: binary_rollback_job_identity(ws, version_id, &m.moment_id),
+                workspace_id: ws.into(),
+                target_path: m.path.clone(),
+                content_sha256: sha.clone(),
+                preimage: Preimage::Present(sha.clone()),
+                target_generation: m.moment_order,
+                now_ms: now,
+            },
+        )?;
+        journal_moment_outbound_with_batch_in_tx(
+            tx,
+            ws,
+            &m.moment_id,
+            false,
+            &mut journal_eligibility,
+        )?;
+        return Ok(());
+    }
     let (path, text, kind, sha): (String, Option<String>, String, String) = tx
         .query_row(
             "SELECT s.path,b.sha256,s.content_kind,
@@ -1533,3 +1639,7 @@ fn publish_undo_member(
 
 #[path = "history_undo_turns.rs"]
 mod turns;
+
+#[cfg(test)]
+#[path = "duplicate_tests.rs"]
+mod duplicate_tests;

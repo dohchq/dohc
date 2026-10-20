@@ -90,7 +90,7 @@ function checkedPath(path: string): string {
 // prepareWorkspaceDelete does: on a disk that ignores case, Notes.txt then
 // reaches the notes.txt History holds. A link keeps its spelled name, and
 // admitTree refuses it.
-async function admitPath(rootPath: string, path: string): Promise<AdmittedPath> {
+export async function admitPath(rootPath: string, path: string): Promise<AdmittedPath> {
   const normalized = checkedPath(path);
   const target = await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, normalized),
     spelled: path, label: "Path", access: "entry" });

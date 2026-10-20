@@ -815,6 +815,8 @@ describe("agent move and delete admission", () => {
   async function refusingFixture() {
     const f = await fixture();
     const engine: Omit<AuthoredPathChanges, "policy"> = {
+      hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
       recordDisk: vi.fn(async () => []),
       moveFile: vi.fn(async () => false),
       rename: vi.fn(async () => { throw new Error("Admission should have refused"); }),

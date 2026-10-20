@@ -15,6 +15,7 @@ import {
   type CollectionQueryResult as CollectionQueryContractResult,
   type CollectionValue,
 } from "@dohc/workspace-contracts/collection";
+import type { WriteAuthor } from "../versioned/versionedWireContract";
 import type { JsonValue } from "../protocol";
 
 export const WORKSPACE_METHOD = {
@@ -43,6 +44,7 @@ export const WORKSPACE_METHOD = {
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
   captureRelease: "capture.release",
+  captureDuplicateFile: "capture.duplicateFile",
   captureMoveFile: "capture.moveFile",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
@@ -469,6 +471,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
+  [WORKSPACE_METHOD.captureDuplicateFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string; author?: WriteAuthor };
   [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
@@ -1361,6 +1364,7 @@ const WorkspaceResultSchemas = {
    * why the file stayed: the destination is taken, the source is gone, or
    * this filesystem has no such rename, and the caller moves it another way.
    */
+  [WORKSPACE_METHOD.captureDuplicateFile]: mutableStruct({path: Schema.String, materialized: Schema.Boolean}),
   [WORKSPACE_METHOD.captureMoveFile]: Schema.Union([
     mutableStruct({ moved: Schema.Literal(true) }),
     mutableStruct({

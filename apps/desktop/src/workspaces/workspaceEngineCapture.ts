@@ -134,7 +134,7 @@ function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
 function liveDocumentMutationRefusal(
   error: unknown,
   path: string,
-  action: "move" | "delete" | "restore",
+  action: "move" | "delete" | "restore" | "duplicate",
 ): Error | null {
   if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
     return null;
@@ -345,6 +345,8 @@ export interface AuthoredPathChanges {
   // refuses to replace. Answers false where this filesystem has no such
   // rename, and the caller moves the file another way. Throws when the
   // destination is taken or the source is gone.
+  hasPath(path: string): Promise<boolean>;
+  duplicateFile(fromPath: string, toPath: string): Promise<{path: string; materialized: boolean}>;
   moveFile(fromPath: string, toPath: string): Promise<boolean>;
   rename(fromPath: string, toPath: string): Promise<void>;
   // Records a delete of a file already gone from disk. Answers its row's id.
@@ -746,7 +748,7 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; operationId: string },
+    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
@@ -5991,13 +5993,13 @@ export function createWorkspaceEngineCapture(
         await ensureAllowed(authored.author);
         await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
         const source = paths[0];
-        if (authored.operation === "move" && source !== undefined) {
+        if ((authored.operation === "move" || authored.operation === "duplicate") && source !== undefined) {
           await payDebtsBeforeMove(source, match, candidate => pathIsAtOrUnder(candidate, source));
         }
         const suspended = suspendDetachedDebts(match);
         const closeRemovalWindow = openRemovalWindow({
           match,
-          operation: authored.operation,
+          operation: authored.operation === "duplicate" ? "move" : authored.operation,
           inProgress: `dohc is still changing ${paths.join(", ")}.`,
         });
         let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
@@ -6050,6 +6052,12 @@ export function createWorkspaceEngineCapture(
                     { origin: "local-file", summary: `Deleted ${pathBasename(headPath)}` }, undefined, !onDisk.has(headPath));
                 }
                 return held;
+              },
+              hasPath: async path => (await engine.listTextFileMetadata({workspaceId, versionId, under: path})).some(head => head.path === path),
+              duplicateFile: async (fromPath, toPath) => {
+                assertEngineWritablePath(toPath, policy);
+                if (!engine.duplicateFileUnderHold) throw new Error("Restart dohc before duplicating this file.");
+                return engine.duplicateFileUnderHold({holdId, fromPath, toPath, author: {...authored.author}});
               },
               moveFile: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);

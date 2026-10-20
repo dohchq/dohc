@@ -86,6 +86,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -850,6 +851,12 @@ export async function moveWorkspacePath(
     ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
     agent, requestId: randomUUID(),
   });
+}
+
+export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: string}, agent?: string) {
+  const source = await safeResolve(ctx, args.path, "entry");
+  if (!source.ok) return {ok: false as const, reason: source.reason};
+  return requestCli(ctx, "fileDuplicate", {path: source.normalized, agent, requestId: randomUUID()});
 }
 
 export async function deleteWorkspacePath(
@@ -1869,6 +1876,7 @@ export const FILE_MOVE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to m
 export const FILE_DELETE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to delete through it, or delete the file yourself. History will record that delete without your name.";
 const FILE_UNAVAILABLE_REASONS: Partial<Record<CliVerb, string>> = {
   fileWrite: FILE_WRITE_UNAVAILABLE_REASON,
+  fileDuplicate: FILE_MOVE_UNAVAILABLE_REASON,
   fileMove: FILE_MOVE_UNAVAILABLE_REASON,
   fileDelete: FILE_DELETE_UNAVAILABLE_REASON,
 };

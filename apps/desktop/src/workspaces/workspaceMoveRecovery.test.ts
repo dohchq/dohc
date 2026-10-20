@@ -33,6 +33,8 @@ async function fixture() {
   const capture: PathChangeOptions["capture"] & Pick<import("./workspaceEngineCapture").WorkspaceEngineCapture, "beginFileRename"> = { beginFileRename: async () => async () => undefined, changePathsAs: async (_paths, authored, work) => {
     activeOperationId = authored.operationId;
     return work({ policy: await readWorkspaceEnginePolicy(rootPath),
+      hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
       recordDisk: async (_base, files) => files.filter(path => !path.endsWith("oversized.bin")),
       rename: async (from, to) => {
         objects.set(to, objects.get(from) ?? `object:${from}`); objects.delete(from);

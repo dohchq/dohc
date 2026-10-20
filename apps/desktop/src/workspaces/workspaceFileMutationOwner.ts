@@ -1,3 +1,5 @@
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
+import { DuplicateWorkspaceFilePayload, DuplicateWorkspaceFileResult } from "../ipc/bridgeContract";
 import { randomUUID } from "node:crypto";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -63,6 +65,7 @@ export interface WorkspaceFileMutationOwner<Event> {
     Event,
     CreateWorkspaceFileResult
   >;
+  duplicateFile: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof DuplicateWorkspaceFileResult>>;
   movePath: WorkspaceFileMutationIpcHandler<Event, MoveWorkspacePathResult>;
   deletePath: WorkspaceFileMutationIpcHandler<
     Event,
@@ -300,6 +303,14 @@ export function createWorkspaceFileMutationOwner<
       );
     },
 
+    duplicateFile: async (event, payload) => {
+      const request = admitMutation(event, payload, DuplicateWorkspaceFilePayload.parse);
+      const person = await dependencies.localPerson();
+      return runAdmittedMutation(event, request, async ({input, workspace, assertCurrent, capture}) => {
+        if (!capture) throw new Error("Restart dohc before duplicating this file.");
+        return DuplicateWorkspaceFileResult.parse(await duplicateWorkspaceFile({workspace, assertCurrent}, input.relativePath, person, capture));
+      });
+    },
     movePath: async (event, payload) => {
       const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
       const person = await dependencies.localPerson();

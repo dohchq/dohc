@@ -1,3 +1,4 @@
+import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
@@ -342,6 +343,10 @@ export function createDesktopCliServer<State>(
         const current = activity.engineCaptureFor(workspace.workspaceId);
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
         return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
+      }),
+      duplicateFile: (path, origin, requestId) => withPathChange(requestId, async (operation, options) => {
+        const copied = await duplicateWorkspaceFile(operation, path, agentWriteAuthor(origin), options.capture);
+        return async () => ({ok: true as const, ...copied});
       }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),

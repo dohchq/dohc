@@ -272,7 +272,9 @@ async function harness(options: {
           let gone = false;
           try {
             const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
-              recordDisk: async (_path, files) => [...files], moveFile: async () => false,
+              hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
+      recordDisk: async (_path, files) => [...files], moveFile: async () => false,
               rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });
             gone = removed(value).length > 0;
             return value;

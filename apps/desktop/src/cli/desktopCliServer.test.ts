@@ -88,7 +88,9 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     // settle: the policy is read once the change runs, History holds every
     // regular file, and the disk has no rename that refuses to replace.
     changePathsAs: vi.fn(async (_paths: readonly string[], _authored: unknown, work: (engine: AuthoredPathChanges) => Promise<unknown>) =>
-      await work({ policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async (_path, files) => [...files],
+      await work({ policy: await readWorkspaceEnginePolicy(rootPath), hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
+      recordDisk: async (_path, files) => [...files],
         moveFile: async () => false, rename: async () => undefined, delete: async () => "moment",
         undoDelete: async () => undefined })) as Capture["changePathsAs"],
   };
@@ -997,6 +999,8 @@ describe("raw fileMove and fileDelete socket requests", () => {
     let attachmentId: symbol | undefined;
     vi.mocked(f.capture.changePathsAs).mockImplementation(async (_paths, _authored, work) => work({
       policy: await readWorkspaceEnginePolicy(f.root),
+      hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
       recordDisk: async () => ["folder/tracked.txt"],
       delete: async () => {
         // History records the delete after the folder has moved into the trash.

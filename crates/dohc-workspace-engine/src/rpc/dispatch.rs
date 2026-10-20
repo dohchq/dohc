@@ -600,6 +600,10 @@ impl EngineService {
                 self.capture_release(request.workspace, request.params)
                     .await?
             }
+            "capture.duplicateFile" => {
+                self.capture_duplicate_file(request.workspace, request.params)
+                    .await?
+            }
             "capture.moveFile" => {
                 self.capture_move_file(request.workspace, request.params)
                     .await?
