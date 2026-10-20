@@ -190,6 +190,53 @@ it("replays a receipt another request committed after this one's first look", as
   expect(f.bases()).toHaveLength(1);
 });
 
+it("replays a receipt another request committed before an ordinary write made this one's source stale", async () => {
+  const f = await fixture();
+  let other: FirstOpenOutcome | undefined;
+  // While this request builds, the other publishes this source's base, then the file changes.
+  f.buildWith(async (policy, input) => {
+    f.buildWith(inThread);
+    other = await f.open();
+    f.writeText("# Plan\n\nBring drinks.\n");
+    return buildFirstOpenBase(policy, input);
+  });
+  const outcome = await f.open();
+  expect(other).toMatchObject({kind: "published"});
+  expect(outcome).toMatchObject({kind: "replayed", receipt: published(other!)});
+  expect(f.bases()).toHaveLength(1);
+});
+
+it("replays a receipt another request committed during this one's last catch-up", async () => {
+  const f = await fixture();
+  let other: FirstOpenOutcome | undefined, own = 0;
+  // This request's first two reads see the workspace move; its third takes its snapshot, then the other publishes.
+  f.readWith(async read => {
+    const history = readFirstOpenHistoryFile(read);
+    own++;
+    if (own < FIRST_OPEN_WRITER_ATTEMPTS) f.writeText(`chat ${own}`, {objectId: `object-chat-${own}`, path: `chat/${own}.md`});
+    else if (own === FIRST_OPEN_WRITER_ATTEMPTS) other = await f.open();
+    return history;
+  });
+  const outcome = await f.open();
+  expect(other).toMatchObject({kind: "published"});
+  expect(outcome).toMatchObject({kind: "replayed", receipt: published(other!)});
+  expect(f.writes).toHaveBeenCalledTimes(FIRST_OPEN_WRITER_ATTEMPTS + 1);
+  expect(f.bases()).toHaveLength(1);
+});
+
+it("replays a base published over a moment ID the log holds twice, at the time of the row it was published over", async () => {
+  const f = await fixture(), bytes = new TextEncoder().encode(MARKDOWN).byteLength;
+  f.append("moment.append", {momentId: f.source.sourceMomentId, objectId: OBJECT, versionId: "main", operation: "write", path: PATH, payloadAfterPath: PATH,
+    payloadAfterBlobSha256: f.source.sourceDigest, payloadAfterByteLength: bytes, payloadAfterContentKind: "text", recordedAtMs: 5_000});
+  const receipt = published(await f.open());
+  expect(f.bases()[0]).toMatchObject({recorded_at_ms: 5_000});
+  expect(await f.open()).toMatchObject({kind: "replayed", receipt});
+  // The same moment again after the base does not change which row the base was published over.
+  f.append("moment.append", {momentId: f.source.sourceMomentId, objectId: OBJECT, versionId: "main", operation: "write", path: PATH, payloadAfterPath: PATH,
+    payloadAfterBlobSha256: f.source.sourceDigest, payloadAfterByteLength: bytes, payloadAfterContentKind: "text", recordedAtMs: 9_000});
+  expect(await f.open()).toMatchObject({kind: "replayed", receipt});
+});
+
 it("refuses squatting on the reserved coordinate, then publishes there", async () => {
   const f = await fixture();
   const originId = firstOpenOrigin(namespace, {workspaceId: WS, objectId: OBJECT, path: PATH, ...f.source, sourceByteLength: 0},
@@ -428,6 +475,23 @@ it("refuses a base over each configured bound, at the boundary the real verifier
   for (const f of [oversized, reduced]) nothingAppended(f);
 });
 
+it("refuses a valid base the validation policy cannot afford as too large, and an invalid one as an integrity failure", async () => {
+  const f = await fixture();
+  f.setActivation(configured({validation: {...selfHostLiveProfile().service.activation.validation, maxStructVisits: 1}}));
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "validation-budget", recovery: "none"});
+  nothingAppended(f);
+  // The same seed under the configured policy publishes.
+  f.setActivation(configured());
+  expect((await f.open()).kind).toBe("published");
+  // A base the validator rejects is the relay's own fault.
+  const g = await fixture(), doc = new Y.Doc();
+  doc.getXmlFragment("prosemirror").insert(0, [new Y.XmlElement("not-a-node")]);
+  vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  expect(await g.open()).toMatchObject({kind: "integrity", reason: "candidate", recovery: "report"});
+  nothingAppended(g);
+});
+
 it("tells contention, capacity, cancellation and failure apart, and appends nothing for any", async () => {
   // Every read sees the workspace move once more, so each writer attempt finds a new head.
   const moving = await fixture();
@@ -449,18 +513,47 @@ it("tells contention, capacity, cancellation and failure apart, and appends noth
   busy.buildWith(async () => ({kind: "busy"}));
   expect(await busy.open()).toMatchObject({kind: "unavailable", reason: "busy"});
 
-  const failing = await fixture();
-  failing.readWith(async () => { throw new Error("history unavailable"); });
-  expect((await failing.post()).status).toBe(500);
-  failing.readWith(async read => readFirstOpenHistoryFile(read));
-  failing.buildWith(async () => { throw new Error("Live validation worker exited."); });
-  expect((await failing.post()).status).toBe(500);
-
   const cancelled = await fixture(), abort = new AbortController();
   cancelled.buildWith(async (policy, input) => { const built = buildFirstOpenBase(policy, input); abort.abort(new Error("cancelled")); return built; });
   await expect(cancelled.post({}, {signal: abort.signal}).then(response => response.status)).resolves.not.toBe(200);
   expect(cancelled.writes).not.toHaveBeenCalled();
-  for (const f of [busy, failing, cancelled]) nothingAppended(f);
+  for (const f of [busy, cancelled]) nothingAppended(f);
+});
+
+it("answers a failed history read, worker or database as a typed transient outcome, and logs its cause", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const sqlite = () => Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10});
+  const f = await fixture(), failures: Array<[string, () => void]> = [
+    ["history-unavailable", () => f.readWith(async () => { throw new Error("no such table"); })],
+    ["worker-failed", () => f.buildWith(async () => { throw new Error("Live validation worker exited."); })],
+    ["storage-failed", () => f.writes.mockImplementationOnce(() => { throw sqlite(); })],
+  ];
+  for (const [reason, fail] of failures) {
+    f.readWith(async read => readFirstOpenHistoryFile(read));
+    f.buildWith(inThread);
+    fail();
+    expect(await f.open(), reason).toMatchObject({kind: "unavailable", reason, recovery: "retry-later", source: {workspaceId: WS, objectId: OBJECT, ...f.source}});
+    expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open unavailable", expect.anything());
+  }
+  // The workspace moves, and the catch-up read fails.
+  f.readWith(async read => { if (read.afterRelaySeq > 0) throw new Error("worker exited"); return readFirstOpenHistoryFile(read); });
+  f.afterRead(() => { f.afterRead(); f.writeText("chat", {objectId: "object-chat", path: "chat/a.md"}); });
+  const writes = f.writes.mock.calls.length;
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "history-unavailable"});
+  expect(f.writes.mock.calls.length).toBe(writes + 1);
+  nothingAppended(f);
+  // An unexpected fault is no outcome, and neither is a timeout nor a cancellation during a read.
+  f.readWith(async read => readFirstOpenHistoryFile(read));
+  f.writes.mockImplementationOnce(() => { throw new TypeError("a relay bug"); });
+  expect(await f.post().then(response => response.json())).toMatchObject({ok: false, code: "internal_error"});
+  for (const reason of [new DOMException("timed out", "TimeoutError"), new Error("cancelled")]) {
+    const abort = new AbortController();
+    f.readWith(async read => { abort.abort(reason); return readFirstOpenHistoryFile(read); });
+    const response = await f.post({}, {signal: abort.signal});
+    expect(response.status).not.toBe(200);
+    expect(await response.json()).not.toHaveProperty("outcome");
+  }
+  nothingAppended(f);
 });
 
 it("is not moved by another workspace's appends", async () => {

@@ -4,7 +4,7 @@ import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents"
 import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/live-journal-validation";
 import {badRequest, notFound} from "./errors";
 import {firstOpenBaseExceeds, type FirstOpenBaseBound, type FirstOpenBaseBounds, type FirstOpenBaseInput, type FirstOpenBaseResult} from "./firstOpenBase";
-import {firstOpenOutcome, type FirstOpenOutcome} from "./firstOpenOutcome";
+import {firstOpenOutcome, type FirstOpenFailure, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {liveValidation} from "./liveValidation";
 import {assertSha256, parseString} from "./requestInputs";
 import type {ServiceActivationConfig} from "./serviceActivationDriver";
@@ -42,6 +42,13 @@ export function parseFirstOpenRequest(body: Record<string, unknown>): FirstOpenR
 class FirstOpenBoundExceeded extends Error {
   constructor(readonly bound: FirstOpenBaseBound) {super("A first-open base exceeds its configured bounds.");}
 }
+
+/** A history read or build that failed rather than answered. */
+class FirstOpenStepFailed extends Error {
+  constructor(readonly reason: Exclude<FirstOpenFailure, "storage-failed">, cause: unknown) {super(`First-open ${reason}.`, {cause});}
+}
+
+const sqliteFailure = (error: unknown) => error instanceof Error && (error as {code?: unknown}).code === "ERR_SQLITE_ERROR";
 
 export type FirstOpenBuild = (policy: OrderedLiveUpdateCutPolicy, input: FirstOpenBaseInput, signal: AbortSignal) => Promise<FirstOpenBaseResult | {kind: "busy"}>;
 export type FirstOpenPublisher = ReturnType<typeof createFirstOpenPublisher>;
@@ -93,7 +100,10 @@ export function createFirstOpenPublisher(options: {
     try {outcome = await publish(objectId);}
     catch (error) {
       if (!standingKept()) throw notFound();
-      throw error;
+      const reason = error instanceof FirstOpenStepFailed ? error.reason : !signal.aborted && sqliteFailure(error) ? "storage-failed" : undefined;
+      if (!reason) throw error;
+      console.error("[sync-relay] first-open unavailable", error);
+      return answer({kind: "unavailable", reason});
     }
     if (!standingKept()) throw notFound();
     return outcome;
@@ -105,24 +115,27 @@ export function createFirstOpenPublisher(options: {
     const originId = firstOpenOrigin(namespace, {...named, sourceByteLength: 0}, identity);
     // An exact receipt answers before freshness, conversion or current bounds, so a lost reply replays.
     const replay = () => {
-      const moment = storage.readFirstOpenMoment(workspaceId, objectId, request.sourceMomentId);
-      const stored = moment && storage.readFirstOpenReceipt(originId, {...named, sourceByteLength: moment.sourceByteLength ?? 0}, moment.recordedAtMs);
-      if (stored?.kind === "receipt") return answer({kind: "replayed", receipt: stored.receipt});
-      if (stored?.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
+      const stored = storage.readFirstOpenReceipt(originId, {...named, sourceByteLength: 0});
+      if (stored.kind === "receipt") return answer({kind: "replayed", receipt: stored.receipt});
+      if (stored.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
       return undefined;
     };
-    // Another request may publish this receipt after the first look; only then is history this request's own.
+    // Another request may publish this receipt after the first look; only then is history or a moved source this request's own.
     const refusal = (refused: Exclude<FirstOpenPreparation, {kind: "prepared"}> | {kind: "refused"; reason: "prior-authority" | "stale-source"}) => {
       if (refused.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
-      if (refused.reason === "stale-source") return answer({kind: "refused", reason: "stale-source"});
-      return replay() ?? (refused.reason === "prior-authority" ? answer({kind: "existing-history", reason: "prior-authority"}) : answer({kind: "refused", reason: "deletion"}));
+      return replay() ?? answer(refused.reason === "prior-authority" ? {kind: "existing-history", reason: "prior-authority"} : {kind: "refused", reason: refused.reason});
+    };
+    // A failed history read or build says nothing about the document; a cancelled one stays cancelled.
+    const step = async <T>(reason: FirstOpenStepFailed["reason"], run: () => Promise<T>) => {
+      try {return await run();}
+      catch (error) {throw signal.aborted ? error : new FirstOpenStepFailed(reason, error);}
     };
     const replayed = replay();
     if (replayed) return replayed;
     const config = options.activation();
     if (!config) throw notFound();
 
-    // The relay's current ordinary text head, exactly as stored.
+    // The relay's current ordinary text head, exactly as stored. No await separates it from the first look, so a stale head needs no second one.
     const head = storage.readFirstOpenMoment(workspaceId, objectId);
     if (!head || head.sourceMomentId !== request.sourceMomentId || head.path !== request.path || head.sourceDigest !== request.sourceDigest ||
       head.contentKind !== "text" || head.sourceByteLength === null) return answer({kind: "refused", reason: "stale-source"});
@@ -133,12 +146,12 @@ export function createFirstOpenPublisher(options: {
     catch {return answer({kind: "refused", reason: "unsupported-source"});}
     const source: FirstOpenSource = Object.freeze({...named, sourceByteLength: head.sourceByteLength});
 
-    const preparation = await storage.prepareFirstOpen(source, signal);
+    const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
     if (preparation.kind !== "prepared") return refusal(preparation);
     let proof = preparation.proof;
-    const built = await build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId}, currentPath: source.path,
-      headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest, sourceByteLength: source.sourceByteLength,
-      bounds: bounds(config, source, identity, originId)}, signal);
+    const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
+      currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,
+      sourceByteLength: source.sourceByteLength, bounds: bounds(config, source, identity, originId)}, signal));
     signal.throwIfAborted();
     if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
     if (built.kind === "refused") {
@@ -169,8 +182,8 @@ export function createFirstOpenPublisher(options: {
       if (written.kind === "published") return answer({kind: "published", receipt: written.receipt});
       if (written.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
       if (written.kind === "refused") return refusal(written);
-      if (attempt === FIRST_OPEN_WRITER_ATTEMPTS) return answer({kind: "unavailable", reason: "contention"});
-      const caught = await storage.catchUpFirstOpen(proof, signal);
+      if (attempt === FIRST_OPEN_WRITER_ATTEMPTS) return replay() ?? answer({kind: "unavailable", reason: "contention"});
+      const caught = await step("history-unavailable", () => storage.catchUpFirstOpen(proof, signal));
       if (caught.kind !== "prepared") return refusal(caught);
       proof = caught.proof;
     }

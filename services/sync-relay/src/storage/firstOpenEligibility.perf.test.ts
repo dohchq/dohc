@@ -10,6 +10,10 @@ import {readFirstOpenHistory, type FirstOpenEligibility, type FirstOpenHistoryRe
 import type {FirstOpenProof} from "./firstOpenEligibility";
 
 // Run: DOHC_FIRST_OPEN_MEASURE=1 pnpm --filter @dohc/sync-relay exec vitest run src/storage/firstOpenEligibility.perf.test.ts --silent=false --reporter=verbose
+// A guarded append is a real publication. Its timed writer hold covers the recheck, the base's blob insert,
+// its row's append, and the N2 reads: the receipt, the moment it was published over, and the appended-row count.
+// Its row is deleted afterwards on another connection, outside the timed window.
+// The report has every hold, append and in-writer sample in run order, and which append of each pair went first.
 const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
 afterEach(async () => {
   await Promise.all(pools.splice(0).map(pool => pool.close()));
@@ -43,6 +47,8 @@ function stats(samples: number[]) {
   const sorted = [...samples].sort((a, b) => a - b), at = (q: number) => Number(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!.toFixed(3));
   return {n: samples.length, minMs: at(0), p50Ms: at(0.5), p95Ms: at(0.95), maxMs: at(1)};
 }
+/** Every sample, in run order. */
+const listed = (samples: number[]) => samples.map(ms => Number(ms.toFixed(3)));
 const timed = async <T>(run: () => T | Promise<T>): Promise<[number, T]> => { const start = performance.now(); const value = await run(); return [performance.now() - start, value]; };
 
 it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open preparation off the writer and its recheck inside it", async () => {
@@ -178,6 +184,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     // The writer: a plain append and the same append behind the first-open recheck, interleaved.
     // Each publication uses up its proof, so each guarded append gets a new one, prepared before either append.
     const plainWhole: number[] = [], plainHold: number[] = [], guardedWhole: number[] = [], guardedHold: number[] = [], eligibility: number[] = [];
+    const pairOrder: Array<"plain-first" | "guarded-first"> = [];
     for (let i = 0; i < 3; i++) { await plain(); await guarded(await prepare(), workspaceId); }
     for (let i = 0; i < WRITES; i++) {
       const proof = await prepare();
@@ -186,11 +193,14 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       const checked = await guarded(proof, workspaceId);
       const bare = first ?? await plain();
       expect(checked.kind).toBe("published");
+      pairOrder.push(first ? "plain-first" : "guarded-first");
       plainWhole.push(bare.whole); plainHold.push(bare.hold);
       guardedWhole.push(checked.whole); guardedHold.push(checked.hold); eligibility.push(checked.eligibility);
     }
     Object.assign(result, {plainAppendMs: stats(plainWhole), plainHoldMs: stats(plainHold), guardedAppendMs: stats(guardedWhole),
-      guardedHoldMs: stats(guardedHold), eligibilityInWriterMs: stats(eligibility)});
+      guardedHoldMs: stats(guardedHold), eligibilityInWriterMs: stats(eligibility),
+      pairs: {order: pairOrder, plainAppendMs: listed(plainWhole), plainHoldMs: listed(plainHold), guardedAppendMs: listed(guardedWhole),
+        guardedHoldMs: listed(guardedHold), eligibilityInWriterMs: listed(eligibility)}});
 
     // The event loop while the worker prepares, alone and with unrelated workspace writes in the main thread.
     const idle = monitorEventLoopDelay({resolution: 1});
@@ -231,7 +241,8 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       proof = caught.proof;
     }
     expect((await guarded(proof, workspaceId)).kind).toBe("published");
-    result.catchUp = {rowsPerRound: CATCH_UP_ROWS, retries, freshWorkerCatchUpMs: stats(catchUp), retryHoldMs: stats(retryHold), retryEligibilityInWriterMs: stats(retryEligibility)};
+    result.catchUp = {rowsPerRound: CATCH_UP_ROWS, retries, freshWorkerCatchUpMs: stats(catchUp), retryHoldMs: stats(retryHold), retryEligibilityInWriterMs: stats(retryEligibility),
+      samples: {retryHoldMs: listed(retryHold), retryEligibilityInWriterMs: listed(retryEligibility)}};
 
     // A stale proof: the source changed, so the writer refuses without publishing.
     proof = await prepare();
@@ -242,7 +253,8 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       expect(checked.kind).toBe("refused");
       staleHold.push(checked.hold); staleEligibility.push(checked.eligibility);
     }
-    result.staleProof = {holdMs: stats(staleHold), eligibilityInWriterMs: stats(staleEligibility)};
+    result.staleProof = {holdMs: stats(staleHold), eligibilityInWriterMs: stats(staleEligibility),
+      samples: {holdMs: listed(staleHold), eligibilityInWriterMs: listed(staleEligibility)}};
 
     // Judged per scenario: eligibility work over every writer outcome, and hold against this scenario's plain appends.
     const work = stats([...eligibility, ...retryEligibility, ...staleEligibility]), plainP95 = stats(plainHold).p95Ms!, guardedP95 = stats(guardedHold).p95Ms!;

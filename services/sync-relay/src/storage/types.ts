@@ -625,11 +625,10 @@ export interface SyncRelayStorage {
   latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
   /** The enrolled document at the path while the service host may start it live, or null. */
   readFirstOpenStanding(input: {workspaceId: string; ownerUserId: string; path: string}): string | null;
-  /** The object's latest main moment, or the main moment named `momentId`. */
-  readFirstOpenMoment(workspaceId: string, objectId: string, momentId?: string): import("./firstOpenEligibility").FirstOpenMoment | null;
+  /** The object's latest main moment. */
+  readFirstOpenMoment(workspaceId: string, objectId: string): import("./firstOpenEligibility").FirstOpenMoment | null;
   /** What a source's reserved first-open origin holds. */
-  readFirstOpenReceipt(originId: string, source: import("./firstOpenHistory").FirstOpenSource,
-    recordedAtMs: number): import("./firstOpenEligibility").FirstOpenStoredReceipt;
+  readFirstOpenReceipt(originId: string, source: import("./firstOpenHistory").FirstOpenSource): import("./firstOpenEligibility").FirstOpenStoredReceipt;
   /** Whether durable history lets the relay give the source's document a first live base, read off the relay writer. */
   prepareFirstOpen(source: import("./firstOpenHistory").FirstOpenSource,
     signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
