@@ -790,7 +790,8 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
     assert_eq!(committed.moments.len(), 3);
     let fault = Arc::new(CrashNth {
         point: FaultPoint::StorageAfterCommitBeforeAck,
-        nth: 3,
+        // Plan, then rename inverse. Write members remain for resume.
+        nth: 2,
         seen: AtomicUsize::new(0),
     });
     assert!(matches!(
