@@ -182,7 +182,8 @@ impl Fixture {
                 self.root.to_path_buf(),
                 self.leases.clone(),
                 self.serial.clone(),
-                faults, Arc::new(|_| {}),
+                faults,
+                Arc::new(|_| {}),
                 CancellationToken::new(),
             )
             .await
@@ -223,7 +224,8 @@ impl Fixture {
                 Arc::new(NoFaults),
                 10,
                 [Arc::default(), self.serial.clone()],
-                Arc::new(()), None,
+                Arc::new(()),
+                None,
                 CancellationToken::new(),
             )
             .await
@@ -299,7 +301,8 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
             f.root.to_path_buf(),
             f.leases.clone(),
             f.serial.clone(),
-            Arc::new(NoFaults), Arc::new(|_| {}),
+            Arc::new(NoFaults),
+            Arc::new(|_| {}),
             CancellationToken::new(),
         )
         .await;
@@ -406,7 +409,8 @@ async fn a_passive_handle_cannot_originate_link_rewrites() {
             root.to_path_buf(),
             LeaseRegistry::new().scoped(&root),
             Arc::default(),
-            Arc::new(NoFaults), Arc::new(|_| {}),
+            Arc::new(NoFaults),
+            Arc::new(|_| {}),
             CancellationToken::new(),
         )
         .await;
@@ -720,7 +724,8 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     f.root.to_path_buf(),
                     f.leases.clone(),
                     f.serial.clone(),
-                    Arc::new(NoFaults), Arc::new(|_| {}),
+                    Arc::new(NoFaults),
+                    Arc::new(|_| {}),
                     CancellationToken::new()
                 )
                 .await,
@@ -813,7 +818,8 @@ async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
                 fault,
                 10,
                 [Arc::default(), f.serial.clone()],
-                Arc::new(()), None,
+                Arc::new(()),
+                None,
                 CancellationToken::new(),
             )
             .await,
@@ -942,7 +948,8 @@ async fn case_only_and_delete_only_operations_refuse() {
                     f.root.to_path_buf(),
                     f.leases.clone(),
                     f.serial.clone(),
-                    Arc::new(NoFaults), Arc::new(|_| {}),
+                    Arc::new(NoFaults),
+                    Arc::new(|_| {}),
                     CancellationToken::new()
                 )
                 .await,
@@ -1304,7 +1311,8 @@ async fn unrelated_undo_and_file_creation_do_not_stop_the_pass() {
             Arc::new(NoFaults),
             10,
             [Arc::default(), f.serial.clone()],
-            Arc::new(()), None,
+            Arc::new(()),
+            None,
             CancellationToken::new(),
         );
         tokio::pin!(undo);
@@ -1471,7 +1479,8 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
             Arc::new(NoFaults),
             10,
             [Arc::default(), f.serial.clone()],
-            Arc::new(()), None,
+            Arc::new(()),
+            None,
             CancellationToken::new(),
         ),
     )
@@ -1578,3 +1587,6 @@ async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
     );
     f.close().await;
 }
+
+#[path = "link_rewrite_open_tests.rs"]
+mod open_documents;

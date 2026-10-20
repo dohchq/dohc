@@ -336,6 +336,13 @@ impl EngineService {
         }
     }
 }
+#[cfg(test)]
+static CLOSE_WRITE_SESSION: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+#[cfg(test)]
+pub(super) fn mutate_close_write_session(id: String) {
+    lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).insert(id);
+}
+
 impl VersionFence {
     /// Acquire the capture and session barriers in the one per-workspace order
     /// used by version fencing and workspace teardown.
@@ -728,18 +735,28 @@ impl VersionFence {
         } else {
             None
         };
-        let undo_writes: std::collections::HashSet<_> = undo_group.as_ref().into_iter()
-            .flatten().filter(|m| m.operation == "write").map(|m| m.object_id.clone()).collect();
+        let undo_writes: std::collections::HashSet<_> = undo_group
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|m| m.operation == "write")
+            .map(|m| m.object_id.clone())
+            .collect();
         let resync: dohc_engine_runtime::actor::DocumentResync = {
             let sessions = self.sessions.clone();
             let events = self.events.clone();
             let handle = handle.clone();
             Arc::new(move |key| {
-                let ids: Vec<_> = lock(&sessions).iter()
+                let ids: Vec<_> = lock(&sessions)
+                    .iter()
                     .filter(|(_, s)| s.workspace == handle && s.key == *key)
-                    .map(|(id, _)| id.clone()).collect();
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 for id in ids {
-                    events.emit("ydoc.remoteUpdate", json!({"sessionId":id,"resyncRequired":true}));
+                    events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({"sessionId":id,"resyncRequired":true}),
+                    );
                 }
             })
         };
@@ -844,12 +861,32 @@ impl VersionFence {
             };
             for session_id in session_ids {
                 let view = version_fence_session_view(&sessions, &handle, &session_id)?;
-                if undo && undo_writes.contains(&view.key.object_id) {
-                    settle_ydoc_session_for_version_fence(&sessions, &self_writes, &events,
-                        &open, &session_id, &view, &token).await?;
+                let keep_write = undo && undo_writes.contains(&view.key.object_id);
+                #[cfg(test)]
+                let keep_write = keep_write && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
+                if keep_write {
+                    settle_ydoc_session_for_version_fence(
+                        &sessions,
+                        &self_writes,
+                        &events,
+                        &open,
+                        &session_id,
+                        &view,
+                        &token,
+                    )
+                    .await?;
                 } else {
-                    close_ydoc_session_for_version_fence(&sessions, &self_writes, &events,
-                        &open, &handle, &session_id, &settle_summary, &token).await?;
+                    close_ydoc_session_for_version_fence(
+                        &sessions,
+                        &self_writes,
+                        &events,
+                        &open,
+                        &handle,
+                        &session_id,
+                        &settle_summary,
+                        &token,
+                    )
+                    .await?;
                 }
             }
 
@@ -959,9 +996,13 @@ impl VersionFence {
                     let mut undo_leases = undo_objects
                         .unwrap_or_default()
                         .into_iter()
-                        .filter(|object| !lock(&sessions).values().any(|s|
-                            s.workspace == handle && s.key.object_id == *object &&
-                            s.key.version_id == reconcile_version_id))
+                        .filter(|object| {
+                            !lock(&sessions).values().any(|s| {
+                                s.workspace == handle
+                                    && s.key.object_id == *object
+                                    && s.key.version_id == reconcile_version_id
+                            })
+                        })
                         .map(|object| {
                             let key =
                                 DocKey::new(&open.workspace_id, &reconcile_version_id, &object)
@@ -983,7 +1024,8 @@ impl VersionFence {
                         Arc::new(NoFaults),
                         placement_now,
                         [open.capture_apply_gate.clone(), open.session_ops.clone()],
-                        Arc::new(self_writes.scoped(&open.root)), Some((capture_leases.clone(), resync)),
+                        Arc::new(self_writes.scoped(&open.root)),
+                        Some((capture_leases.clone(), resync)),
                         token,
                     ))
                     .await

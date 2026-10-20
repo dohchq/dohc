@@ -33,8 +33,14 @@ impl Ydoc {
         }
         let targets: Vec<String> = {
             let txn = staged.doc.transact();
-            elements.iter().map(|e| e.get_attribute(&txn, "target")
-                .map(|v| v.to_string(&txn)).unwrap_or_default()).collect()
+            elements
+                .iter()
+                .map(|e| {
+                    e.get_attribute(&txn, "target")
+                        .map(|v| v.to_string(&txn))
+                        .unwrap_or_default()
+                })
+                .collect()
         };
         {
             let mut txn = staged.doc.transact_mut();
@@ -48,7 +54,9 @@ impl Ydoc {
             let marker = format!("{prefix}{i}End");
             if let Some(start) = marked.find(&marker) {
                 if marked[start + marker.len()..].contains(&marker) {
-                    return Err(CollabError::Corrupt { reason: "ambiguous wikilink element".into() });
+                    return Err(CollabError::Corrupt {
+                        reason: "ambiguous wikilink element".into(),
+                    });
                 }
                 occurrences.push((start..start + marker.len(), i, escape_wikilink_part(target)));
             }
@@ -66,7 +74,9 @@ impl Ydoc {
         }
         rebuilt.push_str(&marked[cursor..]);
         if rebuilt != original {
-            return Err(CollabError::Corrupt { reason: "wikilink projection changed".into() });
+            return Err(CollabError::Corrupt {
+                reason: "wikilink projection changed".into(),
+            });
         }
         Ok((original, spans))
     }

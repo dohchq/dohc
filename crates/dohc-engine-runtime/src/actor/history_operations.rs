@@ -554,7 +554,8 @@ pub(super) fn test_undo_in_turns(
                             faults,
                             now,
                             [Arc::default(), Arc::default()],
-                            Arc::new(()), None,
+                            Arc::new(()),
+                            None,
                             crate::CancellationToken::new(),
                         )
                         .await?;
@@ -1526,17 +1527,19 @@ fn publish_undo_member(
         dohc_engine_sync::ResultingHead::BinaryOrAbsent
     };
     if !live {
-    dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-        tx,
-        ws,
-        version_id,
-        &m.object_id,
-        head,
-        None,
-        None,
-        now,
-    )
-    .map_err(|e| DomainError::Storage(StorageError::persist_public(std::io::Error::other(e))))?;
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            head,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
     }
     if let Some(text) = text.as_deref() {
         crate::search::index::insert_file_search_index_with_policy(

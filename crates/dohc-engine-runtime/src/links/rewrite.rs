@@ -309,16 +309,24 @@ pub(crate) fn inverse(before: &str, after: &str, head: &str) -> Option<String> {
 }
 
 pub(crate) fn map_ranges(
-    before: &str, after: &str, ranges: &[Range<usize>],
+    before: &str,
+    after: &str,
+    ranges: &[Range<usize>],
 ) -> Option<Vec<Option<Range<usize>>>> {
     let mut steps = DIFF_STEPS;
     let unchanged = unchanged_ranges(before, after, &mut steps)?;
-    Some(ranges.iter().map(|r| {
-        let (source, start) = unchanged.iter()
-            .find(|(source, _)| source.start <= r.start && source.end >= r.end)?;
-        let start = start + r.start - source.start;
-        Some(start..start + r.len())
-    }).collect())
+    Some(
+        ranges
+            .iter()
+            .map(|r| {
+                let (source, start) = unchanged
+                    .iter()
+                    .find(|(source, _)| source.start <= r.start && source.end >= r.end)?;
+                let start = start + r.start - source.start;
+                Some(start..start + r.len())
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn inverse_budgeted(

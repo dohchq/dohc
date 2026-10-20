@@ -21,7 +21,10 @@ struct Plan {
     author: Option<String>,
     members: Vec<Member>,
 }
-struct Inverse { text: String, live: Option<super::super::link_documents::Edit> }
+struct Inverse {
+    text: String,
+    live: Option<super::super::link_documents::Edit>,
+}
 struct Prepared {
     inverse: Result<Option<Inverse>, RuntimeError>,
     disk: Result<DiskProof, RuntimeError>,
@@ -30,7 +33,10 @@ fn inverse_input(
     conn: &rusqlite::Connection,
     plan: &Plan,
     member: &Member,
-    open: Option<&(dohc_engine_collab::LeaseRegistry, super::super::link_documents::DocumentResync)>,
+    open: Option<&(
+        dohc_engine_collab::LeaseRegistry,
+        super::super::link_documents::DocumentResync,
+    )>,
 ) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
         let text = link_inverse_input(conn, &plan.workspace, &plan.version, &member.effect)?;
@@ -38,11 +44,20 @@ fn inverse_input(
         let live = if open.is_some_and(|(leases, _)| leases.is_held(&key)) {
             let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![plan.workspace,plan.version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
-            let before = dohc_engine_storage::text::read(conn, &head).map_err(StorageError::corrupt_public)?;
-            Some(super::super::link_documents::prepare(conn, &key, &before, &text)?
-                .ok_or(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"link changed after rename"})?)
-        } else { None };
-        Ok(Some(Inverse {text, live}))
+            let before = dohc_engine_storage::text::read(conn, &head)
+                .map_err(StorageError::corrupt_public)?;
+            Some(
+                super::super::link_documents::prepare(conn, &key, &before, &text)?.ok_or(
+                    DomainError::UndoRefused {
+                        path: member.effect.path.clone(),
+                        reason: "link changed after rename",
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        Ok(Some(Inverse { text, live }))
     } else {
         Ok(None)
     }
@@ -353,7 +368,10 @@ impl ActorHandle {
         now: i64,
         gates: [Arc<tokio::sync::Mutex<()>>; 2],
         recorder: Arc<dyn SelfWriteRecorder>,
-        open_documents: Option<(dohc_engine_collab::LeaseRegistry, super::super::link_documents::DocumentResync)>,
+        open_documents: Option<(
+            dohc_engine_collab::LeaseRegistry,
+            super::super::link_documents::DocumentResync,
+        )>,
         token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
         let _stop = self.stop_link_rewrites(&operation);
@@ -675,8 +693,9 @@ impl ActorHandle {
                         cached.unwrap_or_else(|| {
                             let member = &p.members[prepared_cursor + offset];
                             Prepared {
-                                inverse: inverse_store
-                                    .read_with(|conn| inverse_input(conn, &p, member, prepare_open.as_ref())),
+                                inverse: inverse_store.read_with(|conn| {
+                                    inverse_input(conn, &p, member, prepare_open.as_ref())
+                                }),
                                 disk: disk_check(&disk_root, member),
                             }
                         })

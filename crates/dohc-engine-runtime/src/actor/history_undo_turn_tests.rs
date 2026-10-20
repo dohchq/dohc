@@ -275,7 +275,8 @@ async fn run(
             faults,
             10,
             [Arc::default(), Arc::default()],
-            Arc::new(()), None,
+            Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await
@@ -388,7 +389,8 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
                 Arc::new(NoFaults),
                 30,
                 [Arc::default(), Arc::default()],
-                Arc::new(()), None,
+                Arc::new(()),
+                None,
                 crate::CancellationToken::new(),
             )
             .await,
@@ -537,7 +539,8 @@ async fn pending_undo_refuses_version_switch_and_changed_payload() {
             Arc::new(NoFaults),
             8,
             [Arc::default(), Arc::default()],
-            Arc::new(()), None,
+            Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await;
@@ -718,7 +721,8 @@ async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
                 Arc::new(NoFaults),
                 10,
                 [Arc::default(), Arc::default()],
-                Arc::new(()), None,
+                Arc::new(()),
+                None,
                 task_token,
             )
             .await
@@ -1235,7 +1239,8 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
             Arc::new(NoFaults),
             10,
             gates,
-            Arc::new(()), None,
+            Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await

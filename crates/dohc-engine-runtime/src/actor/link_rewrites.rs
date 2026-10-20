@@ -377,7 +377,13 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let (ws, p, open, root, read_token) = (workspace.clone(), plan.clone(), leases.clone(), root.clone(), token.clone());
+            let (ws, p, open, root, read_token) = (
+                workspace.clone(),
+                plan.clone(),
+                leases.clone(),
+                root.clone(),
+                token.clone(),
+            );
             let (next_cursor, sources, skipped, admitted) = self
                 .run(move |store, cache| {
                     #[cfg(test)]
@@ -399,13 +405,26 @@ impl ActorHandle {
                         let (object, path) = &p.candidates.sources[next];
                         let key = DocKey::new(&ws, &p.version, object)?;
                         let usable = if open.is_held(&key) {
-                            match super::link_documents::baseline(store, cache, &root, &key, path, &read_token) {
+                            match super::link_documents::baseline(
+                                store,
+                                cache,
+                                &root,
+                                &key,
+                                path,
+                                &read_token,
+                            ) {
                                 Ok(value) => value,
-                                Err(RuntimeError::Domain(DomainError::UndoRefused {..}) |
-                                    RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)) => false,
+                                Err(
+                                    RuntimeError::Domain(DomainError::UndoRefused { .. })
+                                    | RuntimeError::Sync(
+                                        dohc_engine_sync::SyncError::LiveDocumentBindingActive,
+                                    ),
+                                ) => false,
                                 Err(error) => return Err(error),
                             }
-                        } else { true };
+                        } else {
+                            true
+                        };
                         if usable {
                             let source = store.read_with(|conn| {
                                 let source = incoming::read_source(conn, &ws, &p.version, object)?;
@@ -413,14 +432,24 @@ impl ActorHandle {
                                 tests::after_read(conn, &ws, object);
                                 let live = if open.is_held(&key) {
                                     dohc_engine_collab::read_marker_in(conn, &key)?
-                                        .map(|marker| dohc_engine_collab::load_doc_in(conn, &key).map(|doc| (doc, marker))).transpose()?
-                                } else { None };
+                                        .map(|marker| {
+                                            dohc_engine_collab::load_doc_in(conn, &key)
+                                                .map(|doc| (doc, marker))
+                                        })
+                                        .transpose()?
+                                } else {
+                                    None
+                                };
                                 Ok::<_, RuntimeError>((source, live))
                             })?;
                             if let (Some(source), live) = source {
                                 sources.push((object.clone(), path.clone(), source, live));
-                            } else { skipped.push(path.clone()); }
-                        } else { skipped.push(path.clone()); }
+                            } else {
+                                skipped.push(path.clone());
+                            }
+                        } else {
+                            skipped.push(path.clone());
+                        }
                         next += 1;
                         if started.elapsed() >= Duration::from_millis(5) {
                             break;
@@ -462,7 +491,17 @@ impl ActorHandle {
                     };
                     match (parsed.head, edit) {
                         (Some(head), Some((text, links))) if links > 0 => {
-                            let live = live.map(|(doc, marker)| super::link_documents::prepare_doc(&doc, marker, &original_text, &text)).transpose()?.flatten();
+                            let live = live
+                                .map(|(doc, marker)| {
+                                    super::link_documents::prepare_doc(
+                                        &doc,
+                                        marker,
+                                        &original_text,
+                                        &text,
+                                    )
+                                })
+                                .transpose()?
+                                .flatten();
                             prepared.push_back((object, head, text, links, live))
                         }
                         (Some(_), Some(_)) => {}
@@ -482,41 +521,84 @@ impl ActorHandle {
                 let key = DocKey::new(&workspace, &plan.version, object)?;
                 if live.is_none() && leases.is_held(&key) {
                     let (object, old_head, _, _, _) = prepared.pop_front().unwrap();
-                    let (ws, p, root, refresh_token) = (workspace.clone(), plan.clone(), root.clone(), token.clone());
+                    let (ws, p, root, refresh_token) =
+                        (workspace.clone(), plan.clone(), root.clone(), token.clone());
                     let guard = session_ops.clone().lock_owned().await;
-                    let refreshed = self.run(move |store, cache| {
-                        let _guard = guard;
-                        match super::link_documents::baseline(store, cache, &root, &key, &old_head.path, &refresh_token) {
-                            Ok(true) => {},
-                            Ok(false) | Err(RuntimeError::Domain(DomainError::UndoRefused {..}) |
-                                RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)) => return Ok(None),
-                            Err(error) => return Err(error),
-                        }
-                        store.read_with(|conn| {
-                            let source = incoming::read_source(conn, &ws, &p.version, &key.object_id)?;
-                            let marker = dohc_engine_collab::read_marker_in(conn, &key)?;
-                            let doc = dohc_engine_collab::load_doc_in(conn, &key)?;
-                            Ok::<_,RuntimeError>(source.zip(marker).map(|(source,marker)| (source,marker,doc)))
+                    let refreshed = self
+                        .run(move |store, cache| {
+                            let _guard = guard;
+                            match super::link_documents::baseline(
+                                store,
+                                cache,
+                                &root,
+                                &key,
+                                &old_head.path,
+                                &refresh_token,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false)
+                                | Err(
+                                    RuntimeError::Domain(DomainError::UndoRefused { .. })
+                                    | RuntimeError::Sync(
+                                        dohc_engine_sync::SyncError::LiveDocumentBindingActive,
+                                    ),
+                                ) => return Ok(None),
+                                Err(error) => return Err(error),
+                            }
+                            store.read_with(|conn| {
+                                let source =
+                                    incoming::read_source(conn, &ws, &p.version, &key.object_id)?;
+                                let marker = dohc_engine_collab::read_marker_in(conn, &key)?;
+                                let doc = dohc_engine_collab::load_doc_in(conn, &key)?;
+                                Ok::<_, RuntimeError>(
+                                    source
+                                        .zip(marker)
+                                        .map(|(source, marker)| (source, marker, doc)),
+                                )
+                            })
                         })
-                    }).await?;
+                        .await?;
                     if let Some((source, marker, doc)) = refreshed {
-                        let (p, before, after) = (plan.clone(),before.clone(),after.clone());
+                        let (p, before, after) = (plan.clone(), before.clone(), after.clone());
                         let item = tokio::task::spawn_blocking(move || {
                             let original = source.text().unwrap_or("").to_owned();
                             let parsed = source.parse()?;
-                            let Some(head) = parsed.head else { return Ok(None) };
-                            if parsed.reason.is_some() { return Ok(None); }
-                            let Some((text,links)) = rewrite::forward(&original,&head.path,
-                                p.rename.before_path.as_deref().unwrap_or(""),&p.rename.path,&before,&after)
-                                else { return Ok(None) };
-                            let Some(edit) = super::link_documents::prepare_doc(&doc,marker,&original,&text)?
-                                else { return Ok(None) };
-                            Ok::<_,RuntimeError>(Some((object,head,text,links,Some(edit))))
-                        }).await.map_err(|_|RuntimeError::ActorUnavailable)??;
-                        if let Some(item) = item { prepared.push_front(item); }
-                        else { unchecked.push(refresh_path.clone()); }
-                    } else { unchecked.push(refresh_path.clone()); }
-                    if prepared.is_empty() { break; }
+                            let Some(head) = parsed.head else {
+                                return Ok(None);
+                            };
+                            if parsed.reason.is_some() {
+                                return Ok(None);
+                            }
+                            let Some((text, links)) = rewrite::forward(
+                                &original,
+                                &head.path,
+                                p.rename.before_path.as_deref().unwrap_or(""),
+                                &p.rename.path,
+                                &before,
+                                &after,
+                            ) else {
+                                return Ok(None);
+                            };
+                            let Some(edit) =
+                                super::link_documents::prepare_doc(&doc, marker, &original, &text)?
+                            else {
+                                return Ok(None);
+                            };
+                            Ok::<_, RuntimeError>(Some((object, head, text, links, Some(edit))))
+                        })
+                        .await
+                        .map_err(|_| RuntimeError::ActorUnavailable)??;
+                        if let Some(item) = item {
+                            prepared.push_front(item);
+                        } else {
+                            unchecked.push(refresh_path.clone());
+                        }
+                    } else {
+                        unchecked.push(refresh_path.clone());
+                    }
+                    if prepared.is_empty() {
+                        break;
+                    }
                 }
 
                 let serial = tokio::select! {
