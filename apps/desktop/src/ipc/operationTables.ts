@@ -3,6 +3,7 @@ import { shareHandoffOperations, shareMountOperations, shareProposalOperations, 
 import { datasetOperations } from "./datasetOperations";
 import { chatOperations } from "./chatOperations";
 import {
+  databaseImportOperations,
   workspaceSyncOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
@@ -39,6 +40,7 @@ export const OPERATION_TABLES = [
   settingsOperations,
   chatOperations,
   datasetOperations,
+  databaseImportOperations,
   shareHandoffOperations,
   shareMountOperations,
   shareProposalOperations,

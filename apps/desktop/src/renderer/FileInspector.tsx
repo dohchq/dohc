@@ -271,7 +271,9 @@ type FileInspectorProps = {
   // A record's Button fields report through the shell's toasts and Notices,
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
-  onButtonNotice?: (message: string) => void;
+  onButtonNotice?: (message: string, undo?: () => void) => void;
+  // Closes every tab showing a file, as an Undo that removes it does first.
+  onClosePath?: (path: string) => void;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   fileOpenStartMark?: string;
   refreshKey?: number;
@@ -306,6 +308,8 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
+  // The file is a received share's: a shared view, or a mount in shared-with-me.
+  receivedShare?: boolean;
   accessEnded?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
@@ -825,8 +829,11 @@ export const FileInspector = memo(function FileInspector(
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             localBuffer={localBuffer}
+            csvSource={props.receivedShare ? "received-share" : "workspace-file"}
             onShare={onShareCurrentPath}
             onError={props.onButtonError}
+            onNotice={props.onButtonNotice}
+            onClosePath={props.onClosePath}
           />
         </div>
       );

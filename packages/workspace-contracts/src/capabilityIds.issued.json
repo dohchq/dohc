@@ -125,6 +125,7 @@
   "app.create",
   "app.test",
   "data.import",
+  "data.import.undo",
   "data.query",
   "app.link.create",
   "workspace.open.retry",

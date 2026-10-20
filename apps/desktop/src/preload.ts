@@ -76,6 +76,7 @@ import {
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
   parseWorkspaceActivityEventForIpc,
+  databaseImportOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { operationBridge } from "./ipc/operationTable";
@@ -226,8 +227,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabasePage, payload),
   applyDatabaseEdit: (payload) =>
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
-  importToDatabase: (payload) =>
-    ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
+  ...operationBridge(databaseImportOperations, invoke),
   listSites: (payload: ListSitesPayload) =>
     ipcRenderer.invoke(CHANNELS.listSites, payload),
   getSitePackage: (payload: SitePackagePayload) =>
