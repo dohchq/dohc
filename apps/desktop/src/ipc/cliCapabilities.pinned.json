@@ -191,6 +191,9 @@
     ],
     "linksEdges": [
       "links.edges"
+    ],
+    "chatFileMentions": [
+      "chat.read"
     ]
   },
   "public": {
@@ -275,6 +278,7 @@
     "history undo": "history.operation.undo",
     "links in": "links.in",
     "links resolve": "links.resolve",
-    "links edges": "links.edges"
+    "links edges": "links.edges",
+    "chat file-mentions": "chat.read"
   }
 }

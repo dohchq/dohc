@@ -12,6 +12,7 @@ import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isChatMentionPageChanged,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
@@ -47,6 +48,25 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["chat-mention-access-changed", "Chat access changed. Try again."],
+    ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],
+  ])("keeps the restartable chat page reason across IPC: %s", (reason, words) => {
+    const received = acrossIpc(refusal("CONFLICT", reason!));
+    expect(isChatMentionPageChanged(received)).toBe(true);
+    expect(readError(received).words).toBe(words);
+    expect(isChatMentionPageChanged(acrossIpc(new Error(reason)))).toBe(true);
+  });
+
+  it.each([
+    refusal("CONFLICT", "A different conflict"),
+    refusal("FORBIDDEN", "chat-mention-access-changed"),
+    refusal("CONFLICT", "chat-mention-access-changed: extra"),
+    new Error("Chat access changed. Try again."),
+  ])("does not restart a chat page for %s", error => {
+    expect(isChatMentionPageChanged(acrossIpc(error))).toBe(false);
+  });
+
   it.each([
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",

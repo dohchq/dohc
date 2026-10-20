@@ -4,8 +4,8 @@ import type {
   ChatFileMentionRecord,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { isChatMentionPageChanged } from "../ipc/errorWords";
 import { Ref } from "./ui/Ref";
-import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
 type BacklinksResult = { sources: BacklinkSource[]; indexBuilding: boolean };
@@ -80,10 +80,7 @@ export function BacklinksPanel(props: {
   path: string;
   // Bumps on workspace activity (saves, agent edits) so mentions recompute.
   refreshKey?: number;
-  // Chat mentions are a CHATS call: `listChatFileMentions` goes through
-  // requireEngineCapture, so a workspace with no capture — a shared view, most
-  // visibly — can only refuse it. Opt-in, and named the way GraphView names
-  // the same fact, so both chat affordances read one word.
+  // Callers opt into chat reads separately from file reads.
   chatMentionsAvailable?: boolean;
   onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
   onOpenPath?: (path: string) => void;
@@ -190,12 +187,40 @@ export function BacklinksPanel(props: {
     return () => { active = false; clearTimeout(timer); };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
-  useAsyncResponseEffect(() => {
-    const read = chatMentionsAvailable ? bridge().listChatFileMentions : undefined;
-    return typeof read === "function" ? read({ workspaceId, path }) : Promise.resolve({ mentions: [] });
-  }, {
-    onSuccess: result => setLoadedChats({ workspaceId, path, mentions: result.mentions }),
-    onError: () => setLoadedChats({ workspaceId, path, mentions: [] }),
+  useEffect(() => {
+    let active = true;
+    if (!chatMentionsAvailable) return;
+    const read = bridge().chatFileMentionsPage;
+    if (typeof read !== "function") return;
+    let retained = loadedChats?.workspaceId === workspaceId && loadedChats.path === path && loadedChats.mentions.length > 0;
+    let restarted = false;
+    const retry = () => {
+      if (currentDocument.current?.workspaceId === workspaceId && currentDocument.current.path === path)
+        setFocusNonce(nonce => nonce + 1);
+    };
+    const walk = async () => {
+      let cursor: string | undefined;
+      const mentions = new Map<string, ChatFileMentionRecord>();
+      try {
+        do {
+          const page = await read({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+          if (!active) return;
+          for (const row of page?.entries ?? []) mentions.set(row.attachment.attachmentId, row);
+          cursor = page?.nextCursor ?? undefined;
+          if (!retained || !cursor) setLoadedChats({ workspaceId, path, mentions: [...mentions.values()] });
+        } while (cursor);
+      } catch (error) {
+        if (!active) return;
+        if (isChatMentionPageChanged(error)) {
+          setLoadedChats(null);
+          retained = false;
+          if (!restarted) { restarted = true; void walk(); return; }
+        }
+        reportError.current?.("dohc could not load chat mentions.", error, retry);
+      }
+    };
+    void walk();
+    return () => { active = false; };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
@@ -249,7 +274,7 @@ export function BacklinksPanel(props: {
                     </span>
                   </button>
                   <p className="dohc-backlinks__snippet m-0 line-clamp-2 text-left">
-                    {mention.message.body}
+                    {mention.message.preview}
                   </p>
                 </li>
               ))}

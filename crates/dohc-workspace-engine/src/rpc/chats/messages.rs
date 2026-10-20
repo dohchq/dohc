@@ -2,14 +2,12 @@ use crate::EngineService;
 use crate::rpc::capture::reject_capture_origin;
 use crate::rpc::chats::ChatKeysetCursor;
 use crate::rpc::chats::bounded_chat_page_len;
-use crate::rpc::chats::channels::ChannelWire;
 use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
-use crate::rpc::chats::threads::ThreadB2Wire;
 use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
@@ -19,7 +17,6 @@ use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatAttachment;
 use dohc_engine_domain::ChatDecision;
-use dohc_engine_domain::ChatFileMention;
 use dohc_engine_domain::ChatMention;
 use dohc_engine_domain::ChatMessage;
 use dohc_engine_domain::ChatMessageAutomation;
@@ -138,10 +135,9 @@ struct ChatAttachmentsListForThreadParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAttachmentsListFileMentionsParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    object_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    path_hint: Option<String>,
-    page_limit: Option<i64>,
+    subject: Option<Value>,
+    scope: String,
+    shared_channel_rows_uncovered: i64,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
@@ -385,24 +381,6 @@ fn attachment_json(attachment: &ChatAttachment) -> Value {
     json!(AttachmentWire::from(attachment))
 }
 
-#[derive(Serialize)]
-struct FileMentionWire<'a> {
-    attachment: AttachmentWire<'a>,
-    message: MessageWire<'a>,
-    thread: ThreadB2Wire<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<ChannelWire<'a>>,
-}
-
-fn file_mention_json(mention: &ChatFileMention) -> Value {
-    json!(FileMentionWire {
-        attachment: AttachmentWire::from(&mention.attachment),
-        message: MessageWire::from(&mention.message),
-        thread: ThreadB2Wire::from(&mention.thread),
-        channel: mention.channel.as_ref().map(ChannelWire::from),
-    })
-}
-
 fn mention_json(mention: &ChatMention) -> Value {
     json!({
         "threadId": mention.thread_id,
@@ -482,70 +460,29 @@ impl EngineService {
         let params: ChatAttachmentsListFileMentionsParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
-        let page_limit = chat_page_limit(params.page_limit)?;
-        let binding = chat_cursor_binding(
-            "chats.attachments.listFileMentions",
-            &workspace_id,
-            &[
-                params.object_id.as_deref().unwrap_or_default(),
-                params.path_hint.as_deref().unwrap_or_default(),
-            ],
-        );
-        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
-        let consumed = cursor
-            .as_ref()
-            .and_then(|cursor| cursor.consumed)
-            .unwrap_or(0);
-        if consumed >= dohc_engine_domain::MAX_FILE_MENTION_RESULTS {
-            return Ok(json!({ "mentions": [], "nextCursor": Value::Null }));
+        if params.scope.is_empty()
+            || params.scope.len() > 256
+            || params.shared_channel_rows_uncovered < 0
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid mention scope",
+            ));
         }
-        let remaining = dohc_engine_domain::MAX_FILE_MENTION_RESULTS - consumed;
-        let fetch_limit = (page_limit + 1).min(remaining);
-        let after = cursor
-            .as_ref()
-            .map(|cursor| (cursor.first, cursor.second.clone()));
         let cancellation = OperationCancellation::new(ctx);
-        let rows = Self::read_under_ctx(
+        Self::read_under_ctx(
             &cancellation,
             "chats.attachments.listFileMentions",
-            open.actor.chat_attachments_list_file_mentions(
+            open.actor.chat_file_mentions_page(
                 workspace_id,
-                params.object_id,
-                params.path_hint,
-                after,
-                fetch_limit,
+                params.subject.map(crate::rpc::files::resolve_target),
+                params.scope,
+                params.shared_channel_rows_uncovered,
+                params.cursor,
+                cancellation.token(),
             ),
         )
-        .await?;
-        let logical_page = page_limit.min(remaining) as usize;
-        let values: Vec<Value> = rows
-            .iter()
-            .take(logical_page)
-            .map(file_mention_json)
-            .collect();
-        let included = bounded_chat_page_len(&values)?;
-        let next_consumed = consumed + included as i64;
-        let has_more =
-            next_consumed < dohc_engine_domain::MAX_FILE_MENTION_RESULTS && rows.len() > included;
-        let next_cursor = if has_more {
-            let last = rows
-                .get(included.saturating_sub(1))
-                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
-            Some(encode_chat_cursor(&ChatKeysetCursor {
-                version: 1,
-                binding,
-                consumed: Some(next_consumed),
-                first: last.attachment.created_at_ms,
-                second: last.attachment.attachment_id.clone(),
-                third: None,
-            })?)
-        } else {
-            None
-        };
-        Ok(json!({
-            "mentions": values[..included].to_vec(),
-            "nextCursor": next_cursor,
-        }))
+        .await
     }
 
     pub(crate) async fn chats_mentions_list_for_handle(
