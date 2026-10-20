@@ -8,8 +8,10 @@ import { AppCommandStillRunningError, buildSite, startSiteDevServer } from "./si
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
 
-// Every tree kill fails: it kills nothing and records the pids it was asked
-// to signal. `beforeTreeKill` runs first, to hold the stop at that point.
+// Every tree kill misses the helpers: it records the pids it was asked to
+// signal and kills none of them. The wrapper itself still ends, as its own
+// signal ends it on Windows, so no stop waits out the kill grace.
+// `beforeTreeKill` runs first, to hold the stop at that point.
 const signalled: number[] = [];
 let beforeTreeKill: ((child: ChildProcess | undefined) => Promise<void>) | null = null;
 vi.mock("../process/windowsSpawn", async (importOriginal) => ({
@@ -25,12 +27,17 @@ vi.mock("../process/windowsSpawn", async (importOriginal) => ({
 }));
 vi.mock("../process/posixSpawn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/posixSpawn")>()),
-  killProcessTreePosix: vi.fn(async (_pid: number, _signal: string, options?: { alsoSignal?: number[] }) => {
+  killProcessTreePosix: vi.fn(async (pid: number, signal: NodeJS.Signals, options?: { alsoSignal?: number[] }) => {
     await beforeTreeKill?.(undefined);
     signalled.push(...(options?.alsoSignal ?? []));
+    endWrapper(pid, signal);
     return options?.alsoSignal ?? [];
   }),
 }));
+
+function endWrapper(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(pid, signal); } catch { /* already gone */ }
+}
 
 const started: ChildProcess[] = [];
 afterEach(() => {

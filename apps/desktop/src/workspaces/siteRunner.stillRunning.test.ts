@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppCommandStillRunningError, buildSite, startSiteDevServer } from "./siteRunner";
 import { createTestScratch } from "./testTemp";
 
-// The tree kill fails: it reports nothing and kills nothing.
+// The tree kill misses the helpers: it reports nothing and kills none of
+// them. The wrapper itself still ends, as its own signal ends it on Windows,
+// so no stop waits out the kill grace.
 vi.mock("../process/windowsSpawn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/windowsSpawn")>()),
   killChildTreeWin32: vi.fn(async () => false),
@@ -13,7 +15,10 @@ vi.mock("../process/windowsSpawn", async (importOriginal) => ({
 }));
 vi.mock("../process/posixSpawn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/posixSpawn")>()),
-  killProcessTreePosix: vi.fn(async () => []),
+  killProcessTreePosix: vi.fn(async (pid: number, signal: NodeJS.Signals) => {
+    try { process.kill(pid, signal); } catch { /* already gone */ }
+    return [];
+  }),
 }));
 
 const started: ChildProcess[] = [];

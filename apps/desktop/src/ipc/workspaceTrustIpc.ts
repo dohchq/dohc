@@ -80,6 +80,10 @@ export function workspaceTrustHandlers<
         // person gave meanwhile already told them otherwise.
         if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
       }
+      // A Trust given meanwhile replaces this restrict. Apps that started
+      // since belong to the trusted workspace, so a stop that counted them
+      // is not a failure, and there is nothing to save.
+      if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
       let saveFailed = false;
       try {
         await trust.persistRevocation(workspaceId);
@@ -90,7 +94,7 @@ export function workspaceTrustHandlers<
       if (stopFailed && saveFailed) throw new Error(STOP_AND_SAVE_FAILED_MESSAGE);
       if (stopFailed) throw new Error(STOP_FAILED_MESSAGE);
       if (saveFailed) throw new Error(SAVE_FAILED_MESSAGE);
-      return { workspaceId, trusted: !trust.isRevoked(workspaceId) };
+      return { workspaceId, trusted: false };
     },
   };
 }

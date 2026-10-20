@@ -100,7 +100,7 @@ describe("main's workspace trust operations", () => {
     expect(h.notified).toEqual([]);
   });
 
-  it("lets a Trust given in another window while the restrict stops apps win", async () => {
+  it("lets a Trust given in another window while the restrict stops apps win, even over a stop it failed", async () => {
     const stopping = deferred<void>();
     const stopReached = deferred<void>();
     const h = await harness({
@@ -115,7 +115,8 @@ describe("main's workspace trust operations", () => {
     await stopReached.promise;
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
-    stopping.resolve();
+    // That window started a dev server, so the restrict's sweep counts it.
+    stopping.reject(new Error("An app is still running because dohc could not stop it."));
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(h.notified.at(-1)).toEqual(["trip", true]);
     expect(await h.trust.isTrusted(h.workspace)).toBe(true);
