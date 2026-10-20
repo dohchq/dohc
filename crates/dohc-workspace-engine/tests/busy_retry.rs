@@ -64,3 +64,58 @@ async fn persistent_store_busy_refusal_exhausts_a_total_budget() {
         "no replay starts after the deadline"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn keyed_call_retries_busy_with_the_same_request() {
+    use dohc_engine_protocol::{
+        transport::{EngineService, InProcessTransport, RequestContext, ServiceResponse},
+        wire::{Request, Response, WorkspaceHandle},
+    };
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct BusyOnce(Mutex<Vec<Request>>);
+
+    impl EngineService for BusyOnce {
+        type Input = ();
+
+        async fn call(
+            &self,
+            _context: RequestContext,
+            request: Request,
+        ) -> Result<ServiceResponse, WireError> {
+            let mut requests = self.0.lock().unwrap();
+            requests.push(request.clone());
+            if requests.len() == 1 {
+                return Err(WireError::new(ErrorCode::Overloaded, "engine-store-busy"));
+            }
+            Ok(ServiceResponse::response(Response {
+                id: request.id,
+                result: json!({"committed": true}),
+            }))
+        }
+    }
+
+    let service = Arc::new(BusyOnce::default());
+    let transport = InProcessTransport::new(service.clone());
+    let workspace = WorkspaceHandle("workspace".into());
+    let params = json!({"operationId": "dohc-operation:move"});
+    let result = common::call_keyed(
+        &transport,
+        &workspace,
+        42,
+        "history.undo",
+        "undo-move",
+        params.clone(),
+    )
+    .await;
+
+    assert_eq!(result, json!({"committed": true}));
+    let requests = service.0.lock().unwrap();
+    assert_eq!(
+        *requests,
+        vec![common::keyed_request(42, "history.undo", Some(workspace), "undo-move", params,); 2],
+        "busy retries must preserve the envelope key and payload",
+    );
+}

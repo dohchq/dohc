@@ -1196,7 +1196,7 @@ it("detaches a store restored from an older copy before anyone edits it", () => 
   credential: {credentialId: "link-credential", grantId: "link-grant", secretHash: "s".repeat(64), generation: 1, mintedAtMs: now, retiredAtMs: null}})).toBe(true);
   expect(proof.storage.mintLinkSession({session: {sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, linkKey), grantId: "link-grant",
     generation: 1, mintedAtMs: now, expiresAtMs: now + 600_000}})).toBe(true);
-  const linkHttp = createLinkLiveHttp({storage: proof.storage, linkKey, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey,
+  const linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage: proof.storage, linkKey, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey,
     limits: routeLimits, sessionHostBlocked: proof.sessionHostBlocked});
   const openLive = async () => {
     const response = await linkHttp(new Request("https://relay.test/sync/live/link-document", {method: "POST",

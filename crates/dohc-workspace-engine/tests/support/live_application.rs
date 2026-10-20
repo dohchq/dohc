@@ -1,7 +1,12 @@
+#[path = "../common/mod.rs"]
+mod common;
+
+pub(super) use common::service_call_with_busy_retry;
+
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, durable};
-use dohc_engine_protocol::transport::{ConnectionOwner, EngineService as _, RequestContext};
+use dohc_engine_protocol::transport::{ConnectionOwner, RequestContext};
 use dohc_engine_protocol::wire::Request;
 use dohc_engine_storage::{
     EngineStore, NoFaults, StorageError, hex_sha256, put_binary_blob_with_sha,
@@ -60,7 +65,7 @@ pub async fn fixture() -> (
         }).unwrap();
     drop(store);
     let service = Arc::new(EngineService::new());
-    let response = service.call(RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, progress: false, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
+    let response = service_call_with_busy_retry(&service, RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, progress: false, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
     let workspace = response.response.result["workspace"]
         .as_str()
         .unwrap()
@@ -85,23 +90,23 @@ pub async fn fixture() -> (
         .unwrap();
     let mut ctx = RequestContext::unbounded();
     ctx.connection = Some(owner.handle());
-    let registration = service
-        .call(
-            ctx,
-            Request {
-                id: 2,
-                method: "liveApplication.register".into(),
-                workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
-                    workspace.clone(),
-                )),
-                deadline_ms: None,
-                idempotency_key: None,
-                progress: false,
-                params: json!({ "binding": binding }),
-            },
-        )
-        .await
-        .unwrap();
+    let registration = service_call_with_busy_retry(
+        &service,
+        ctx,
+        Request {
+            id: 2,
+            method: "liveApplication.register".into(),
+            workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
+                workspace.clone(),
+            )),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({ "binding": binding }),
+        },
+    )
+    .await
+    .unwrap();
     let id = registration.response.result["registrationId"]
         .as_u64()
         .unwrap();
