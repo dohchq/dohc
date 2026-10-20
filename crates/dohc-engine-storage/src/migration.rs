@@ -3337,7 +3337,6 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("file_search_key.sql"),
         sets_user_version: None,
     },
-
 ];
 
 /// The ordinary pull pass whose applied pages await their terminal commit.

@@ -117,63 +117,80 @@ pub(crate) fn forward(
     Some((replace(text, &edits), count))
 }
 
-fn myers<T: PartialEq>(a: &[T], b: &[T]) -> Option<Vec<(Range<usize>, usize)>> {
-    use std::collections::HashMap;
-    let mut frontier = HashMap::from([(1isize, 0usize)]);
-    let mut trace = Vec::new();
-    'search: for d in 0..=a.len() + b.len() {
-        // Bound edit-distance memory; never guess after exhausting it.
-        if d > 1000 {
-            return None;
-        }
-        trace.push(frontier.clone());
-        for k in (-(d as isize)..=d as isize).step_by(2) {
-            let down =
-                k == -(d as isize) || (k != d as isize && frontier[&(k - 1)] < frontier[&(k + 1)]);
-            let mut x = if down {
-                frontier[&(k + 1)]
+// Myers' bidirectional frontiers find a split using linear memory.
+fn bisect<T: PartialEq>(a: &[T], b: &[T]) -> Option<(usize, usize)> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let limit = (n + m + 1) / 2;
+    let offset = limit + 1;
+    let mut forward = vec![-1; (2 * limit + 3) as usize];
+    let mut reverse = forward.clone();
+    forward[(offset + 1) as usize] = 0;
+    reverse[(offset + 1) as usize] = 0;
+    let delta = n - m;
+    let odd = delta % 2 != 0;
+    let (mut fs, mut fe, mut rs, mut re) = (0, 0, 0, 0);
+    for d in 0..=limit {
+        for k in ((-d + fs)..=(d - fe)).step_by(2) {
+            let slot = (offset + k) as usize;
+            let mut x = if k == -d || (k != d && forward[slot - 1] < forward[slot + 1]) {
+                forward[slot + 1]
             } else {
-                frontier[&(k - 1)] + 1
+                forward[slot - 1] + 1
             };
-            let mut y = (x as isize - k) as usize;
-            while x < a.len() && y < b.len() && a[x] == b[y] {
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
                 x += 1;
                 y += 1;
             }
-            frontier.insert(k, x);
-            if x == a.len() && y == b.len() {
-                break 'search;
+            forward[slot] = x;
+            if x > n {
+                fe += 2;
+            } else if y > m {
+                fs += 2;
+            } else if odd {
+                let other = offset + delta - k;
+                if other >= 0
+                    && other < (reverse.len() as isize)
+                    && reverse[other as usize] >= 0
+                    && x >= n - reverse[other as usize]
+                {
+                    return Some((x as usize, y as usize));
+                }
+            }
+        }
+        for k in ((-d + rs)..=(d - re)).step_by(2) {
+            let slot = (offset + k) as usize;
+            let mut x = if k == -d || (k != d && reverse[slot - 1] < reverse[slot + 1]) {
+                reverse[slot + 1]
+            } else {
+                reverse[slot - 1] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[(n - x - 1) as usize] == b[(m - y - 1) as usize] {
+                x += 1;
+                y += 1;
+            }
+            reverse[slot] = x;
+            if x > n {
+                re += 2;
+            } else if y > m {
+                rs += 2;
+            } else if !odd {
+                let other = offset + delta - k;
+                if other >= 0
+                    && other < (forward.len() as isize)
+                    && forward[other as usize] >= 0
+                    && forward[other as usize] >= n - x
+                {
+                    let start = forward[other as usize];
+                    return Some((start as usize, (start - delta + k) as usize));
+                }
             }
         }
     }
-    let (mut x, mut y) = (a.len(), b.len());
-    let mut ranges = Vec::new();
-    for (d, previous) in trace.iter().enumerate().rev() {
-        let k = x as isize - y as isize;
-        let (px, py) = if d == 0 {
-            (0, 0)
-        } else {
-            let down =
-                k == -(d as isize) || (k != d as isize && previous[&(k - 1)] < previous[&(k + 1)]);
-            let pk = if down { k + 1 } else { k - 1 };
-            let px = previous[&pk];
-            (px, (px as isize - pk) as usize)
-        };
-        let end = x;
-        while x > px && y > py {
-            x -= 1;
-            y -= 1;
-        }
-        if x < end {
-            ranges.push((x..end, y));
-        }
-        x = px;
-        y = py;
-    }
-    ranges.reverse();
-    Some(ranges)
+    None
 }
-// Strip common edges before Myers, so a long insertion costs no edit frontier.
+
 fn matching<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, usize)> {
     let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
     let suffix = a[prefix..]
@@ -186,13 +203,19 @@ fn matching<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, usize)> {
     if prefix > 0 {
         ranges.push((0..prefix, 0));
     }
-    // An exhausted hunk remains changed; it cannot invalidate exact edges.
-    if let Some(middle) = myers(&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]) {
-        ranges.extend(
-            middle
-                .into_iter()
-                .map(|(r, b)| (r.start + prefix..r.end + prefix, b + prefix)),
-        );
+    let (left, right) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    if !left.is_empty()
+        && !right.is_empty()
+        && let Some((x, y)) = bisect(left, right)
+        && (x, y) != (0, 0)
+        && (x, y) != (left.len(), right.len())
+    {
+        for (r, start) in matching(&left[..x], &right[..y]) {
+            ranges.push((r.start + prefix..r.end + prefix, start + prefix));
+        }
+        for (r, start) in matching(&left[x..], &right[y..]) {
+            ranges.push((r.start + prefix + x..r.end + prefix + x, start + prefix + y));
+        }
     }
     if suffix > 0 {
         ranges.push((a.len() - suffix..a.len(), b.len() - suffix));
@@ -367,6 +390,11 @@ mod tests {
                 "more ".repeat(2000)
             ),
             format!("[[new|{}]] tail", "label ".repeat(2000)),
+            format!(
+                "{}[[new|label]] tail{}",
+                "before ".repeat(2000),
+                "after ".repeat(2000)
+            ),
         ] {
             assert_eq!(
                 inverse("[[old|label]] tail", "[[new|label]] tail", &head).unwrap(),
@@ -389,6 +417,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, (r"[[new%5D#part\name|label]]".into(), 1));
+    }
+
+    #[test]
+    fn myers_matches_have_the_optimal_length() {
+        let inputs: Vec<Vec<u8>> = (0..128u8)
+            .map(|bits| {
+                let len = (8 - bits.leading_zeros()).saturating_sub(1);
+                (0..len).map(|i| (bits >> i) & 1).collect()
+            })
+            .collect();
+        for a in &inputs {
+            for b in &inputs {
+                let mut lcs = vec![vec![0; b.len() + 1]; a.len() + 1];
+                for i in 0..a.len() {
+                    for j in 0..b.len() {
+                        lcs[i + 1][j + 1] = if a[i] == b[j] {
+                            lcs[i][j] + 1
+                        } else {
+                            lcs[i][j + 1].max(lcs[i + 1][j])
+                        };
+                    }
+                }
+                let matches = matching(a, b);
+                assert_eq!(
+                    matches.iter().map(|(r, _)| r.len()).sum::<usize>(),
+                    lcs[a.len()][b.len()],
+                    "{a:?} -> {b:?}"
+                );
+                for (r, start) in matches {
+                    assert_eq!(a[r.clone()], b[start..start + r.len()]);
+                }
+            }
+        }
     }
 
     #[test]
