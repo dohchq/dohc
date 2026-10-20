@@ -902,6 +902,21 @@ export function siteCommandEnvironment(
   return env;
 }
 
+// The last check before an app's own command starts. Nothing awaits between
+// it and spawn, so a cancel or a revoked trust that landed during the awaits
+// before it stops the command here.
+interface SpawnGate {
+  signal?: AbortSignal;
+  // Throws unless the command may still run, such as when the workspace lost
+  // its trust.
+  assertMayRun?: () => void;
+}
+
+function assertMayStart(input: SpawnGate): void {
+  if (input.signal?.aborted) throw new Error("The app command was cancelled before it started.");
+  input.assertMayRun?.();
+}
+
 export async function startSiteDevServer(input: {
   workspaceRoot: string;
   siteRoot: string;
@@ -909,8 +924,7 @@ export async function startSiteDevServer(input: {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
-  signal?: AbortSignal;
-} & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
+} & SpawnGate & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
@@ -919,6 +933,7 @@ export async function startSiteDevServer(input: {
   // Package-manager commands are .cmd shims on Windows and cannot be spawned
   // directly; resolveSpawnCommand is a no-op on other platforms.
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
+  assertMayStart(input);
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
@@ -1190,14 +1205,14 @@ export async function buildSite(input: {
   output?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
-  signal?: AbortSignal;
-} & DescendantCaptureOverrides): Promise<BuildSiteResult> {
+} & SpawnGate & DescendantCaptureOverrides): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
   const env = siteCommandEnvironment(process.env, input.env);
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
+  assertMayStart(input);
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,

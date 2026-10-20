@@ -10,7 +10,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettingsResult } from "../settin
 import { deferred } from "../testing/deferred";
 import * as windowZoom from "./windowZoom";
 import { createWorkspaceRootApproval, registerWorkspaceRegistryIpcHandlers } from "../ipc/workspaceRegistryIpc";
-import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { createWorkspaceFolderWithFreshness as createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { createRegistryStore } from "../workspaces/registryStore";
 import { workspaceSummariesFrom } from "../workspaces/workspaceSummaryProjection";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -177,7 +177,7 @@ describe("desktop workspace windows", () => {
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: () => undefined,
-      isEmptyOrMissingFolder: async () => false, trustNewWorkspace: async () => undefined,
+      trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: () => undefined,
@@ -540,7 +540,7 @@ describe("desktop native menus", () => {
       roots, effectiveHome: () => home, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
-      isEmptyOrMissingFolder: async () => false, trustNewWorkspace: async () => undefined,
+      trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
@@ -563,7 +563,7 @@ describe("desktop native menus", () => {
     expect(f.templates).toHaveLength(2);
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
-    const attached = await createWorkspaceFolder({
+    const { workspace: attached } = await createWorkspaceFolder({
       rootPath: attachedPath, homeDir: home, kind: "shared",
       workspaceId: "attached-workspace",
     });

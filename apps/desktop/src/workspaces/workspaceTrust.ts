@@ -1,5 +1,6 @@
 import { normalizeRootPath } from "@dohc/workspace-core";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 
@@ -47,22 +48,17 @@ function isRecord(value: unknown): value is TrustRecord {
     typeof trustedAtMs === "number";
 }
 
-// The folder now at a path. Null when the file system gives folders no
-// number, so only the id and the path can match.
-export async function folderIdentity(rootPath: string): Promise<string | null> {
-  const folder = await stat(rootPath, { bigint: true });
-  if (!folder.isDirectory()) throw new Error(`Not a folder: ${rootPath}`);
+// A folder's identity: null when the file system gives folders no number, so
+// only the id and the path can match.
+export function identityOf(folder: Pick<BigIntStats, "dev" | "ino">): string | null {
   return folder.ino === 0n ? null : `${folder.dev}:${folder.ino}`;
 }
 
-// A folder New workspace may trust: it does not exist yet, or has nothing in it.
-export async function isEmptyOrMissingFolder(path: string): Promise<boolean> {
-  try {
-    return (await readdir(path)).length === 0;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-    throw error;
-  }
+// The folder now at a path.
+export async function folderIdentity(rootPath: string): Promise<string | null> {
+  const folder = await stat(rootPath, { bigint: true });
+  if (!folder.isDirectory()) throw new Error(`Not a folder: ${rootPath}`);
+  return identityOf(folder);
 }
 
 // Main spells a root two ways on Windows, with forward slashes in the
@@ -73,12 +69,25 @@ export function createWorkspaceTrust(dependencies: {
   file: string;
   identify?: (rootPath: string) => Promise<string | null>;
   now?: () => number;
+  // Tests replace the file system calls.
+  readText?: (file: string) => Promise<string>;
+  writeText?: (file: string, text: string) => Promise<void>;
 }) {
   const identify = dependencies.identify ?? folderIdentity;
   const now = dependencies.now ?? Date.now;
-  // One read for every caller, replaced by each write, so a read that
-  // finishes late never overwrites a newer record.
-  let records: Promise<TrustRecord[]> | null = null;
+  const readText = dependencies.readText ?? ((file: string) => readFile(file, "utf8"));
+  const writeText = dependencies.writeText ?? (async (file: string, text: string) => {
+    await mkdir(dirname(file), { recursive: true });
+    await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
+  });
+  // The records as last read or written. Null until a read succeeds.
+  let current: TrustRecord[] | null = null;
+  // The read in flight, shared by every caller.
+  let reading: Promise<TrustRecord[]> | null = null;
+  // Workspaces put in Restricted Mode during this run. They stay restricted
+  // even when the file could not be written, until the person trusts them.
+  const restricted = new Set<string>();
+  const revocations = new Map<string, number>();
   // Writes go one at a time, so the last one lands last.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -87,57 +96,112 @@ export function createWorkspaceTrust(dependencies: {
     return result;
   };
 
-  // An unreadable file trusts nothing. The next change replaces it.
+  // A missing file trusts nothing, and so does one dohc cannot parse; that
+  // file stays as it is until the person trusts or restricts a workspace.
+  // Any other failure is not kept, so the next call reads again.
   async function read(): Promise<TrustRecord[]> {
+    let text: string;
+    try {
+      text = await readText(dependencies.file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(dependencies.file, "utf8"));
+      parsed = JSON.parse(text);
     } catch {
-      parsed = null;
+      return [];
     }
     const trusted = parsed && typeof parsed === "object" && "trusted" in parsed ? parsed.trusted : null;
     return Array.isArray(trusted) ? trusted.filter(isRecord) : [];
   }
-  const load = (): Promise<TrustRecord[]> => (records ??= read());
 
-  async function save(next: TrustRecord[]): Promise<void> {
-    await mkdir(dirname(dependencies.file), { recursive: true });
-    await atomicReplaceFile(dependencies.file, (temporary) =>
-      writeFile(temporary, `${JSON.stringify({ version: 1, trusted: next }, null, 2)}\n`));
-    records = Promise.resolve(next);
+  async function load(): Promise<TrustRecord[]> {
+    if (current) return current;
+    reading ??= read().finally(() => { reading = null; });
+    const loaded = await reading;
+    // A write that finished meanwhile is newer than this read.
+    return (current ??= loaded);
   }
 
-  async function isTrusted(workspace: TrustedFolder): Promise<boolean> {
+  async function save(next: TrustRecord[]): Promise<void> {
+    await writeText(dependencies.file, `${JSON.stringify({ version: 1, trusted: next }, null, 2)}\n`);
+    current = next;
+  }
+
+  // Whether a grant still holds now. Synchronous, for the spawn boundary.
+  const holds = (record: TrustRecord) => !restricted.has(record.workspaceId) && current?.includes(record) === true;
+
+  async function grantFor(workspace: TrustedFolder): Promise<TrustRecord | null> {
+    if (restricted.has(workspace.workspaceId)) return null;
     const rootPath = spelling(workspace.rootPath);
     const record = (await load()).find((each) =>
       each.workspaceId === workspace.workspaceId && each.rootPath === rootPath);
-    if (!record) return false;
+    if (!record) return null;
+    let folder: string | null;
     try {
-      return (await identify(workspace.rootPath)) === record.folder;
+      folder = await identify(workspace.rootPath);
     } catch {
-      return false;
+      return null;
     }
+    // A revoke, or a new grant, during the lookup wins.
+    return folder === record.folder && holds(record) ? record : null;
   }
 
+  // Restricted Mode at once, in memory, before anything is written.
+  function revoke(workspaceId: string): void {
+    restricted.add(workspaceId);
+    revocations.set(workspaceId, (revocations.get(workspaceId) ?? 0) + 1);
+  }
+
+  // Writes Restricted Mode to the file. A failed write leaves the workspace
+  // restricted in memory; trying again writes it.
+  const persistRevocation = (workspaceId: string): Promise<void> =>
+    serial(async () => {
+      const records = await load();
+      if (!records.some((each) => each.workspaceId === workspaceId)) return;
+      await save(records.filter((each) => each.workspaceId !== workspaceId));
+    });
+
   return {
-    isTrusted,
-    // Main's check before it runs any app command.
-    async assertTrusted(workspace: TrustedFolder): Promise<void> {
-      if (!(await isTrusted(workspace))) throw new WorkspaceRestrictedError();
+    // Throws when the file cannot be read, so the caller can say so.
+    isTrusted: async (workspace: TrustedFolder): Promise<boolean> => (await grantFor(workspace)) !== null,
+    /**
+     * Main's check before it runs any app command. The answer is a
+     * synchronous check that the grant still holds, for the spawn itself.
+     */
+    async assertTrusted(workspace: TrustedFolder): Promise<() => void> {
+      const record = await grantFor(workspace);
+      if (!record) throw new WorkspaceRestrictedError();
+      return () => {
+        if (!holds(record)) throw new WorkspaceRestrictedError();
+      };
     },
-    trust: (workspace: TrustedFolder): Promise<void> =>
-      serial(async () => {
-        const folder = await identify(workspace.rootPath);
-        const kept = (await load()).filter((each) => each.workspaceId !== workspace.workspaceId);
+    /**
+     * Trusts the workspace in its folder now, or in the folder New workspace
+     * made when `known` names it. False when the workspace was restricted
+     * again before the grant was written.
+     */
+    trust(workspace: TrustedFolder, known?: { folder: string | null }): Promise<boolean> {
+      const revocationsAtStart = revocations.get(workspace.workspaceId) ?? 0;
+      return serial(async () => {
+        const folder = known ? known.folder : await identify(workspace.rootPath);
+        const records = await load();
+        if ((revocations.get(workspace.workspaceId) ?? 0) !== revocationsAtStart) return false;
+        const kept = records.filter((each) => each.workspaceId !== workspace.workspaceId);
         await save([...kept, { workspaceId: workspace.workspaceId, rootPath: spelling(workspace.rootPath), folder, trustedAtMs: now() }]);
-      }),
-    // Restricted Mode for every folder this workspace was trusted in.
-    restrict: (workspaceId: string): Promise<void> =>
-      serial(async () => {
-        const current = await load();
-        if (!current.some((each) => each.workspaceId === workspaceId)) return;
-        await save(current.filter((each) => each.workspaceId !== workspaceId));
-      }),
+        restricted.delete(workspace.workspaceId);
+        return true;
+      });
+    },
+    revoke,
+    persistRevocation,
+    // Both, for a caller with nothing to do in between.
+    restrict(workspaceId: string): Promise<void> {
+      revoke(workspaceId);
+      return persistRevocation(workspaceId);
+    },
   };
 }
 
@@ -145,6 +209,25 @@ export type WorkspaceTrust = ReturnType<typeof createWorkspaceTrust>;
 
 const TRUST = 0;
 const STAY = 1;
+
+// Code points a folder name can hide in: controls, line breaks, and the
+// marks that reorder text.
+function isHidden(code: number): boolean {
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x061c ||
+    code === 0x200e || code === 0x200f || code === 0x2028 || code === 0x2029 ||
+    (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+}
+
+const BACKSLASH = String.fromCharCode(92);
+
+// A path as one visible line: each hidden code point shows as an escape, so
+// a folder's name cannot add lines or reorder words in the dialog.
+export function visiblePath(path: string): string {
+  return Array.from(path, (character) => {
+    const code = character.codePointAt(0)!;
+    return isHidden(code) ? `${BACKSLASH}u{${code.toString(16).padStart(4, "0")}}` : character;
+  }).join("");
+}
 
 /**
  * Main's own question before a workspace may run its apps' code. The renderer
@@ -170,7 +253,7 @@ export async function confirmWorkspaceTrust(
     detail: [
       "Apps in this workspace can run code on this computer. That code can do anything you can: open and change your files and use your network.",
       "If you don't know who made these files or who else can change them, stay in Restricted Mode.",
-      workspace.rootPath,
+      visiblePath(workspace.rootPath),
     ].join("\n\n"),
     buttons: ["Trust workspace", "Stay in Restricted Mode"],
     defaultId: STAY,

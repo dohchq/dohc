@@ -241,6 +241,7 @@ import {
 import {
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
+  createWorkspaceFolderWithFreshness,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import { createFolder, listFiles } from "./workspaces/workspaceFiles";
@@ -544,7 +545,7 @@ import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
-import { confirmWorkspaceTrust, createWorkspaceTrust, isEmptyOrMissingFolder } from "./workspaces/workspaceTrust";
+import { confirmWorkspaceTrust, createWorkspaceTrust } from "./workspaces/workspaceTrust";
 import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
@@ -2029,9 +2030,11 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 const forgetWorkspace = createWorkspaceForget({
   // A forgotten workspace opened again is an existing folder: it starts in
   // Restricted Mode.
+  // The grant goes first, so a failed write cannot leave one that returns
+  // when the folder opens again.
   remove: async workspaceId => {
-    await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
     await workspaceTrust.restrict(workspaceId);
+    await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
   },
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
@@ -6113,10 +6116,9 @@ function registerIpcHandlers(): void {
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),
-    createWorkspaceFolder,
+    createWorkspaceFolder: createWorkspaceFolderWithFreshness,
     forgetWorkspace,
-    isEmptyOrMissingFolder,
-    trustNewWorkspace: (workspace) => workspaceTrust.trust(workspace),
+    trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     openWorkspaceWindow: (workspace) =>
       desktopWindows.openWorkspaceInWindow(workspace, (window) => {
@@ -6952,7 +6954,8 @@ function registerIpcHandlers(): void {
         showMessageBox: (options) => window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
       }, workspace);
     },
-    stopAppCommands: (operation) => operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId),
+    stopAppCommands: (operation) =>
+      operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
     notifyChanged: notifyWorkspaceTrustChanged,
   }));
 

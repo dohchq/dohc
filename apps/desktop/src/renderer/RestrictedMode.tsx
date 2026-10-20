@@ -2,6 +2,9 @@ import { ShieldAlert } from "lucide-react";
 import { EmptyState, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 export const RESTRICTED_APP_WORDS = "In Restricted Mode, dohc does not run this app's code.";
+// Shown through the shell's error hook, with Try again. Until main answers,
+// nothing that runs app code starts.
+export const TRUST_READ_FAILED_MESSAGE = "dohc could not read whether it trusts this workspace.";
 const RESTRICTED_WORKSPACE_WORDS = "In Restricted Mode, dohc does not run this workspace's app code.";
 
 // The workspace's Restricted Mode, beside its save state in the title bar.

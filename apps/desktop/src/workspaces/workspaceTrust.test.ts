@@ -2,10 +2,12 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "./testTemp";
+import { deferred } from "../testing/deferred";
 import {
   confirmWorkspaceTrust,
   createWorkspaceTrust,
-  isEmptyOrMissingFolder,
+  folderIdentity,
+  visiblePath,
   WorkspaceRestrictedError,
 } from "./workspaceTrust";
 
@@ -118,13 +120,115 @@ describe("workspace trust", () => {
   });
 });
 
-describe("New workspace's default", () => {
-  it("counts a missing or empty folder as new, and a folder with files as existing", async () => {
-    const { scratch, rootPath } = await setup();
-    expect(await isEmptyOrMissingFolder(join(scratch, "missing"))).toBe(true);
-    expect(await isEmptyOrMissingFolder(rootPath)).toBe(true);
-    await writeFile(join(rootPath, "package.json"), "{}");
-    expect(await isEmptyOrMissingFolder(rootPath)).toBe(false);
+describe("trust against races and failed files", () => {
+  it("answers no when the workspace is restricted during the folder lookup", async () => {
+    const { file, workspace } = await setup();
+    const reached = deferred<void>();
+    const release = deferred<void>();
+    let hold = false;
+    const trust = createWorkspaceTrust({
+      file,
+      identify: async (rootPath) => {
+        if (hold) { reached.resolve(); await release.promise; }
+        return folderIdentity(rootPath);
+      },
+    });
+    await trust.trust(workspace);
+    hold = true;
+    const checking = trust.isTrusted(workspace);
+    await reached.promise;
+    trust.revoke("trip");
+    release.resolve();
+    expect(await checking).toBe(false);
+  });
+
+  it("gives a check taken before a revoke no way to pass at the spawn", async () => {
+    const { file, workspace } = await setup();
+    const trust = createWorkspaceTrust({ file });
+    await trust.trust(workspace);
+    const stillTrusted = await trust.assertTrusted(workspace);
+    expect(() => stillTrusted()).not.toThrow();
+    trust.revoke("trip");
+    expect(() => stillTrusted()).toThrow(WorkspaceRestrictedError);
+  });
+
+  it("binds New workspace's grant to the folder creation made", async () => {
+    const { file, workspace } = await setup();
+    const trust = createWorkspaceTrust({ file });
+    await trust.trust(workspace, { folder: "1:2" });
+    expect(await trust.isTrusted(workspace)).toBe(false);
+    await trust.trust(workspace, { folder: await folderIdentity(workspace.rootPath) });
+    expect(await trust.isTrusted(workspace)).toBe(true);
+  });
+
+  it("keeps Restricted Mode when the person restricts while a grant waits to be written", async () => {
+    const { file, workspace } = await setup();
+    const trust = createWorkspaceTrust({ file });
+    const granting = trust.trust(workspace);
+    trust.revoke("trip");
+    expect(await granting).toBe(false);
+    await trust.persistRevocation("trip");
+    expect(await trust.isTrusted(workspace)).toBe(false);
+  });
+
+  it("reads the file again after a failed read, and writes no grant over the others", async () => {
+    const { scratch, file, workspace } = await setup();
+    const otherRoot = join(scratch, "other");
+    await mkdir(otherRoot);
+    const other = { workspaceId: "other", rootPath: otherRoot };
+    await createWorkspaceTrust({ file }).trust(other);
+    let failures = 1;
+    const trust = createWorkspaceTrust({
+      file,
+      readText: async (path) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw Object.assign(new Error("busy"), { code: "EBUSY" });
+        }
+        return readFile(path, "utf8");
+      },
+    });
+    await expect(trust.isTrusted(other)).rejects.toThrow("busy");
+    failures = 1;
+    await expect(trust.trust(workspace)).rejects.toThrow("busy");
+    expect(await trust.isTrusted(other)).toBe(true);
+    await trust.trust(workspace);
+    const fresh = createWorkspaceTrust({ file });
+    expect(await fresh.isTrusted(other)).toBe(true);
+    expect(await fresh.isTrusted(workspace)).toBe(true);
+  });
+
+  it("trusts nothing in a corrupt file and leaves it until the person trusts or restricts", async () => {
+    const { file, workspace } = await setup();
+    await mkdir(join(file, ".."), { recursive: true });
+    await writeFile(file, "{ not json");
+    const trust = createWorkspaceTrust({ file });
+    expect(await trust.isTrusted(workspace)).toBe(false);
+    await trust.persistRevocation("someone-else");
+    expect(await readFile(file, "utf8")).toBe("{ not json");
+    await trust.trust(workspace);
+    expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
+  });
+
+  it("stays restricted when the revoke cannot be written, and writes it on retry", async () => {
+    const { file, workspace } = await setup();
+    await createWorkspaceTrust({ file }).trust(workspace);
+    let failWrite = true;
+    const trust = createWorkspaceTrust({
+      file,
+      writeText: async (path, text) => {
+        if (failWrite) throw new Error("disk full");
+        await writeFile(path, text);
+      },
+    });
+    expect(await trust.isTrusted(workspace)).toBe(true);
+    await expect(trust.restrict("trip")).rejects.toThrow("disk full");
+    expect(await trust.isTrusted(workspace)).toBe(false);
+    // The file still holds the grant, so a restart would trust it again.
+    expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
+    failWrite = false;
+    await trust.restrict("trip");
+    expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
   });
 });
 
@@ -153,6 +257,18 @@ describe("main's trust dialog", () => {
     })]);
     expect(dialog.asked[0]!.detail).toContain("That code can do anything you can");
     expect(dialog.asked[0]!.detail).toContain("C:/Users/ice/trip");
+  });
+
+  it("shows a folder name's line breaks and control characters as escapes", async () => {
+    const dialog = answering(1);
+    const code = (value: number) => String.fromCodePoint(value);
+    const escape = (hex: string) => `${String.fromCharCode(92)}u{${hex}}`;
+    const lines = `C:/trip${code(0x0a)}${code(0x0a)}Trust this folder${code(0x202e)}${code(0x07)}`;
+    await confirmWorkspaceTrust(dialog.deps, { rootPath: lines });
+    const detail = dialog.asked[0]!.detail;
+    expect(detail.endsWith(`C:/trip${escape("000a")}${escape("000a")}Trust this folder${escape("202e")}${escape("0007")}`)).toBe(true);
+    expect(detail.split(code(0x0a)).filter(Boolean)).toHaveLength(3);
+    expect(visiblePath("C:/Users/ice/trip")).toBe("C:/Users/ice/trip");
   });
 
   it("trusts only on Trust workspace", async () => {

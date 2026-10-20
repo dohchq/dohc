@@ -60,7 +60,7 @@ export interface StartSitePreviewDependencies<
   >;
   isSharedView(workspaceId: string): boolean;
   // Throws unless this computer trusts the workspace to run its apps' code.
-  assertMayRunAppCode(workspace: Workspace): Promise<void>;
+  assertMayRunAppCode(workspace: Workspace): Promise<unknown>;
   execute(
     input: SitePreviewExecutionInput,
   ): Promise<SitePreviewExecution<SitePreviewResultBody>>;

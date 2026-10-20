@@ -71,6 +71,7 @@ async function harness() {
   let trusted = true;
   const assertMayRunAppCode = vi.fn(async (_workspace: { workspaceId: string; rootPath: string }) => {
     if (!trusted) throw new WorkspaceRestrictedError();
+    return () => undefined;
   });
   const execute = createAppPreviewExecution({
     get shareViewFiles() { if (!files) throw new Error("File owner not constructed"); return files; },
@@ -195,7 +196,7 @@ describe("app preview execution", () => {
     h.app.configuredScripts = configuredScripts;
     h.app.scripts = scripts;
     const execution = await h.run();
-    expect(startSiteDevServer).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command, args, signal: h.controller.signal });
+    expect(startSiteDevServer).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command, args, signal: h.controller.signal, assertMayRun: expect.any(Function) });
     expect(execution.handle).toBe(h.devHandle);
     expect(execution.result).toEqual({ siteRoot: "portal", mode: "dev", logs: [log("Ready")] });
     expect(startStaticSitePreview).not.toHaveBeenCalled();
@@ -208,7 +209,7 @@ describe("app preview execution", () => {
     await h.run();
     expect(startSiteDevServer).toHaveBeenCalledWith({
       workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "react-scripts", args: ["start"],
-      env: { HOST: "127.0.0.1" }, signal: h.controller.signal,
+      env: { HOST: "127.0.0.1" }, signal: h.controller.signal, assertMayRun: expect.any(Function),
     });
   });
 
@@ -235,7 +236,7 @@ describe("app preview execution", () => {
     h.app.configuredBuildOutput = "dist";
     h.app.buildOutputs = ["other"];
     const execution = await h.run();
-    expect(buildSite).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "node", args: ["configured-build.js"], output: "dist", signal: h.controller.signal });
+    expect(buildSite).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "node", args: ["configured-build.js"], output: "dist", signal: h.controller.signal, assertMayRun: expect.any(Function) });
     expect(execution.result).toEqual({ siteRoot: "portal", mode: "build", logs: [log("Built")], build: { ok: true, command: "node", args: ["build.js"], outputPath: join(h.workspaceRoot, "portal/dist"), exitCode: 0 } });
     expect(startStaticSitePreview).toHaveBeenCalledWith(h.workspaceRoot, "portal/dist", { authority: h.app.authority });
     await expect(fetch(execution.handle.url).then((response) => response.text())).resolves.toBe("<h1>Built app</h1>");

@@ -755,7 +755,13 @@ export function createSitePreviewLifecycle<
     }
   }
 
-  async function stopWorkspace(workspaceId: string): Promise<void> {
+  // `rejectOnFailure` answers with the stops that failed, as Restricted Mode
+  // needs to report. A workspace switch only logs them. Either way a failed
+  // stop keeps its handle, so the next call tries it again.
+  async function stopWorkspace(
+    workspaceId: string,
+    options: { rejectOnFailure?: boolean } = {},
+  ): Promise<void> {
     dropHolds(workspaceId);
     const pending = abortPending(
       [...pendingStarts].filter((start) => start.workspaceId === workspaceId),
@@ -764,10 +770,12 @@ export function createSitePreviewLifecycle<
     const snapshots = [...activePreviews.entries()]
       .filter(([, active]) => active.workspaceId === workspaceId)
       .map(([key, active]) => ({ key, handle: active.handle }));
+    const failures: unknown[] = [];
     await Promise.all([
       ...snapshots.map(({ key, handle }) =>
         runInKeyedLane(startLanes, key, () => stopCurrent(key, handle)).catch(
-          (error) => {
+          (error: unknown) => {
+            failures.push(error);
             console.warn(
               "[desktop] failed to stop site preview during workspace switch",
               error,
@@ -777,6 +785,10 @@ export function createSitePreviewLifecycle<
       ),
       ...draining.map((start) => start.settled),
     ]);
+    if (!options.rejectOnFailure || failures.length === 0) return;
+    throw failures.length === 1
+      ? failures[0]
+      : new AggregateError(failures, "Some app previews did not stop.");
   }
 
   let stopAllPromise: Promise<void> | null = null;

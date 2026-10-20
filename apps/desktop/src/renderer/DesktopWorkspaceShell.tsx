@@ -71,6 +71,7 @@ import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
+import { TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
 import {
   chatMentionOpenTarget,
   graphChatOpenTarget,
@@ -1810,7 +1811,8 @@ export function DesktopWorkspaceShell(props: {
   );
   // Restricted Mode in the title bar. A shared view never runs app code, so it
   // shows none.
-  const workspaceTrust = useWorkspaceTrust(workspaceId, workspaceIsReady && !shareView);
+  const workspaceTrust = useWorkspaceTrust(workspaceId, workspaceIsReady && !shareView, (error, retry) =>
+    reportShellError(TRUST_READ_FAILED_MESSAGE, error, retry));
   const { requestTrust: requestWorkspaceTrust } = workspaceTrust;
   const trustWorkspace = useCallback(async () => {
     try {

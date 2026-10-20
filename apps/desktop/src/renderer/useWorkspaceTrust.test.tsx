@@ -56,6 +56,46 @@ describe("useWorkspaceTrust", () => {
     await waitFor(() => expect(hook.result.current.trusted).toBe(false));
   });
 
+  it("drops a slow Trust workspace reply for A once the window shows B, and is not busy for B", async () => {
+    const reply = deferred<WorkspaceTrustAnswer>();
+    bridgeMock.requestWorkspaceTrust.mockImplementationOnce(() => reply.promise);
+    const hook = renderHook(({ id }) => useWorkspaceTrust(id, true), { initialProps: { id: "a" } });
+    await act(async () => { reads.get("a")!.resolve({ workspaceId: "a", trusted: false }); });
+    let asked!: Promise<boolean>;
+    act(() => { asked = hook.result.current.requestTrust(); });
+    expect(hook.result.current.asking).toBe(true);
+    hook.rerender({ id: "b" });
+    expect(hook.result.current.asking).toBe(false);
+    await act(async () => { reads.get("b")!.resolve({ workspaceId: "b", trusted: false }); });
+    await act(async () => { reply.resolve({ workspaceId: "a", trusted: true }); await asked; });
+    expect(hook.result.current.trusted).toBe(false);
+    expect(hook.result.current.asking).toBe(false);
+  });
+
+  it("keeps a change main announced over an older action's reply", async () => {
+    const reply = deferred<WorkspaceTrustAnswer>();
+    bridgeMock.restrictWorkspace.mockImplementationOnce(() => reply.promise);
+    const hook = renderHook(() => useWorkspaceTrust("a", true));
+    await act(async () => { reads.get("a")!.resolve({ workspaceId: "a", trusted: true }); });
+    let restricting!: Promise<void>;
+    act(() => { restricting = hook.result.current.restrict(); });
+    // The person trusted the workspace again from another window.
+    act(() => { for (const listener of listeners) listener({ workspaceId: "a", trusted: true }); });
+    await act(async () => { reply.resolve({ workspaceId: "a", trusted: false }); await restricting; });
+    expect(hook.result.current.trusted).toBe(true);
+  });
+
+  it("reports a failed read with a way to read again", async () => {
+    const onReadError = vi.fn();
+    const hook = renderHook(() => useWorkspaceTrust("a", true, onReadError));
+    await act(async () => { reads.get("a")!.reject(new Error("busy")); });
+    expect(hook.result.current).toMatchObject({ trusted: null, readFailed: true });
+    expect(onReadError).toHaveBeenCalledWith(expect.any(Error), expect.any(Function));
+    act(() => { onReadError.mock.calls[0]![1](); });
+    await act(async () => { reads.get("a")!.resolve({ workspaceId: "a", trusted: true }); });
+    expect(hook.result.current).toMatchObject({ trusted: true, readFailed: false });
+  });
+
   it("reads nothing while disabled, as for a shared view", () => {
     const hook = renderHook(() => useWorkspaceTrust("a", false));
     expect(bridgeMock.readWorkspaceTrust).not.toHaveBeenCalled();

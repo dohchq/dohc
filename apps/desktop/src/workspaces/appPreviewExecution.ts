@@ -53,8 +53,8 @@ export function createAppPreviewExecution(dependencies: {
     path: string,
   ) => Promise<{ target: ShareViewFilesTarget; path: string } | null>;
   // Throws unless this computer trusts the workspace to run its apps' code.
-  // Checked again just before each command starts, whatever the caller checked.
-  readonly assertMayRunAppCode: (workspace: { workspaceId: string; rootPath: string }) => Promise<void>;
+  // Its answer checks again, synchronously, at the spawn itself.
+  readonly assertMayRunAppCode: (workspace: { workspaceId: string; rootPath: string }) => Promise<() => void>;
 }) {
   async function executeAppPreview(input: SitePreviewExecutionInput) {
     if (input.mode === "static") {
@@ -101,7 +101,7 @@ export function createAppPreviewExecution(dependencies: {
       const script =
         input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
       const command = commandForSiteScript(input.site, script);
-      await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
+      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
       const handle = await startSiteDevServer({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,
@@ -109,6 +109,7 @@ export function createAppPreviewExecution(dependencies: {
         args: command.args,
         env: command.env,
         signal: input.signal,
+        assertMayRun,
       });
       return {
         handle,
@@ -133,7 +134,7 @@ export function createAppPreviewExecution(dependencies: {
     let outputRoot = preferredBuildOutput(input.site);
     if (input.site.configuredScripts.build || input.site.scripts.build) {
       const command = commandForSiteScript(input.site, "build");
-      await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
+      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
       const result = await buildSite({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,
@@ -141,6 +142,7 @@ export function createAppPreviewExecution(dependencies: {
         args: command.args,
         output: outputRoot ?? undefined,
         signal: input.signal,
+        assertMayRun,
       });
       logs = result.logs;
       build = {

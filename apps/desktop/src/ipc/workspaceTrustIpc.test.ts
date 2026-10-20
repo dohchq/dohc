@@ -1,22 +1,31 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it, vi } from "vitest";
 import { workspaceTrustOperations } from "./bridgeContract";
-import { workspaceTrustHandlers } from "./workspaceTrustIpc";
+import { SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, workspaceTrustHandlers } from "./workspaceTrustIpc";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SiteProcessHandle } from "../workspaces/siteRunner";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createWorkspaceTrust } from "../workspaces/workspaceTrust";
+import { deferred } from "../testing/deferred";
 
 type Event = { windowId: number };
 
-async function harness(input: { answer?: boolean; sharedView?: boolean } = {}) {
+async function harness(input: { answer?: boolean; sharedView?: boolean; failWrites?: { value: boolean } } = {}) {
   const scratch = await createTestScratch("workspace-trust-ipc-");
   const rootPath = join(scratch, "trip");
   await mkdir(rootPath);
   const workspace = { workspaceId: "trip", rootPath };
-  const trust = createWorkspaceTrust({ file: join(scratch, "profile", "workspace-trust.json") });
+  const file = join(scratch, "profile", "workspace-trust.json");
+  const trust = createWorkspaceTrust({
+    file,
+    writeText: async (path, text) => {
+      if (input.failWrites?.value) throw new Error("disk full");
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, text);
+    },
+  });
   const lifecycle = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
   let current = true;
   const operation = {
@@ -30,13 +39,13 @@ async function harness(input: { answer?: boolean; sharedView?: boolean } = {}) {
     trust,
     isSharedView: () => input.sharedView ?? false,
     confirm,
-    stopAppCommands: (held) => held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId),
+    stopAppCommands: (held) => held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
   const payload = { workspaceId: "trip" };
   return {
-    trust, workspace, lifecycle, confirm, notified, context,
+    trust, file, workspace, lifecycle, confirm, notified, context,
     leave: () => { current = false; },
     read: () => handlers.readWorkspaceTrust(payload, context),
     request: () => handlers.requestWorkspaceTrust(payload, context),
@@ -44,7 +53,70 @@ async function harness(input: { answer?: boolean; sharedView?: boolean } = {}) {
   };
 }
 
+function devServer(h: Awaited<ReturnType<typeof harness>>, stop: () => Promise<void>): Promise<unknown> {
+  const handle: SiteProcessHandle = {
+    url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: h.workspace.rootPath,
+    logs: () => [], onExit: () => undefined, stop,
+  };
+  return h.lifecycle.acquire({
+    holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,
+    isCurrent: () => true,
+    prepare: async () => async () => ({ handle, result: { logs: [] } }),
+  });
+}
+
 describe("main's workspace trust operations", () => {
+  it("opens one dialog per workspace, and a second request waits for its answer", async () => {
+    const h = await harness();
+    const answer = deferred<boolean>();
+    h.confirm.mockImplementation(() => answer.promise);
+    const first = h.request();
+    const second = h.request();
+    await vi.waitFor(() => expect(h.confirm).toHaveBeenCalledTimes(1));
+    answer.resolve(true);
+    await expect(first).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    await expect(second).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    expect(h.notified).toEqual([["trip", true]]);
+  });
+
+  it("reports a stop that failed, keeps the workspace restricted, and stops it on Try again", async () => {
+    const h = await harness({ answer: true });
+    await h.request();
+    let failStop = true;
+    const stop = vi.fn(async () => { if (failStop) throw new Error("access denied"); });
+    await devServer(h, stop);
+
+    await expect(h.restrict()).rejects.toThrow(STOP_FAILED_MESSAGE);
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+    expect(h.notified.at(-1)).toEqual(["trip", false]);
+    expect(h.lifecycle.status("trip", "portal").running).toBe(true);
+
+    failStop = false;
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(h.lifecycle.status("trip", "portal").running).toBe(false);
+  });
+
+  it("stops commands even when Restricted Mode cannot be saved, says so, and saves it on Try again", async () => {
+    const failWrites = { value: false };
+    const h = await harness({ answer: true, failWrites });
+    await h.request();
+    const stop = vi.fn(async () => undefined);
+    await devServer(h, stop);
+    failWrites.value = true;
+
+    await expect(h.restrict()).rejects.toThrow(SAVE_FAILED_MESSAGE);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+    // A restart would read the grant the write could not remove.
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(true);
+
+    failWrites.value = false;
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false);
+  });
+
   it("trusts a workspace only when the person chooses Trust workspace in main's dialog", async () => {
     const stay = await harness({ answer: false });
     await expect(stay.request()).resolves.toEqual({ workspaceId: "trip", trusted: false });

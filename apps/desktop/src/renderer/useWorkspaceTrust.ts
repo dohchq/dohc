@@ -5,63 +5,95 @@ import { bridge } from "./bridge";
 /**
  * Whether this computer trusts a workspace to run its apps' code: true, false
  * in Restricted Mode, or null until main answers. Main decides and enforces
- * it; this only follows it. Every answer names its workspace, so a slow answer
- * for one workspace never shows for another.
+ * it; this only follows it.
+ *
+ * Every answer is guarded: a read, or the reply to Trust workspace or
+ * Restricted Mode, shows only while the hook still shows its workspace and
+ * nothing newer arrived. A change main announces is always newest.
  */
-export function useWorkspaceTrust(workspaceId: string, enabled: boolean) {
+export function useWorkspaceTrust(
+  workspaceId: string,
+  enabled: boolean,
+  // A failed read, with a way to read again.
+  onReadError?: (error: unknown, retry: () => void) => void,
+) {
   const [answer, setAnswer] = useState<WorkspaceTrustAnswer | null>(null);
-  const [asking, setAsking] = useState(false);
-  // Moves on each new workspace and each change main announces, so an older
-  // read never paints over a newer answer.
-  const sequence = useRef(0);
+  const [readFailedFor, setReadFailedFor] = useState<string | null>(null);
+  const [asking, setAsking] = useState<{ workspaceId: string; token: number } | null>(null);
+  const [readAttempt, setReadAttempt] = useState(0);
+  // Moves when the workspace changes and when main announces a change.
+  const changes = useRef(0);
+  // Moves when an action's reply shows, so an older read does not paint over it.
+  const applied = useRef(0);
+  // The newest action. Only its reply shows.
+  const actions = useRef(0);
   const workspaceRef = useRef(workspaceId);
   workspaceRef.current = workspaceId;
-
-  const show = useCallback((next: WorkspaceTrustAnswer) => {
-    if (next.workspaceId === workspaceRef.current) setAnswer(next);
-  }, []);
+  const onReadErrorRef = useRef(onReadError);
+  onReadErrorRef.current = onReadError;
 
   useEffect(() => {
     if (!enabled) return;
-    const request = ++sequence.current;
+    changes.current += 1;
+    const atStart = { changes: changes.current, applied: applied.current };
     const unsubscribe = bridge().onWorkspaceTrustChanged((event) => {
       if (event.workspaceId !== workspaceId) return;
-      sequence.current += 1;
-      show(event);
+      changes.current += 1;
+      setReadFailedFor(null);
+      setAnswer(event);
     });
     void bridge().readWorkspaceTrust({ workspaceId }).then(
-      (read) => { if (request === sequence.current) show(read); },
-      // Unknown stays unknown. Main still refuses every app command.
-      () => undefined,
+      (read) => {
+        if (changes.current !== atStart.changes || applied.current !== atStart.applied) return;
+        if (read.workspaceId !== workspaceId) return;
+        setReadFailedFor(null);
+        setAnswer(read);
+      },
+      (error: unknown) => {
+        if (changes.current !== atStart.changes) return;
+        setReadFailedFor(workspaceId);
+        onReadErrorRef.current?.(error, () => setReadAttempt((attempt) => attempt + 1));
+      },
     );
     return () => {
-      sequence.current += 1;
+      changes.current += 1;
       unsubscribe();
     };
-  }, [enabled, show, workspaceId]);
+  }, [enabled, readAttempt, workspaceId]);
 
-  // Opens main's dialog. Only the person's answer there trusts the workspace.
-  const requestTrust = useCallback(async () => {
-    setAsking(true);
+  const act = useCallback(async (call: (workspaceId: string) => Promise<WorkspaceTrustAnswer>) => {
+    const token = ++actions.current;
+    const changesAtStart = changes.current;
+    setAsking({ workspaceId, token });
     try {
-      const next = await bridge().requestWorkspaceTrust({ workspaceId });
-      sequence.current += 1;
-      show(next);
+      const next = await call(workspaceId);
+      if (token === actions.current && changes.current === changesAtStart && next.workspaceId === workspaceRef.current) {
+        applied.current += 1;
+        setReadFailedFor(null);
+        setAnswer(next);
+      }
       return next.trusted;
     } finally {
-      setAsking(false);
+      setAsking((current) => (current?.token === token ? null : current));
     }
-  }, [show, workspaceId]);
+  }, [workspaceId]);
 
-  const restrict = useCallback(async () => {
-    const next = await bridge().restrictWorkspace({ workspaceId });
-    sequence.current += 1;
-    show(next);
-  }, [show, workspaceId]);
+  // Opens main's dialog. Only the person's answer there trusts the workspace.
+  const requestTrust = useCallback(
+    () => act((id) => bridge().requestWorkspaceTrust({ workspaceId: id })),
+    [act],
+  );
+  const restrict = useCallback(
+    async () => { await act((id) => bridge().restrictWorkspace({ workspaceId: id })); },
+    [act],
+  );
 
+  const shown = enabled && answer?.workspaceId === workspaceId ? answer.trusted : null;
   return {
-    trusted: enabled && answer?.workspaceId === workspaceId ? answer.trusted : null,
-    asking,
+    trusted: shown,
+    // Main did not answer for this workspace. Nothing that runs app code starts.
+    readFailed: enabled && shown === null && readFailedFor === workspaceId,
+    asking: asking?.workspaceId === workspaceId,
     requestTrust,
     restrict,
   };

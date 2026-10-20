@@ -453,6 +453,35 @@ describe("SitePreviewPage", () => {
       bridgeMock.getSitePackage.mockResolvedValue(site);
     });
 
+    it("starts a static app when main's trust read fails, and says so with Try again", async () => {
+      bridgeMock.readWorkspaceTrust.mockRejectedValueOnce(new Error("busy"));
+      const reportError = vi.fn();
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" reportError={reportError} />);
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["static"]);
+      await waitFor(() => expect(reportError).toHaveBeenCalledWith(
+        "dohc could not read whether it trusts this workspace.", expect.any(Error), expect.any(Function)));
+      expect(screen.queryByTestId("restricted-mode-state")).toBeNull();
+    });
+
+    it("holds Dev back while the read failed, and runs it once Try again reads trust", async () => {
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      bridgeMock.readWorkspaceTrust.mockRejectedValueOnce(new Error("busy"));
+      bridgeMock.startSitePreview.mockResolvedValueOnce(answer("static")).mockResolvedValueOnce(answer("dev", 2));
+      const reportError = vi.fn();
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" reportError={reportError} />);
+      await screen.findByTestId("restricted-mode-state");
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["static"]);
+
+      await waitFor(() => expect(reportError).toHaveBeenCalled());
+      act(() => { (reportError.mock.calls[0]![2] as () => void)(); });
+
+      await waitFor(() => expect(starts()).toEqual(["static", "dev"]));
+      await waitFor(() => expect(screen.queryByTestId("restricted-mode-state")).toBeNull());
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
     it("ignores another workspace's trust change", async () => {
       trust.trusted = false;
       bridgeMock.getSitePackage.mockResolvedValue(packageApp);
