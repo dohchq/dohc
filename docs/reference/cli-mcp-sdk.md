@@ -562,6 +562,8 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+On Windows, dohc starts a chat agent with `NoDefaultCurrentDirectoryInExePath=1`, so in cmd the agent must run a program in the workspace folder as `.\name`, not by its bare name.
+
 ### `dohc links`
 
 Read and resolve document links.
