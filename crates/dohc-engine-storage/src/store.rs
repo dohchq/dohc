@@ -925,9 +925,11 @@ impl EngineStore {
     /// (`VACUUM INTO`). `dest` must not already exist. Used by the backup
     /// pipeline; not a general-purpose export.
     pub(crate) fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
-        let dest_str = dest.to_str().ok_or(StorageError::InvalidInput {
-            reason: "backup destination path is not valid UTF-8",
-        })?;
+        let dest_str = crate::sqlite_path(dest)
+            .to_str()
+            .ok_or(StorageError::InvalidInput {
+                reason: "backup destination path is not valid UTF-8",
+            })?;
         self.conn
             .execute("VACUUM INTO ?1", [dest_str])
             .map_err(StorageError::backup)?;
