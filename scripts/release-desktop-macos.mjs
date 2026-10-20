@@ -609,6 +609,8 @@ export async function withReleaseKeychain({ dryRun, keychain }, action, run = ca
 }
 
 async function main() {
+  // A usage error does not wait for the lock.
+  const options = parseMacReleaseArgs(process.argv.slice(2));
   // One release command at a time on this Mac. Under the scheduled nightly job, this command already holds the lock.
   const locked = process.platform === "darwin" ? await underReleaseLock(RELEASE_LOCK) : null;
   if (locked !== null) {
@@ -624,7 +626,6 @@ async function main() {
       console.error(`\n${signal}: stopping. Nothing further uploads.`);
     });
   }
-  const options = parseMacReleaseArgs(process.argv.slice(2));
   await withReleaseKeychain(options, async () => {
     const plan = await preflightMacRelease(options);
     for (const notice of plan.notices) console.log(notice);

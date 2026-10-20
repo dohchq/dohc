@@ -1534,9 +1534,17 @@ test("a real Mac release opens the release keychain only to check signing and to
   assert.equal(existsSync(join(workRoot, "v0.1.0")), false, "a finished upload keeps no files");
 });
 
-test("release-desktop-macos refuses incomplete arguments when run as a command", async () => {
+// HOME moves the command's lock into a temporary directory, so the test never takes this Mac's real one.
+test("release-desktop-macos refuses incomplete arguments when run as a command, even while a release holds the lock", async t => {
+  const home = await mkdtemp(join(tmpdir(), "dohc-release-home-"));
+  if (process.platform === "darwin") {
+    await mkdir(join(home, "dohc-release"));
+    const holder = spawn("/usr/bin/perl", ["-e", '$| = 1; open(my $lock, ">>", shift) or die; flock($lock, 2) or die; print "held\\n"; sleep 60', join(home, "dohc-release/release.lock")], { stdio: ["ignore", "pipe", "inherit"] });
+    t.after(() => holder.kill("SIGKILL"));
+    await new Promise(resolve => holder.stdout.once("data", resolve));
+  }
   await assert.rejects(
-    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
+    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"], { HOME: home }),
     (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
   );
 });

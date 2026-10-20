@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   NoticeRow,
@@ -1965,6 +1966,64 @@ describe("notices sent to you", () => {
     expect(shape("automation")?.getAttribute("class")).not.toMatch(/rounded|border/);
     expect(screen.getByTestId("sent-notice-automation").textContent).toContain("From an automation");
     expect(screen.getByTestId("sent-notice-agent").textContent).toContain("From an agent");
+  });
+
+  describe("an agent run that didn't start", () => {
+    const reason = "Couldn't find claude on PATH. Use its full path in the runner command.";
+    const agentRun = (noticeId: string, title: string, body: string) =>
+      sentRow(noticeId, { senderKind: "agent", kind: "agent-run", title, body });
+    const notStarted = agentRun("s", "Your agent's run failed to start", reason);
+    const finished = agentRun("f", "Your agent finished", "");
+    const copiedDetails = async () =>
+      (await navigator.clipboard.readText()).split("\n").find((line) => line.startsWith("Details: "));
+
+    it("shows why in a toast that stays until closed, with Copy beside it", () => {
+      vi.useFakeTimers();
+      try {
+        const onHideSentNoticeToast = vi.fn();
+        renderNotices({ sentNotices: [notStarted], sentNoticeToast: notStarted, onHideSentNoticeToast });
+        const toast = screen.getByTestId("sent-notice-toast");
+        expect(toast.getAttribute("role")).toBe("alert");
+        expect(screen.getByTestId("sent-notice-toast-body").textContent).toBe(reason);
+        expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+        act(() => vi.advanceTimersByTime(60_000));
+        expect(onHideSentNoticeToast).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a finished run's toast fading, with no reason or Copy", () => {
+      vi.useFakeTimers();
+      try {
+        const onHideSentNoticeToast = vi.fn();
+        renderNotices({ sentNotices: [finished], sentNoticeToast: finished, onHideSentNoticeToast });
+        expect(screen.getByTestId("sent-notice-toast").getAttribute("role")).toBe("status");
+        expect(screen.queryByTestId("sent-notice-toast-body")).toBeNull();
+        expect(screen.queryByTestId("sent-notice-toast-copy")).toBeNull();
+        act(() => vi.advanceTimersByTime(6_000));
+        expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("copies the whole reason the row and toast show, even near the length limit in emoji", async () => {
+      const long = agentRun("e", "Your agent's run failed to start", "🙂".repeat(NOTICE_BODY_MAX_CHARS - 1));
+      renderNotices({ sentNotices: [long, finished], sentNoticeToast: long });
+      const body = screen.getByTestId("sent-notice-toast-body");
+      const shown = body.textContent;
+      expect(shown).toBe(long.notice.body);
+      // About four lines, then it scrolls, so the title and controls stay in view.
+      expect(body.className.split(" ")).toEqual(expect.arrayContaining(["max-h-[5.5em]", "overflow-y-auto"]));
+      await userEvent.click(screen.getByTestId("sent-notice-toast-copy"));
+      expect(await copiedDetails()).toBe(`Details: ${shown}`);
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("sent-notice-e").textContent).toContain(shown);
+      await userEvent.click(screen.getByTestId("sent-notice-e-copy"));
+      expect(await copiedDetails()).toBe(`Details: ${shown}`);
+      expect(screen.queryByTestId("sent-notice-f-copy")).toBeNull();
+    });
   });
 
   it("names the Collection folder of a notice from another workspace", async () => {

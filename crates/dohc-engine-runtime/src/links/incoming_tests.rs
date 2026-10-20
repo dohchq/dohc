@@ -126,7 +126,7 @@ fn seed_counts_unreached_objects_once_and_never_double_counts_pending() {
     write_deferred(&mut s, "b", "b.md", "", 2);
     assert_eq!(lookup(&s, "target.md").unchecked, vec!["a.md", "b.md"]);
     assert!(lookup(&s, "target.md").sources.is_empty());
-    while seed_step(&mut s).unwrap() {}
+    while retry_file_locked("link drain seed_step", || seed_step(&mut s)) {}
     let pending = lookup(&s, "target.md");
     assert!(pending.unchecked.is_empty());
     assert_eq!(pending.sources.len(), 2);
@@ -322,7 +322,7 @@ fn fresh_seed_does_not_queue_current_sources_again() {
             n + 1,
         );
     }
-    while seed_step(&mut s).unwrap() {}
+    while retry_file_locked("link drain seed_step", || seed_step(&mut s)) {}
     publish_pending(&mut s);
     assert_eq!(count(&s, "link_sources"), 1000);
     assert!(
@@ -332,13 +332,19 @@ fn fresh_seed_does_not_queue_current_sources_again() {
         )
         .unwrap()
     );
-    assert!(!reseed_step(&mut s).unwrap());
+    assert!(!retry_file_locked(
+        "link drain reseed_step",
+        || reseed_step(&mut s)
+    ));
     assert_eq!(
         count(&s, "link_pending"),
         0,
         "the first seed already certified generation 2 keys"
     );
-    assert!(!reseed_step(&mut s).unwrap());
+    assert!(!retry_file_locked(
+        "link drain reseed_step",
+        || reseed_step(&mut s)
+    ));
 }
 
 fn resolver_for(s: &EngineStore, ws: &str, version: &str) -> Resolver {
@@ -378,7 +384,7 @@ fn write_scoped(
     VersionedTextStore::new(s)
         .ensure_main_version(ws, "main", 1, &NoFaults)
         .unwrap();
-    while seed_step(s).unwrap() {}
+    while retry_file_locked("link alias seeding", || seed_step(s)) {}
     VersionedTextStore::new(s)
         .write_text(
             &WriteText {
@@ -424,7 +430,9 @@ fn authoritative_resolver_is_complete_during_deferred_and_partial_seed() {
         resolver_for(&s, "ws", "main").resolve("source.md", "/z/report"),
         Some("z/report.md")
     );
-    assert!(seed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain seed_step", || seed_step(
+        &mut s
+    )));
     assert_eq!(count(&s, "link_aliases"), 32);
     assert_eq!(
         resolver_for(&s, "ws", "main").resolve("source.md", "report"),
@@ -521,7 +529,9 @@ fn publish_pending(s: &mut EngineStore) {
             .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
             .collect::<std::collections::VecDeque<_>>();
         while !staged.is_empty() {
-            stage_batch(&mut staged, s, &NoFaults).unwrap();
+            retry_file_locked("link batch staging", || {
+                stage_batch(&mut staged, s, &NoFaults)
+            });
         }
     }
 }
@@ -536,7 +546,9 @@ fn reseed_reopen_retains_cursor_and_queue_and_covers_mixed_generations() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n031".into()));
     assert_eq!(count(&s, "link_pending"), 32);
     let queue = s
@@ -587,7 +599,9 @@ fn reseed_reopen_retains_cursor_and_queue_and_covers_mixed_generations() {
         "stale sources remain candidates between batches"
     );
     assert_eq!(lookup(&s, "target.md").sources.len(), 70);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
     assert_eq!(count(&s, "link_pending"), 32);
     drain(&mut s);
@@ -602,10 +616,12 @@ fn fork_mid_reseed_copies_cursor_and_work_and_resumes_independently() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     // Publish one source, leaving both current and old generations plus work.
     let mut staged = parsed(&s);
-    while !staged.step(&mut s, &NoFaults).unwrap() {}
+    while !retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)) {}
     fork(&mut s);
     assert_eq!(reseed_state(&s, "fork"), (1, "n031".into()));
     let pending: i64 = s
@@ -649,7 +665,9 @@ fn reseed_skips_edited_sources_ahead_and_triggers_requeue_behind_cursor() {
     let scratch = ScratchDir::new().unwrap();
     let mut s = open(&engine_db_path(&scratch).unwrap());
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     publish_pending(&mut s);
     write(&mut s, "n040", "n040.md", "[[ahead]]", 100);
     publish_pending(&mut s);
@@ -670,7 +688,9 @@ fn reseed_skips_edited_sources_ahead_and_triggers_requeue_behind_cursor() {
     );
     assert_eq!(lookup(&s, "behind.md").sources[0].0, "n000");
     publish_pending(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
     let ahead_queued: bool = s
         .read_with(|c| {
@@ -719,11 +739,15 @@ fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
     })
     .unwrap();
     for cursor in ["n031", "n063"] {
-        assert!(reseed_step(&mut s).unwrap());
+        assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+            &mut s
+        )));
         assert_eq!(reseed_state(&s, "main"), (1, cursor.into()));
         assert_eq!(count(&s, "link_pending"), 0);
     }
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(count(&s, "link_pending"), 6);
     drain(&mut s);
     // One object with many aliases also consumes only one 32-row slice.
@@ -740,7 +764,9 @@ fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
         Ok::<_, StorageError>(())
     })
     .unwrap();
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n000".into()));
     assert_eq!(count(&s, "link_pending"), 0);
     drain(&mut s);
