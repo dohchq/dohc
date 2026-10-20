@@ -162,8 +162,13 @@ impl ActorHandle {
         let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
         #[cfg(test)]
         let admission_ws = workspace.clone();
+        let serial = tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            guard = session_ops.clone().lock_owned() => guard,
+        };
         let db = self
             .run(move |store, _| {
+                let _admission = serial;
                 #[cfg(test)]
                 let _turn = tests::Turn::start(&admission_ws, "admission");
                 if store.is_passive() {
@@ -243,7 +248,12 @@ impl ActorHandle {
         let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
         #[cfg(test)]
         let reserve_ws = workspace.clone();
+        let serial = tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            guard = session_ops.clone().lock_owned() => guard,
+        };
         self.run(move |store, _| {
+            let _admission = serial;
             #[cfg(test)]
             let _turn = tests::Turn::start(&reserve_ws, "reserve");
             save(store, &r, false, &initial, f.as_ref())
@@ -509,7 +519,12 @@ impl ActorHandle {
         result["complete"] = json!(unchecked.is_empty());
         result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
         let reply = result.clone();
+        let serial = tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            guard = session_ops.clone().lock_owned() => guard,
+        };
         self.run(move |store, _| {
+            let _admission = serial;
             #[cfg(test)]
             let _turn = tests::Turn::start(&workspace, "reply");
             save(store, &receipt, !stopped, &result, faults.as_ref())?;
