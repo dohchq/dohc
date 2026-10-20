@@ -5,9 +5,11 @@ import { dirname } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 
 // Workspace trust, as VS Code has it. A trusted workspace runs its apps' own
-// commands (dev, start, build, and their hooks) on this computer. A workspace
-// in Restricted Mode still opens, edits, shares, and shows apps through dohc's
-// static file server; it runs none of their code.
+// commands (dev, start, build, and their hooks) on this computer, and starts
+// the person's agent for its chats in its folder, where the agent can follow
+// the folder's own settings. A workspace in Restricted Mode still opens,
+// edits, shares, and shows apps through dohc's static file server; it runs
+// none of their code and starts no agent.
 //
 // Only the person grants trust, through main's own dialog, or by creating the
 // workspace in an empty folder with New workspace. The record lives in this
@@ -17,7 +19,7 @@ import { atomicReplaceFile } from "../atomicReplaceFile";
 // workspace, is restricted again.
 
 export const RESTRICTED_MODE_MESSAGE =
-  "This workspace is in Restricted Mode, so dohc does not run its apps' code. Trust the workspace to run it.";
+  "This workspace is in Restricted Mode, so dohc does not run its apps' code or start agents in it. Trust the workspace to allow them.";
 
 // The renderer reads the class from the IPC error's text.
 export class WorkspaceRestrictedError extends Error {
@@ -260,7 +262,7 @@ export async function confirmWorkspaceTrust(
     type: "warning",
     message: "Do you trust the authors of the files in this workspace?",
     detail: [
-      "Apps in this workspace can run code on this computer. That code can do anything you can: open and change your files and use your network.",
+      "Apps in this workspace can run code on this computer. An agent started here can follow this folder's settings, such as hooks and tool servers, which also run code. That code can do anything you can: open and change your files and use your network.",
       "If you don't know who made these files or who else can change them, stay in Restricted Mode.",
       visiblePath(workspace.rootPath),
     ].join("\n\n"),

@@ -144,7 +144,7 @@ interface FixtureOptions {
   // The workspace starts in Restricted Mode.
   restricted?: boolean;
   // Runs after each trust lookup resolves, before its spawn check.
-  afterTrustLookup?: (trust: WorkspaceTrust) => void;
+  afterTrustLookup?: (trust: WorkspaceTrust) => void | Promise<void>;
 }
 
 interface Fixture {
@@ -578,7 +578,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
     assertMayStartAgent: async (dispatchWorkspace) => {
       const check = await trust.assertTrusted(dispatchWorkspace);
-      options.afterTrustLookup?.(trust);
+      await options.afterTrustLookup?.(trust);
       return check;
     },
     listOpenWorkspaces: () => [],
@@ -807,6 +807,16 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
 });
+
+// As main's trust operations do: change the record, then tell dispatch.
+async function trustWorkspace(fixture: Fixture): Promise<void> {
+  await fixture.trust.trust(fixture.workspace);
+  fixture.service.trustChanged(WORKSPACE_ID);
+}
+async function restrictWorkspace(fixture: Fixture): Promise<void> {
+  await fixture.trust.restrict(WORKSPACE_ID);
+  fixture.service.trustChanged(WORKSPACE_ID);
+}
 
 describe("chatDispatchService", () => {
   it("does not provision an agent channel before the runner is enabled", async () => {
@@ -3391,14 +3401,14 @@ describe("chatDispatchService", () => {
       const fixture = await createFixture({ restricted: true, runner: { enabled: true } });
       await createAgentThread(fixture, { body: "First request.", authorUserId: "user_local" });
       await activate(fixture);
-      await fixture.trust.trust(fixture.workspace);
+      await trustWorkspace(fixture);
       await fixture.service.scanWorkspace(WORKSPACE_ID);
       const run = fixture.spawnCalls[0]!;
       await linkAgentReply(fixture, (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!.run.threadId, run.options.env.DOHC_RUN_ID!);
       run.process.emitExit(0);
       await vi.waitFor(async () => expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]));
 
-      await fixture.trust.restrict(WORKSPACE_ID);
+      await restrictWorkspace(fixture);
       const later = await createAgentThread(fixture, { body: "Second request.", authorUserId: "user_local" });
       await fixture.service.scanWorkspace(WORKSPACE_ID);
       expect(fixture.spawnCalls).toHaveLength(1);
@@ -3464,19 +3474,77 @@ describe("chatDispatchService", () => {
       expect(fixture.runActivity).toEqual({ acquires: 0, releases: 0 });
     });
 
-    it("stops a run whose workspace was restricted after the trust lookup, before it spawns", async () => {
-      const fixture = await createFixture({ afterTrustLookup: (trust) => trust.revoke(WORKSPACE_ID) });
-      await createAgentThread(fixture, { body: "Plan day 2", authorUserId: "user_local" });
+    it("puts back a request whose workspace was restricted after the trust lookup, and starts it once trusted", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const trigger = await createAgentThread(fixture, { body: "Plan day 2", authorUserId: "user_local" });
 
       await activate(fixture);
 
       expect(fixture.spawnCalls).toEqual([]);
-      await vi.waitFor(() => {
-        expect(fixture.notices).toEqual([expect.objectContaining({
-          title: "Your agent's run in \"Plan day 2\" failed to start",
-          body: AGENTS_RESTRICTED_MESSAGE,
-        })]);
+      // The request is back in line, held, with one attempt spent on the start.
+      expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({ state: "pending", attemptCount: 1 });
+      expect(fixture.requeues).toEqual([expect.objectContaining({ triggerMessageId: trigger.messageId })]);
+      expect(fixture.notices).toEqual([]);
+      expect(fixture.dispatchNotices.map(({ notice }) => notice)).toEqual([
+        { reason: "restricted", threadId: trigger.threadId, message: AGENTS_RESTRICTED_MESSAGE },
+      ]);
+
+      await trustWorkspace(fixture);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(trigger.threadId);
+    });
+
+    it("starts a request whose workspace was restricted and trusted again between the lookup and the spawn", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: async (trust) => {
+          if ((lookups += 1) !== 1) return;
+          trust.revoke(WORKSPACE_ID);
+          await trust.trust({ workspaceId: WORKSPACE_ID, rootPath: fixture.workspace.rootPath });
+        },
       });
+      const trigger = await createAgentThread(fixture, { body: "Plan day 3", authorUserId: "user_local" });
+
+      await activate(fixture);
+
+      // The old grant no longer holds, so the first start stops; the request
+      // goes back in line and the next drain, trusted, starts it.
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(trigger.threadId);
+      expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({ state: "running", attemptCount: 2 });
+      expect(fixture.notices).toEqual([]);
+      expect(fixture.dispatchNotices).toEqual([]);
+    });
+
+    it("leaves a request on its last attempt failed when Restricted Mode stops its start, and says so", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const trigger = await createAgentThread(fixture, { body: "Plan day 4", authorUserId: "user_local" });
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
+      });
+      const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      if (!first) throw new Error("Expected a first attempt.");
+      await fixture.dispatch.failRun({ runId: first.run.runId, reason: "app restart during run" });
+      await expect(fixture.requeueRaw({
+        workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, runId: first.run.runId,
+      })).resolves.toBe(true);
+
+      fixture.service.start();
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+      expect(fixture.spawnCalls).toEqual([]);
+      expect(fixture.requeues).toEqual([]);
+      expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("failed");
+      await vi.waitFor(() => expect(fixture.notices).toEqual([expect.objectContaining({
+        title: "Your agent's run in \"Plan day 4\" did not start in Restricted Mode",
+      })]));
     });
 
     it("stops a self-test whose workspace was restricted after the trust lookup, before it spawns", async () => {
@@ -3487,21 +3555,40 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls).toEqual([]);
     });
 
-    it("says a person's own message waits for trust, and not another person's or a trusted one", async () => {
+    it("asks once for a person's own held message, never for another person's, and again after a restrict", async () => {
       const fixture = await createFixture({ restricted: true });
       fixture.service.start();
-      const own = await createAgentThread(fixture, { body: "Mine.", authorUserId: "user_local" });
-      const scan = fixture.service.scanWorkspace(WORKSPACE_ID);
-      await expect(fixture.service.waitsForTrust(WORKSPACE_ID, own.messageId)).resolves.toBe(true);
-      await scan;
-      const synced = await createAgentThread(fixture, { body: "Theirs.", authorUserId: "user_other" });
-      void fixture.service.scanWorkspace(WORKSPACE_ID);
-      await expect(fixture.service.waitsForTrust(WORKSPACE_ID, synced.messageId)).resolves.toBe(false);
+      const ask = async (authorUserId: string, body: string) => {
+        const message = await createAgentThread(fixture, { body, authorUserId });
+        void fixture.service.scanWorkspace(WORKSPACE_ID);
+        return await fixture.service.waitsForTrust(WORKSPACE_ID, message.messageId);
+      };
+      await expect(ask("user_other", "Theirs.")).resolves.toBe(false);
+      await expect(ask("user_local", "Mine.")).resolves.toBe(true);
+      await expect(ask("user_local", "Mine again.")).resolves.toBe(false);
 
-      await fixture.trust.trust(fixture.workspace);
-      const trusted = await createAgentThread(fixture, { body: "Trusted now.", authorUserId: "user_local" });
-      void fixture.service.scanWorkspace(WORKSPACE_ID);
-      await expect(fixture.service.waitsForTrust(WORKSPACE_ID, trusted.messageId)).resolves.toBe(false);
+      await trustWorkspace(fixture);
+      await expect(ask("user_local", "Trusted now.")).resolves.toBe(false);
+      await restrictWorkspace(fixture);
+      await expect(ask("user_local", "Restricted again.")).resolves.toBe(true);
+      await expect(ask("user_local", "And again.")).resolves.toBe(false);
+    });
+
+    it("tells the person again after a restrict-again that came while dispatch was paused", async () => {
+      const fixture = await createFixture({ restricted: true });
+      const first = await createAgentThread(fixture, { body: "Held first.", authorUserId: "user_local" });
+      await activate(fixture);
+      expect(fixture.dispatchNotices.map(({ notice }) => notice.threadId)).toEqual([first.threadId]);
+
+      fixture.service.setPaused(true);
+      await trustWorkspace(fixture);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      await restrictWorkspace(fixture);
+      fixture.service.setPaused(false);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+      expect(fixture.spawnCalls).toEqual([]);
+      expect(fixture.dispatchNotices).toHaveLength(2);
     });
 
     it("stops a live run when the workspace is restricted, and starts nothing after it exits", async () => {
@@ -3555,6 +3642,25 @@ describe("chatDispatchService", () => {
       process.emitExit(null, "SIGTERM");
       await expect(stopping).resolves.toBeUndefined();
       await expect(result).resolves.toEqual({ ok: false, detail: SELF_TEST_RESTRICTED_DETAIL });
+    });
+
+    it("finds a timed-out self-test's runner until it exits, so a restrict cannot miss it", async () => {
+      vi.useFakeTimers();
+      const fixture = await createFixture();
+      const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1), { interval: 0 });
+      await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
+      await expect(result).resolves.toMatchObject({ ok: false, detail: expect.stringContaining("timed out") });
+
+      // The runner has had its SIGTERM and is still exiting.
+      fixture.trust.revoke(WORKSPACE_ID);
+      let settled = false;
+      const stopping = fixture.service.stopForRestrictedMode(WORKSPACE_ID).finally(() => { settled = true; });
+      const outcome = expect(stopping).rejects.toThrow(RUNNER_OUTLIVED_STOP);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS + 1_000);
+      await outcome;
     });
   });
 });

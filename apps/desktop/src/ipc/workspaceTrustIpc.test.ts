@@ -142,8 +142,11 @@ describe("main's workspace trust operations", () => {
       },
     });
     await h.request();
+    const persisting = vi.spyOn(h.trust, "persistRevocation");
     const restricting = h.restrict();
     await stopReached.promise;
+    // The save does not wait for the stop, so a quit meanwhile keeps it.
+    expect(persisting).toHaveBeenCalledWith("trip");
     // The Trust from another window is writing its grant when the stop ends.
     const writing = deferred<void>();
     const releaseWrite = deferred<void>();
@@ -154,10 +157,7 @@ describe("main's workspace trust operations", () => {
     };
     const trusting = h.request();
     await writing.promise;
-    const persisting = vi.spyOn(h.trust, "persistRevocation");
     stopping.reject(new Error("An app is still running because dohc could not stop it."));
-    // The restrict passed its first check and queued its save behind the write.
-    await vi.waitFor(() => expect(persisting).toHaveBeenCalledWith("trip"));
     releaseWrite.resolve();
     await expect(trusting).resolves.toEqual({ workspaceId: "trip", trusted: true });
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
@@ -299,5 +299,17 @@ describe("main's workspace trust operations", () => {
     expect(restrictFailure("agent", true)).toBe(
       "An agent in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.",
     );
+  });
+
+  it("saves Restricted Mode and tells windows without waiting for the agent to stop", async () => {
+    const agentStopping = deferred<void>();
+    const h = await harness({ answer: true, stopAgents: () => agentStopping.promise });
+    await h.request();
+    const restricting = h.restrict();
+    // The agent is still stopping, and a restart would already find the workspace restricted.
+    await vi.waitFor(async () => expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false));
+    await vi.waitFor(() => expect(h.notified.at(-1)).toEqual(["trip", false]));
+    agentStopping.resolve();
+    await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: false });
   });
 });

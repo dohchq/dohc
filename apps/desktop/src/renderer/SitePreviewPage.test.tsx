@@ -431,7 +431,7 @@ describe("SitePreviewPage", () => {
     it("shows Restricted Mode, not an error, when main refuses a stale start", async () => {
       bridgeMock.getSitePackage.mockResolvedValue({ ...packageApp, entryPath: null });
       bridgeMock.startSitePreview.mockRejectedValueOnce(new Error(
-        "Error invoking remote method 'desktop:start-site-preview': WorkspaceRestrictedError: This workspace is in Restricted Mode, so dohc does not run its apps' code. Trust the workspace to run it.",
+        "Error invoking remote method 'desktop:start-site-preview': WorkspaceRestrictedError: This workspace is in Restricted Mode, so dohc does not run its apps' code or start agents in it. Trust the workspace to allow them.",
       ));
       render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
       await screen.findByTestId("restricted-mode-state");

@@ -6963,9 +6963,11 @@ function registerIpcHandlers(): void {
     stopAgents: (workspaceId) => chatDispatchService.stopForRestrictedMode(workspaceId),
     notifyChanged: (workspaceId, trusted) => {
       notifyWorkspaceTrustChanged(workspaceId, trusted);
+      // The held notice and the ask on a send come once per trust change.
+      chatDispatchService.trustChanged(workspaceId);
+      chatDispatchNotices.clear(workspaceId, "restricted");
       if (!trusted) return;
       // Requests Restricted Mode held start now, without another message.
-      chatDispatchNotices.clear(workspaceId, "restricted");
       void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
         console.error("[desktop] chat dispatch scan after trust:", error);
       });

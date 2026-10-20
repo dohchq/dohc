@@ -84,36 +84,32 @@ export function workspaceTrustHandlers<
     restrictWorkspace: async (_input, { operation }) => {
       const { workspaceId } = operation.workspace;
       trust.revoke(workspaceId);
-      const [apps, agents] = await Promise.allSettled([
-        dependencies.stopAppCommands(operation),
-        dependencies.stopAgents(workspaceId),
-      ]);
-      if (apps.status === "rejected") {
-        console.warn("[desktop] could not stop a restricted workspace's app commands", apps.reason);
-      }
-      if (agents.status === "rejected") {
-        console.warn("[desktop] could not stop a restricted workspace's agent", agents.reason);
-      }
+      // The save starts with the stops, so quitting while an agent takes its
+      // time to exit still leaves the workspace restricted. Saves wait in
+      // line with Trust's writes and skip when a Trust replaced this.
+      const failed = (work: Promise<void>, what: string) => work.then(() => false, (error: unknown) => {
+        console.warn(`[desktop] could not ${what}`, error);
+        return true;
+      });
+      const early = trust.persistRevocation(workspaceId).catch(() => undefined);
+      const agentsFailing = failed(dependencies.stopAgents(workspaceId), "stop a restricted workspace's agent");
+      const appsFailed = await failed(dependencies.stopAppCommands(operation), "stop a restricted workspace's app commands");
       // Windows start their static previews again, unless a Trust the
       // person gave meanwhile already told them otherwise.
       if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
-      const stillRunning = apps.status === "rejected"
-        ? agents.status === "rejected" ? "both" : "app"
-        : agents.status === "rejected" ? "agent" : null;
-      // A Trust given meanwhile replaces this restrict. Apps that started
-      // since belong to the trusted workspace, so a stop that counted them
-      // is not a failure, and there is nothing to save.
+      const agentsFailed = await agentsFailing;
+      await early;
+      // Saving again lines up behind a Trust that is still writing, and
+      // tries once more when the first save failed.
+      const saveFailed = await failed(trust.persistRevocation(workspaceId), "save Restricted Mode");
+      // A Trust given meanwhile replaces this restrict. Apps and agents that
+      // started since belong to the trusted workspace, so a stop that counted
+      // them is not a failure, and the save skipped.
       if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
-      let saveFailed = false;
-      try {
-        await trust.persistRevocation(workspaceId);
-      } catch (error) {
-        console.warn("[desktop] could not save Restricted Mode", error);
-        saveFailed = true;
-      }
-      // The save can wait behind a Trust's write and then skip, so ask again.
-      if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
-      const failure = restrictFailure(stillRunning, saveFailed);
+      const failure = restrictFailure(
+        appsFailed ? agentsFailed ? "both" : "app" : agentsFailed ? "agent" : null,
+        saveFailed,
+      );
       if (failure) throw new Error(failure);
       return { workspaceId, trusted: false };
     },
