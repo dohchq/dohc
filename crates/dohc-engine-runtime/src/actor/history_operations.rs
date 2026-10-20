@@ -1588,13 +1588,9 @@ fn publish_undo_member(
             },
         )?;
     }
-    journal_moment_outbound_with_batch_in_tx(
-        tx,
-        ws,
-        &m.moment_id,
-        false,
-        &mut journal_eligibility,
-    )?;
+    if !live {
+        journal_moment_outbound_with_batch_in_tx(tx, ws, &m.moment_id, false, &mut journal_eligibility)?;
+    }
     Ok(())
 }
 

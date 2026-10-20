@@ -1,3 +1,49 @@
+#[allow(clippy::too_many_arguments)]
+async fn settle_fence_session(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    events: &EngineEvents,
+    open: &OpenWorkspace,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    // Mirrors ydoc.close's default-settle rule: only an untouched
+    // absent-lineage session (nothing to settle) skips the settling sweep.
+    let settle = !(session.lineage_absent && session.first_update_pending);
+    if settle {
+        let first = settle_ydoc_session_for_version_fence(
+            sessions,
+            self_writes,
+            events,
+            open,
+            session_id,
+            &session,
+            token,
+        )
+        .await;
+        match first {
+            Ok(()) => {}
+            Err(error) if error.message == "ydoc-remote-updates-pending" => {
+                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
+                settle_ydoc_session_for_version_fence(
+                    sessions,
+                    self_writes,
+                    events,
+                    open,
+                    session_id,
+                    &refreshed,
+                    token,
+                )
+                .await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 use crate::EngineService;
 use crate::SelfWriteSuppression;
 use crate::capture_driver;
@@ -93,39 +139,7 @@ async fn close_ydoc_session_for_version_fence(
     _summary: &str,
     token: &CancellationToken,
 ) -> Result<(), WireError> {
-    let session = version_fence_session_view(sessions, handle, session_id)?;
-    // Mirrors ydoc.close's default-settle rule: only an untouched
-    // absent-lineage session (nothing to settle) skips the settling sweep.
-    let settle = !(session.lineage_absent && session.first_update_pending);
-    if settle {
-        let first = settle_ydoc_session_for_version_fence(
-            sessions,
-            self_writes,
-            events,
-            open,
-            session_id,
-            &session,
-            token,
-        )
-        .await;
-        match first {
-            Ok(()) => {}
-            Err(error) if error.message == "ydoc-remote-updates-pending" => {
-                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
-                settle_ydoc_session_for_version_fence(
-                    sessions,
-                    self_writes,
-                    events,
-                    open,
-                    session_id,
-                    &refreshed,
-                    token,
-                )
-                .await?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    settle_fence_session(sessions, self_writes, events, open, handle, session_id, token).await?;
 
     let session = version_fence_session_view(sessions, handle, session_id)?;
     let now = now_ms()?;
@@ -345,6 +359,12 @@ pub(super) fn mutate_close_write_session(id: String) {
 }
 
 impl VersionFence {
+    pub(super) fn link_document_is_open(&self, handle: &WorkspaceHandle) -> dohc_engine_runtime::actor::DocumentIsOpen {
+        let sessions = self.sessions.clone();
+        let handle = handle.clone();
+        Arc::new(move |key| lock(&sessions).values().any(|s| s.workspace == handle && s.key == *key))
+    }
+
     pub(super) fn link_document_resync(
         &self,
         handle: &WorkspaceHandle,
@@ -614,11 +634,11 @@ impl VersionFence {
         let mut held = HashMap::new();
         for member in &result.moments {
             if held.contains_key(&member.object_id)
-                || lock(&self.sessions).values().any(|session| {
+                || (member.operation == dohc_engine_domain::MomentOp::Write && lock(&self.sessions).values().any(|session| {
                     session.key.workspace_id == open.workspace_id
                         && session.key.version_id == result.version_id
                         && session.key.object_id == member.object_id
-                })
+                }))
             {
                 continue;
             }
@@ -878,16 +898,7 @@ impl VersionFence {
                 let keep_write = keep_write
                     && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
                 if keep_write {
-                    settle_ydoc_session_for_version_fence(
-                        &sessions,
-                        &self_writes,
-                        &events,
-                        &open,
-                        &session_id,
-                        &view,
-                        &token,
-                    )
-                    .await?;
+                    settle_fence_session(&sessions, &self_writes, &events, &open, &handle, &session_id, &token).await?;
                 } else {
                     close_ydoc_session_for_version_fence(
                         &sessions,

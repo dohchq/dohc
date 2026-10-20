@@ -54,7 +54,7 @@ pub(super) fn prepare_doc(
     if old.len() != new.len() {
         return Ok(None);
     }
-    let (projection, spans) = doc.wikilink_spans()?;
+    let Ok((projection, spans)) = doc.wikilink_spans() else { return Ok(None); };
     if projection != before && doc.preserved_markdown_source(&projection).as_deref() != Some(before)
     {
         return Ok(None);
@@ -90,7 +90,7 @@ pub(super) fn prepare_doc(
     if edits.is_empty() {
         return Ok(None);
     }
-    let update = doc.stage_wikilink_targets(after, &edits)?;
+    let Ok(update) = doc.stage_wikilink_targets(after, &edits) else { return Ok(None); };
     Ok(Some(Edit { marker, update }))
 }
 
@@ -164,6 +164,8 @@ pub(super) fn baseline(
     key: &DocKey,
     path: &str,
     token: &CancellationToken,
+    recorder: &dyn super::materialization::SelfWriteRecorder,
+    relevant: impl FnOnce(&str) -> bool,
 ) -> Result<bool, RuntimeError> {
     let Some(marker) = store.read_with(|c| read_marker_in(c, key))? else {
         return Ok(false);
@@ -171,6 +173,11 @@ pub(super) fn baseline(
     if marker.content_kind != ContentKind::Richdoc {
         return Ok(false);
     }
+    let doc = store.read_with(|c| load_doc_in(c, key))?;
+    if doc.has_pending_dependencies() { return Ok(false); }
+    let Ok(projection) = doc.project(marker.content_kind) else { return Ok(false); };
+    let text = doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content);
+    if !relevant(&text) { return Ok(false); }
     store.read_with(|c| {
         super::history_operations::check_path_ownership(
             c,
@@ -195,7 +202,7 @@ pub(super) fn baseline(
         Some(head.blob_sha256),
         None,
         "link-rewrite-baseline",
-        &(),
+        recorder,
         crate::links::now_ms(),
         &dohc_engine_storage::NoFaults,
         token,
@@ -249,12 +256,6 @@ pub(super) fn write(
             &input.object_id,
             &input.path,
             &input.text,
-        )?;
-        super::journal::journal_moment_outbound_in_tx(
-            tx,
-            &input.workspace_id,
-            &result.moment.moment_id,
-            result.deduped,
         )?;
         settled(
             tx,

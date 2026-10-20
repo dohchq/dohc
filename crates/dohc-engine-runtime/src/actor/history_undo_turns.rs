@@ -51,7 +51,7 @@ fn inverse_input(
                 super::super::link_documents::prepare(conn, &key, &before, &text)?.ok_or(
                     DomainError::UndoRefused {
                         path: member.effect.path.clone(),
-                        reason: "link changed after rename",
+                        reason: "wikilink element unavailable",
                     },
                 )?,
             )
@@ -489,8 +489,7 @@ impl ActorHandle {
             let read_db = db.clone();
             let disk_root = root.clone();
             let prepare_token = token.clone();
-            let prepare_open = open_documents.clone();
-            let (prepared, body, prepared_inputs) = tokio::task::spawn_blocking(move || {
+            let (mut prepared, _, mut prepared_inputs) = tokio::task::spawn_blocking(move || {
                 let mut store = EngineStore::open_read_only(&read_db)?;
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
@@ -543,7 +542,7 @@ impl ActorHandle {
                 let mut inputs = std::collections::VecDeque::new();
                 for member in &prepared.members {
                     if prepare_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                    let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member, prepare_open.as_ref()));
+                    let inverse = reader.read_with(|conn| inverse_input(conn, &prepared, member, None));
                     let inverse = match inverse {
                         value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason: "link diff budget exceeded", ..}))) => value,
                         Err(error) => return Err(error),
@@ -553,6 +552,42 @@ impl ActorHandle {
                 let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
                 Ok::<_, RuntimeError>((prepared, body, inputs))
             }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+            for index in 0..prepared.members.len() {
+                let member = &mut prepared.members[index];
+                if member.effect.operation != "write" { continue; }
+                let capture = gates[0].clone().lock_owned().await;
+                let sessions = tokio::select! {
+                    () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                    guard = gates[1].clone().lock_owned() => guard,
+                };
+                let key = DocKey::new(&prepared.workspace, &prepared.version, &member.effect.object_id)?;
+                if !open_documents.as_ref().is_some_and(|(is_open,_)| is_open(&key)) { continue; }
+                let (key2, path, root2, recorder2, token2) = (key.clone(), member.effect.path.clone(), root.clone(), recorder.clone(), token.clone());
+                let (usable, head, sha) = self.run(move |store,cache| {
+                    let usable = super::super::link_documents::baseline(store,cache,&root2,&key2,&path,&token2,recorder2.as_ref(), |_| true)?;
+                    let head = store.read_with(|c| signature(c,&key2.workspace_id,&key2.version_id,&key2.object_id))?;
+                    let sha = store.read_with(|c| rename_head_sha(c, &key2.workspace_id, &key2.version_id, &key2.object_id))?;
+                    Ok((usable,head,sha))
+                }).await?;
+                member.head = head;
+                member.sha = Some(sha);
+                let mut single = prepared.clone();
+                let member = single.members.remove(index);
+                let open = open_documents.clone();
+                let read_db = db.clone();
+                let disk_root = root.clone();
+                let input = tokio::task::spawn_blocking(move || {
+                    let _guards = (capture, sessions);
+                    let reader = EngineStore::open_read_only(&read_db)?;
+                    let inverse = if usable {
+                        reader.read_with(|c| inverse_input(c,&single,&member,open.as_ref()))
+                    } else { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"document projection unavailable"}.into()) };
+                    if let Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link changed after rename",..})) = &inverse { return inverse.map(|_| unreachable!()); }
+                    Ok(Prepared {inverse,disk:disk_check(&disk_root,&member)})
+                }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+                prepared_inputs[index] = input;
+            }
+            let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
             inputs = prepared_inputs;
             let prepared = Arc::new(prepared);
             let body = Arc::new(body);
@@ -685,7 +720,6 @@ impl ActorHandle {
             let cached: Vec<_> = (0..count).map(|_| inputs.pop_front()).collect();
             let disk_root = root.clone();
             let p = plan.clone();
-            let prepare_open = open_documents.clone();
             let (batch, policy, reader) = tokio::task::spawn_blocking(move || {
                 let batch = cached
                     .into_iter()
@@ -695,7 +729,7 @@ impl ActorHandle {
                             let member = &p.members[prepared_cursor + offset];
                             Prepared {
                                 inverse: inverse_store.read_with(|conn| {
-                                    inverse_input(conn, &p, member, prepare_open.as_ref())
+                                    inverse_input(conn, &p, member, None)
                                 }),
                                 disk: disk_check(&disk_root, member),
                             }
@@ -760,7 +794,11 @@ impl ActorHandle {
                             let outcome = checks.and_then(|()| {
                                 let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                                 crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
-                                let inverse = inverse?;
+                                let mut inverse = inverse?;
+                                let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
+                                if member.effect.operation == "write" {
+                                    inverse = inverse_input(tx,&p,member,turn_open.as_ref())?;
+                                }
                                 let live = inverse.as_ref().and_then(|i| i.live.as_ref());
                                 let key = DocKey::new(&p.workspace,&p.version,&member.effect.object_id)?;
                                 if let Some(edit) = live {
@@ -792,6 +830,9 @@ impl ActorHandle {
                                     tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
                                     let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
+                                    if refusal {
+                                        tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),error.to_string()]).map_err(StorageError::persist_public)?;
+                                    }
                                     if !refusal {
                                         tx.execute("UPDATE history_undo_plans SET attempts=attempts+1,last_error=?2 WHERE request_id=?1",params![p.request,error.to_string()]).map_err(StorageError::persist_public)?;
                                         let attempts: i64 = tx.query_row("SELECT attempts FROM history_undo_plans WHERE request_id=?1",[&p.request],|r|r.get(0)).map_err(StorageError::corrupt_public)?;

@@ -222,9 +222,11 @@ impl ActorHandle {
         leases: LeaseRegistry,
         session_ops: Arc<tokio::sync::Mutex<()>>,
         faults: Arc<dyn FaultInjector>,
-        resync: super::link_documents::DocumentResync,
+        documents: (super::link_documents::DocumentIsOpen, super::link_documents::DocumentResync),
+        recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
+        let (is_open, resync) = documents;
         let _pass = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
@@ -367,9 +369,9 @@ impl ActorHandle {
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)?;
         let mut unchecked = plan.candidates.unchecked.clone();
-        let mut cursor = 0;
+        let mut pending: VecDeque<_> = plan.candidates.sources.clone().into();
         let mut stopped = false;
-        'sources: while cursor < plan.candidates.sources.len() {
+        'sources: while !pending.is_empty() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -377,14 +379,15 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let (ws, p, open, read_root, read_token) = (
+            let (ws, p, open, read_root, read_token, read_recorder, check_before, check_after) = (
                 workspace.clone(),
                 plan.clone(),
-                leases.clone(),
+                is_open.clone(),
                 root.clone(),
                 token.clone(),
+                recorder.clone(), before.clone(), after.clone(),
             );
-            let (next_cursor, sources, skipped, admitted) = self
+            let (remaining, sources, skipped, admitted) = self
                 .run(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
@@ -396,22 +399,24 @@ impl ActorHandle {
                         .get_active_version(&ws)?
                         .version_id;
                     if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p, true))? {
-                        return Ok((cursor, sources, skipped, false));
+                        return Ok((pending, sources, skipped, false));
                     }
-                    let mut next = cursor;
-                    while next < p.candidates.sources.len() && next - cursor < 16 {
+                    let mut read_count = 0;
+                    while let Some((object, path)) = pending.pop_front() {
+                        read_count += 1;
                         #[cfg(test)]
                         tests::source();
-                        let (object, path) = &p.candidates.sources[next];
-                        let key = DocKey::new(&ws, &p.version, object)?;
-                        let usable = if open.is_held(&key) {
+                        let key = DocKey::new(&ws, &p.version, &object)?;
+                        let usable = if open(&key) {
                             match super::link_documents::baseline(
                                 store,
                                 cache,
                                 &read_root,
                                 &key,
-                                path,
+                                &path,
                                 &read_token,
+                                read_recorder.as_ref(),
+                                |text| rewrite::forward(text, &path, p.rename.before_path.as_deref().unwrap_or(""), &p.rename.path, &check_before, &check_after).is_some_and(|(_, links)| links > 0),
                             ) {
                                 Ok(value) => value,
                                 Err(
@@ -427,10 +432,10 @@ impl ActorHandle {
                         };
                         if usable {
                             let source = store.read_with(|conn| {
-                                let source = incoming::read_source(conn, &ws, &p.version, object)?;
+                                let source = incoming::read_source(conn, &ws, &p.version, &object)?;
                                 #[cfg(test)]
-                                tests::after_read(conn, &ws, object);
-                                let live = if open.is_held(&key) {
+                                tests::after_read(conn, &ws, &object);
+                                let live = if open(&key) {
                                     dohc_engine_collab::read_marker_in(conn, &key)?
                                         .map(|marker| {
                                             dohc_engine_collab::load_doc_in(conn, &key)
@@ -450,25 +455,23 @@ impl ActorHandle {
                         } else {
                             skipped.push(path.clone());
                         }
-                        next += 1;
-                        if started.elapsed() >= Duration::from_millis(5) {
+                        if read_count == 16 || started.elapsed() >= Duration::from_millis(5) {
                             break;
                         }
                     }
-                    Ok((next, sources, skipped, true))
+                    Ok((pending, sources, skipped, true))
                 })
                 .await?;
+            pending = remaining;
             unchecked.extend(skipped);
             if !admitted {
                 stopped = true;
                 unchecked.extend(
-                    plan.candidates.sources[cursor..]
-                        .iter()
+                    pending.iter()
                         .map(|(_, p)| p.clone()),
                 );
                 break;
             }
-            cursor = next_cursor;
             let (p, parse_before, parse_after) = (plan.clone(), before.clone(), after.clone());
             let (mut prepared, skipped) = tokio::task::spawn_blocking(move || {
                 let mut prepared = VecDeque::new();
@@ -491,6 +494,7 @@ impl ActorHandle {
                     };
                     match (parsed.head, edit) {
                         (Some(head), Some((text, links))) if links > 0 => {
+                            let was_open = live.is_some();
                             let live = live
                                 .map(|(doc, marker)| {
                                     super::link_documents::prepare_doc(
@@ -502,7 +506,7 @@ impl ActorHandle {
                                 })
                                 .transpose()?
                                 .flatten();
-                            prepared.push_back((object, head, text, links, live))
+                            if was_open && live.is_none() { skipped.push(path); } else { prepared.push_back((object, head, text, links, live)); }
                         }
                         (Some(_), Some(_)) => {}
                         _ => skipped.push(path),
@@ -514,93 +518,6 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)??;
             unchecked.extend(skipped);
             while !prepared.is_empty() {
-                // A source can open after its off-actor parse. Refresh that one
-                // source through a separate turn, then stage the edit off actor.
-                let (object, head, _, _, live) = prepared.front().unwrap();
-                let refresh_path = head.path.clone();
-                let key = DocKey::new(&workspace, &plan.version, object)?;
-                if live.is_none() && leases.is_held(&key) {
-                    let (object, old_head, _, _, _) = prepared.pop_front().unwrap();
-                    let (ws, p, root, refresh_token) =
-                        (workspace.clone(), plan.clone(), root.clone(), token.clone());
-                    let guard = session_ops.clone().lock_owned().await;
-                    let refreshed = self
-                        .run(move |store, cache| {
-                            let _guard = guard;
-                            match super::link_documents::baseline(
-                                store,
-                                cache,
-                                &root,
-                                &key,
-                                &old_head.path,
-                                &refresh_token,
-                            ) {
-                                Ok(true) => {}
-                                Ok(false)
-                                | Err(
-                                    RuntimeError::Domain(DomainError::UndoRefused { .. })
-                                    | RuntimeError::Sync(
-                                        dohc_engine_sync::SyncError::LiveDocumentBindingActive,
-                                    ),
-                                ) => return Ok(None),
-                                Err(error) => return Err(error),
-                            }
-                            store.read_with(|conn| {
-                                let source =
-                                    incoming::read_source(conn, &ws, &p.version, &key.object_id)?;
-                                let marker = dohc_engine_collab::read_marker_in(conn, &key)?;
-                                let doc = dohc_engine_collab::load_doc_in(conn, &key)?;
-                                Ok::<_, RuntimeError>(
-                                    source
-                                        .zip(marker)
-                                        .map(|(source, marker)| (source, marker, doc)),
-                                )
-                            })
-                        })
-                        .await?;
-                    if let Some((source, marker, doc)) = refreshed {
-                        let (p, before, after) = (plan.clone(), before.clone(), after.clone());
-                        let item = tokio::task::spawn_blocking(move || {
-                            let original = source.text().unwrap_or("").to_owned();
-                            let parsed = source.parse()?;
-                            let Some(head) = parsed.head else {
-                                return Ok(None);
-                            };
-                            if parsed.reason.is_some() {
-                                return Ok(None);
-                            }
-                            let Some((text, links)) = rewrite::forward(
-                                &original,
-                                &head.path,
-                                p.rename.before_path.as_deref().unwrap_or(""),
-                                &p.rename.path,
-                                &before,
-                                &after,
-                            ) else {
-                                return Ok(None);
-                            };
-                            let Some(edit) =
-                                super::link_documents::prepare_doc(&doc, marker, &original, &text)?
-                            else {
-                                return Ok(None);
-                            };
-                            Ok::<_, RuntimeError>(Some((object, head, text, links, Some(edit))))
-                        })
-                        .await
-                        .map_err(|_| RuntimeError::ActorUnavailable)??;
-                        if let Some(item) = item {
-                            prepared.push_front(item);
-                        } else {
-                            unchecked.push(refresh_path.clone());
-                        }
-                    } else {
-                        unchecked.push(refresh_path.clone());
-                    }
-                    if prepared.is_empty() {
-                        break;
-                    }
-                }
-
                 let serial = tokio::select! {
                     () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     guard = Arc::clone(&session_ops).lock_owned() => guard,
@@ -618,6 +535,7 @@ impl ActorHandle {
                     resync.clone(),
                     result.clone(),
                 );
+                let turn_open = is_open.clone();
                 let committed = self
                 .run(move |store, cache| {
                     #[cfg(test)]
@@ -625,6 +543,7 @@ impl ActorHandle {
                     let _admission = serial;
                     let started = Instant::now();
                     let mut skipped = Vec::new();
+                    let mut refresh = Vec::new();
                     while let Some((object, head, text, links, live)) = prepared.pop_front() {
                     #[cfg(test)]
                     tests::source();
@@ -635,9 +554,11 @@ impl ActorHandle {
                         Err(CollabError::LeaseHeld) => None,
                         Err(error) => return Err(error.into()),
                     };
+                    if lease.is_none() && !turn_open(&key) {
+                        skipped.push(source_path); continue;
+                    }
                     if lease.is_none() && live.is_none() {
-                        prepared.push_front((object,head,text,links,live));
-                        break;
+                        refresh.push((object, source_path)); continue;
                     }
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
                     let committed = (|| -> Result<bool, RuntimeError> {
@@ -742,16 +663,16 @@ impl ActorHandle {
                     if committed { next_result = next; } else { skipped.push(source_path); }
                     if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
-                    Ok((prepared, next_result, skipped, stopped))
+                    Ok((prepared, next_result, skipped, stopped, refresh))
                 }).await?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
                 stopped = committed.3;
+                pending.extend(committed.4);
                 if stopped {
                     unchecked.extend(prepared.drain(..).map(|(_, head, _, _, _)| head.path));
                     unchecked.extend(
-                        plan.candidates.sources[cursor..]
-                            .iter()
+                        pending.iter()
                             .map(|(_, path)| path.clone()),
                     );
                     break 'sources;

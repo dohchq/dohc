@@ -103,7 +103,9 @@ impl Fixture {
                     &root,
                     &key,
                     &path,
-                    &CancellationToken::new()
+                    &CancellationToken::new(),
+                    &(),
+                    |_| true
                 )?);
                 Ok(())
             })
@@ -553,5 +555,98 @@ async fn an_editor_opened_after_read_uses_its_ydoc_and_stays_open() {
             .is_held(&DocKey::new(&f.ws, "main", "source-0000").unwrap())
     );
     drop(held.lock().unwrap().take());
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
+    let f = Fixture::new(1,1);
+    let (lease,_) = f.open_document("source-0000").await;
+    f.pass("fence-gap", Arc::new(NoFaults)).await.unwrap();
+    f.settle_document("source-0000").await;
+    f.type_document("source-0000", "typing [[new#part|label]] [[./new.md]] [old](old.md)").await;
+    let result = f.undo_open().await.unwrap();
+    assert!(result.not_restored.is_empty());
+    assert_eq!(f.text("source-0000.md").await, "typing [[old#part|label]] [[./old.md]] [old](old.md)");
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_does_not_write_through_another_undos_internal_lease() {
+    let f = Fixture::new(1,1);
+    let (session,_) = f.open_document("source-0000").await;
+    f.settle_document("source-0000").await;
+    drop(session);
+    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
+    let lease = f.leases.acquire_internal(&key).unwrap();
+    let before = f.document("source-0000").await.encode_state_vector();
+    let result = f.pass("other-undo-lease",Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"],0);
+    assert_eq!(result["unchecked"],json!(["source-0000.md"]));
+    assert_eq!(f.document("source-0000").await.encode_state_vector(),before);
+    assert_eq!(f.text("source-0000.md").await,BODY);
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage() {
+    let f = Fixture::new(1,1);
+    let (lease,_) = f.open_document("source-0000").await;
+    f.pass("reopen-gap",Arc::new(NoFaults)).await.unwrap();
+    f.publish().await;
+    f.settle_document("source-0000").await;
+    drop(lease);
+    let request = format!("{}-undo",f.ws);
+    let (receive,barrier) = undo_probe::pause_inverse(&request);
+    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
+    let leases = f.leases.clone();
+    let reopen = async move {
+        tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
+        let lease = leases.acquire(&key).unwrap();
+        tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
+        lease
+    };
+    let (result,lease) = tokio::join!(f.undo_open(),reopen);
+    assert!(result.unwrap().not_restored.is_empty());
+    assert!(f.document("source-0000").await.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
+    assert_eq!(f.text("source-0000.md").await,BODY);
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
+    let f = Fixture::new(1,1);
+    let (lease,_) = f.open_document("source-0000").await;
+    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
+    f.actor.run(move |store,_| {
+        let marker = store.read_with(|c| dohc_engine_collab::read_marker_in(c,&key))?.unwrap();
+        let doc = Ydoc::wire();
+        let body = format!("{}{}", "[[a]] ".repeat(16), "x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200));
+        doc.richdoc_wikilinks_for_test(&body)?;
+        let before = doc.project(ContentKind::Richdoc)?.content;
+        assert!(matches!(doc.wikilink_spans(),Err(dohc_engine_collab::CollabError::ProjectionTooLarge {..})));
+        let after = before.replacen("[[a]]","[[b]]",1);
+        assert!(super::super::super::link_documents::prepare_doc(&doc,marker,&before,&after)?.is_none());
+        Ok(())
+    }).await.unwrap();
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
+    let f = Fixture::new(2,2);
+    f.pass("unmapped-inverse",Arc::new(NoFaults)).await.unwrap();
+    f.publish().await;
+    let (lease,_) = f.open_document_with_elements("source-0000",false).await;
+    let result = f.undo_open().await.unwrap();
+    assert_eq!(result.not_restored.len(),1);
+    assert_eq!(result.not_restored[0].path,"source-0000.md");
+    assert_eq!(f.text("source-0001.md").await,BODY);
+    assert!(f.text("source-0000.md").await.contains("[[new#part"));
+    drop(lease);
     f.close().await;
 }

@@ -183,7 +183,8 @@ impl Fixture {
                 self.leases.clone(),
                 self.serial.clone(),
                 faults,
-                Arc::new(|_| {}),
+                ( { let leases = self.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                Arc::new(()),
                 CancellationToken::new(),
             )
             .await
@@ -302,7 +303,8 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
             f.leases.clone(),
             f.serial.clone(),
             Arc::new(NoFaults),
-            Arc::new(|_| {}),
+            ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+            Arc::new(()),
             CancellationToken::new(),
         )
         .await;
@@ -410,7 +412,8 @@ async fn a_passive_handle_cannot_originate_link_rewrites() {
             LeaseRegistry::new().scoped(&root),
             Arc::default(),
             Arc::new(NoFaults),
-            Arc::new(|_| {}),
+            (Arc::new(|_| false), Arc::new(|_| {})),
+            Arc::new(()),
             CancellationToken::new(),
         )
         .await;
@@ -725,7 +728,8 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
-                    Arc::new(|_| {}),
+                    ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                    Arc::new(()),
                     CancellationToken::new()
                 )
                 .await,
@@ -949,7 +953,8 @@ async fn case_only_and_delete_only_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
-                    Arc::new(|_| {}),
+                    ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                    Arc::new(()),
                     CancellationToken::new()
                 )
                 .await,

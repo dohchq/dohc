@@ -534,8 +534,9 @@ impl EngineService {
                 self.leases.scoped(&open.root),
                 std::sync::Arc::clone(&open.session_ops),
                 std::sync::Arc::new(dohc_engine_runtime::NoFaults),
-                self.version_fence()
-                    .link_document_resync(handle.ok_or_else(workspace_unavailable)?),
+                (self.version_fence().link_document_is_open(handle.ok_or_else(workspace_unavailable)?),
+                 self.version_fence().link_document_resync(handle.ok_or_else(workspace_unavailable)?)),
+                std::sync::Arc::new(self.self_writes.scoped(&open.root)),
                 cancellation.token(),
             ),
         )
