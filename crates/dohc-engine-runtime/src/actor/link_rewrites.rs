@@ -222,7 +222,10 @@ impl ActorHandle {
         leases: LeaseRegistry,
         session_ops: Arc<tokio::sync::Mutex<()>>,
         faults: Arc<dyn FaultInjector>,
-        documents: (super::link_documents::DocumentIsOpen, super::link_documents::DocumentResync),
+        documents: (
+            super::link_documents::DocumentIsOpen,
+            super::link_documents::DocumentResync,
+        ),
         recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
@@ -385,7 +388,9 @@ impl ActorHandle {
                 is_open.clone(),
                 root.clone(),
                 token.clone(),
-                recorder.clone(), before.clone(), after.clone(),
+                recorder.clone(),
+                before.clone(),
+                after.clone(),
             );
             let (remaining, sources, skipped, admitted) = self
                 .run(move |store, cache| {
@@ -402,8 +407,12 @@ impl ActorHandle {
                         return Ok((pending, sources, skipped, false));
                     }
                     let mut read_count = 0;
-                    while read_count < 16 && (read_count == 0 || started.elapsed() < Duration::from_millis(5)) {
-                        let Some((object, path)) = pending.pop_front() else { break; };
+                    while read_count < 16
+                        && (read_count == 0 || started.elapsed() < Duration::from_millis(5))
+                    {
+                        let Some((object, path)) = pending.pop_front() else {
+                            break;
+                        };
                         read_count += 1;
                         #[cfg(test)]
                         tests::source();
@@ -419,7 +428,15 @@ impl ActorHandle {
                                 &read_token,
                                 read_recorder.as_ref(),
                                 |text| {
-                                    irrelevant = rewrite::forward(text, &path, p.rename.before_path.as_deref().unwrap_or(""), &p.rename.path, &check_before, &check_after).is_some_and(|(_, links)| links == 0);
+                                    irrelevant = rewrite::forward(
+                                        text,
+                                        &path,
+                                        p.rename.before_path.as_deref().unwrap_or(""),
+                                        &p.rename.path,
+                                        &check_before,
+                                        &check_after,
+                                    )
+                                    .is_some_and(|(_, links)| links == 0);
                                     !irrelevant
                                 },
                             ) {
@@ -435,7 +452,9 @@ impl ActorHandle {
                         } else {
                             true
                         };
-                        if irrelevant { continue; }
+                        if irrelevant {
+                            continue;
+                        }
                         if usable {
                             let source = store.read_with(|conn| {
                                 let source = incoming::read_source(conn, &ws, &p.version, &object)?;
@@ -469,10 +488,7 @@ impl ActorHandle {
             unchecked.extend(skipped);
             if !admitted {
                 stopped = true;
-                unchecked.extend(
-                    pending.iter()
-                        .map(|(_, p)| p.clone()),
-                );
+                unchecked.extend(pending.iter().map(|(_, p)| p.clone()));
                 break;
             }
             let (p, parse_before, parse_after) = (plan.clone(), before.clone(), after.clone());
@@ -509,7 +525,11 @@ impl ActorHandle {
                                 })
                                 .transpose()?
                                 .flatten();
-                            if was_open && live.is_none() { skipped.push(path); } else { prepared.push_back((object, head, text, links, live)); }
+                            if was_open && live.is_none() {
+                                skipped.push(path);
+                            } else {
+                                prepared.push_back((object, head, text, links, live));
+                            }
                         }
                         (Some(_), Some(_)) => {}
                         _ => skipped.push(path),
@@ -674,10 +694,7 @@ impl ActorHandle {
                 pending.extend(committed.4);
                 if stopped {
                     unchecked.extend(prepared.drain(..).map(|(_, head, _, _, _)| head.path));
-                    unchecked.extend(
-                        pending.iter()
-                            .map(|(_, path)| path.clone()),
-                    );
+                    unchecked.extend(pending.iter().map(|(_, path)| path.clone()));
                     break 'sources;
                 }
             }

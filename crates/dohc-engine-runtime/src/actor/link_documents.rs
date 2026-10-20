@@ -54,7 +54,9 @@ pub(super) fn prepare_doc(
     if old.len() != new.len() {
         return Ok(None);
     }
-    let Ok((projection, spans)) = doc.wikilink_spans() else { return Ok(None); };
+    let Ok((projection, spans)) = doc.wikilink_spans() else {
+        return Ok(None);
+    };
     if projection != before && doc.preserved_markdown_source(&projection).as_deref() != Some(before)
     {
         return Ok(None);
@@ -90,7 +92,9 @@ pub(super) fn prepare_doc(
     if edits.is_empty() {
         return Ok(None);
     }
-    let Ok(update) = doc.stage_wikilink_targets(after, &edits) else { return Ok(None); };
+    let Ok(update) = doc.stage_wikilink_targets(after, &edits) else {
+        return Ok(None);
+    };
     Ok(Some(Edit { marker, update }))
 }
 
@@ -175,10 +179,18 @@ pub(super) fn baseline(
         return Ok(false);
     }
     let doc = store.read_with(|c| load_doc_in(c, key))?;
-    if doc.has_pending_dependencies() { return Ok(false); }
-    let Ok(projection) = doc.project(marker.content_kind) else { return Ok(false); };
-    let text = doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content);
-    if !relevant(&text) { return Ok(false); }
+    if doc.has_pending_dependencies() {
+        return Ok(false);
+    }
+    let Ok(projection) = doc.project(marker.content_kind) else {
+        return Ok(false);
+    };
+    let text = doc
+        .preserved_markdown_source(&projection.content)
+        .unwrap_or(projection.content);
+    if !relevant(&text) {
+        return Ok(false);
+    }
     store.read_with(|c| {
         super::history_operations::check_path_ownership(
             c,
@@ -216,7 +228,9 @@ pub(super) fn baseline(
     match outcome {
         Ok(_) => {}
         Err(RuntimeError::Collab(_)) => return Ok(false),
-        Err(RuntimeError::Domain(DomainError::InvalidInput {reason:"ydoc-remote-updates-pending"})) => return Ok(false),
+        Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "ydoc-remote-updates-pending",
+        })) => return Ok(false),
         Err(error) => return Err(error),
     }
     Ok(true)

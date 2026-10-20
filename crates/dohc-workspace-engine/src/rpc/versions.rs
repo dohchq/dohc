@@ -139,7 +139,16 @@ async fn close_ydoc_session_for_version_fence(
     _summary: &str,
     token: &CancellationToken,
 ) -> Result<(), WireError> {
-    settle_fence_session(sessions, self_writes, events, open, handle, session_id, token).await?;
+    settle_fence_session(
+        sessions,
+        self_writes,
+        events,
+        open,
+        handle,
+        session_id,
+        token,
+    )
+    .await?;
 
     let session = version_fence_session_view(sessions, handle, session_id)?;
     let now = now_ms()?;
@@ -359,10 +368,17 @@ pub(super) fn mutate_close_write_session(id: String) {
 }
 
 impl VersionFence {
-    pub(super) fn link_document_is_open(&self, handle: &WorkspaceHandle) -> dohc_engine_runtime::actor::DocumentIsOpen {
+    pub(super) fn link_document_is_open(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> dohc_engine_runtime::actor::DocumentIsOpen {
         let sessions = self.sessions.clone();
         let handle = handle.clone();
-        Arc::new(move |key| lock(&sessions).values().any(|s| s.workspace == handle && s.key == *key))
+        Arc::new(move |key| {
+            lock(&sessions)
+                .values()
+                .any(|s| s.workspace == handle && s.key == *key)
+        })
     }
 
     pub(super) fn link_document_resync(
@@ -634,11 +650,12 @@ impl VersionFence {
         let mut held = HashMap::new();
         for member in &result.moments {
             if held.contains_key(&member.object_id)
-                || (member.operation == "write" && lock(&self.sessions).values().any(|session| {
-                    session.key.workspace_id == open.workspace_id
-                        && session.key.version_id == result.version_id
-                        && session.key.object_id == member.object_id
-                }))
+                || (member.operation == "write"
+                    && lock(&self.sessions).values().any(|session| {
+                        session.key.workspace_id == open.workspace_id
+                            && session.key.version_id == result.version_id
+                            && session.key.object_id == member.object_id
+                    }))
             {
                 continue;
             }
@@ -899,7 +916,16 @@ impl VersionFence {
                 let keep_write = keep_write
                     && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
                 if keep_write {
-                    settle_fence_session(&sessions, &self_writes, &events, &open, &handle, &session_id, &token).await?;
+                    settle_fence_session(
+                        &sessions,
+                        &self_writes,
+                        &events,
+                        &open,
+                        &handle,
+                        &session_id,
+                        &token,
+                    )
+                    .await?;
                 } else {
                     close_ydoc_session_for_version_fence(
                         &sessions,

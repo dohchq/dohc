@@ -42,7 +42,7 @@ fn inverse_input(
 ) -> Result<Option<Inverse>, RuntimeError> {
     if member.effect.operation == "write" {
         let text = link_inverse_input(conn, ws, version, &member.effect)?;
-        let live = inverse_live_edit(conn,ws,version,member,&text,open)?;
+        let live = inverse_live_edit(conn, ws, version, member, &text, open)?;
         Ok(Some(Inverse { text, live }))
     } else {
         Ok(None)
@@ -58,24 +58,24 @@ fn inverse_live_edit(
         super::super::link_documents::DocumentIsOpen,
         super::super::link_documents::DocumentResync,
     )>,
-) -> Result<Option<super::super::link_documents::Edit>,RuntimeError> {
+) -> Result<Option<super::super::link_documents::Edit>, RuntimeError> {
     let key = DocKey::new(ws, version, &member.effect.object_id)?;
-        let live = if open.is_some_and(|(is_open, _)| is_open(&key)) {
-            let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+    let live = if open.is_some_and(|(is_open, _)| is_open(&key)) {
+        let head: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![ws,version,member.effect.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
-            let before = dohc_engine_storage::text::read(conn, &head)
-                .map_err(StorageError::corrupt_public)?;
-            Some(
-                super::super::link_documents::prepare(conn, &key, &before, text)?.ok_or(
-                    DomainError::UndoRefused {
-                        path: member.effect.path.clone(),
-                        reason: "wikilink element unavailable",
-                    },
-                )?,
-            )
-        } else {
-            None
-        };
+        let before =
+            dohc_engine_storage::text::read(conn, &head).map_err(StorageError::corrupt_public)?;
+        Some(
+            super::super::link_documents::prepare(conn, &key, &before, text)?.ok_or(
+                DomainError::UndoRefused {
+                    path: member.effect.path.clone(),
+                    reason: "wikilink element unavailable",
+                },
+            )?,
+        )
+    } else {
+        None
+    };
     Ok(live)
 }
 
@@ -553,7 +553,9 @@ impl ActorHandle {
                 Ok::<_, RuntimeError>(prepared)
             }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
             for member in &mut prepared.members {
-                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
                 let guards = if member.effect.operation == "write" {
                     let capture = gates[0].clone().lock_owned().await;
                     let sessions = tokio::select! {
@@ -561,36 +563,97 @@ impl ActorHandle {
                         guard = gates[1].clone().lock_owned() => guard,
                     };
                     Some((capture, sessions))
-                } else { None };
-                let key = DocKey::new(&prepared.workspace, &prepared.version, &member.effect.object_id)?;
-                let live = member.effect.operation == "write" && open_documents.as_ref().is_some_and(|(is_open,_)| is_open(&key));
+                } else {
+                    None
+                };
+                let key = DocKey::new(
+                    &prepared.workspace,
+                    &prepared.version,
+                    &member.effect.object_id,
+                )?;
+                let live = member.effect.operation == "write"
+                    && open_documents
+                        .as_ref()
+                        .is_some_and(|(is_open, _)| is_open(&key));
                 let usable = if live {
-                    let (path, root2, recorder2, token2) = (member.effect.path.clone(), root.clone(), recorder.clone(), token.clone());
-                    let (usable, head, sha) = self.run(move |store,cache| {
-                        let usable = super::super::link_documents::baseline(store,cache,&root2,&key,&path,&token2,recorder2.as_ref(), |_| true)?;
-                        let head = store.read_with(|c| signature(c,&key.workspace_id,&key.version_id,&key.object_id))?;
-                        let sha = store.read_with(|c| rename_head_sha(c,&key.workspace_id,&key.version_id,&key.object_id))?;
-                        Ok((usable,head,sha))
-                    }).await?;
+                    let (path, root2, recorder2, token2) = (
+                        member.effect.path.clone(),
+                        root.clone(),
+                        recorder.clone(),
+                        token.clone(),
+                    );
+                    let (usable, head, sha) = self
+                        .run(move |store, cache| {
+                            let usable = super::super::link_documents::baseline(
+                                store,
+                                cache,
+                                &root2,
+                                &key,
+                                &path,
+                                &token2,
+                                recorder2.as_ref(),
+                                |_| true,
+                            )?;
+                            let head = store.read_with(|c| {
+                                signature(c, &key.workspace_id, &key.version_id, &key.object_id)
+                            })?;
+                            let sha = store.read_with(|c| {
+                                rename_head_sha(
+                                    c,
+                                    &key.workspace_id,
+                                    &key.version_id,
+                                    &key.object_id,
+                                )
+                            })?;
+                            Ok((usable, head, sha))
+                        })
+                        .await?;
                     member.head = head;
                     member.sha = Some(sha);
                     usable
-                } else { true };
-                let (w, v, member) = (prepared.workspace.clone(),prepared.version.clone(),member.clone());
+                } else {
+                    true
+                };
+                let (w, v, member) = (
+                    prepared.workspace.clone(),
+                    prepared.version.clone(),
+                    member.clone(),
+                );
                 let open = open_documents.clone();
                 let disk_root = root.clone();
                 let reader = inverse_store;
                 let (input, reader) = tokio::task::spawn_blocking(move || {
                     let _guards = guards;
                     let inverse = if usable {
-                        reader.read_with(|c| inverse_input(c,&w,&v,&member,open.as_ref()))
-                    } else { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"document projection unavailable"}.into()) };
+                        reader.read_with(|c| inverse_input(c, &w, &v, &member, open.as_ref()))
+                    } else {
+                        Err(DomainError::UndoRefused {
+                            path: member.effect.path.clone(),
+                            reason: "document projection unavailable",
+                        }
+                        .into())
+                    };
                     let inverse = match inverse {
-                        value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link diff budget exceeded" | "wikilink element unavailable" | "document projection unavailable",..}))) => value,
+                        value @ (Ok(_)
+                        | Err(RuntimeError::Domain(DomainError::UndoRefused {
+                            reason:
+                                "link diff budget exceeded"
+                                | "wikilink element unavailable"
+                                | "document projection unavailable",
+                            ..
+                        }))) => value,
                         Err(error) => return Err(error),
                     };
-                    Ok((Prepared {inverse,disk:Ok(disk_check(&disk_root,&member)?)},reader))
-                }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
+                    Ok((
+                        Prepared {
+                            inverse,
+                            disk: Ok(disk_check(&disk_root, &member)?),
+                        },
+                        reader,
+                    ))
+                })
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)??;
                 inverse_store = reader;
                 inputs.push_back(input);
             }

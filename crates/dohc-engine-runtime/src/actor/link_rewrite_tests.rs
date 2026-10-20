@@ -183,7 +183,13 @@ impl Fixture {
                 self.leases.clone(),
                 self.serial.clone(),
                 faults,
-                ( { let leases = self.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                (
+                    {
+                        let leases = self.leases.clone();
+                        Arc::new(move |key| leases.is_held_by_session(key))
+                    },
+                    Arc::new(|_| {}),
+                ),
                 Arc::new(()),
                 CancellationToken::new(),
             )
@@ -303,7 +309,13 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
             f.leases.clone(),
             f.serial.clone(),
             Arc::new(NoFaults),
-            ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+            (
+                {
+                    let leases = f.leases.clone();
+                    Arc::new(move |key| leases.is_held_by_session(key))
+                },
+                Arc::new(|_| {}),
+            ),
             Arc::new(()),
             CancellationToken::new(),
         )
@@ -728,7 +740,13 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
-                    ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                    (
+                        {
+                            let leases = f.leases.clone();
+                            Arc::new(move |key| leases.is_held_by_session(key))
+                        },
+                        Arc::new(|_| {})
+                    ),
                     Arc::new(()),
                     CancellationToken::new()
                 )
@@ -953,7 +971,13 @@ async fn case_only_and_delete_only_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
-                    ( { let leases = f.leases.clone(); Arc::new(move |key| leases.is_held_by_session(key)) }, Arc::new(|_| {})),
+                    (
+                        {
+                            let leases = f.leases.clone();
+                            Arc::new(move |key| leases.is_held_by_session(key))
+                        },
+                        Arc::new(|_| {})
+                    ),
                     Arc::new(()),
                     CancellationToken::new()
                 )

@@ -560,11 +560,15 @@ async fn an_editor_opened_after_read_uses_its_ydoc_and_stays_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
-    let f = Fixture::new(1,1);
-    let (lease,_) = f.open_document("source-0000").await;
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
     f.pass("fence-gap", Arc::new(NoFaults)).await.unwrap();
     f.settle_document("source-0000").await;
-    f.type_document("source-0000", "typing [[new#part|label]] [[./new.md]] [old](old.md)").await;
+    f.type_document(
+        "source-0000",
+        "typing [[new#part|label]] [[./new.md]] [old](old.md)",
+    )
+    .await;
     let result = f.undo_open().await;
     let text = f.text("source-0000.md").await;
     drop(lease);
@@ -575,103 +579,168 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_does_not_write_through_another_undos_internal_lease() {
-    let f = Fixture::new(1,1);
+    let f = Fixture::new(1, 1);
     let before = format!("{BODY} [[other-old]]");
     let after = format!("{BODY} [[other-new]]");
-    f.edit("source-0000","source-0000.md",&before).await;
-    let (ws,body,root) = (f.ws.clone(),after.clone(),f.root.to_path_buf());
-    f.actor.run(move |store,_| {
-        let mut versions = VersionedTextStore::new(store);
-        versions.write_text(&write(&ws,"other-target","other-old.md","other","other-seed"),&NoFaults)?;
-        versions.rename_text_file(&RenameTextFile {
-            workspace_id:ws.clone(),version_id:"main".into(),from_path:"other-old.md".into(),
-            to_path:"other-new.md".into(),moment_id:"other-rename".into(),request_id:None,
-            metadata_origin:"api".into(),metadata_summary:None,metadata_correlation_id:Some("dohc-operation:other".into()),
-            author_json:None,now_ms:3,
-        },&NoFaults)?;
-        let mut input=write(&ws,"source-0000","source-0000.md",&body,"other-links");
-        input.metadata_correlation_id=Some("dohc-operation:other".into());
-        versions.write_text(&input,&NoFaults)?;
-        std::fs::write(root.join("other-new.md"),"other").unwrap();
-        std::fs::write(root.join("source-0000.md"),body).unwrap();
-        Ok(())
-    }).await.unwrap();
-    let (session,_) = f.open_document("source-0000").await;
+    f.edit("source-0000", "source-0000.md", &before).await;
+    let (ws, body, root) = (f.ws.clone(), after.clone(), f.root.to_path_buf());
+    f.actor
+        .run(move |store, _| {
+            let mut versions = VersionedTextStore::new(store);
+            versions.write_text(
+                &write(&ws, "other-target", "other-old.md", "other", "other-seed"),
+                &NoFaults,
+            )?;
+            versions.rename_text_file(
+                &RenameTextFile {
+                    workspace_id: ws.clone(),
+                    version_id: "main".into(),
+                    from_path: "other-old.md".into(),
+                    to_path: "other-new.md".into(),
+                    moment_id: "other-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:other".into()),
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )?;
+            let mut input = write(&ws, "source-0000", "source-0000.md", &body, "other-links");
+            input.metadata_correlation_id = Some("dohc-operation:other".into());
+            versions.write_text(&input, &NoFaults)?;
+            std::fs::write(root.join("other-new.md"), "other").unwrap();
+            std::fs::write(root.join("source-0000.md"), body).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (session, _) = f.open_document("source-0000").await;
     f.settle_document("source-0000").await;
     drop(session);
-    let key=DocKey::new(&f.ws,"main","source-0000").unwrap();
-    let lease=f.leases.acquire_internal(&key).unwrap();
-    let request=format!("{}-other-undo",f.ws);
-    let (receive,barrier)=undo_probe::pause_inverse(&request);
-    let (actor,ws,root,serial)=(f.actor.clone(),f.ws.clone(),f.root.to_path_buf(),f.serial.clone());
+    let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
+    let lease = f.leases.acquire_internal(&key).unwrap();
+    let request = format!("{}-other-undo", f.ws);
+    let (receive, barrier) = undo_probe::pause_inverse(&request);
+    let (actor, ws, root, serial) = (
+        f.actor.clone(),
+        f.ws.clone(),
+        f.root.to_path_buf(),
+        f.serial.clone(),
+    );
     let capture: Arc<tokio::sync::Mutex<()>> = Arc::default();
     let undo_capture = capture.clone();
-    let undo=tokio::spawn(async move {
-        actor.history_undo_in_turns(ws,"dohc-operation:other".into(),request,None,root,Arc::new(NoFaults),10,
-            [undo_capture,serial],Arc::new(()),
-            Some((Arc::new(|_| false),Arc::new(|_| {}))),CancellationToken::new()).await
+    let undo = tokio::spawn(async move {
+        actor
+            .history_undo_in_turns(
+                ws,
+                "dohc-operation:other".into(),
+                request,
+                None,
+                root,
+                Arc::new(NoFaults),
+                10,
+                [undo_capture, serial],
+                Arc::new(()),
+                Some((Arc::new(|_| false), Arc::new(|_| {}))),
+                CancellationToken::new(),
+            )
+            .await
     });
-    tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
+    tokio::task::spawn_blocking(move || receive.recv().unwrap())
+        .await
+        .unwrap();
     let held = capture.lock_owned().await;
-    tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
-    let result=f.pass("other-undo-lease",Arc::new(NoFaults)).await;
+    tokio::task::spawn_blocking(move || barrier.wait())
+        .await
+        .unwrap();
+    let result = f.pass("other-undo-lease", Arc::new(NoFaults)).await;
     drop(held);
-    let undone=undo.await.unwrap();
-    let text=f.text("source-0000.md").await;
+    let undone = undo.await.unwrap();
+    let text = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
-    let result=result.unwrap();
-    assert_eq!(result["documents"],0);
-    assert_eq!(result["unchecked"],json!(["source-0000.md"]));
+    let result = result.unwrap();
+    assert_eq!(result["documents"], 0);
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
     assert!(undone.unwrap().not_restored.is_empty());
-    assert_eq!(text,before);
+    assert_eq!(text, before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage() {
-    let f = Fixture::new(1,1);
-    let (lease,_) = f.open_document("source-0000").await;
-    f.pass("reopen-gap",Arc::new(NoFaults)).await.unwrap();
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    f.pass("reopen-gap", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
     f.settle_document("source-0000").await;
     drop(lease);
-    let request = format!("{}-undo",f.ws);
-    let (receive,barrier) = undo_probe::pause_inverse(&request);
-    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
+    let request = format!("{}-undo", f.ws);
+    let (receive, barrier) = undo_probe::pause_inverse(&request);
+    let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
     let leases = f.leases.clone();
     let reopen = async move {
-        tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || receive.recv().unwrap())
+            .await
+            .unwrap();
         let lease = leases.acquire(&key).unwrap();
-        tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
+        tokio::task::spawn_blocking(move || barrier.wait())
+            .await
+            .unwrap();
         lease
     };
-    let (result,lease) = tokio::join!(f.undo_open(),reopen);
+    let (result, lease) = tokio::join!(f.undo_open(), reopen);
     let doc = f.document("source-0000").await;
-    let text=f.text("source-0000.md").await;
+    let text = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
     assert!(result.unwrap().not_restored.is_empty());
-    assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
-    assert_eq!(doc.wikilink_spans().unwrap().1.len(),2,"reopened editor lost its native wikilink elements");
-    assert_eq!(text,BODY);
+    assert!(
+        doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("[[old#part")
+    );
+    assert_eq!(
+        doc.wikilink_spans().unwrap().1.len(),
+        2,
+        "reopened editor lost its native wikilink elements"
+    );
+    assert_eq!(text, BODY);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
-    let f = Fixture::new(1,1);
-    let (lease,_) = f.open_document("source-0000").await;
-    let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
-    let result=f.actor.run(move |store,_| {
-        let marker = store.read_with(|c| dohc_engine_collab::read_marker_in(c,&key))?.unwrap();
-        let doc = Ydoc::wire();
-        let body = format!("{}{}", "[[a]] ".repeat(16), "x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200));
-        doc.richdoc_wikilinks_for_test(&body)?;
-        let before = doc.project(ContentKind::Richdoc)?.content;
-        assert!(matches!(doc.wikilink_spans(),Err(dohc_engine_collab::CollabError::ProjectionTooLarge {..})));
-        let after = before.replacen("[[a]]","[[b]]",1);
-        assert!(super::super::super::link_documents::prepare_doc(&doc,marker,&before,&after)?.is_none());
-        Ok(())
-    }).await;
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
+    let result = f
+        .actor
+        .run(move |store, _| {
+            let marker = store
+                .read_with(|c| dohc_engine_collab::read_marker_in(c, &key))?
+                .unwrap();
+            let doc = Ydoc::wire();
+            let body = format!(
+                "{}{}",
+                "[[a]] ".repeat(16),
+                "x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200)
+            );
+            doc.richdoc_wikilinks_for_test(&body)?;
+            let before = doc.project(ContentKind::Richdoc)?.content;
+            assert!(matches!(
+                doc.wikilink_spans(),
+                Err(dohc_engine_collab::CollabError::ProjectionTooLarge { .. })
+            ));
+            let after = before.replacen("[[a]]", "[[b]]", 1);
+            assert!(
+                super::super::super::link_documents::prepare_doc(&doc, marker, &before, &after)?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .await;
     drop(lease);
     f.close().await;
     result.unwrap();
@@ -679,52 +748,89 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
-    let f = Fixture::new(2,2);
-    f.pass("unmapped-inverse",Arc::new(NoFaults)).await.unwrap();
+    let f = Fixture::new(2, 2);
+    f.pass("unmapped-inverse", Arc::new(NoFaults))
+        .await
+        .unwrap();
     f.publish().await;
-    let (lease,_) = f.open_document_with_elements("source-0000",false).await;
+    let (lease, _) = f.open_document_with_elements("source-0000", false).await;
     let result = f.undo_open().await;
-    let request=format!("{}-undo",f.ws);
-    let reasons=f.actor.run(move |store,_| {
-        let reasons: String=store.read_with(|c| c.query_row("SELECT errors_json FROM history_undo_plans WHERE request_id=?1",[request],|r|r.get(0)).optional()).unwrap().unwrap_or_default();
-        Ok(reasons)
-    }).await.unwrap();
-    let restored=f.text("source-0001.md").await;
-    let untouched=f.text("source-0000.md").await;
+    let request = format!("{}-undo", f.ws);
+    let reasons = f
+        .actor
+        .run(move |store, _| {
+            let reasons: String = store
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT errors_json FROM history_undo_plans WHERE request_id=?1",
+                        [request],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                })
+                .unwrap()
+                .unwrap_or_default();
+            Ok(reasons)
+        })
+        .await
+        .unwrap();
+    let restored = f.text("source-0001.md").await;
+    let untouched = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
-    let result=result.unwrap();
-    assert_eq!(result.not_restored,["source-0000.md"]);
+    let result = result.unwrap();
+    assert_eq!(result.not_restored, ["source-0000.md"]);
     assert!(reasons.contains("wikilink element unavailable"));
-    assert_eq!(restored,BODY);
+    assert_eq!(restored, BODY);
     assert!(untouched.contains("[[new#part"));
 }
 
 #[derive(Default)]
 struct BaselineWrites(std::sync::atomic::AtomicUsize);
 impl super::super::super::materialization::SelfWriteRecorder for BaselineWrites {
-    fn record(&self,_workspace:&str,_path:&str,_sha:&str) { self.0.fetch_add(1,Ordering::SeqCst); }
-    fn retract(&self,_workspace:&str,_path:&str,_sha:&str) {}
+    fn record(&self, _workspace: &str, _path: &str, _sha: &str) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+    fn retract(&self, _workspace: &str, _path: &str, _sha: &str) {}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled() {
-    for relevant in [false,true] {
-        let f=Fixture::new(1,1);
-        let (lease,_) = f.open_document("source-0000").await;
-        let body=if relevant { "typing [[old]]" } else { "typing [[elsewhere]]" };
-        f.type_document("source-0000",body).await;
-        let key=DocKey::new(&f.ws,"main","source-0000").unwrap();
-        let root=f.root.to_path_buf();
-        let recorder=Arc::new(BaselineWrites::default());
-        let writes=recorder.clone();
-        let usable=f.actor.run(move |store,cache| {
-            super::super::super::link_documents::baseline(store,cache,&root,&key,"source-0000.md",
-                &CancellationToken::new(),writes.as_ref(),|text| text.contains("[[old]]"))
-        }).await.unwrap();
-        assert_eq!(usable,relevant);
-        assert_eq!(recorder.0.load(Ordering::SeqCst)>0,relevant);
-        assert_eq!(f.text("source-0000.md").await,if relevant {body} else {BODY});
+    for relevant in [false, true] {
+        let f = Fixture::new(1, 1);
+        let (lease, _) = f.open_document("source-0000").await;
+        let body = if relevant {
+            "typing [[old]]"
+        } else {
+            "typing [[elsewhere]]"
+        };
+        f.type_document("source-0000", body).await;
+        let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
+        let root = f.root.to_path_buf();
+        let recorder = Arc::new(BaselineWrites::default());
+        let writes = recorder.clone();
+        let usable = f
+            .actor
+            .run(move |store, cache| {
+                super::super::super::link_documents::baseline(
+                    store,
+                    cache,
+                    &root,
+                    &key,
+                    "source-0000.md",
+                    &CancellationToken::new(),
+                    writes.as_ref(),
+                    |text| text.contains("[[old]]"),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(usable, relevant);
+        assert_eq!(recorder.0.load(Ordering::SeqCst) > 0, relevant);
+        assert_eq!(
+            f.text("source-0000.md").await,
+            if relevant { body } else { BODY }
+        );
         drop(lease);
         f.close().await;
     }
