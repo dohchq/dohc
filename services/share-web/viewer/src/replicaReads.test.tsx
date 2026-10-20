@@ -32,18 +32,18 @@ it.each(["view","comment","edit"] as const)("R4: %s responses preserve the viewe
     const {payload,...op}=moment("docs/a.md","saved",{originSeq:0,recordedAtMs:1234,objectId:"object"});
     f.storage.appendLogBatch({workspaceId:"w",originId:"origin-a",ops:[{...op,payloadJson:JSON.stringify(payload)}]});
     f.publish("live"); // The settlement facts are independent of this view.
-    if(access==="edit")f.latest.logCursor=(await json(await f.savedSend("/sync/link/current"))).nextCursor;
+    if(access==="edit")f.latest.logCursor=Number((await json(await f.savedSend("/sync/link/current"))).nextCursor);
     const baseline=await f.savedSend("/sync/link/current"),candidate=await f.send("/sync/link/current");
     expect([...candidate.headers]).toEqual([...baseline.headers]);
     const saved=await json(baseline),current=await json(candidate);
     expect(Object.keys(current).sort()).toEqual(Object.keys(saved).sort());
     expect(current).toMatchObject({lastSettledKnown:true,lastSettledAtMs:1234});
-    const feedCursor=access==="edit" ? (await json(await f.send("/sync/link/log?current=true&since=0"))).nextCursor : current.nextCursor;
+    const feedCursor=Number(access==="edit" ? (await json(await f.send("/sync/link/log?current=true&since=0"))).nextCursor : current.nextCursor);
     const loaded=await loadCurrentState("abcdefghijkl");
     expect(loaded.meta).toMatchObject({access,lastSettledKnown:true,lastSettledAtMs:1234});
     expect(loaded.fileAccumulator.get("docs/a.md")?.blobSha256).toBe(sha256("live"));
     f.publish("journal-only");
-    const next=await loadLog("abcdefghijkl",feedCursor,loaded.fileAccumulator,1,undefined,current.epochLogFloor,undefined,true);
+    const next=await loadLog("abcdefghijkl",feedCursor,loaded.fileAccumulator,1,undefined,Number(current.epochLogFloor),undefined,true);
     expect(next.fileAccumulator.get("docs/a.md")?.blobSha256).toBe(sha256("journal-only"));
     expect(await json(await f.send("/sync/link/current"))).toMatchObject({lastSettledKnown:true,lastSettledAtMs:1234});
     const savedFeed=await json(await f.savedSend("/sync/link/log?current=true&since=0"));
