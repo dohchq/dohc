@@ -875,8 +875,8 @@ interface DescendantCaptureOverrides {
 // proxies, package-manager config), minus what could rebind the server or
 // belongs to dohc. A HOST or HOSTNAME inherited from dohc's own environment
 // would bind beyond loopback with no command for the validator above to
-// refuse: Docker exports HOSTNAME as the machine name, and Next.js binds to
-// it. DOHC_* variables configure dohc itself, including where its owner
+// refuse: Docker exports HOSTNAME as the machine name, and Next.js's
+// standalone server binds to it. DOHC_* variables configure dohc itself, including where its owner
 // credentials live, and the Electron ones control dohc's own runtime.
 const DOHC_OWN_ENVIRONMENT_NAME = /^(?:DOHC_|ELECTRON_RUN_AS_NODE$|ELECTRON_RENDERER_URL$)/i;
 
