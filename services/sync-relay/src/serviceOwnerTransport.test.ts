@@ -1,21 +1,31 @@
 import {expect,it,vi} from "vitest";
 import type {NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
-import {serviceOwnerTransport} from "./serviceOwnerTransport";
+import {receiptFirstSeed,serviceOwnerTransport} from "./serviceOwnerTransport";
 
 function fixture(){
   const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:1};
-  const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",source:{nativeHeadSequence:2}} as NativeOwnerActivation;
+  const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",source:{nativeHeadSequence:2,fullStateDigest:"c".repeat(64)}} as NativeOwnerActivation;
+  const storage={},host={mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never;
   let adopted=false,changed=false;
   const sendRequest=vi.fn(async(request:{id:number;method:string})=>({id:request.id,result:request.method==="liveApplication.register"?{registrationId:7}:
     request.method==="liveApplication.ownerState"?{adoptionId:adopted?capture.activationId:"native-default-adoption",expectedLocalSequence:2,
       throughCursor:adopted?0:null,outboxId:adopted?"actual-outbox":null,pendingBytes:adopted?12:0,outboxState:adopted?"active":null}:{delivered:true}}));
   const sendLiveOwnerAdoption=vi.fn(async()=>{adopted=true;return {id:3,result:{status:"adopted",adoption:{}}};});
   const transport=serviceOwnerTransport({client:{sendRequest,sendLiveOwnerAdoption} as never,workspace:"native-workspace",capture:async()=>capture,binding,
-    storage:{},host:{mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never,
-    nextRequestId:()=>100,assertCurrent(){if(changed)throw new Error("retired");}});
+    storage,host,nextRequestId:()=>100,assertCurrent(){if(changed)throw new Error("retired");}});
   const request={id:1,workspace:"native-workspace",deadlineMs:1000};
-  return {binding,capture,transport,sendRequest,sendLiveOwnerAdoption,request,retire(){changed=true;}};
+  return {binding,capture,storage,host,transport,sendRequest,sendLiveOwnerAdoption,request,retire(){changed=true;}};
 }
+it("derives the seed's delivery from the outbox the engine reports, as native does",async()=>{
+  const f=fixture();
+  await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
+  await f.transport.client.sendLiveOwnerAdoption({...f.request,id:3,registrationId:7,sessionId:f.capture.sessionId},
+    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null} as never,{maxBytes:1000,maxEvents:2});
+  await f.transport.client.sendRequest({...f.request,id:4,method:"liveApplication.ownerOutbox",params:{registrationId:7}});
+  const seed=receiptFirstSeed(f.transport.seedDelivery(),{storage:f.storage,transport:f.transport.client,activationId:f.capture.activationId,binding:f.binding,host:f.host});
+  // The Rust test a_successors_later_edit_is_delivered_from_its_outbox pins the same vector natively.
+  expect(seed?.deliveryId(2)).toBe("owner-delivery-c9d123ecd57e191bbb1f55a3eb45488d05a36bbef55727702cffb5711ed7a37b");
+});
 it("uses the captured native session and translates owner outbox calls to its native outbox",async()=>{
   const f=fixture();
   await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});

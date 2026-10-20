@@ -28,7 +28,7 @@ fn capture_imported(
         &mut f.store,
         "namespace",
         &f.key,
-        "owner.md",
+        &f.binding.current_path,
         max_bytes,
         &NoFaults,
     )

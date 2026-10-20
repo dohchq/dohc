@@ -720,29 +720,14 @@ fn append_with_retained_base(
             if retained_base.is_none() {
                 put_binary_blob_with_sha(tx, &input.base_update, &base_update_digest)?;
             }
-            tx.execute(
-                    "INSERT INTO owner_ydoc_outboxes \
-                     (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
-                      current_path,selector_paths_json,restore_fence_generation,\
-                      base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,\
-                      oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,'active',0,NULL,1,NULL,NULL,?11)",
-                    params![
-                        outbox_id,
-                        binding.workspace_id,
-                        binding.main_version_id,
-                        binding.object_id,
-                        binding.lineage_claim_id,
-                        binding.current_path,
-                        serde_json::to_string(&binding.selector_paths)
-                            .map_err(|_| OwnerOutboxError::InvalidInput("selector paths are not serializable"))?,
-                        binding.restore_fence_generation,
-                        base_update_digest,
-                        base_byte_length,
-                        input.created_at_ms,
-                    ],
-                )
-                .map_err(write_sql)?;
+            insert_outbox(
+                tx,
+                &outbox_id,
+                &binding,
+                &base_update_digest,
+                base_byte_length,
+                input.created_at_ms,
+            )?;
             read_parent(tx, &outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?
         }
     };
@@ -1530,6 +1515,73 @@ fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, 
     )
     .optional()
     .map_err(read_sql)
+}
+
+fn insert_outbox(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    binding: &LiveObjectBinding,
+    base_update_digest: &str,
+    base_byte_length: i64,
+    created_at_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    tx.execute(
+        "INSERT INTO owner_ydoc_outboxes \
+         (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
+          current_path,selector_paths_json,restore_fence_generation,\
+          base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,\
+          oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,'active',0,NULL,1,NULL,NULL,?11)",
+        params![
+            outbox_id,
+            binding.workspace_id,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            binding.current_path,
+            serde_json::to_string(&binding.selector_paths).map_err(|_| {
+                OwnerOutboxError::InvalidInput("selector paths are not serializable")
+            })?,
+            binding.restore_fence_generation,
+            base_update_digest,
+            base_byte_length,
+            created_at_ms,
+        ],
+    )
+    .map_err(write_sql)?;
+    Ok(())
+}
+
+/// Open an empty outbox at a successor's binding, on its lineage's retained
+/// base, beside the outboxes its released chain left at earlier paths of the
+/// same restore generation. Only successor adoption calls this, once its
+/// coverage proved each of them; an ordinary append never opens a second
+/// outbox for a generation.
+pub(crate) fn open_successor_outbox_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    created_at_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let binding = binding
+        .clone()
+        .normalized()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    let base = &binding.lineage_claim_id;
+    let base_byte_length: i64 = tx
+        .query_row(
+            "SELECT byte_length FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes)",
+            [base],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?
+        .filter(|length| *length > 0)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    if find_parent_for_binding(tx, &binding)?.is_some() {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let id = outbox_id(&binding, base, &binding_json(&binding)?);
+    insert_outbox(tx, &id, &binding, base, base_byte_length, created_at_ms)
 }
 
 fn find_parent_for_binding(

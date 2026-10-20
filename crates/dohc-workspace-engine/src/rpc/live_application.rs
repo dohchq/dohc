@@ -283,14 +283,19 @@ fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
     Ok(())
 }
 
+/// The outbox at the registration's exact binding. A succession leaves
+/// retired outboxes at earlier paths of the same generation, so path and
+/// selectors decide which one owner deliveries come from.
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<(String, i64, String)>, dohc_engine_storage::StorageError> {
     use rusqlite::OptionalExtension;
+    let selectors = serde_json::to_string(&binding.selector_paths)
+        .map_err(dohc_engine_storage::StorageError::persist_public)?;
     conn.query_row(
-        "SELECT outbox_id,pending_bytes,state FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
-        rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation],
+        "SELECT outbox_id,pending_bytes,state FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
+        rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,selectors,binding.restore_fence_generation],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
     .optional()
@@ -1693,20 +1698,28 @@ mod tests {
         }
     }
 
+    /// Owner deliveries come from the outbox at the registration's exact
+    /// binding: not one at an earlier restore generation, nor one a
+    /// succession retired at an earlier path, nor one at its path with other
+    /// selectors, whichever sorts first.
     #[tokio::test]
-    async fn owner_state_reads_only_the_registered_restore_generation() {
+    async fn owner_state_reads_only_the_registered_binding() {
         use dohc_engine_storage::{EngineStore, StorageError};
         let (_scratch, service, _owner, workspace, _registration, mut binding) = fixture().await;
         let open = service.open(Some(&WorkspaceHandle(workspace))).unwrap();
         let mut store = EngineStore::open(&open.db_path, 0).unwrap();
+        let selectors = serde_json::to_string(&binding.selector_paths).unwrap();
+        let wider = serde_json::to_string(&[binding.current_path.as_str(), "zz-other.md"]).unwrap();
         store.write_with(&NoFaults, |tx| {
-            for (id, generation, state, reason, bytes) in [
-                ("old", 0, "quarantined", Some("restore-fenced"), 64),
-                ("current", 1, "active", None, 61),
+            for (id, path, selectors, generation, state, reason, bytes) in [
+                ("old", binding.current_path.as_str(), selectors.as_str(), 0, "quarantined", Some("restore-fenced"), 64),
+                ("a-retired", "a-earlier.md", "[\"a-earlier.md\"]", 1, "quarantined", Some("succession-retired"), 3),
+                ("b-selectors", binding.current_path.as_str(), wider.as_str(), 1, "active", None, 7),
+                ("current", binding.current_path.as_str(), selectors.as_str(), 1, "active", None, 61),
             ] {
                 tx.execute(
                     "INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,2,?9,?10,0,2,?11,0)",
-                    rusqlite::params![id,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,serde_json::to_string(&binding.selector_paths).unwrap(),generation,state,bytes,reason],
+                    rusqlite::params![id,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,path,selectors,generation,state,bytes,reason],
                 ).unwrap();
             }
             Ok::<_, StorageError>(())
@@ -1721,6 +1734,13 @@ mod tests {
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
                     Some(("current".into(), 61, "active".into()))
+                );
+                let mut earlier = binding.clone();
+                earlier.current_path = "a-earlier.md".into();
+                earlier.selector_paths = vec!["a-earlier.md".into()];
+                assert_eq!(
+                    read_owner_outbox(conn, &earlier)?,
+                    Some(("a-retired".into(), 3, "quarantined".into()))
                 );
                 binding.restore_fence_generation = 2;
                 assert_eq!(read_owner_outbox(conn, &binding)?, None);

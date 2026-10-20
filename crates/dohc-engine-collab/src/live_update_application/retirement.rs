@@ -11,7 +11,7 @@ use crate::owner_outbox::{
     OwnerDeliveryReceipt, OwnerOutboxError, OwnerOutboxNativeOrigin, OwnerOutboxNativeSource,
     ACTIVATION_RELEASED, MAX_TERMINAL_REASON_BYTES,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The activation Stop retires, as the relay fenced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +532,37 @@ pub(crate) fn inherited_entries(
         return Ok(Vec::new());
     };
     let (_, manifest) = released_tail(conn, namespace, tail)?;
+    if manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+    let chain = chain_activations(conn, namespace, tail)?;
+    resolve_manifest(conn, namespace, doc, lineage, manifest, &chain)
+}
+
+/// [`inherited_entries`] of the released chain ending at `tail`, whose
+/// activations its caller already walked.
+pub(super) fn inherited_in_chain(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: &str,
+    chain: &HashSet<String>,
+) -> Result<Vec<InheritedEntry>, ApplicationError> {
+    let (_, manifest) = released_tail(conn, namespace, tail)?;
+    resolve_manifest(conn, namespace, doc, lineage, manifest, chain)
+}
+
+/// Each delivery of a chain's Carried manifest, resolved as
+/// [`inherited_entries`] describes, through the activations `chain` names.
+fn resolve_manifest(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    manifest: Vec<CarriedDelivery>,
+    chain: &HashSet<String>,
+) -> Result<Vec<InheritedEntry>, ApplicationError> {
     let mut listed = BTreeSet::new();
     let mut inherited = Vec::with_capacity(manifest.len());
     for carried in manifest {
@@ -580,7 +611,7 @@ pub(crate) fn inherited_entries(
                 namespace,
                 doc,
                 lineage,
-                tail,
+                chain,
                 &entry.source.adoption_id,
             )?
             .is_none()
@@ -615,7 +646,8 @@ pub(crate) fn chain_refusal(
     else {
         return Ok(false);
     };
-    Ok(chained_retiring(conn, namespace, doc, lineage, tail, &source.adoption_id)?.is_some())
+    let chain = chain_activations(conn, namespace, tail)?;
+    Ok(chained_retiring(conn, namespace, doc, lineage, &chain, &source.adoption_id)?.is_some())
 }
 
 /// Whether this host applied exactly `receipt` to the document's lineage in
@@ -765,7 +797,8 @@ pub(crate) fn unproven_retained(
 ) -> Result<Vec<RetainedContribution>, ApplicationError> {
     let mut unproven = Vec::new();
     let mut listed = BTreeSet::new();
-    for inherited in inherited_entries(conn, namespace, doc, lineage, Some(tail))? {
+    let chain = chain_activations(conn, namespace, tail)?;
+    for inherited in inherited_in_chain(conn, namespace, doc, lineage, tail, &chain)? {
         let receipt = inherited.receipt;
         listed.insert(receipt.delivery_id.clone());
         if !applied(conn, namespace, doc, lineage, &receipt)? {
@@ -776,19 +809,6 @@ pub(crate) fn unproven_retained(
             });
         }
     }
-    let chain = conn
-        .prepare(
-            "WITH RECURSIVE chain(activation_id) AS (SELECT ?1 UNION
-               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
-                 ON v.relay_database_namespace=?2 AND v.activation_id=c.activation_id
-               WHERE v.predecessor_activation_id IS NOT NULL)
-             SELECT activation_id FROM chain",
-        )
-        .map_err(read_sql)?
-        .query_map(params![tail, namespace], |row| row.get(0))
-        .map_err(read_sql)?
-        .collect::<Result<BTreeSet<String>, _>>()
-        .map_err(read_sql)?;
     type Row = (
         String,
         i64,
@@ -880,7 +900,7 @@ pub(crate) fn unproven_retained(
                     continue;
                 }
             } else if terminal.is_some() {
-                if strictly_terminal(conn, namespace, doc, lineage, tail, &outbox_id, sequence)? {
+                if strictly_terminal(conn, namespace, doc, lineage, &chain, &outbox_id, sequence)? {
                     continue;
                 }
                 return Err(ApplicationError::Conflict);
@@ -921,14 +941,15 @@ fn lineage_activation(
 }
 
 /// Whether the entry at `sequence` of `outbox_id` ended in a strict terminal
-/// representation of the released chain ending at `tail`: a refusal, or a
-/// seed its activation abandoned. A refused owner draft names no activation.
+/// representation of the released chain whose activations `chain` names: a
+/// refusal, or a seed its activation abandoned. A refused owner draft names
+/// no activation.
 fn strictly_terminal(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
-    tail: &str,
+    chain: &HashSet<String>,
     outbox_id: &str,
     sequence: i64,
 ) -> Result<bool, ApplicationError> {
@@ -937,7 +958,7 @@ fn strictly_terminal(
             None => Ok(true),
             Some(source) => {
                 Ok(
-                    chained_retiring(conn, namespace, doc, lineage, tail, &source.adoption_id)?
+                    chained_retiring(conn, namespace, doc, lineage, chain, &source.adoption_id)?
                         .is_some(),
                 )
             }
@@ -958,7 +979,7 @@ fn strictly_terminal(
         namespace,
         doc,
         lineage,
-        tail,
+        chain,
         &entry.source.adoption_id,
     )? {
         Some(retiring) => is_abandoned_seed(conn, namespace, &retiring, &entry),
@@ -2118,30 +2139,45 @@ pub(super) fn released_tail(
     ))
 }
 
-/// An activation of the released chain ending at `tail`, as its release left
-/// it, to judge an entry it queued. None for any other activation.
+/// The activations of the released chain ending at `tail`, that one included.
+fn chain_activations(
+    conn: &Connection,
+    namespace: &str,
+    tail: &str,
+) -> Result<HashSet<String>, ApplicationError> {
+    let mut query = conn
+        .prepare(
+            "WITH RECURSIVE chain(activation_id) AS (SELECT ?2 UNION
+               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
+                 ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
+               WHERE v.predecessor_activation_id IS NOT NULL)
+             SELECT activation_id FROM chain",
+        )
+        .map_err(read_sql)?;
+    let chain = query
+        .query_map(params![namespace, tail], |row| row.get(0))
+        .map_err(read_sql)?
+        .collect::<Result<_, _>>()
+        .map_err(read_sql)?;
+    Ok(chain)
+}
+
+/// An activation of a released chain, given its activations, as its release
+/// left it, to judge an entry it queued. None for any other activation.
 fn chained_retiring(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
-    tail: &str,
+    chain: &HashSet<String>,
     activation_id: &str,
 ) -> Result<Option<Retiring>, ApplicationError> {
-    let chained: bool = conn
-        .query_row(
-            "WITH RECURSIVE chain(activation_id) AS (SELECT ?2 UNION
-               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
-                 ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
-               WHERE v.predecessor_activation_id IS NOT NULL)
-             SELECT EXISTS(SELECT 1 FROM chain WHERE activation_id=?3)",
-            params![namespace, tail, activation_id],
-            |row| row.get(0),
-        )
-        .map_err(read_sql)?;
-    let Some(activation) = activation_by_id(conn, namespace, activation_id)?.filter(|found| {
-        chained && found.released && found.key == *doc && found.lineage_claim_id == lineage
-    }) else {
+    if !chain.contains(activation_id) {
+        return Ok(None);
+    }
+    let Some(activation) = activation_by_id(conn, namespace, activation_id)?
+        .filter(|found| found.released && found.key == *doc && found.lineage_claim_id == lineage)
+    else {
         return Ok(None);
     };
     let through: i64 = conn
@@ -2178,15 +2214,63 @@ pub(super) enum Disposition {
     },
 }
 
-/// A successor's coverage of the outbox its released chain left: each entry
-/// Covered by accepted history at or below the prefix, Carried as the
-/// chain's resolved manifest lists it, a seed its activation strictly
-/// abandoned, or a delivery a host strictly refused. Native sources of the
-/// last two belong to the chain. Anything else refuses the succession, and so
-/// does a carried delivery it lacks. Each entry names its sequence and
-/// disposition.
+/// One entry of an adoption's coverage: its original outbox, its sequence
+/// there, and its disposition. The coverage digest hashes them in this order.
+pub(super) type CoveredEntry = (String, i64, Disposition);
+
+/// A successor's coverage of the outboxes its released chain left, under one
+/// budget for all of them: each entry Covered by accepted history at or below
+/// the prefix, Carried as the chain's resolved manifest lists it, a seed its
+/// activation strictly abandoned, or a delivery a host strictly refused.
+/// Native sources of the last two belong to the chain, whose activations
+/// `chain` names. Anything else refuses the succession, and so does a carried
+/// delivery none of them holds. Entries are ordered by outbox and sequence,
+/// whatever order `outboxes` names them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retained_coverage(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    outboxes: &[String],
+    prefix: &RetainedPrefix,
+    carried: &[InheritedEntry],
+    chain: &HashSet<String>,
+    max_events: usize,
+) -> Result<Vec<CoveredEntry>, ApplicationError> {
+    let mut outboxes = outboxes.to_vec();
+    outboxes.sort();
+    outboxes.dedup();
+    let mut coverage = Vec::new();
+    let mut found = BTreeSet::new();
+    for outbox_id in &outboxes {
+        outbox_entries(
+            conn,
+            namespace,
+            doc,
+            lineage,
+            outbox_id,
+            prefix,
+            carried,
+            chain,
+            max_events,
+            &mut coverage,
+            &mut found,
+        )?;
+    }
+    if carried
+        .iter()
+        .any(|delivery| !found.contains(&delivery.receipt.delivery_id))
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(coverage)
+}
+
+/// Add one outbox's entries to `coverage`, which holds at most `max_events`
+/// across every outbox, and record the Carried deliveries it found.
+#[allow(clippy::too_many_arguments)]
+fn outbox_entries(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
@@ -2194,16 +2278,21 @@ pub(super) fn retained_coverage(
     outbox_id: &str,
     prefix: &RetainedPrefix,
     carried: &[InheritedEntry],
+    chain: &HashSet<String>,
     max_events: usize,
-) -> Result<Vec<(i64, Disposition)>, ApplicationError> {
+    coverage: &mut Vec<CoveredEntry>,
+    found: &mut BTreeSet<String>,
+) -> Result<(), ApplicationError> {
     let through = prefix
         .terminal_receipt
         .as_ref()
         .map_or(0, |receipt| receipt.journal_cursor);
-    let limit = i64::try_from(max_events)
-        .ok()
-        .and_then(|limit| limit.checked_add(1))
-        .ok_or(invalid("owner adoption capacity"))?;
+    let over_budget = || invalid("owner adoption retained outbox coverage exceeds its budget");
+    let limit = max_events
+        .checked_sub(coverage.len())
+        .and_then(|remaining| i64::try_from(remaining).ok())
+        .and_then(|remaining| remaining.checked_add(1))
+        .ok_or_else(over_budget)?;
     let mut query = conn
         .prepare(
             "SELECT sequence,append_key,delivery_id,update_digest,native_source_json,accepted_receipt_json,pending,
@@ -2212,18 +2301,16 @@ pub(super) fn retained_coverage(
         )
         .map_err(read_sql)?;
     let mut rows = query.query(params![outbox_id, limit]).map_err(read_sql)?;
-    let mut coverage = Vec::new();
-    let mut found = BTreeSet::new();
+    let mut next = 1;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if coverage.len() >= max_events {
-            return Err(invalid(
-                "owner adoption retained outbox coverage exceeds its budget",
-            ));
+            return Err(over_budget());
         }
         let sequence: i64 = row.get(0).map_err(read_sql)?;
-        if sequence != coverage.len() as i64 + 1 || row.get::<_, bool>(6).map_err(read_sql)? {
+        if sequence != next || row.get::<_, bool>(6).map_err(read_sql)? {
             return Err(ApplicationError::Conflict);
         }
+        next += 1;
         let append_key: String = row.get(1).map_err(read_sql)?;
         let delivery: String = row.get(2).map_err(read_sql)?;
         let digest: String = row.get(3).map_err(read_sql)?;
@@ -2256,7 +2343,11 @@ pub(super) fn retained_coverage(
             {
                 return Err(ApplicationError::Conflict);
             }
-            coverage.push((sequence, Disposition::Receipt { receipt }));
+            coverage.push((
+                outbox_id.to_owned(),
+                sequence,
+                Disposition::Receipt { receipt },
+            ));
             continue;
         }
         if let (Some(saved), Some(_)) = (&saved, &source) {
@@ -2276,6 +2367,7 @@ pub(super) fn retained_coverage(
             }
             found.insert(delivery);
             coverage.push((
+                outbox_id.to_owned(),
                 sequence,
                 Disposition::Receipt {
                     receipt: saved.clone(),
@@ -2287,14 +2379,7 @@ pub(super) fn retained_coverage(
             return Err(ApplicationError::Conflict);
         }
         let chained = |activation_id: &str| {
-            chained_retiring(
-                conn,
-                namespace,
-                doc,
-                lineage,
-                &prefix.predecessor_activation_id,
-                activation_id,
-            )
+            chained_retiring(conn, namespace, doc, lineage, chain, activation_id)
         };
         if let Some(source) = &source {
             let entry = RetainedEntry {
@@ -2312,7 +2397,7 @@ pub(super) fn retained_coverage(
             };
             if let Some(retiring) = chained(&source.adoption_id)? {
                 if is_abandoned_seed(conn, namespace, &retiring, &entry)? {
-                    coverage.push((sequence, Disposition::Abandoned));
+                    coverage.push((outbox_id.to_owned(), sequence, Disposition::Abandoned));
                     continue;
                 }
             }
@@ -2325,6 +2410,7 @@ pub(super) fn retained_coverage(
             }
         }
         coverage.push((
+            outbox_id.to_owned(),
             sequence,
             Disposition::Refused {
                 delivery_id: refusal.delivery_id,
@@ -2333,13 +2419,7 @@ pub(super) fn retained_coverage(
             },
         ));
     }
-    if carried
-        .iter()
-        .any(|delivery| !found.contains(&delivery.receipt.delivery_id))
-    {
-        return Err(ApplicationError::Conflict);
-    }
-    Ok(coverage)
+    Ok(())
 }
 
 /// The registration a retirement settles through: the activation's own

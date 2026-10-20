@@ -226,6 +226,7 @@ fn native_tail_record_at_depth(
     depth: u32,
 ) -> owner_outbox::OwnerOutboxEntry {
     let key = f.key.clone();
+    let path = f.binding.current_path.clone();
     let attribution = dohc_engine_domain::ChangeAttribution {
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
         on_behalf_of: local_person.map(str::to_owned),
@@ -250,7 +251,7 @@ fn native_tail_record_at_depth(
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,
-                "owner.md",
+                &path,
                 outcome.seq,
                 &update,
                 now,
@@ -262,8 +263,8 @@ fn native_tail_record_at_depth(
         .store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1",
-                [f.binding.restore_fence_generation],
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1 AND current_path=?2",
+                rusqlite::params![f.binding.restore_fence_generation, f.binding.current_path],
                 |r| r.get(0),
             )
         })
