@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as ydocProjection from "@dohc/ydoc-projection";
+// The shared seed helper calls the projection module directly.
+import * as projectionImport from "../../../ydoc-projection/src/import-export";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -5726,11 +5728,11 @@ describe("no-edit settle skip", () => {
     async (failRecord) => {
       const source = "```js\ncode\n```\n";
       const seedDocs: Y.Doc[] = [];
-      const importMarkdown = ydocProjection.markdownToYDoc;
+      const importMarkdown = projectionImport.markdownToYDoc;
       const importer = vi
-        .spyOn(ydocProjection, "markdownToYDoc")
-        .mockImplementation((markdown) => {
-          const doc = importMarkdown(markdown);
+        .spyOn(projectionImport, "markdownToYDoc")
+        .mockImplementation((markdown, options) => {
+          const doc = importMarkdown(markdown, options);
           seedDocs.push(doc);
           return doc;
         });
@@ -5754,7 +5756,7 @@ describe("no-edit settle skip", () => {
         });
       const adapter = new YdocLiveAdapter(engine);
       const projector = vi
-        .spyOn(ydocProjection, "yDocToMarkdown")
+        .spyOn(projectionImport, "yDocToMarkdown")
         .mockImplementationOnce(() => {
           throw new Error("source projection failed");
         });

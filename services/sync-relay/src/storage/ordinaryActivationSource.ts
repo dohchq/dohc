@@ -13,6 +13,28 @@ export class ServiceActivationStaleCut extends Error {
 }
 export interface OrdinaryActivationBounds {maxCaptureBytes:number;maxEntriesPerDrain:number;maxBytesPerDrain:number}
 export interface VerifiedOrdinaryActivationCut {readonly verified:true}
+const emptyCandidate=()=>new Uint8Array([0,0]);
+const WIDEST_INTEGER=Number.MAX_SAFE_INTEGER,WIDEST_DIGEST="f".repeat(64);
+// #2103 adds the activation a resumed capture follows.
+const PREDECESSOR_FIELD=`,"predecessorActivationId":"ordinary-activation-${WIDEST_DIGEST}"`;
+export const activationDescriptorBytes=(source:NativeOwnerActivationSource)=>Buffer.byteLength(JSON.stringify(source));
+export const activationCaptureBytes=(baselineBytes:number,fullStateBytes:number,descriptorBytes:number)=>baselineBytes+fullStateBytes+descriptorBytes;
+/** What reading one history row's metadata charges. */
+export const ordinaryActivationEntryBytes=(row:Readonly<Record<string,unknown>>,payloadBytes:number)=>
+  payloadBytes+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind]));
+/** What verifying a history that holds only its base charges: the baseline, the base's row and blob, the full state, and the base's replay. */
+export const baseOnlyActivationReadBytes=(input:{baseBytes:number;fullStateBytes:number;logEntryBytes:number})=>
+  3*input.baseBytes+input.logEntryBytes+input.fullStateBytes+emptyCandidate().length;
+export type KnownActivationSource=Pick<NativeOwnerActivationSource,"relayDatabaseNamespace"|"workspaceId"|"objectId"|"currentPath"|
+  "replicationEpoch"|"streamIdentity"|"baseOriginId"|"sourceMomentId"|"sourceDigest"|"sourceByteLength">;
+/** The largest descriptor native can capture for these values; the rest take their widest form. */
+export function activationDescriptorReserve(known:KnownActivationSource){
+  return activationDescriptorBytes({version:1,relayDatabaseNamespace:known.relayDatabaseNamespace,workspaceId:known.workspaceId,mainVersionId:"main",
+    objectId:known.objectId,lineageClaimId:WIDEST_DIGEST,currentPath:known.currentPath,replicationEpoch:known.replicationEpoch,
+    streamIdentity:known.streamIdentity,committedCursor:WIDEST_INTEGER,baseOriginId:known.baseOriginId,baseOriginSeq:WIDEST_INTEGER,
+    baseRelaySeq:WIDEST_INTEGER,sourceMomentId:known.sourceMomentId,sourceDigest:known.sourceDigest,sourceByteLength:known.sourceByteLength,
+    nativeHeadSequence:WIDEST_INTEGER,fullStateDigest:WIDEST_DIGEST,fullStateByteLength:WIDEST_INTEGER})+Buffer.byteLength(PREDECESSOR_FIELD);
+}
 const cuts=new WeakMap<VerifiedOrdinaryActivationCut,{storage:StorageContext;source:NativeOwnerActivationSource;baseline:LiveDocumentBaselineRegistrationInput["evidence"]}>();
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const integer=(value:unknown):value is number=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0;
@@ -29,7 +51,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
   const {source,document,baselineBytes,fullState,baseline,validateJournal,validateRegistration,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
-  requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
+  requireValue(activationCaptureBytes(baselineBytes.length,fullState.length,activationDescriptorBytes(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
@@ -44,7 +66,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
   let charged=baselineBytes.length;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
-  for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
+  for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(ordinaryActivationEntryBytes(row,Number(row.payload_bytes)));}
   const rows=metadata.flatMap(row=>{
     requireValue(integer(row.relay_seq)&&integer(row.origin_seq)&&typeof row.origin_id==="string"&&row.origin_id.length>0,"Ordinary activation coordinate is damaged.");
     const stored=storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,row.relay_seq);
@@ -87,7 +109,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   charge(fullState.length);
   const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
   requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
-  const captured=full.evidence,ordinary=normalize(updates.slice(1,-1),updates.length===1?new Uint8Array([0,0]):updates.at(-1)!);
+  const captured=full.evidence,ordinary=normalize(updates.slice(1,-1),updates.length===1?emptyCandidate():updates.at(-1)!);
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
     Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,

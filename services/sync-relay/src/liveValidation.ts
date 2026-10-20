@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import type { FirstOpenBaseInput, FirstOpenBaseResult } from "./firstOpenBase.js";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 
@@ -32,6 +33,7 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
+  | { kind: "first-open"; input: FirstOpenBaseInput }
 );
 type CapacityRetry = {
   kind: "retry";
@@ -43,6 +45,7 @@ export function createLiveValidationExecutor() {
   const slots = new Set<{ worker: Worker; busy: boolean }>();
   const waiters = new Set<() => void>();
   let closed = false;
+  let buildingFirstOpen = false;
   const hasCapacity = () => !closed && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
@@ -188,6 +191,28 @@ export function createLiveValidationExecutor() {
         { kind: "settlement", policy, input },
         signal,
       );
+    },
+    /**
+     * Builds at most one first-open base at a time and never waits for a
+     * slot, so live admission keeps the other. A busy caller retries on its
+     * next pass.
+     */
+    async buildFirstOpenBase(
+      policy: OrderedLiveUpdateCutPolicy,
+      input: FirstOpenBaseInput,
+      signal?: AbortSignal,
+    ): Promise<FirstOpenBaseResult | { kind: "busy" }> {
+      if (buildingFirstOpen) return { kind: "busy" };
+      buildingFirstOpen = true;
+      try {
+        const result = await submit<FirstOpenBaseResult>(
+          { kind: "first-open", policy, input },
+          signal,
+        );
+        return result.kind === "retry" ? { kind: "busy" } : result;
+      } finally {
+        buildingFirstOpen = false;
+      }
     },
     close,
   };

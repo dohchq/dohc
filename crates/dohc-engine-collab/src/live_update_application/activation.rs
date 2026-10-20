@@ -324,3 +324,69 @@ pub fn resume_imported_owner_activation(
         Ok(ImportedOwnerActivation {activation_id:activation_id.to_owned(),source,baseline_bytes,full_state,restore_generation})
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct KnownSource {
+        relay_database_namespace: String,
+        workspace_id: String,
+        object_id: String,
+        current_path: String,
+        replication_epoch: String,
+        stream_identity: String,
+        base_origin_id: String,
+        source_moment_id: String,
+        source_digest: String,
+        source_byte_length: i64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DescriptorReserve {
+        known: KnownSource,
+        reserve: usize,
+    }
+
+    /// The relay reserves descriptor bytes before a first-open base exists, so
+    /// every value it cannot know yet takes its widest form, and #2103's
+    /// predecessor activation is counted.
+    #[test]
+    fn first_open_descriptor_reserve_is_the_widest_native_descriptor() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/first-open-base/descriptor-reserve.json");
+        let fixture: DescriptorReserve =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let known = fixture.known;
+        let digest = "f".repeat(64);
+        let source = ImportedOwnerSource {
+            version: 1,
+            relay_database_namespace: known.relay_database_namespace,
+            workspace_id: known.workspace_id,
+            main_version_id: "main".to_owned(),
+            object_id: known.object_id,
+            lineage_claim_id: digest.clone(),
+            current_path: known.current_path,
+            replication_epoch: known.replication_epoch,
+            stream_identity: known.stream_identity,
+            committed_cursor: SAFE,
+            base_origin_id: known.base_origin_id,
+            base_origin_seq: SAFE,
+            base_relay_seq: SAFE,
+            source_moment_id: known.source_moment_id,
+            source_digest: known.source_digest,
+            source_byte_length: known.source_byte_length,
+            native_head_sequence: SAFE,
+            full_state_digest: digest.clone(),
+            full_state_byte_length: SAFE as usize,
+        };
+        let predecessor = format!(",\"predecessorActivationId\":\"ordinary-activation-{digest}\"");
+        assert_eq!(
+            serde_json::to_string(&source).unwrap().len() + predecessor.len(),
+            fixture.reserve
+        );
+    }
+}

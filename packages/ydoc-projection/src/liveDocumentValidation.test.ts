@@ -620,6 +620,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './image-src': './src/image-src.ts',
     './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
+    './richdoc-seed': './src/richdoc-seed.ts',
     './named-live-provider': './src/namedLiveProvider.ts',
     './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
   })

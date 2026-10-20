@@ -1,10 +1,15 @@
 import {createLiveMarkdownRegistrationValidator} from "@dohc/ydoc-projection/live-journal-validation";
 import { parentPort } from "node:worker_threads";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { buildFirstOpenBase } from "./firstOpenBase.js";
 import type {LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
 if (!parentPort) throw new Error("Live validation requires a worker.");
 parentPort.on("message", (work:LiveValidationWork) => {
+  if (work.kind === "first-open") {
+    parentPort!.postMessage(buildFirstOpenBase(work.policy, work.input));
+    return;
+  }
   if (work.kind === "settlement") {
     const result=createLiveMarkdownRegistrationValidator(work.policy)(work.input);
     parentPort!.postMessage(result.kind === "accepted" ? {kind:"accepted",evidence:{stateUpdateSha256:result.evidence.stateUpdateSha256,

@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingLimits";
 import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { encodeRichdocSeed } from "@dohc/ydoc-projection/richdoc-seed";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,
@@ -331,12 +330,16 @@ function declareDohcRootSchema(
   }
 }
 
-function createPlaintextSeedDoc(content: string, clientID: number): Y.Doc {
+function encodePlaintextSeed(content: string, clientID: number): Uint8Array {
   const doc = new Y.Doc();
-  doc.clientID = clientID;
-  declareDohcRootSchema(doc);
-  if (content.length > 0) doc.getText("plainText").insert(0, content);
-  return doc;
+  try {
+    doc.clientID = clientID;
+    declareDohcRootSchema(doc);
+    if (content.length > 0) doc.getText("plainText").insert(0, content);
+    return Y.encodeStateAsUpdate(doc);
+  } finally {
+    doc.destroy();
+  }
 }
 
 function visitJsonStrings(
@@ -1654,43 +1657,16 @@ export class YdocLiveAdapter {
             "The engine returned seed content without a valid seed client id.",
           );
         }
-        const seedDoc =
+        await session.applySeedUpdate(
           result.contentKind === "plaintext"
-            ? createPlaintextSeedDoc(result.seedContent, clientID)
-            : markdownToYDoc(result.seedContent, { clientID });
-        try {
-          if (result.contentKind === "richdoc") {
-            let projection: string | undefined;
-            try {
-              projection = yDocToMarkdown(seedDoc);
-            } catch {
-              // The serializer rejects some accepted imports. They can still
-              // open, but cannot carry an exact-source witness yet.
-            }
-            if (projection !== undefined && projection !== result.seedContent) {
-              // The first replicated base must still match the captured file.
-              // The engine validates this source against the projection witness.
-              const meta = seedDoc.getMap("meta");
-              meta.set("dohcMarkdownSource", result.seedContent);
-              meta.set(
-                "dohcMarkdownSourceSha256",
-                createHash("sha256").update(result.seedContent).digest("hex"),
-              );
-              meta.set(
-                "dohcMarkdownSourceProjectionSha256",
-                createHash("sha256").update(projection).digest("hex"),
-              );
-            }
-          }
-          await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
-          // The exposed initial state must include the seed: consumers (the
-          // desktop bridge) forward session.initialUpdate to the renderer,
-          // and the pre-seed encoding would render an empty document and
-          // baseline subsequent edits wrongly.
-          session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
-        } finally {
-          seedDoc.destroy();
-        }
+            ? encodePlaintextSeed(result.seedContent, clientID)
+            : encodeRichdocSeed(result.seedContent, clientID),
+        );
+        // The exposed initial state must include the seed: consumers (the
+        // desktop bridge) forward session.initialUpdate to the renderer,
+        // and the pre-seed encoding would render an empty document and
+        // baseline subsequent edits wrongly.
+        session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
       } catch (error) {
         // A failed seed must not leak the registered session (and with it
         // the daemon lease). settle:false is refused precisely when the

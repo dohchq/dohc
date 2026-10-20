@@ -12631,3 +12631,7 @@ mod fence_projection_tests {
 #[cfg(test)]
 #[path = "ydoc/nested1b_allowlist_tests.rs"]
 mod nested1b_allowlist_tests;
+
+#[cfg(test)]
+#[path = "ydoc/first_open_base_tests.rs"]
+mod first_open_base_tests;
