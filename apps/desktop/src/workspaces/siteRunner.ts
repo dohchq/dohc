@@ -462,6 +462,9 @@ function explicitHostBinds(args: string[]): HostBindCandidate[] {
 // only the host-named ones, and stops at the first token that isn't an
 // assignment at all (the real command).
 const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+// The variable names that rebind a dev server's host. siteCommandEnvironment
+// keeps dohc's own values of them out of a site command's environment too.
+const HOST_ENVIRONMENT_NAME = /^host(name)?$/i;
 
 // GNU env's documented form is `env [OPTION]... [NAME=VALUE]... [COMMAND
 // [arg]...]` — its OPTIONs can precede the assignments this scanner is
@@ -557,7 +560,7 @@ function explicitHostEnvironmentAssignments(
     const assignment = ENV_ASSIGNMENT_PATTERN.exec(token);
     if (assignment) {
       const [, name, value] = assignment;
-      if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
       index += 1;
       continue;
     }
@@ -581,7 +584,7 @@ function explicitHostEnvironmentAssignments(
         const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
         if (operandAssignment) {
           const [, name, value] = operandAssignment;
-          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+          if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
         }
         index += 1;
       }
@@ -610,7 +613,7 @@ function explicitHostEnvironmentAssignments(
         const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
         if (exported && operandAssignment) {
           const [, name, value] = operandAssignment;
-          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+          if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
         }
         index += 1;
       }
@@ -868,6 +871,33 @@ interface DescendantCaptureOverrides {
   descendantsReader?: (pid: number) => Promise<number[]>;
 }
 
+// A site's dev and build commands get the user's environment (PATH, HOME,
+// proxies, package-manager config), minus what could rebind the server or
+// belongs to dohc. A HOST or HOSTNAME inherited from dohc's own environment
+// would bind beyond loopback with no command for the validator above to
+// refuse: Docker exports HOSTNAME as the machine name, and Next.js binds to
+// it. DOHC_* variables configure dohc itself, including where its owner
+// credentials live, and the Electron ones control dohc's own runtime.
+const DOHC_OWN_ENVIRONMENT_NAME = /^(?:DOHC_|ELECTRON_RUN_AS_NODE$|ELECTRON_RENDERER_URL$)/i;
+
+export function siteCommandEnvironment(
+  parent: NodeJS.ProcessEnv,
+  overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(parent)) {
+    if (!HOST_ENVIRONMENT_NAME.test(name) && !DOHC_OWN_ENVIRONMENT_NAME.test(name)) env[name] = value;
+  }
+  // dohc's own callers may set any variable, but not a host beyond loopback.
+  for (const [name, value] of Object.entries(overrides)) {
+    if (HOST_ENVIRONMENT_NAME.test(name) && value !== undefined && !isLoopbackHostname(value)) {
+      throw new Error(`App command environment must set ${name} to a loopback host, not ${value || "all interfaces"}.`);
+    }
+    env[name] = value;
+  }
+  return env;
+}
+
 export async function startSiteDevServer(input: {
   workspaceRoot: string;
   siteRoot: string;
@@ -881,7 +911,7 @@ export async function startSiteDevServer(input: {
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
   const logs: SiteLogEntry[] = [];
-  const env = { ...process.env, ...(input.env ?? {}) };
+  const env = siteCommandEnvironment(process.env, input.env);
   // Package-manager commands are .cmd shims on Windows and cannot be spawned
   // directly; resolveSpawnCommand is a no-op on other platforms.
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
@@ -1162,7 +1192,7 @@ export async function buildSite(input: {
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
-  const env = { ...process.env, ...(input.env ?? {}) };
+  const env = siteCommandEnvironment(process.env, input.env);
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
