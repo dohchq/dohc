@@ -1,5 +1,5 @@
 import { desktopPins, activityPin } from "../../src/testPins";
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
@@ -259,6 +259,22 @@ export async function waitForWorkspaceReady(page: Page): Promise<void> {
     "data-ready",
     "true",
   );
+}
+
+// An opened folder starts in Restricted Mode, where dohc starts no agent and
+// runs no app code. This trusts it the way a person does: Restricted Mode in
+// the title bar, then Trust workspace in main's dialog, answered here.
+export async function trustOpenWorkspace(desktop: { app: ElectronApplication; page: Page }): Promise<void> {
+  await desktop.app.evaluate(({ dialog }) => {
+    const ask = dialog.showMessageBox;
+    dialog.showMessageBox = (async () => {
+      dialog.showMessageBox = ask;
+      return { response: 0, checkboxChecked: false };
+    }) as typeof dialog.showMessageBox;
+  });
+  const indicator = desktop.page.getByTestId("restricted-mode-indicator");
+  await indicator.click();
+  await expect(indicator).toHaveCount(0);
 }
 
 export async function openWorkspaceFromFirstRun(

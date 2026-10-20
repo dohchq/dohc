@@ -2,12 +2,25 @@ import type { workspaceTrustOperations } from "./bridgeContract";
 import type { OperationHandlers } from "./operationTable";
 import type { TrustedFolder, WorkspaceTrust } from "../workspaces/workspaceTrust";
 
-// The running app leads, because it is the fact that matters for safety.
-export const STOP_FAILED_MESSAGE = "An app in this workspace is still running. dohc could not stop it.";
-export const SAVE_FAILED_MESSAGE =
-  "dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.";
-export const STOP_AND_SAVE_FAILED_MESSAGE =
-  "An app in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.";
+// What is still running leads, because it is the fact that matters for safety.
+const STILL_RUNNING = {
+  app: "An app in this workspace is still running",
+  agent: "An agent in this workspace is still running",
+  both: "An app and an agent in this workspace are still running",
+};
+const SAVE_FAILED = "dohc could not save Restricted Mode";
+const SAVE_NEXT = "Try again before you quit dohc, or this workspace will be trusted again after a restart.";
+
+// Why a restrict failed, or null when it did not.
+export function restrictFailure(stillRunning: keyof typeof STILL_RUNNING | null, saveFailed: boolean): string | null {
+  if (!stillRunning) return saveFailed ? `${SAVE_FAILED}. ${SAVE_NEXT}` : null;
+  const running = STILL_RUNNING[stillRunning];
+  if (saveFailed) return `${running}, and ${SAVE_FAILED}. ${SAVE_NEXT}`;
+  return `${running}. dohc could not stop ${stillRunning === "both" ? "them" : "it"}.`;
+}
+export const STOP_FAILED_MESSAGE = restrictFailure("app", false)!;
+export const SAVE_FAILED_MESSAGE = restrictFailure(null, true)!;
+export const STOP_AND_SAVE_FAILED_MESSAGE = restrictFailure("app", true)!;
 
 // Main's side of workspace trust. The renderer can read it, ask for main's
 // dialog, and give trust up; only the person's answer in the dialog grants it.
@@ -24,6 +37,8 @@ export function workspaceTrustHandlers<
   // Stops every app command the workspace runs, and its previews. Rejects
   // when one did not stop.
   stopAppCommands(operation: Operation): Promise<void>;
+  // Stops the workspace's agent. Rejects when its runner did not stop.
+  stopAgents(workspaceId: string): Promise<void>;
   notifyChanged(workspaceId: string, trusted: boolean): void;
 }): OperationHandlers<typeof workspaceTrustOperations, Event, Operation> {
   const { trust } = dependencies;
@@ -69,17 +84,22 @@ export function workspaceTrustHandlers<
     restrictWorkspace: async (_input, { operation }) => {
       const { workspaceId } = operation.workspace;
       trust.revoke(workspaceId);
-      let stopFailed = false;
-      try {
-        await dependencies.stopAppCommands(operation);
-      } catch (error) {
-        console.warn("[desktop] could not stop a restricted workspace's app commands", error);
-        stopFailed = true;
-      } finally {
-        // Windows start their static previews again, unless a Trust the
-        // person gave meanwhile already told them otherwise.
-        if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
+      const [apps, agents] = await Promise.allSettled([
+        dependencies.stopAppCommands(operation),
+        dependencies.stopAgents(workspaceId),
+      ]);
+      if (apps.status === "rejected") {
+        console.warn("[desktop] could not stop a restricted workspace's app commands", apps.reason);
       }
+      if (agents.status === "rejected") {
+        console.warn("[desktop] could not stop a restricted workspace's agent", agents.reason);
+      }
+      // Windows start their static previews again, unless a Trust the
+      // person gave meanwhile already told them otherwise.
+      if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
+      const stillRunning = apps.status === "rejected"
+        ? agents.status === "rejected" ? "both" : "app"
+        : agents.status === "rejected" ? "agent" : null;
       // A Trust given meanwhile replaces this restrict. Apps that started
       // since belong to the trusted workspace, so a stop that counted them
       // is not a failure, and there is nothing to save.
@@ -93,9 +113,8 @@ export function workspaceTrustHandlers<
       }
       // The save can wait behind a Trust's write and then skip, so ask again.
       if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
-      if (stopFailed && saveFailed) throw new Error(STOP_AND_SAVE_FAILED_MESSAGE);
-      if (stopFailed) throw new Error(STOP_FAILED_MESSAGE);
-      if (saveFailed) throw new Error(SAVE_FAILED_MESSAGE);
+      const failure = restrictFailure(stillRunning, saveFailed);
+      if (failure) throw new Error(failure);
       return { workspaceId, trusted: false };
     },
   };

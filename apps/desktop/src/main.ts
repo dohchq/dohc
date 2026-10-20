@@ -3482,6 +3482,9 @@ const chatDispatchNotices = createChatDispatchNotices((event) => {
 });
 
 const chatDispatchService = createChatDispatchService({
+  // An agent runs in the workspace folder, where its CLI may follow the
+  // folder's own settings, so it starts only where app commands may run.
+  assertMayStartAgent: (workspace) => workspaceTrust.assertTrusted(workspace),
   onDispatchNotice: (workspace, notice) => {
     withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
   },
@@ -6957,7 +6960,16 @@ function registerIpcHandlers(): void {
     },
     stopAppCommands: (operation) =>
       operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
-    notifyChanged: notifyWorkspaceTrustChanged,
+    stopAgents: (workspaceId) => chatDispatchService.stopForRestrictedMode(workspaceId),
+    notifyChanged: (workspaceId, trusted) => {
+      notifyWorkspaceTrustChanged(workspaceId, trusted);
+      if (!trusted) return;
+      // Requests Restricted Mode held start now, without another message.
+      chatDispatchNotices.clear(workspaceId, "restricted");
+      void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+        console.error("[desktop] chat dispatch scan after trust:", error);
+      });
+    },
   }));
 
   registerOpenWorkspaceIpcHandler<
@@ -7014,6 +7026,7 @@ function registerIpcHandlers(): void {
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },
+    agentWaitsForTrust: (workspaceId, messageId) => chatDispatchService.waitsForTrust(workspaceId, messageId),
   });
 
   agentRunsIpc.registerChatRunRecords();

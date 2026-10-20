@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it, vi } from "vitest";
 import { workspaceTrustOperations } from "./bridgeContract";
-import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, workspaceTrustHandlers } from "./workspaceTrustIpc";
+import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, restrictFailure, workspaceTrustHandlers } from "./workspaceTrustIpc";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SiteProcessHandle } from "../workspaces/siteRunner";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -18,6 +18,8 @@ async function harness(input: {
   failWrites?: { value: boolean };
   // Stands in for the workspace's stop, when a test holds it.
   stop?: () => Promise<void>;
+  // Stands in for the stop of the workspace's agent.
+  stopAgents?: (workspaceId: string) => Promise<void>;
   // Runs before each write of the trust file, to hold it.
   writeGate?: { hold: (() => Promise<void>) | null };
 } = {}) {
@@ -51,6 +53,7 @@ async function harness(input: {
     confirm,
     stopAppCommands: (held) =>
       input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
+    stopAgents: input.stopAgents ?? (async () => undefined),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
@@ -275,5 +278,26 @@ describe("main's workspace trust operations", () => {
     expect(h.lifecycle.status("trip", "portal").running).toBe(false);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     expect(h.notified).toEqual([["trip", true], ["trip", false]]);
+  });
+
+  it("stops the workspace's agent with its apps, and says which one is still running", async () => {
+    const stopAgents = vi.fn(async (_workspaceId: string) => undefined);
+    const h = await harness({ answer: true, stopAgents });
+    await h.request();
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(stopAgents).toHaveBeenCalledWith("trip");
+
+    await h.request();
+    stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
+    await expect(h.restrict()).rejects.toThrow("An agent in this workspace is still running. dohc could not stop it.");
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+
+    await h.request();
+    await devServer(h, async () => { throw new Error("access denied"); });
+    stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
+    await expect(h.restrict()).rejects.toThrow("An app and an agent in this workspace are still running. dohc could not stop them.");
+    expect(restrictFailure("agent", true)).toBe(
+      "An agent in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.",
+    );
   });
 });

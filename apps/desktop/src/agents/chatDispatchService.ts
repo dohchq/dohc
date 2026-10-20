@@ -1,5 +1,5 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
-import { configuredRunnerCommand } from "./agentToolCatalog";
+import { AGENTS_RESTRICTED_MESSAGE, configuredRunnerCommand } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
@@ -24,6 +24,7 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 // How a run ended, as its notice says it.
 type RunOutcome =
@@ -99,6 +100,11 @@ const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
+export const SELF_TEST_RESTRICTED_DETAIL =
+  `${AGENTS_RESTRICTED_MESSAGE} Set Workspace trust to Trusted in Settings → Privacy, then test again.`;
+// For the log. The restrict that asked for the stop words what the person reads.
+export const RUNNER_OUTLIVED_STOP = "The agent runner did not exit after dohc stopped it.";
+
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
 const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
@@ -136,6 +142,10 @@ export interface ChatDispatchRecovery {
 
 interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   workspaceFor(workspaceId: string): ChatDispatchWorkspace | null;
+  // Main's workspace trust, the same check app commands pass. Rejects with
+  // WorkspaceRestrictedError in Restricted Mode; the answer is a synchronous
+  // check that trust still holds, for the spawn itself.
+  assertMayStartAgent(workspace: ChatDispatchWorkspace): Promise<() => void>;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
@@ -236,6 +246,8 @@ interface SelfTestState {
   timeout: ReturnType<typeof setTimeout>;
   killEscalation: ReturnType<typeof setTimeout> | null;
   resolve(result: { ok: boolean; detail: string }): void;
+  // Ends the self-test with this answer and stops its runner.
+  cancel(detail: string): Promise<void>;
 }
 
 function signalExitCode(signal: NodeJS.Signals | null): number {
@@ -266,6 +278,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const selfTests = new Map<string, SelfTestState>();
   const selfTestReservations = new Set<string>();
   const budgetBypassThreads = new Set<string>();
+  // Workspaces whose person was told that Restricted Mode holds a request.
+  const heldForTrust = new Set<string>();
   const workspaceChains = new Map<string, Promise<void>>();
   const sweptWorkspaces = new Set<string>();
   const recoveryTimers = new Map<
@@ -351,6 +365,38 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       );
     }, delay);
     recoveryTimers.set(workspaceId, timer);
+  }
+
+  // The synchronous check for the spawn, or null in Restricted Mode. Any
+  // other failure, such as an unreadable trust file, starts nothing either:
+  // it throws, and the scan tries again later.
+  async function agentStartCheck(workspace: ChatDispatchWorkspace): Promise<(() => void) | null> {
+    try {
+      return await options.assertMayStartAgent(workspace);
+    } catch (error) {
+      if (error instanceof WorkspaceRestrictedError) return null;
+      throw error;
+    }
+  }
+
+  // In Restricted Mode a request waits unclaimed, so it keeps its place and
+  // its budget, and nothing fails. The person hears of it once per workspace
+  // until the workspace is trusted.
+  async function holdForTrust(
+    workspace: ChatDispatchWorkspace,
+    dispatch: AwaitableAgentDispatchStore,
+  ): Promise<void> {
+    if (heldForTrust.has(workspace.workspaceId)) return;
+    const [held] = await dispatch.listPending(workspace.workspaceId);
+    if (!held) return;
+    heldForTrust.add(workspace.workspaceId);
+    try {
+      options.onDispatchNotice?.(workspace, {
+        reason: "restricted", threadId: held.threadId, message: AGENTS_RESTRICTED_MESSAGE,
+      });
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   function threadKey(workspaceId: string, threadId: string): string {
@@ -755,6 +801,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     claim: AgentDispatchClaim,
     runner: RunnerSettings,
     releaseWorkspace: (() => Promise<void>) | null,
+    assertMayStart: () => void,
   ): Promise<void> {
     const dispatch = options.dispatchStoreFor(workspace);
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
@@ -784,6 +831,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         command: configuredRunnerCommand(runner),
         profile: runner.profile,
         prompt: buildRunnerPrompt(markdown, claim.run.threadId),
+        assertMayStart,
       });
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
@@ -835,8 +883,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
-      const detail =
-        error instanceof Error && error.message ? error.message : "unknown error";
+      // A restrict that landed while the run was starting stops it here.
+      const detail = error instanceof WorkspaceRestrictedError
+        ? AGENTS_RESTRICTED_MESSAGE
+        : error instanceof Error && error.message ? error.message : "unknown error";
       const reason = `${RUNNER_START_FAILURE}: ${detail}`;
       try {
         await failClaimBeforeRun(workspace, claim, reason);
@@ -893,6 +943,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       return;
     }
+    const assertMayStart = await agentStartCheck(workspace);
+    if (!assertMayStart) {
+      await holdForTrust(workspace, dispatch);
+      return;
+    }
+    heldForTrust.delete(workspace.workspaceId);
     if (stopped || paused || workspaceProcessReserved(workspace)) {
       return;
     }
@@ -926,7 +982,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           if (bypassBudget) budgetBypassThreads.add(bypassKey);
           throw error;
         }
-        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace);
+        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace, assertMayStart);
         return;
       }
       runReservations.delete(workspace.workspaceId);
@@ -1014,7 +1070,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
-      await startClaim(workspace, claim, runner, releaseWorkspace);
+      await startClaim(workspace, claim, runner, releaseWorkspace, assertMayStart);
       return;
     }
   }
@@ -1355,6 +1411,52 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return stoppedRun;
   }
 
+  function exitWithin(child: RunnerProcess, ms: number): Promise<boolean> {
+    if (child.hasExited()) return Promise.resolve(true);
+    return new Promise((resolveExit) => {
+      const timer = setTimeout(() => resolveExit(child.hasExited()), ms);
+      child.onExit(() => {
+        clearTimeout(timer);
+        resolveExit(true);
+      });
+    });
+  }
+
+  // Whether a person's message waits for them to trust its workspace: the
+  // dispatch holds it in Restricted Mode. A trusted workspace answers at
+  // once; a restricted one answers behind the scan the message's post queued.
+  async function waitsForTrust(workspaceId: string, messageId: string): Promise<boolean> {
+    const workspace = options.workspaceFor(workspaceId);
+    if (stopped || !workspace || (await agentStartCheck(workspace))) return false;
+    let waits = false;
+    await enqueue(workspaceId, async () => {
+      const current = options.workspaceFor(workspaceId);
+      if (stopped || !current) return;
+      const pending = await options.dispatchStoreFor(current).listPending(workspaceId);
+      waits = pending.some((each) => each.triggerMessageId === messageId) &&
+        (await agentStartCheck(current)) === null;
+    });
+    return waits;
+  }
+
+  // Restricted Mode stops the workspace's agent: its run, through the
+  // person's own Stop, and a self-test. Resolves once each runner exited;
+  // rejects when one outlived its kill. The caller has already restricted
+  // the workspace, so no runner starts after this looks.
+  async function stopForRestrictedMode(workspaceId: string): Promise<void> {
+    const live = liveRuns.get(workspaceId);
+    const test = selfTests.get(workspaceId);
+    if (live && !live.finalized) {
+      // A failed save of the run's end is retried when the runner exits.
+      await stopAgentRun(workspaceId, live.claim.run.runId).catch(reportError);
+    }
+    await test?.cancel(SELF_TEST_RESTRICTED_DETAIL);
+    const exits = await Promise.all(
+      [live?.child, test?.child].map((child) => child ? exitWithin(child, RUNNER_KILL_GRACE_MS + 1_000) : true),
+    );
+    if (exits.includes(false)) throw new Error(RUNNER_OUTLIVED_STOP);
+  }
+
   async function resumeThreadDispatch(
     workspaceId: string,
     threadId: string,
@@ -1417,6 +1519,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const runner = await options.readRunnerSettings();
       const command = configuredRunnerCommand(runner);
       if (!command) return { ok: false, detail: "Configure a runner command first." };
+      const assertMayStart = await agentStartCheck(workspace);
+      if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
 
       // A self-test spawns a real runner and writes a scratch thread, so it
       // takes the same run lease and engine gate as a claimed run. A workspace
@@ -1491,6 +1595,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           command,
           profile: runner.profile,
           prompt,
+          assertMayStart,
         });
         return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
           const complete = async (result: { ok: boolean; detail: string }) => {
@@ -1584,6 +1689,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             timeout,
             killEscalation: null,
             resolve: resolveResult,
+            cancel: (detail) => complete({ ok: false, detail }),
           };
           selfTests.set(workspaceId, state);
           child.onError((error) => {
@@ -1614,6 +1720,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           // The self-test already failed; the caller reads that failure, not this one.
         }
         reportError(error);
+        // A restrict that landed while the self-test was starting stops it here.
+        if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
           detail: `Runner self-test could not start. ${
@@ -1728,6 +1836,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stop,
     scanWorkspace,
     stopAgentRun,
+    stopForRestrictedMode,
+    waitsForTrust,
     resumeThreadDispatch,
     dispatchStateForThread,
     runnerSelfTest,

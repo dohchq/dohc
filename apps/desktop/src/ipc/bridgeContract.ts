@@ -2070,6 +2070,9 @@ export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
 export const SendChatMessageResult = z.object({
   message: ChatMessageRecord,
+  // The message asks an agent, and Restricted Mode holds it until the person
+  // trusts the workspace.
+  waitsForTrust: z.literal(true).optional(),
   // The question or poll the message asked, read back after the write.
   // Absent when it asked none, or when that read failed.
   decision: ChatDecisionRecord.optional(),
@@ -2412,6 +2415,8 @@ export const StartChannelThreadResult = z.object({
   viewerAuthorId: OPAQUE_ID,
   // As on SendChatMessageResult: the opening message's question or poll.
   decision: ChatDecisionRecord.optional(),
+  // As on SendChatMessageResult.
+  waitsForTrust: z.literal(true).optional(),
 });
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 
@@ -6416,7 +6421,7 @@ export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
-  reason: z.enum(["no-runner", "budget-paused"]),
+  reason: z.enum(["no-runner", "budget-paused", "restricted"]),
   threadId: z.string().min(1),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),
