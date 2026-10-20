@@ -71,36 +71,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         (10_000, 10_000, 256),
         (10_000, 0, 2048),
     ] {
-        let (scratch, mut s) = fixture();
-        s.write_with(&NoFaults,|c| {
-            for i in 0..distinct {
-                let object=format!("f-{i:04}");
-                c.execute("INSERT INTO file_objects VALUES('ws',?1,1)",[&object]).map_err(sql)?;
-                if i%7!=6 {
-                    let path=if i%11==3 {format!("notes/{}/{object}.md","long-label".repeat(120))} else {format!("notes/{object}.md")};
-                    c.execute("INSERT INTO path_aliases VALUES('ws','main',?1,?2)",params![path,object]).map_err(sql)?;
-                }
-            }
-            for i in 0..32 {
-                let thread=format!("p-{i:02}");let message=format!("pm-{i:02}");
-                c.execute("INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id,lane) VALUES('ws',?1,'Measured',1,1,?2,?3)",params![thread,if i<16 {"a"} else {"b"},if i%2==0 {"posts"} else {"chat"}]).map_err(sql)?;
-                c.execute("INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws',?1,0,?2,'human',?3,'',1)",params![thread,message,"Long author ".repeat(20)]).map_err(sql)?;
-            }
-            let mut insert=c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,created_at_ms) VALUES('ws',?1,?2,?3,'file',?4,?5,?6)").map_err(sql)?;
-            for i in 0..history+unrelated {
-                let n=if i<history {i%16} else {16+i%16};
-                let object=format!("f-{:04}",if i<distinct {i} else {0});
-                insert.execute(params![format!("id-{i:06}"),format!("p-{n:02}"),format!("pm-{n:02}"),object,Option::<String>::None,i/5]).map_err(sql)?;
-            }
-            for i in 0..64 {insert.execute(params![format!("orphan-{i:03}"),"p-00","absent","f-0000",Option::<String>::None,history+i]).map_err(sql)?;}
-            insert.execute(params!["unresolved","p-00","pm-00",Option::<String>::None,"old/unproved.md",history]).map_err(sql)?;
-            c.execute_batch("INSERT INTO chat_channels(workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES('ws','z-small','Small','z-small','channel',1,1);
-                INSERT INTO chat_channel_wire_ids VALUES('ws','wire-z-small','z-small');
-                INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES('ws','small','Small',1,1,'z-small');
-                INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','small',0,'small-message','human','Ada','',1);").map_err(sql)?;
-            for i in 0..3 {insert.execute(params![format!("small-{i}"),"small","small-message",format!("f-{i:04}"),Option::<String>::None,i]).map_err(sql)?;}
-            Ok::<_,StorageError>(())
-        }).unwrap();
+        let (scratch, mut s) = seed_measurement_fixture(history, unrelated, distinct);
         demand(&mut s, "z-small");
         demand(&mut s, "a");
         let start = Instant::now();
@@ -116,11 +87,10 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
                 break;
             }
             slices += 1;
-            if slices == 2 {
+            if small_us == 0 && page(&s, "z-small", None).unwrap()["indexBuilding"] == false {
                 small_us = start.elapsed().as_micros();
                 assert_eq!(page(&s, "z-small", None).unwrap()["indexBuilding"], false);
-                let after:String=s.read_with(|c|c.query_row("SELECT seed_after FROM chat_conversation_file_link_state WHERE channel_id='a'",[],|r|r.get(0))).unwrap();
-                assert!(after.is_empty(), "small request must finish first");
+                assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true, "small request must finish first");
             }
             if slices == 5 && history >= 10_000 {
                 drop(s);
@@ -219,4 +189,100 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         "CONVERSATION_LINKS_MEASUREMENT {}",
         serde_json::to_string(&results).unwrap()
     );
+}
+
+fn seed_measurement_fixture(history: i64, unrelated: i64, distinct: i64) -> (ScratchDir, EngineStore) {
+    let (scratch, mut s) = fixture();
+    s.write_with(&NoFaults,|c| {
+        for i in 0..distinct {
+            let object=format!("f-{i:04}");
+            c.execute("INSERT INTO file_objects VALUES('ws',?1,1)",[&object]).map_err(sql)?;
+            if i%7!=6 {
+                let path=if i%11==3 {format!("notes/{}/{object}.md","long-label".repeat(120))} else {format!("notes/{object}.md")};
+                c.execute("INSERT INTO path_aliases VALUES('ws','main',?1,?2)",params![path,object]).map_err(sql)?;
+            }
+        }
+        for i in 0..32 {
+            let thread=format!("p-{i:02}");let message=format!("pm-{i:02}");
+            c.execute("INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id,lane) VALUES('ws',?1,'Measured',1,1,?2,?3)",params![thread,if i<16 {"a"} else {"b"},if i%2==0 {"posts"} else {"chat"}]).map_err(sql)?;
+            c.execute("INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws',?1,0,?2,'human',?3,'',1)",params![thread,message,"Long author ".repeat(20)]).map_err(sql)?;
+        }
+        let mut insert=c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,created_at_ms) VALUES('ws',?1,?2,?3,'file',?4,?5,?6)").map_err(sql)?;
+        for i in 0..history+unrelated {
+            let n=if i<history {i%16} else {16+i%16};
+            let object=format!("f-{:04}",if i<distinct {i} else {0});
+            insert.execute(params![format!("id-{i:06}"),format!("p-{n:02}"),format!("pm-{n:02}"),object,Option::<String>::None,i/5]).map_err(sql)?;
+        }
+        for i in 0..64 {insert.execute(params![format!("orphan-{i:03}"),"p-00","absent","f-0000",Option::<String>::None,history+i]).map_err(sql)?;}
+        insert.execute(params!["unresolved","p-00","pm-00",Option::<String>::None,"old/unproved.md",history]).map_err(sql)?;
+        c.execute_batch("INSERT INTO chat_channels(workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES('ws','z-small','Small','z-small','channel',1,1);
+            INSERT INTO chat_channel_wire_ids VALUES('ws','wire-z-small','z-small');
+            INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES('ws','small','Small',1,1,'z-small');
+            INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','small',0,'small-message','human','Ada','',1);").map_err(sql)?;
+        for i in 0..3 {insert.execute(params![format!("small-{i}"),"small","small-message",format!("f-{i:04}"),Option::<String>::None,i]).map_err(sql)?;}
+        Ok::<_,StorageError>(())
+    }).unwrap();
+    (scratch, s)
+}
+
+/// Seed rows only: optimized release, no opcode hook, both request orders.
+#[test]
+#[ignore = "scheduled conversation Links seed measurement"]
+fn conversation_links_measure_seed_only() {
+    assert!(!std::hint::black_box(cfg!(debug_assertions)), "run with --release");
+    let mut results = Vec::new();
+    for (history, unrelated, distinct, empty_threads) in [
+        (1000, 0, 256, 0), (10000, 0, 256, 0),
+        (10000, 10000, 256, 0), (10000, 0, 2048, 0),
+        (0, 0, 256, 20000),
+    ] {
+        for small_first in [true, false] {
+            let (scratch, mut s) = seed_measurement_fixture(history, unrelated, distinct);
+            if empty_threads != 0 {
+                exec(&mut s, "DELETE FROM chat_attachments WHERE attachment_id LIKE 'orphan-%' OR attachment_id='unresolved';");
+                posts_seed_fixture(&mut s, empty_threads, 50);
+            }
+            let order = if small_first { ["z-small", "a"] } else { ["a", "z-small"] };
+            for channel in order { demand(&mut s, channel); }
+            let start = Instant::now();
+            let mut slices = 0;
+            let mut small_slices = 0;
+            let mut small_us = 0;
+            let mut max_slice_us = 0;
+            let mut max_slice_channel = String::new();
+            let mut reopen_us = 0;
+            loop {
+                let channel: Option<String> = s.read_with(|c| c.query_row(
+                    "SELECT channel_id FROM chat_conversation_file_link_state WHERE seed_phase='scan' ORDER BY seed_turn,request_id LIMIT 1",
+                    [], |r| r.get(0)).optional()).unwrap();
+                let begin = Instant::now();
+                let pending = tick(&mut s).unwrap();
+                let elapsed = begin.elapsed().as_micros();
+                if elapsed > max_slice_us {
+                    max_slice_us = elapsed;
+                    max_slice_channel = channel.unwrap_or_else(|| "idle".into());
+                }
+                if !pending { break; }
+                slices += 1;
+                if small_slices == 0 && page(&s, "z-small", None).unwrap()["indexBuilding"] == false {
+                    small_slices = slices;
+                    small_us = start.elapsed().as_micros();
+                    assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true);
+                }
+                if slices == 5 && history >= 10000 {
+                    drop(s);
+                    let begin = Instant::now();
+                    s = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+                    reopen_us = begin.elapsed().as_micros();
+                }
+            }
+            assert_eq!(small_slices, if small_first { 3 } else { 4 });
+            if empty_threads != 0 { assert_eq!(slices, 53); }
+            results.push(json!({"history":history,"unrelated":unrelated,"distinct":distinct,
+                "emptyThreadFixture":empty_threads,"requestOrder":order,"slices":slices,
+                "smallReadyAtSlice":small_slices,"smallUs":small_us,"totalUs":start.elapsed().as_micros(),
+                "maxSliceUs":max_slice_us,"maxSliceKind":"seed","maxSliceChannel":max_slice_channel,"reopenUs":reopen_us}));
+        }
+    }
+    println!("CONVERSATION_LINKS_SEED_MEASUREMENT {}", serde_json::to_string(&results).unwrap());
 }

@@ -4387,7 +4387,7 @@ mod tests {
             ),
             (
                 "v2-chat-conversation-file-links",
-                "461dce6901f2f345c4ecdde97f9b727247406369df631c4108193b87f10cce64",
+                "a976e7546ecf2efacaa0e885b966bfaac96f4c2b1c3ca24f417fbf3b645bdd22",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -731,6 +731,9 @@ fn conversation_links_seed_is_conversation_scoped_and_request_ordered() {
     demand(&mut s, "b");
     demand(&mut s, "a");
     assert!(tick(&mut s).unwrap());
+    let after: String = s.read_with(|c| c.query_row("SELECT seed_after FROM chat_conversation_file_link_state WHERE channel_id='a'", [], |r| r.get(0))).unwrap();
+    assert!(after.is_empty(), "the first requested conversation must run first");
+    assert!(tick(&mut s).unwrap());
     assert!(tick(&mut s).unwrap());
     assert_eq!(page(&s, "b", None).unwrap()["indexBuilding"], false);
     assert_eq!(entries(&s, "b").len(), 1);
@@ -744,8 +747,8 @@ fn conversation_links_seed_is_conversation_scoped_and_request_ordered() {
         })
         .unwrap();
     assert!(
-        after.is_empty(),
-        "request order must win over channel order"
+        !after.is_empty(),
+        "the large conversation must advance between small seed slices"
     );
     drain(&mut s);
     // A reset must also scan only this conversation, not the large neighbour.
@@ -790,7 +793,7 @@ fn conversation_links_failed_repair_backs_off_without_releasing_its_barrier_or_s
     );
     assert_eq!(
         tick_at(&mut s, 1001).unwrap(),
-        std::time::Duration::from_millis(250)
+        std::time::Duration::from_millis(249)
     );
     exec(&mut s, "DROP TRIGGER fail_a;");
     for _ in 0..3 {
@@ -825,4 +828,161 @@ fn conversation_links_failed_seed_does_not_stall_later_requests() {
         tick_at(&mut s, 1250).unwrap();
     }
     assert_eq!(entries(&s, "a").len(), 1);
+}
+
+#[test]
+fn conversation_links_clock_rollback_makes_seed_and_repair_due_after_restart() {
+    for repairing in [false, true] {
+        let (scratch, mut s) = fixture();
+        alias(&mut s, "f", "f.md");
+        attach(&mut s, "f", Some("f"), 1, "t", "m");
+        demand(&mut s, "a");
+        if repairing {
+            drain(&mut s);
+            exec(&mut s, "INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','file','f');
+                UPDATE chat_conversation_file_link_work SET failures=4,retry_at_ms=3600000;");
+        } else {
+            exec(&mut s, "UPDATE chat_conversation_file_link_state SET failures=4,retry_at_ms=3600000;");
+        }
+        drop(s);
+        let mut s = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+        assert_eq!(tick_at(&mut s, 1000).unwrap(), std::time::Duration::ZERO);
+        for _ in 0..2 { tick_at(&mut s, 1000).unwrap(); }
+        assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], false);
+        assert_eq!(entries(&s, "a").len(), 1);
+    }
+}
+
+#[test]
+fn conversation_links_retry_sleeps_until_earliest_deadline_and_bounds_the_future() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    exec(&mut s, "UPDATE chat_conversation_file_link_state SET retry_at_ms=61000 WHERE channel_id='a';
+        UPDATE chat_conversation_file_link_state SET retry_at_ms=11000 WHERE channel_id='b';");
+    assert_eq!(tick_at(&mut s, 1000).unwrap(), std::time::Duration::from_secs(10));
+    tick_at(&mut s, 11000).unwrap();
+    assert_eq!(tick_at(&mut s, 11000).unwrap(), std::time::Duration::from_secs(50));
+    // Exactly 60 seconds is a valid deadline; anything beyond it is due.
+    assert_eq!(tick_at(&mut s, 1000).unwrap(), std::time::Duration::from_secs(60));
+    assert_eq!(tick_at(&mut s, 999).unwrap(), std::time::Duration::ZERO);
+}
+
+fn retries(s: &EngineStore, table: &str, predicate: &str) -> (i64, i64) {
+    s.read_with(|c| c.query_row(&format!("SELECT failures,retry_at_ms FROM {table} WHERE {predicate}"), [],
+        |r| Ok((r.get(0)?, r.get(1)?)))).unwrap()
+}
+
+#[test]
+fn conversation_links_fresh_changes_and_reset_clear_backoff() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "f.md");
+    attach(&mut s, "old", Some("f"), 1, "t", "m");
+    demand(&mut s, "a");
+    drain(&mut s);
+    exec(&mut s, "INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','file','f');
+        UPDATE chat_conversation_file_link_work SET failures=8,retry_at_ms=61000;");
+    // Existing-work revision update.
+    attach(&mut s, "new", Some("f"), 2, "t", "m");
+    assert_eq!(retries(&s, "chat_conversation_file_link_work", "kind='file'"), (0, 0));
+    exec(&mut s, "UPDATE chat_conversation_file_link_work SET failures=8,retry_at_ms=61000;");
+    // INSERT ON CONFLICT requeue.
+    exec(&mut s, "DELETE FROM chat_attachments WHERE attachment_id='new';");
+    assert_eq!(retries(&s, "chat_conversation_file_link_work", "kind='file'"), (0, 0));
+    exec(&mut s, "UPDATE chat_conversation_file_link_work SET failures=8,retry_at_ms=61000;
+        INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','thread','t');");
+    // Runtime enqueue also requeues the backed-off file.
+    tick_at(&mut s, 1000).unwrap();
+    assert_eq!(retries(&s, "chat_conversation_file_link_work", "kind='file'"), (0, 0));
+    drain(&mut s);
+    exec(&mut s, "UPDATE chat_conversation_file_link_state SET failures=8,retry_at_ms=61000;
+        INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','reset','');");
+    assert_eq!(retries(&s, "chat_conversation_file_link_state", "channel_id='a'"), (0, 0));
+    exec(&mut s, "UPDATE chat_conversation_file_link_state SET failures=8,retry_at_ms=61000;
+        INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','reset','')
+        ON CONFLICT(workspace_id,channel_id,kind,key) DO UPDATE SET revision=revision+1,retry_at_ms=0,failures=0;");
+    assert_eq!(retries(&s, "chat_conversation_file_link_state", "channel_id='a'"), (0, 0));
+}
+
+#[test]
+fn conversation_links_successful_partial_repair_clears_failures() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    drain(&mut s);
+    s.write_with(&NoFaults, |c| {
+        let mut q = c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,'t','absent','file','f',?2)").map_err(sql)?;
+        for i in 0..101 { q.execute(params![format!("orphan-{i:03}"),i]).map_err(sql)?; }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    exec(&mut s, "INSERT INTO chat_conversation_file_link_work(workspace_id,channel_id,kind,key) VALUES('ws','a','file','f');
+        UPDATE chat_conversation_file_link_work SET failures=8,retry_at_ms=1000;");
+    tick_at(&mut s, 1000).unwrap();
+    assert_eq!(retries(&s, "chat_conversation_file_link_work", "kind='file'"), (0, 0));
+    let after: String = s.read_with(|c| c.query_row("SELECT after_id FROM chat_conversation_file_link_work", [], |r| r.get(0))).unwrap();
+    assert!(!after.is_empty(), "the successful slice must retain its continuation");
+}
+
+fn posts_seed_fixture(s: &mut EngineStore, threads: i64, files: i64) {
+    s.write_with(&NoFaults, |c| {
+        let mut thread = c.prepare_cached("INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id,lane) VALUES('ws',?1,'Post',1,1,'a','posts')").map_err(sql)?;
+        let mut message = c.prepare_cached("INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws',?1,0,'post','human','Ada','',1)").map_err(sql)?;
+        let mut attachment = c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,?2,'post','file',?1,1)").map_err(sql)?;
+        for i in 0..threads {
+            let id = format!("post-{i:05}");
+            thread.execute([&id]).map_err(sql)?;
+            if i < files {
+                message.execute([&id]).map_err(sql)?;
+                attachment.execute(params![format!("f-{i:03}"),id]).map_err(sql)?;
+            }
+        }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+}
+
+#[test]
+fn conversation_links_posts_seed_skips_twenty_thousand_empty_threads() {
+    let (_scratch, mut s) = fixture();
+    posts_seed_fixture(&mut s, 20_000, 50);
+    demand(&mut s, "a");
+    let mut slices = 0;
+    while tick(&mut s).unwrap() { slices += 1; }
+    assert_eq!(slices, 51, "one slice per nonempty thread plus completion");
+    assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], false);
+}
+
+#[test]
+fn conversation_links_seed_rotates_to_a_small_second_request() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "small", "small.md");
+    attach(&mut s, "small", Some("small"), 1, "u", "n");
+    s.write_with(&NoFaults, |c| {
+        let mut insert = c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,'t','m','file','large',?2)").map_err(sql)?;
+        for i in 0..1000 { insert.execute(params![format!("large-{i:04}"),i]).map_err(sql)?; }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    for _ in 0..4 { tick(&mut s).unwrap(); }
+    assert_eq!(page(&s, "b", None).unwrap()["indexBuilding"], false);
+    assert_eq!(entries(&s, "b").len(), 1);
+    assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true);
+}
+
+#[test]
+fn conversation_links_message_restoration_publishes_without_queueing_repair() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "f.md");
+    attach(&mut s, "old", Some("f"), 1, "t", "m");
+    attach(&mut s, "new", Some("f"), 2, "t", "restored");
+    attach(&mut s, "legacy", None, 3, "t", "restored");
+    demand(&mut s, "a");
+    drain(&mut s);
+    assert_eq!(entries(&s, "a")[0]["attachmentId"], "old");
+    exec(&mut s, "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','t',1,'restored','human','Ada','',1);");
+    let p = page(&s, "a", None).unwrap();
+    assert_eq!(p["indexBuilding"], false);
+    assert_eq!(p["entries"][0]["attachmentId"], "new");
+    assert_eq!(p["complete"], false, "restored path-only mention marks incomplete coverage");
+    let work: i64 = s.read_with(|c| c.query_row("SELECT count(*) FROM chat_conversation_file_link_work", [], |r| r.get(0))).unwrap();
+    assert_eq!(work, 0);
 }
