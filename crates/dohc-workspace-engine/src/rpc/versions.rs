@@ -878,7 +878,7 @@ impl VersionFence {
                             open.root.clone(),
                             open.workspace_id.clone(),
                             Arc::new(self_writes.scoped(&open.root)),
-                            jobs.iter().cloned().collect(),
+                            jobs.to_vec(),
                             now_ms()?,
                         )
                         .await
