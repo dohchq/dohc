@@ -59,7 +59,7 @@ export async function duplicateWorkspaceFile(
       const pending = await readPending(pendingPath);
       if (pending) {
         if (pending.workspaceId !== workspace.workspaceId || pending.source !== source.physical) throw new Error("This pending Duplicate belongs to another file or workspace.");
-        const previous = await engine.readDuplicate(pending.operationId);
+        const previous = await engine.readDuplicate(pending.operationId, pending.path);
         if (previous) {
           const target = await admitPath(workspace.rootPath, previous.path);
           if (previous.path !== pending.path || !allowed(target.path) || !allowed(target.physical)) throw new Error("dohc could not confirm the pending Duplicate. Check its operation in History.");

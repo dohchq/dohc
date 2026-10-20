@@ -342,7 +342,7 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
-  readDuplicate(operationId: string): Promise<{path: string} | null>;
+  readDuplicate(operationId: string, path: string): Promise<{path: string} | null>;
   hasPath(path: string): Promise<boolean>;
   duplicateFile(fromPath: string, toPath: string): Promise<{path: string; materialized: boolean}>;
   // Moves one visible regular file to an empty name in one rename that
@@ -6063,18 +6063,16 @@ export function createWorkspaceEngineCapture(
                 }
                 return held;
               },
-              readDuplicate: async operationId => {
+              readDuplicate: async (operationId, path) => {
                 const operation = await engine.readHistoryOperation({workspaceId, operationId});
-                if (operation.kind !== "file-duplicate" || operation.versionId !== versionId) return null;
-                const page = await engine.readHistoryPage({workspaceId, operationId, versionId: operation.versionId, limit: 1});
-                const member = page.moments[0];
-                if (!member) throw new Error("dohc could not read the pending Duplicate. Open the workspace again, then try again.");
-                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path: member.path}]});
+                if (operation.kind !== "file-duplicate" || operation.versionId !== versionId || operation.momentCount !== 1) return null;
+                const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path}]});
                 const current = resolved.results[0];
-                if (current?.status !== "found" || current.objectId !== member.objectId) return null;
-                const latest = await engine.readHistoryPage({workspaceId, versionId, objectId: member.objectId, limit: 1});
-                if (latest.moments[0]?.momentId !== member.momentId) return null;
-                return {path: member.path};
+                if (current?.status !== "found") return null;
+                // history.page flushes capture, so it cannot run inside this hold.
+                const latest = (await engine.listMoments({workspaceId, versionId, objectId: current.objectId, limit: 1})).moments[0];
+                if (latest?.objectId !== current.objectId || latest.path !== path || latest.operation !== "write" || latest.metadata.correlationId !== operationId) return null;
+                return {path};
               },
               hasPath: async path => {
                 const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{path}]});
