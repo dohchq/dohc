@@ -26,10 +26,15 @@ fn exact_work(s: &EngineStore, counter: Arc<AtomicU64>) {
 async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pages() {
     let mut results = Vec::new();
     let mut baseline = None;
-    for (history, unrelated) in [(1_000_i64, 0_i64), (10_000, 0), (10_000, 10_000)] {
+    for (history, unrelated, distinct) in [
+        (1_000_i64, 0_i64, 256_i64),
+        (10_000, 0, 256),
+        (10_000, 10_000, 256),
+        (10_000, 0, 2048),
+    ] {
         let (scratch, mut s) = fixture();
         s.write_with(&NoFaults,|c| {
-            for i in 0..256 { let object=format!("f-{i:03}");c.execute("INSERT INTO file_objects VALUES('ws',?1,1)",[&object]).map_err(sql)?;
+            for i in 0..distinct { let object=format!("f-{i:03}");c.execute("INSERT INTO file_objects VALUES('ws',?1,1)",[&object]).map_err(sql)?;
                 c.execute("INSERT INTO path_aliases VALUES('ws','main',?1,?2)",params![format!("notes/{object}.md"),object]).map_err(sql)?; }
             for i in 0..32 {
                 let thread=format!("p-{i:02}");let message=format!("pm-{i:02}");
@@ -38,7 +43,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
             }
             for i in 0..history+unrelated {
                 let n=if i<history {i%16} else {16+i%16};let thread=format!("p-{n:02}");let message=format!("pm-{n:02}");
-                let object=format!("f-{:03}",if i<256 {i} else {0});
+                let object=format!("f-{:03}",if i<distinct {i} else {0});
                 c.execute("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,?2,?3,'file',?4,?5)",
                     params![format!("id-{i:06}"),thread,message,object,i]).map_err(sql)?;
             }
@@ -107,7 +112,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         let second = page(&s, "a", Some(first["nextCursor"].as_str().unwrap().into())).unwrap();
         let second_us = start.elapsed().as_micros();
         let second_steps = work.swap(0, Ordering::Relaxed);
-        let page_plan=s.read_with(|c| c.prepare("EXPLAIN QUERY PLAN SELECT file_key,attachment_id FROM chat_conversation_file_links WHERE workspace_id='ws' AND channel_id='a' AND invalid=0 AND (mentioned_at_ms,attachment_id,file_key)<(999999,'z','z') ORDER BY mentioned_at_ms DESC,attachment_id DESC,file_key DESC LIMIT 101").unwrap().query_map([],|r| r.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
+        let page_plan=s.read_with(|c| c.prepare("EXPLAIN QUERY PLAN SELECT file_key,attachment_id,thread_id,message_id,mentioned_at_ms FROM chat_conversation_file_links WHERE workspace_id='ws' AND channel_id='a' AND invalid=0 AND (mentioned_at_ms,attachment_id,file_key)<(999999,'z','z') ORDER BY mentioned_at_ms DESC,attachment_id DESC,file_key DESC LIMIT 101").unwrap().query_map([],|r| r.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>()).unwrap();
         assert!(page_plan.iter().all(|s| !s.contains("TEMP B-TREE")));
         assert_eq!(first["entries"].as_array().unwrap().len(), 100);
         assert_eq!(second["entries"].as_array().unwrap().len(), 100);
@@ -143,7 +148,14 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         attach(
             &mut s,
             &last_id,
-            Some("f-000"),
+            Some(&format!(
+                "f-{:03}",
+                if history - 1 < distinct {
+                    history - 1
+                } else {
+                    0
+                }
+            )),
             history - 1,
             &format!("p-{:02}", (history - 1) % 16),
             &format!("pm-{:02}", (history - 1) % 16),
@@ -198,6 +210,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         let mut pages = 0;
         let mut mentions = 0;
         let mut bytes = 0;
+        let file_count = distinct;
         let mut distinct = std::collections::BTreeSet::new();
         loop {
             let p = actor
@@ -226,10 +239,10 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         }
         let drain_us = start.elapsed().as_micros();
         let drain_steps = work.swap(0, Ordering::Relaxed);
-        assert_eq!(distinct.len(), 256);
+        assert_eq!(distinct.len(), file_count as usize);
         drop(actor);
         drop(supervisor);
-        results.push(json!({"history":history,"unrelated":unrelated,"threads":32,"orphans":64,"aggregate":{"rows":aggregate_rows.len(),"us":aggregate_us,"vmSteps":aggregate_steps,"plan":aggregate_plan},
+        results.push(json!({"history":history,"unrelated":unrelated,"distinctFiles":file_count,"threads":32,"orphans":64,"aggregate":{"rows":aggregate_rows.len(),"us":aggregate_us,"vmSteps":aggregate_steps,"plan":aggregate_plan},
             "projection":{"firstUs":first_us,"continuationUs":second_us,"firstVmSteps":first_steps,"continuationVmSteps":second_steps,"firstBytes":first.to_string().len(),"continuationBytes":second.to_string().len(),"candidateWindow":101,"hydrationMaximum":100,"plan":page_plan},
             "seed":{"resumeAfterRecords":if resume_open_us.is_some(){100}else{0},"resumeOpenUs":resume_open_us,"slices":slices,"us":seed_us,"vmSteps":seed_steps,"maxActorSliceUs":max_slice_us},"repair":{"invalidationUs":removal_us,"invalidationVmSteps":removal_steps,"oneSliceUs":repair_slice_us,"vmSteps":repair_slice_steps},
             "threadMove":{"invalidationUs":move_invalidate_us,"repairUs":move_repair_us,"slices":move_slices,"maxSliceUs":move_max_us,"vmSteps":move_steps},
