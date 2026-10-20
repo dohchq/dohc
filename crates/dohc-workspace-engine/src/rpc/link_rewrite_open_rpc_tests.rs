@@ -157,10 +157,12 @@ async fn rpc_open_source_stays_open_through_rewrite_and_undo() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stays_open_oracle_kills_closing_write_sessions_in_the_fence() {
     let mutant = tokio::spawn(open_session_proof(true)).await;
-    assert!(
-        mutant.is_err_and(|error| error.is_panic()),
-        "close-write-session mutation survived"
-    );
+    let error = mutant.expect_err("close-write-session mutation survived");
+    assert!(error.is_panic());
+    let panic = error.into_panic();
+    let message = panic.downcast_ref::<String>().map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert_eq!(message, Some("Undo closed the write member's session"));
     if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
