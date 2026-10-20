@@ -4499,7 +4499,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn conversation_links_migrations_64_and_65_apply_in_order_from_fresh_and_main_64() {
         for resume_at_main_64 in [false, true] {
@@ -4509,35 +4508,67 @@ mod tests {
             let ctx = MigrationContext::current(1);
             let before = migration_index("v2-chat-conversation-file-links");
             let predecessor = &BASELINE_MIGRATIONS[before - 1];
-            assert_eq!((predecessor.ordinal, predecessor.id), (64, "v2-ydoc-files-seen"));
+            assert_eq!(
+                (predecessor.ordinal, predecessor.id),
+                (64, "v2-ydoc-files-seen")
+            );
             assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
             let prior = if resume_at_main_64 {
                 run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
                 let row: (String, String) = conn.query_row(
                     "SELECT id,checksum FROM engine_migrations WHERE ordinal=64 AND completed_at IS NOT NULL",
                     [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-                assert_eq!(row, (predecessor.id.into(), migration_checksum(predecessor.sql)));
+                assert_eq!(
+                    row,
+                    (predecessor.id.into(), migration_checksum(predecessor.sql))
+                );
                 conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main');
                     INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','named','Main',1);
                     INSERT INTO ydoc_files_seen VALUES('ws','main','seen-before-links');").unwrap();
                 drop(conn);
                 conn = open_bare(&path);
                 Some(row)
-            } else { None };
+            } else {
+                None
+            };
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
             let rows: Vec<(i64, String, String)> = conn.prepare(
                 "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal>=64 AND completed_at IS NOT NULL ORDER BY ordinal"
             ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
                 .collect::<Result<_,_>>().unwrap();
-            assert_eq!(rows, vec![
-                (64, predecessor.id.into(), migration_checksum(predecessor.sql)),
-                (65, "v2-chat-conversation-file-links".into(), migration_checksum(BASELINE_MIGRATIONS[before].sql)),
-            ]);
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        64,
+                        predecessor.id.into(),
+                        migration_checksum(predecessor.sql)
+                    ),
+                    (
+                        65,
+                        "v2-chat-conversation-file-links".into(),
+                        migration_checksum(BASELINE_MIGRATIONS[before].sql)
+                    ),
+                ]
+            );
             if let Some(prior) = prior {
                 assert_eq!((rows[0].1.clone(), rows[0].2.clone()), prior);
-                assert_eq!(conn.query_row("SELECT object_id FROM ydoc_files_seen", [], |r| r.get::<_,String>(0)).unwrap(), "seen-before-links");
+                assert_eq!(
+                    conn.query_row("SELECT object_id FROM ydoc_files_seen", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "seen-before-links"
+                );
             }
-            assert_eq!(conn.query_row("SELECT count(*) FROM chat_conversation_file_link_state", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM chat_conversation_file_link_state",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
         }
     }
 
