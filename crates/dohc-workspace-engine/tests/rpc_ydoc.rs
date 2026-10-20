@@ -3452,37 +3452,6 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
-    async fn call_after_backfill(
-        transport: &InProcessTransport<EngineService>,
-        workspace: &WorkspaceHandle,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> Value {
-        tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                match transport
-                    .call(
-                        RequestContext::unbounded(),
-                        request(id, method, Some(workspace.clone()), params.clone()),
-                    )
-                    .await
-                {
-                    Ok(response) => break response.result,
-                    Err(error)
-                        if error.code == ErrorCode::Overloaded
-                            && error.message == "engine-store-busy" =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("{method} failed: {error:?}"),
-                }
-            }
-        })
-        .await
-        .expect("capture backfill must admit the request")
-    }
-
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
@@ -3523,7 +3492,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = call_after_backfill(
+    let settled = call(
         &transport,
         &handle,
         4,
@@ -3608,7 +3577,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
-    call_after_backfill(
+    call(
         &transport,
         &handle,
         7,
@@ -3988,18 +3957,18 @@ async fn assert_settle_refuses_over_deleted_file(
     path: &str,
     session_id: &str,
 ) {
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "ydoc.settle",
-                Some(handle.clone()),
-                json!({ "sessionId": session_id, "summary": "type" }),
-            ),
-        )
-        .await
-        .expect_err("a settle over a file deleted outside dohc must refuse");
+    let refused = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "ydoc.settle",
+            Some(handle.clone()),
+            json!({ "sessionId": session_id, "summary": "type" }),
+        ),
+    )
+    .await
+    .expect_err("a settle over a file deleted outside dohc must refuse");
     assert_eq!(refused.message, "conflict-stale-target", "{path}");
     assert!(
         !scratch.path().join(path).exists(),

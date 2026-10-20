@@ -47,21 +47,21 @@ async fn flush_until(
 async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
 
@@ -140,21 +140,21 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     write_file(scratch.path(), "big.env", big_secret.as_bytes());
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let mut id: u64 = 10;
@@ -542,21 +542,21 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     // versions.active answers null when neither active nor main resolves;
     // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id + 1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": fresh.path().to_string_lossy(),
-                    "workspaceId": "rpc-read-fresh",
-                }),
-            ),
-        )
-        .await
-        .expect("fresh open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            id + 1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": fresh.path().to_string_lossy(),
+                "workspaceId": "rpc-read-fresh",
+            }),
+        ),
+    )
+    .await
+    .expect("fresh open");
     let fresh_handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
     let active = call(

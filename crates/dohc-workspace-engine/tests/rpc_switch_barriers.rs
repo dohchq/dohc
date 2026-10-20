@@ -32,13 +32,13 @@ async fn wait_until_capture_ready(
 ) {
     let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         id += 1;
         if status.result["phase"] == json!("ready") {
             return;
@@ -977,7 +977,8 @@ async fn a_fork_cancelled_at_the_session_lock_answers_cancelled_and_creates_noth
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = bounded(
         "workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -1375,11 +1376,30 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = "ws-switch-barrier-drop-release";
     let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-    transport
-        .call(
+    call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("initial open");
+    drop(transport);
+
+    for id in 2..42 {
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        match call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
-                1,
+                id,
                 "workspace.open",
                 None,
                 json!({
@@ -1389,25 +1409,6 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
             ),
         )
         .await
-        .expect("initial open");
-    drop(transport);
-
-    for id in 2..42 {
-        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    id,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": workspace_id,
-                    }),
-                ),
-            )
-            .await
         {
             Ok(opened) => {
                 let handle: WorkspaceHandle =
@@ -1441,7 +1442,8 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         .build()
         .expect("scoped runtime");
     runtime
-        .block_on(transport.call(
+        .block_on(call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -1463,7 +1465,8 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         .expect("replacement runtime");
     for id in 2..42 {
         let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement_runtime.block_on(replacement.call(
+        match replacement_runtime.block_on(call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
                 id,
@@ -1506,21 +1509,21 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .expect("scoped runtime");
     runtime.block_on(async {
         let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": workspace_id,
-                    }),
-                ),
-            )
-            .await
-            .expect("initial open");
+        call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )
+        .await
+        .expect("initial open");
         drop(transport);
     });
     drop(runtime);
@@ -1531,7 +1534,8 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .expect("replacement runtime");
     for id in 2..42 {
         let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement_runtime.block_on(replacement.call(
+        match replacement_runtime.block_on(call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
                 id,
@@ -2050,7 +2054,8 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
     let reopened = bounded(
         "workspace reopen",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 5,
