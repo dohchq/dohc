@@ -13,6 +13,7 @@ import type { ServiceActivationAccess } from "./storage/serviceActivationAccess"
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
+import {readFirstOpenEligibility} from "./storage/firstOpenEligibility";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
@@ -410,6 +411,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
+  }
+  readFirstOpenEligibility(input: {workspaceId: string; objectId: string}) {
+    return readFirstOpenEligibility(this, input);
   }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);

@@ -18,6 +18,11 @@ export function initializeServiceHostFeedIndex(db: SqliteDb): void {
   db.exec(`CREATE INDEX IF NOT EXISTS ${INDEX} ON sync_relay_log(workspace_id, ${OBJECT}, relay_seq) WHERE op_kind IN (${KINDS})`);
 }
 
+/** Every log row naming one document, through its index. `workspace` and `object` are SQL expressions. */
+export function hostedDocumentRows(workspace: string, object: string): string {
+  return `sync_relay_log INDEXED BY ${INDEX} WHERE workspace_id=${workspace} AND ${OBJECT}=${object} AND op_kind IN (${KINDS})`;
+}
+
 export interface ServiceHostFeedScope {
   readonly workspaceId: string;
   readonly replicationEpoch: string;
@@ -78,15 +83,13 @@ export function listServiceHostDocumentRows(storage: StorageContext, input: {
 }): SyncRelayLogRow[] {
   return storage.db.prepare(`SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq,
       admitted_author_snapshot_json, settlement_admission_json
-    FROM sync_relay_log INDEXED BY ${INDEX}
-    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND relay_seq>? ORDER BY relay_seq LIMIT ?`)
+    FROM ${hostedDocumentRows("?", "?")} AND relay_seq>? ORDER BY relay_seq LIMIT ?`)
     .all(input.workspaceId, input.objectId, input.afterRelaySeq, input.limit).map(rowToLogRow);
 }
 
 /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
 export function latestServiceHostDocumentUpdate(storage: StorageContext, input: {workspaceId: string; objectId: string}): number {
-  const row = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log INDEXED BY ${INDEX}
-    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
+  const row = storage.db.prepare(`SELECT relay_seq FROM ${hostedDocumentRows("?", "?")} AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
     .get(input.workspaceId, input.objectId);
   return row ? Number(row.relay_seq) : 0;
 }
