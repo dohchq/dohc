@@ -87,11 +87,19 @@ jobs:
           reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
           if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
 
+      # Deleting node_modules takes the Windows runner over 15 minutes, and
+      # only this workflow uses that runner. There a job keeps node_modules
+      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
+          clean: ${{ runner.os != 'Windows' }}
+
+      - name: Remove leftover files but keep node_modules and target
+        if: runner.os == 'Windows'
+        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -181,10 +189,18 @@ jobs:
           reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
           if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
 
+      # Deleting node_modules takes the Windows runner over 15 minutes, and
+      # only this workflow uses that runner. There a job keeps node_modules
+      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          clean: ${{ runner.os != 'Windows' }}
+
+      - name: Remove leftover files but keep node_modules and target
+        if: runner.os == 'Windows'
+        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -261,10 +277,18 @@ jobs:
           reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
           if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
 
+      # Deleting node_modules takes the Windows runner over 15 minutes, and
+      # only this workflow uses that runner. There a job keeps node_modules
+      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          clean: ${{ runner.os != 'Windows' }}
+
+      - name: Remove leftover files but keep node_modules and target
+        if: runner.os == 'Windows'
+        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -469,10 +493,18 @@ jobs:
           reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
           if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
 
+      # Deleting node_modules takes the Windows runner over 15 minutes, and
+      # only this workflow uses that runner. There a job keeps node_modules
+      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          clean: ${{ runner.os != 'Windows' }}
+
+      - name: Remove leftover files but keep node_modules and target
+        if: runner.os == 'Windows'
+        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
