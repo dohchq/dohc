@@ -32,6 +32,20 @@ import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
 
+it("sends the link rewrite request identity and author in the correct fields", async () => {
+  const requests: Request[] = [];
+  const reply = {documents: 2, links: 4, unchecked: ["open.md"], uncheckedCount: 1, complete: false};
+  const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+    requests.push(request);
+    return {id: request.id, result: reply};
+  }}, WORKSPACE, {workspaceId: WORKSPACE});
+  expect(await adapter.rewriteHistoryLinks({workspaceId: WORKSPACE, operationId: "dohc-operation:rename", requestId: "rewrite-retry", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}})).toEqual(reply);
+  expect(requests[0]).toMatchObject({method: "history.rewriteLinks", idempotencyKey: "rewrite-retry", params: {operationId: "dohc-operation:rename", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}}});
+  expect(requests[0]?.params).not.toHaveProperty("requestId");
+  await expect(adapter.rewriteHistoryLinks({workspaceId: "other", operationId: "dohc-operation:rename", requestId: "retry"})).rejects.toThrow();
+  expect(requests).toHaveLength(1);
+});
+
 type VersionedRequestCase = {
   method: VersionedMethod;
   params: VersionedMethodParamsMap[VersionedMethod];

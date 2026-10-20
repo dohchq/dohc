@@ -92,6 +92,9 @@ pub(crate) struct Source {
 }
 
 impl Source {
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.head.text.as_deref()
+    }
     /// Run off the actor. This result is for resolution, never index publication.
     pub(crate) fn parse(self) -> Result<parser::Parsed, StorageError> {
         parser::parse(self.work, Some(self.head))
@@ -121,5 +124,6 @@ pub(crate) fn read_source(
         version: version.into(),
         object: object.into(),
     };
-    Ok(head(conn, &work, true)?.map(|head| Source { work, head }))
+    // The index's alias seed may still be incomplete.
+    Ok(head(conn, &work, true, true)?.map(|head| Source { work, head }))
 }

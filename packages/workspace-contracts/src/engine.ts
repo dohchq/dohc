@@ -112,9 +112,17 @@ export function refuseCallerOperationId(id: string | undefined): void {
 
 export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
 export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
+export interface HistoryLinkRewriteResult {
+  documents: number;
+  links: number;
+  unchecked: string[];
+  uncheckedCount: number;
+  complete: boolean;
+}
 export interface HistoryOperationsStore {
   readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
   undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
+  rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryLinkRewriteResult>;
 }
 
 // A recorded moment can also say that a live document session settled it.

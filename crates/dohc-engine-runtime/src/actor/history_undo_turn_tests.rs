@@ -16,10 +16,11 @@ struct StoreWork {
     rows: usize,
     inverses: usize,
     commits: usize,
+    sources: usize,
 }
 thread_local! {
     static STORE_WORK: std::cell::Cell<StoreWork> = const { std::cell::Cell::new(StoreWork {
-        reads: 0, writes: 0, rows: 0, inverses: 0, commits: 0,
+        reads: 0, writes: 0, rows: 0, inverses: 0, commits: 0, sources: 0,
     }) };
 }
 const INVERSE_PROBE: &str = "CREATE TEMP TRIGGER undo_proof_inverse AFTER INSERT ON moments WHEN NEW.metadata_origin='restore' BEGIN SELECT 'undo-proof-inverse'; END;";
@@ -68,8 +69,15 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     assert_eq!(work.inverses, 2, "count rows, not inverse statements");
     assert!(work.reads >= 2 && work.writes >= 1);
 }
+pub(in crate::actor) fn source() {
+    STORE_WORK.with(|cell| {
+        let mut work = cell.get();
+        work.sources += 1;
+        cell.set(work);
+    });
+}
 // Start on the actor, so queued Y.Doc work cannot enter this turn's counters.
-pub(super) fn begin_turn(request: &str) {
+pub(in crate::actor) fn begin_turn(request: &str) {
     STORE_WORK.with(|cell| cell.set(StoreWork::default()));
     probes()
         .lock()
@@ -83,6 +91,7 @@ type Hook = (std::sync::mpsc::Sender<()>, Arc<Barrier>);
 #[derive(Default)]
 struct Probe {
     times: Vec<Duration>,
+    turn_budget: Option<Duration>,
     phases: Vec<Phase>,
     actor_totals: Option<dohc_engine_storage::capture_phase::Snapshot>,
     hook: Option<Hook>,
@@ -91,6 +100,22 @@ struct Probe {
 fn probes() -> &'static Mutex<std::collections::HashMap<String, Probe>> {
     static PROBES: OnceLock<Mutex<std::collections::HashMap<String, Probe>>> = OnceLock::new();
     PROBES.get_or_init(Mutex::default)
+}
+// Override only the elapsed-time cutoff; the production 16-member cap still applies.
+pub(in crate::actor) fn set_turn_budget(request: &str, budget: Duration) {
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .turn_budget = Some(budget);
+}
+pub(super) fn turn_budget(request: &str) -> Option<Duration> {
+    probes()
+        .lock()
+        .unwrap()
+        .get(request)
+        .and_then(|p| p.turn_budget)
 }
 #[derive(Clone, serde::Serialize)]
 struct Phase {
@@ -102,7 +127,7 @@ struct Phase {
     storage: Option<serde_json::Value>,
     store_work: Option<StoreWork>,
 }
-pub(super) fn record_phase(
+pub(in crate::actor) fn record_phase(
     request: &str,
     phase: &str,
     member: Option<usize>,
@@ -173,7 +198,7 @@ fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObs
         OnceLock::new();
     OBSERVERS.get_or_init(Mutex::default)
 }
-pub(in super::super) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
+pub(in crate::actor) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
     let mut observers = disk_observers().lock().unwrap();
     if let Some(observer) = observer {
         observers.insert(root, observer);
@@ -319,7 +344,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
         })
         .await
         .unwrap();
-    assert_eq!(first.len(), 2);
+    assert!((2..=6).contains(&first.len()));
     assert_eq!(first.last().unwrap().operation, "rename");
     assert!(
         actor
@@ -1126,6 +1151,7 @@ async fn concurrent_replay_reports_only_its_own_committed_work() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     let (root, supervisor, actor) = setup(2000);
+    set_turn_budget("turn-perf", Duration::MAX);
     let hold = actor.hold_link_drain();
     actor
         .run(|store, _| {
@@ -1294,14 +1320,14 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         let work = phase.store_work.unwrap();
         inverses += work.inverses;
         assert!(
-            work.inverses <= 1
+            work.inverses <= 16
                 && work.commits
                     <= if phase.phase == "rename-placement" {
                         3
                     } else {
                         1
                     },
-            "one inverse and transaction per turn: {} member={:?} work={}",
+            "at most 16 inverses and one transaction per turn: {} member={:?} work={}",
             phase.phase,
             phase.member,
             serde_json::to_string(&work).unwrap()
@@ -1331,7 +1357,9 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         // Fixed statement and result-row budgets, independent of member count.
         // Include SQL executed by trigger programs, not only root statements.
         assert!(
-            work.reads <= 128 && work.writes <= 128 && work.rows <= 256,
+            work.reads <= 16 + 112 * work.inverses.max(1)
+                && work.writes <= 16 + 112 * work.inverses.max(1)
+                && work.rows <= 32 + 224 * work.inverses.max(1),
             "bounded store work per turn: {} member={:?} work={}",
             phase.phase,
             phase.member,
@@ -1340,8 +1368,98 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     }
     assert_eq!(
         times.len(),
-        2000,
-        "p95 includes every inverse and no empty turn"
+        1 + 1999usize.div_ceil(16),
+        "the rename runs alone; a fixed budget fills every remaining batch"
     );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
+}
+
+pub(in crate::actor) fn enable_work_probe(store: &EngineStore) {
+    store
+        .read_with(|conn| {
+            dohc_engine_storage::capture_phase::enable_for_current_thread();
+            conn.execute_batch(INVERSE_PROBE).unwrap();
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
+                    | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
+                Some(trace_store_work),
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+pub(in crate::actor) fn turn_count(request: &str) -> usize {
+    probes()
+        .lock()
+        .unwrap()
+        .get(request)
+        .map_or(0, |p| p.phases.iter().filter(|p| p.actor).count())
+}
+pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> serde_json::Value {
+    let phases = probes().lock().unwrap()[request].phases.clone();
+    let mut inverses = 0;
+    let mut times = Vec::new();
+    for p in phases.iter().filter(|p| p.actor) {
+        let w = p.store_work.unwrap();
+        assert!(w.sources <= 16);
+        // A write inverse replaces an existing search entry, including its FTS
+        // shadow rows. The delete-inverse proof above keeps its smaller bounds.
+        assert!(
+            w.reads
+                <= if forward {
+                    4 + 64 * w.sources
+                } else {
+                    16 + 112 * w.inverses.max(1)
+                }
+                && w.writes
+                    <= if forward {
+                        (if matches!(p.phase.as_str(), "admission" | "reply") {
+                            3
+                        } else {
+                            2
+                        }) + 112 * w.sources
+                    } else {
+                        16 + 496 * w.inverses.max(1)
+                    }
+                && w.rows
+                    <= if forward {
+                        (if p.phase == "admission" { 16 } else { 8 }) + 96 * w.sources
+                    } else {
+                        32 + 480 * w.inverses.max(1)
+                    },
+            "{}: reads={} writes={} rows={}",
+            p.phase,
+            w.reads,
+            w.writes,
+            w.rows
+        );
+        assert!(w.inverses <= if forward { 0 } else { 16 });
+        assert!(
+            w.commits
+                <= if forward {
+                    w.sources.max(1)
+                } else if p.phase == "rename-placement" {
+                    3
+                } else {
+                    1
+                }
+        );
+        inverses += w.inverses;
+        times.push(p.elapsed_ns);
+    }
+    if !forward {
+        assert_eq!(inverses, members);
+    }
+    times.sort();
+    serde_json::json!({"turns":phases,"p95Ns":times[(times.len()*95).div_ceil(100)-1],
+        "maxNs":times.last(),"inverseRows":inverses})
+}
+
+pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::Notify>) {
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .notify = Some(notify);
 }
