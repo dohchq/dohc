@@ -257,7 +257,9 @@ where
         input.request_id.as_deref(),
         &payload_hash,
         moment_order,
-        input.now_ms, "versioned")?;
+        input.now_ms,
+        "versioned",
+    )?;
     Ok::<_, DomainError>(result)
 }
 
@@ -608,7 +610,9 @@ fn delete_text_in_tx_prepared(
         input.request_id.as_deref(),
         &payload_hash,
         moment_order,
-        input.now_ms, "versioned")?;
+        input.now_ms,
+        "versioned",
+    )?;
     Ok(result)
 }
 

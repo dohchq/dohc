@@ -257,7 +257,12 @@ pub fn undo_request_fingerprint(
     Ok(if duplicate {
         hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes()])
     } else {
-        hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes(), author.unwrap_or("").as_bytes()])
+        hash_fields(&[
+            b"history.undo",
+            ws.as_bytes(),
+            operation.as_bytes(),
+            author.unwrap_or("").as_bytes(),
+        ])
     })
 }
 

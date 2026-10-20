@@ -158,8 +158,17 @@ async fn duplicate_commit_crash_restart_replays_placement_and_undo_plan() {
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 6).unwrap().actor;
     // The workspace.open startup path: no capture hold and no Duplicate retry.
-    assert_eq!(actor.materialize_replay_pending_counting(root.path().to_path_buf(), WS.into(), 6, None).await.unwrap(), 1);
-    tokio::task::spawn_blocking(move || supervisor.close_all()).await.unwrap().unwrap();
+    assert_eq!(
+        actor
+            .materialize_replay_pending_counting(root.path().to_path_buf(), WS.into(), 6, None)
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::task::spawn_blocking(move || supervisor.close_all())
+        .await
+        .unwrap()
+        .unwrap();
     let mut store = EngineStore::open(&db, 7).unwrap();
     assert_eq!(
         std::fs::read_to_string(root.path().join("copy.md")).unwrap(),
@@ -254,20 +263,58 @@ async fn duplicate_fresh_lazy_document_has_no_source_authorship() {
 async fn duplicate_undo_replays_across_authors_with_first_attribution() {
     let (root, mut store) = fixture();
     seed(&mut store, root.path(), "source.md", "source", "Original");
-    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults)).await.unwrap();
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
     place(&mut store, root.path(), &copy);
     let first_author = r#"[{"kind":"human","humanId":"person"}]"#;
     let second_author = r#"[{"kind":"agent","agentId":"agent","onBehalfOf":"person"}]"#;
     store.read_with(|conn| {
-        let fingerprint = |operation, author| dohc_engine_domain::undo_request_fingerprint(conn, WS, operation, Some(author)).unwrap();
-        assert_eq!(fingerprint(OP, first_author), fingerprint(OP, second_author));
-        assert_ne!(fingerprint("dohc-operation:other", first_author), fingerprint("dohc-operation:other", second_author));
+        let fingerprint = |operation, author| {
+            dohc_engine_domain::undo_request_fingerprint(conn, WS, operation, Some(author)).unwrap()
+        };
+        assert_eq!(
+            fingerprint(OP, first_author),
+            fingerprint(OP, second_author)
+        );
+        assert_ne!(
+            fingerprint("dohc-operation:other", first_author),
+            fingerprint("dohc-operation:other", second_author)
+        );
     });
-    let first = test_undo_in_turns(&mut store, WS, OP, "undo-copy", Some(first_author), root.path(), Arc::new(NoFaults), 10).unwrap();
-    let replay = test_undo_in_turns(&mut store, WS, OP, "undo-copy", Some(second_author), root.path(), Arc::new(NoFaults), 11).unwrap();
+    let first = test_undo_in_turns(
+        &mut store,
+        WS,
+        OP,
+        "undo-copy",
+        Some(first_author),
+        root.path(),
+        Arc::new(NoFaults),
+        10,
+    )
+    .unwrap();
+    let replay = test_undo_in_turns(
+        &mut store,
+        WS,
+        OP,
+        "undo-copy",
+        Some(second_author),
+        root.path(),
+        Arc::new(NoFaults),
+        11,
+    )
+    .unwrap();
     assert!(replay.deduped && replay.materialized);
     assert_eq!(first.moments, replay.moments);
-    let author: String = store.read_with(|conn| conn.query_row("SELECT author_json FROM moments WHERE moment_id=?1", [&first.moments[0].moment_id], |r|r.get(0))).unwrap();
+    let author: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id=?1",
+                [&first.moments[0].moment_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
     assert_eq!(author, first_author);
 }
 
@@ -275,9 +322,14 @@ async fn duplicate_undo_replays_across_authors_with_first_attribution() {
 async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
     let (root, mut store) = fixture();
     seed(&mut store, root.path(), "source.md", "source", "Original");
-    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults)).await.unwrap();
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
     place(&mut store, root.path(), &copy);
     store.write_with(&NoFaults, |tx| tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES('relay','adoption',?1,'main',?2,'claim','{\"currentPath\":\"copy.md\"}',?3,'sha',8,0,0,'evidence','coverage',0,0,0,'{}','{}',100,100)", params![WS,copy.moments[0].object_id,copy.moments[0].moment_id]).map_err(StorageError::persist_public)).unwrap();
-    let error = undo_copy(&mut store,root.path(),Arc::new(NoFaults)).unwrap_err();
-    assert!(matches!(error, RuntimeError::Domain(DomainError::UndoRefused {ref path,reason:"This copy is a shared live file. Continue editing at its current location"}) if path == "copy.md"), "{error:?}");
+    let error = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Domain(DomainError::UndoRefused {ref path,reason:"This copy is a shared live file. Continue editing at its current location"}) if path == "copy.md"),
+        "{error:?}"
+    );
 }

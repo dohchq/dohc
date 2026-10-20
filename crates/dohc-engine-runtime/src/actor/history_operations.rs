@@ -446,8 +446,14 @@ fn check_undo_ownership(
             }
             .into());
         }
-        if let Err(error) = dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path) {
-            if matches!(error, dohc_engine_sync::SyncError::LiveDocumentBindingActive) && m.operation == "write" {
+        if let Err(error) =
+            dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)
+        {
+            if matches!(
+                error,
+                dohc_engine_sync::SyncError::LiveDocumentBindingActive
+            ) && m.operation == "write"
+            {
                 return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
             }
             return Err(error.into());

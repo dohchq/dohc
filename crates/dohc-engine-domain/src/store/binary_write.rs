@@ -124,7 +124,9 @@ pub fn write_published_binary_in_tx(
             input.request_id.as_deref(),
             &payload_hash,
             moment.moment_order,
-            input.now_ms, "versioned")?;
+            input.now_ms,
+            "versioned",
+        )?;
         return Ok(BinaryWriteResult {
             object,
             object_id: before.object_id.clone(),
@@ -182,7 +184,9 @@ pub fn write_published_binary_in_tx(
         input.request_id.as_deref(),
         &payload_hash,
         moment.moment_order,
-        input.now_ms, "versioned")?;
+        input.now_ms,
+        "versioned",
+    )?;
     Ok(BinaryWriteResult {
         object,
         object_id,
