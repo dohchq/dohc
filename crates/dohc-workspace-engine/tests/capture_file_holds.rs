@@ -124,18 +124,18 @@ impl Fixture {
         write_file(scratch.path(), HELD, outside().as_bytes());
         write_file(scratch.path(), "sibling.txt", b"Sibling.\n");
         let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-        let opened = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WS}),
-                ),
-            )
-            .await
-            .unwrap();
+        let opened = call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WS}),
+            ),
+        )
+        .await
+        .unwrap();
         let handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();
         let fixture = Self {
             scratch,
@@ -148,19 +148,18 @@ impl Fixture {
     async fn reopen(&mut self) {
         self.close().await;
         self.transport = InProcessTransport::new(Arc::new(EngineService::new()));
-        let opened = self
-            .transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({"rootDir":self.scratch.path().to_string_lossy(),"workspaceId":WS}),
-                ),
-            )
-            .await
-            .unwrap();
+        let opened = call_with_busy_retry(
+            &self.transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({"rootDir":self.scratch.path().to_string_lossy(),"workspaceId":WS}),
+            ),
+        )
+        .await
+        .unwrap();
         self.handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();
         self.scan().await;
     }

@@ -32,13 +32,13 @@ async fn wait_until_capture_ready(
 ) {
     let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         id += 1;
         if status.result["phase"] == json!("ready") {
             return;

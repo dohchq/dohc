@@ -1142,7 +1142,7 @@ async fn assert_open_document_artifact_recovery_inner(
         .to_owned();
     if local_edit {
         a_id += 1;
-        let resync = ProtocolEngineService::call(
+        let resync = service_call_with_busy_retry(
             a_service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),
             request(
@@ -1190,7 +1190,7 @@ async fn assert_open_document_artifact_recovery_inner(
     if integrated {
         // Drain u1 into the live CRDT and publish the merged local/remote projection.
         a_id += 1;
-        let resync = ProtocolEngineService::call(
+        let resync = service_call_with_busy_retry(
             a_service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),
             request(

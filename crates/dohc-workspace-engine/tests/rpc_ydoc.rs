@@ -3459,28 +3459,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         method: &str,
         params: Value,
     ) -> Value {
-        tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                match transport
-                    .call(
-                        RequestContext::unbounded(),
-                        request(id, method, Some(workspace.clone()), params.clone()),
-                    )
-                    .await
-                {
-                    Ok(response) => break response.result,
-                    Err(error)
-                        if error.code == ErrorCode::Overloaded
-                            && error.message == "engine-store-busy" =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("{method} failed: {error:?}"),
-                }
-            }
-        })
-        .await
-        .expect("capture backfill must admit the request")
+        call(transport, workspace, id, method, params).await
     }
 
     // AUDIT-SILENTSAVE round 5. This is the race that made
@@ -3988,18 +3967,18 @@ async fn assert_settle_refuses_over_deleted_file(
     path: &str,
     session_id: &str,
 ) {
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "ydoc.settle",
-                Some(handle.clone()),
-                json!({ "sessionId": session_id, "summary": "type" }),
-            ),
-        )
-        .await
-        .expect_err("a settle over a file deleted outside dohc must refuse");
+    let refused = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "ydoc.settle",
+            Some(handle.clone()),
+            json!({ "sessionId": session_id, "summary": "type" }),
+        ),
+    )
+    .await
+    .expect_err("a settle over a file deleted outside dohc must refuse");
     assert_eq!(refused.message, "conflict-stale-target", "{path}");
     assert!(
         !scratch.path().join(path).exists(),

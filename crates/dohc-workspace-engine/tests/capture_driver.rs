@@ -58,13 +58,13 @@ async fn wait_until_capture_ready(
 ) {
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         id += 1;
         if status.result["phase"] == json!("ready") {
             return;
@@ -84,17 +84,17 @@ async fn read_text(
     id: u64,
     path: &str,
 ) -> Option<String> {
-    let response = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "versionedText.read",
-                Some(handle.clone()),
-                json!({ "versionId": "main", "path": path }),
-            ),
-        )
-        .await;
+    let response = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "versionedText.read",
+            Some(handle.clone()),
+            json!({ "versionId": "main", "path": path }),
+        ),
+    )
+    .await;
     // Before the first capture lands, the main version does not exist yet and
     // the read errors — that is simply "not captured yet" for the poll.
     let Ok(response) = response else {
@@ -119,17 +119,17 @@ async fn wait_for_text(
     let mut id = 10_000;
     loop {
         id += 1;
-        let current = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    id,
-                    "versionedText.read",
-                    Some(handle.clone()),
-                    json!({ "versionId": "main", "path": path }),
-                ),
-            )
-            .await;
+        let current = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(
+                id,
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await;
         let matches = current.as_ref().is_ok_and(|response| match expected {
             Some(text) => response.result["text"].as_str() == Some(text),
             None => response.result.is_null(),
@@ -2944,8 +2944,7 @@ async fn measure_initial_capture(measure_typing: bool) {
         assert_eq!(snapshots, 5_000);
         if measure_typing && n == 0 {
             use base64::Engine as _;
-            use dohc_engine_protocol::transport::EngineService as Service;
-            let opened = Service::call(
+            let opened = service_call_with_busy_retry(
                 service.as_ref(),
                 RequestContext::unbounded().with_capability("blobs"),
                 request(
@@ -2970,7 +2969,7 @@ async fn measure_initial_capture(measure_typing: bool) {
                 for i in 0..200 {
                     let update = doc.plaintext_insert(0, "x");
                     let start = std::time::Instant::now();
-                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
+                    call_with_busy_retry(&transport,RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
                     timings.push(start.elapsed().as_micros());
                 }
                 if draining {
@@ -3009,18 +3008,18 @@ async fn measure_initial_capture(measure_typing: bool) {
                 samples[0][199] < 50_000,
                 "drain caused a long typing request"
             );
-            transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(
-                        900,
-                        "ydoc.close",
-                        Some(handle.clone()),
-                        json!({"sessionId":session}),
-                    ),
-                )
-                .await
-                .unwrap();
+            call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(
+                    900,
+                    "ydoc.close",
+                    Some(handle.clone()),
+                    json!({"sessionId":session}),
+                ),
+            )
+            .await
+            .unwrap();
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
