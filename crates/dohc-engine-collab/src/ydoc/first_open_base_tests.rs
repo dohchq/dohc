@@ -157,8 +157,9 @@ const UNORDERED: [&str; 2] = ["links", "frontmatter-nested"];
 /// reader does not reproduce, so the engine settles the canonical projection.
 const ENGINE_SETTLES_CANONICAL: [&str; 1] = ["links"];
 
-/// The file text, canonical projection, and state vector a base decodes to.
-fn settled(bytes: &[u8], markdown: &str) -> (String, String, Vec<u8>) {
+/// What a base decodes to: its file under the lenient and the strict settle
+/// rules, its canonical projection, and its state vector.
+fn settled(bytes: &[u8], markdown: &str) -> (String, String, String, Vec<u8>) {
     let doc = Ydoc::wire();
     doc.apply(bytes).unwrap();
     assert!(!doc.has_pending_dependencies());
@@ -169,7 +170,10 @@ fn settled(bytes: &[u8], markdown: &str) -> (String, String, Vec<u8>) {
         })
         .unwrap()
         .unwrap_or_else(|| projection.clone());
-    (file, projection, doc.encode_state_vector())
+    let strict = doc
+        .preserved_markdown_source(&projection)
+        .unwrap_or_else(|| projection.clone());
+    (file, strict, projection, doc.encode_state_vector())
 }
 
 #[test]
@@ -179,7 +183,7 @@ fn first_open_bases_settle_their_file_and_reencode_through_the_full_state() {
     let encoded: Vec<YrsBase> = bases
         .iter()
         .map(|base| {
-            let (file, projection, _) = settled(&base.bytes, &base.markdown);
+            let (file, strict, projection, _) = settled(&base.bytes, &base.markdown);
             assert_eq!(projection, base.canonical, "{}", base.name);
             let expected = if ENGINE_SETTLES_CANONICAL.contains(&base.name.as_str()) {
                 assert_ne!(base.canonical, base.markdown, "{}", base.name);
@@ -188,6 +192,9 @@ fn first_open_bases_settle_their_file_and_reencode_through_the_full_state() {
                 &base.markdown
             };
             assert_eq!(&file, expected, "{}", base.name);
+            // The strict rule of the live baseline and bootstrap settles every
+            // base to the same file as activation's lenient rule.
+            assert_eq!(strict, file, "{}", base.name);
             let doc = Ydoc::wire();
             doc.apply(&base.bytes).unwrap();
             YrsBase {

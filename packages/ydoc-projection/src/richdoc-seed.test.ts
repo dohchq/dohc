@@ -17,6 +17,12 @@ const SEEDS = [
   { name: 'unicode', markdown: '# Café 🎉\n\nnaïve 中文 — ok\n', clientId: 65_536 },
   { name: 'source-witness', markdown: '* one\n* two\n', clientId: 3 },
   { name: 'integer-2147483648', markdown: '---\ncount: 2147483648\n---\n\nBody\n', clientId: 5 },
+  // 300 integers lib0 writes as 4-byte float32s and yrs as 8-byte varints.
+  {
+    name: 'float32-integers',
+    markdown: `---\nsizes: [${Array.from({ length: 300 }, (_, index) => index % 2 ? -(2 ** 48) : 2 ** 52).join(', ')}]\n---\n\nBody`,
+    clientId: 11,
+  },
 ] as const
 // Whether yrs re-encodes the Yjs bytes exactly. Bases without a JSON object
 // value re-encode deterministically; yrs writes integral floats such as
@@ -31,6 +37,7 @@ const YRS_BYTE_PARITY: Record<(typeof SEEDS)[number]['name'], boolean | 'unorder
   'unicode': true,
   'source-witness': true,
   'integer-2147483648': false,
+  'float32-integers': false,
 }
 
 // The engine reads an autolink differently, so it settles the projection; the
@@ -121,6 +128,11 @@ describe('richdoc seed', () => {
     expect(includes(native, [124, 0x4f, 0, 0, 0])).toBe(false)
     expect(native.length).toBe(base.bytes.length + 1)
     expect(decoded(native).frontmatter).toEqual({ count: 2147483648 })
+  })
+  it('pins 300 wide integers growing by four bytes each in yrs', () => {
+    const base = bases.find(base => base.name === 'float32-integers')!
+    const native = yrs.get('float32-integers')!
+    expect(native.length - base.bytes.length).toBe(300 * 4)
   })
 })
 

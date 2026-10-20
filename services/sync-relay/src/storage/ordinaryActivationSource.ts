@@ -22,9 +22,12 @@ export const activationCaptureBytes=(baselineBytes:number,fullStateBytes:number,
 /** What reading one history row's metadata charges. */
 export const ordinaryActivationEntryBytes=(row:Readonly<Record<string,unknown>>,payloadBytes:number)=>
   payloadBytes+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind]));
-/** What verifying a history that holds only its base charges: the baseline, the base's row and blob, the full state, and the base's replay. */
-export const baseOnlyActivationReadBytes=(input:{baseBytes:number;fullStateBytes:number;logEntryBytes:number})=>
-  3*input.baseBytes+input.logEntryBytes+input.fullStateBytes+emptyCandidate().length;
+const sum=(values:readonly number[])=>values.reduce((total,value)=>total+value,0);
+/** What replaying the baseline and the updates after it charges; a base alone replays an empty candidate. */
+const replayBytes=(baselineBytes:number,updateBytes:readonly number[])=>baselineBytes+(updateBytes.length?sum(updateBytes):emptyCandidate().length);
+/** What verifying a history charges: the baseline, each row's metadata and update, the full state, and the replay of every update after the base. */
+export const ordinaryActivationReadBytes=(history:{baselineBytes:number;entryBytes:readonly number[];updateBytes:readonly number[];fullStateBytes:number})=>
+  history.baselineBytes+sum(history.entryBytes)+sum(history.updateBytes)+history.fullStateBytes+replayBytes(history.baselineBytes,history.updateBytes.slice(1));
 export type KnownActivationSource=Pick<NativeOwnerActivationSource,"relayDatabaseNamespace"|"workspaceId"|"objectId"|"currentPath"|
   "replicationEpoch"|"streamIdentity"|"baseOriginId"|"sourceMomentId"|"sourceDigest"|"sourceByteLength">;
 /** The largest descriptor native can capture for these values; the rest take their widest form. */
@@ -64,9 +67,9 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   requireValue(size&&integer(size.entries)&&size.entries>0&&size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
   requireValue(integer(size.bytes)&&size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");
   const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
-  let charged=baselineBytes.length;
+  let charged=0;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
-  for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(ordinaryActivationEntryBytes(row,Number(row.payload_bytes)));}
+  const entryBytes=metadata.map(row=>{requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");return ordinaryActivationEntryBytes(row,Number(row.payload_bytes));});
   const rows=metadata.flatMap(row=>{
     requireValue(integer(row.relay_seq)&&integer(row.origin_seq)&&typeof row.origin_id==="string"&&row.origin_id.length>0,"Ordinary activation coordinate is damaged.");
     const stored=storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,row.relay_seq);
@@ -87,9 +90,10 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
       typeof payload.updateBlobSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.updateBlobSha256),"Ordinary activation history differs from the captured lineage.");
     const blob=storage.db.prepare("SELECT byte_length,length(content) AS actual_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,payload.updateBlobSha256);
     requireValue(blob&&integer(blob.byte_length)&&blob.byte_length===blob.actual_length,"Ordinary activation bytes are unavailable.");
-    charge(Number(blob.byte_length));
     return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,payload,byteLength:Number(blob.byte_length)}];
   });
+  // Charged before any update or the full state is read.
+  charge(ordinaryActivationReadBytes({baselineBytes:baselineBytes.length,entryBytes,updateBytes:rows.map(row=>row.byteLength),fullStateBytes:fullState.length}));
   requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
   const first=rows[0]!;
   requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
@@ -102,11 +106,9 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   });
   requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
   const normalize=(suffix:readonly Uint8Array[],candidate:Uint8Array)=>{
-    charge(baselineBytes.length+candidate.length+suffix.reduce((sum,bytes)=>sum+bytes.length,0));
     const result=validateJournal({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix,candidate});
     requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");return result.evidence;
   };
-  charge(fullState.length);
   const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
   requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
   const captured=full.evidence,ordinary=normalize(updates.slice(1,-1),updates.length===1?emptyCandidate():updates.at(-1)!);
@@ -124,7 +126,11 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     requireValue(!moment || Number(moment.relay_seq)<=rows[index]!.relay_seq ||
       (moment.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength),
       "Ordinary activation found a later ordinary file moment with a divergent projection.");
-    const prefix=index===0?baseline:normalize(updates.slice(1,index),updates[index]!);
+    let prefix:Pick<LiveMarkdownRegistrationEvidence,"projectedMarkdownSha256"|"projectedMarkdownByteLength">=baseline;
+    if(index>0){
+      charge(replayBytes(baselineBytes.length,updates.slice(1,index+1).map(bytes=>bytes.length)));
+      prefix=normalize(updates.slice(1,index),updates[index]!);
+    }
     momentMatches=prefix.projectedMarkdownSha256===source.sourceDigest&&prefix.projectedMarkdownByteLength===source.sourceByteLength;
   }
   requireValue(momentMatches,"Native activation source moment does not project the captured source.");

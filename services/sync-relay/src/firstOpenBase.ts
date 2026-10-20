@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as Y from "yjs";
 import {
   createLiveMarkdownRegistrationValidator,
   type OrderedLiveUpdateCutPolicy,
@@ -10,13 +11,20 @@ import {
 } from "@dohc/ydoc-projection/richdoc-seed";
 import {
   activationCaptureBytes,
-  baseOnlyActivationReadBytes,
+  ordinaryActivationReadBytes,
 } from "./storage/ordinaryActivationSource.js";
 
 /** `dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES`. */
 export const MAX_YDOC_UPDATE_BYTES = 20 * 1024 * 1024;
-/** Room for native to re-encode the base larger than Yjs did, as it does integral floats. */
-export const FIRST_OPEN_FULL_STATE_SLACK_BYTES = 1024;
+/**
+ * The most bytes yrs adds when it re-encodes one number. lib0 writes an
+ * integer above 2^31 - 1 that a float32 holds as a 4-byte float32 (lib0
+ * 0.2.117 `encoding.js:551-559`). yrs reads it back as that integer
+ * (yrs 0.27.3 `any.rs:53`) and writes every safe integer as a signed varint
+ * (`any.rs:143-154`, `encoding/varint.rs:330-353`): 6 bits, then 7 per byte,
+ * so 8 bytes for 53 bits. Every other number keeps its width.
+ */
+export const NATIVE_NUMBER_GROWTH_BYTES = 4;
 
 export interface FirstOpenBaseBounds {
   maxCaptureBytes: number;
@@ -35,42 +43,85 @@ export interface FirstOpenBaseInput {
   sourceByteLength: number;
   bounds: FirstOpenBaseBounds;
 }
-export type FirstOpenBaseBound =
-  | "update-limit"
-  | "drain-budget"
-  | "capture-budget"
-  | "read-budget";
+export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget";
 export type FirstOpenBaseResult =
   | { kind: "built"; base: Uint8Array; lineageClaimId: string }
-  | { kind: "refused"; reason: "source-mismatch" | "invalid-base" | FirstOpenBaseBound };
+  | {
+      kind: "refused";
+      /**
+       * `source-mismatch`: the input is not the verified head. `unsupported-source`:
+       * the head is current, but its base would not settle to it or could not be
+       * bounded once native re-encodes it.
+       */
+      reason: "source-mismatch" | "unsupported-source" | "invalid-base" | FirstOpenBaseBound;
+    };
 
 const sha256 = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 
+/** Whether yrs writes this number wider than lib0 did. */
+const growsNatively = (value: number) =>
+  Number.isSafeInteger(value) && Math.abs(value) > 0x7fff_ffff && Math.fround(value) === value;
+
+/**
+ * How many bytes larger native's full state can be than this base, or
+ * undefined when that is not bounded. yrs writes the same structs as the base;
+ * only values change width.
+ * - Binary values grow only by numbers (see `NATIVE_NUMBER_GROWTH_BYTES`).
+ * - Format and embed values travel as JSON text, which yrs parses and prints
+ *   again (yrs `updates/encoder.rs:170-174`). It prints a safe integer as an
+ *   i64 (`encoding/serde/ser.rs:25-34`), with the digits JSON.stringify wrote;
+ *   other numbers can change spelling, so they are not bounded.
+ */
+export function nativeFullStateGrowth(base: Uint8Array): number | undefined {
+  let growing = 0;
+  let bounded = true;
+  const visit = (value: unknown, json: boolean) => {
+    if (typeof value === "number") {
+      if (json) bounded &&= Number.isSafeInteger(value);
+      else if (growsNatively(value)) growing += 1;
+    } else if (Array.isArray(value)) {
+      for (const entry of value) visit(entry, json);
+    } else if (value !== null && typeof value === "object" && !(value instanceof Uint8Array)) {
+      for (const entry of Object.values(value)) visit(entry, json);
+    }
+  };
+  for (const struct of Y.decodeUpdate(base).structs) {
+    if (!(struct instanceof Y.Item)) continue;
+    const { content } = struct;
+    if (content instanceof Y.ContentAny) visit(content.arr, false);
+    else if (content instanceof Y.ContentFormat) visit(content.value, true);
+    else if (content instanceof Y.ContentEmbed) visit(content.embed, true);
+    else if (content instanceof Y.ContentDoc) bounded = false;
+  }
+  return bounded ? growing * NATIVE_NUMBER_GROWTH_BYTES : undefined;
+}
+
 /**
  * The first bound a base would break when native captures its activation and
  * the relay verifies it. Native re-encodes the full state, so its length is
- * estimated from the larger of the base and the validated state.
+ * the larger of the base and the validated state, plus what re-encoding adds.
  */
 export function firstOpenBaseExceeds(
-  sizes: { baseBytes: number; stateUpdateBytes: number },
+  sizes: { baseBytes: number; stateUpdateBytes: number; nativeGrowthBytes: number },
   bounds: FirstOpenBaseBounds,
 ): FirstOpenBaseBound | undefined {
   const { baseBytes } = sizes;
   const larger = Math.max(baseBytes, sizes.stateUpdateBytes);
-  const fullStateBytes = larger + FIRST_OPEN_FULL_STATE_SLACK_BYTES;
-  if (baseBytes > MAX_YDOC_UPDATE_BYTES) return "update-limit";
-  if (baseBytes > bounds.maxBytesPerDrain) return "drain-budget";
+  const fullStateBytes = larger + sizes.nativeGrowthBytes;
+  if (baseBytes > MAX_YDOC_UPDATE_BYTES || fullStateBytes > MAX_YDOC_UPDATE_BYTES) {
+    return "update-limit";
+  }
   if (activationCaptureBytes(larger, fullStateBytes, bounds.descriptorBytes) > bounds.maxCaptureBytes) {
     return "capture-budget";
   }
-  if (
-    baseOnlyActivationReadBytes({ baseBytes, fullStateBytes, logEntryBytes: bounds.logEntryBytes }) >
-    bounds.maxBytesPerDrain
-  ) {
-    return "read-budget";
-  }
-  return undefined;
+  const reads = ordinaryActivationReadBytes({
+    baselineBytes: baseBytes,
+    entryBytes: [bounds.logEntryBytes],
+    updateBytes: [baseBytes],
+    fullStateBytes,
+  });
+  return reads > bounds.maxBytesPerDrain ? "read-budget" : undefined;
 }
 
 /**
@@ -101,8 +152,13 @@ export function buildFirstOpenBase(
   } catch {
     return refused("invalid-base");
   }
+  const nativeGrowthBytes = nativeFullStateGrowth(base);
+  if (nativeGrowthBytes === undefined) return refused("unsupported-source");
   // A base too large on its own is refused before validation.
-  const early = firstOpenBaseExceeds({ baseBytes: base.byteLength, stateUpdateBytes: 0 }, bounds);
+  const early = firstOpenBaseExceeds(
+    { baseBytes: base.byteLength, stateUpdateBytes: 0, nativeGrowthBytes },
+    bounds,
+  );
   if (early) return refused(early);
   const lineageClaimId = sha256(base);
   const validated = createLiveMarkdownRegistrationValidator(policy)({
@@ -118,10 +174,10 @@ export function buildFirstOpenBase(
     evidence.projectedMarkdownByteLength !== sourceByteLength ||
     richdocSeedFile(base) !== markdown
   ) {
-    return refused("source-mismatch");
+    return refused("unsupported-source");
   }
   const exceeded = firstOpenBaseExceeds(
-    { baseBytes: base.byteLength, stateUpdateBytes: evidence.stateUpdateByteLength },
+    { baseBytes: base.byteLength, stateUpdateBytes: evidence.stateUpdateByteLength, nativeGrowthBytes },
     bounds,
   );
   return exceeded ? refused(exceeded) : { kind: "built", base, lineageClaimId };

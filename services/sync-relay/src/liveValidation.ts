@@ -40,12 +40,14 @@ type CapacityRetry = {
   reason: "admission-unavailable";
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
+type Slot = { worker: Worker; busy: boolean };
 /** Two process-wide validation slots, with no retained waiting inputs. */
 export function createLiveValidationExecutor() {
-  const slots = new Set<{ worker: Worker; busy: boolean }>();
+  const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false;
-  let buildingFirstOpen = false;
+  // A failed job's slot stays busy until its worker exits.
+  let firstOpenSlot: Slot | undefined;
   const hasCapacity = () => !closed && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
@@ -103,6 +105,7 @@ export function createLiveValidationExecutor() {
   async function submit<Result>(
     work: LiveValidationWork,
     signal?: AbortSignal,
+    claim?: (slot: Slot) => void,
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
@@ -116,6 +119,7 @@ export function createLiveValidationExecutor() {
         waitForCapacity,
       };
     slot.busy = true;
+    claim?.(slot);
     slot.worker.ref();
     return new Promise<Result>((resolve, reject) => {
       let done = false;
@@ -202,17 +206,17 @@ export function createLiveValidationExecutor() {
       input: FirstOpenBaseInput,
       signal?: AbortSignal,
     ): Promise<FirstOpenBaseResult | { kind: "busy" }> {
-      if (buildingFirstOpen) return { kind: "busy" };
-      buildingFirstOpen = true;
-      try {
-        const result = await submit<FirstOpenBaseResult>(
-          { kind: "first-open", policy, input },
-          signal,
-        );
-        return result.kind === "retry" ? { kind: "busy" } : result;
-      } finally {
-        buildingFirstOpen = false;
-      }
+      if (firstOpenSlot?.busy && slots.has(firstOpenSlot)) return { kind: "busy" };
+      const result = await submit<FirstOpenBaseResult>(
+        { kind: "first-open", policy, input },
+        signal,
+        (slot) => {
+          firstOpenSlot = slot;
+        },
+      );
+      if (result.kind === "retry") return { kind: "busy" };
+      firstOpenSlot = undefined;
+      return result;
     },
     close,
   };
