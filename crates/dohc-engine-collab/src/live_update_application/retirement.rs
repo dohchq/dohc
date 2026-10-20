@@ -530,8 +530,12 @@ pub(crate) fn inherited_entries(
     let Some(tail) = tail else {
         return Ok(Vec::new());
     };
+    let (_, manifest) = released_tail(conn, namespace, tail)?;
+    if manifest.is_empty() {
+        return Ok(Vec::new());
+    }
     let chain = chain_activations(conn, namespace, tail)?;
-    inherited_in_chain(conn, namespace, doc, lineage, tail, &chain)
+    resolve_manifest(conn, namespace, doc, lineage, manifest, &chain)
 }
 
 /// [`inherited_entries`] of the released chain ending at `tail`, whose
@@ -545,6 +549,19 @@ pub(super) fn inherited_in_chain(
     chain: &HashSet<String>,
 ) -> Result<Vec<InheritedEntry>, ApplicationError> {
     let (_, manifest) = released_tail(conn, namespace, tail)?;
+    resolve_manifest(conn, namespace, doc, lineage, manifest, chain)
+}
+
+/// Each delivery of a chain's Carried manifest, resolved as
+/// [`inherited_entries`] describes, through the activations `chain` names.
+fn resolve_manifest(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    manifest: Vec<CarriedDelivery>,
+    chain: &HashSet<String>,
+) -> Result<Vec<InheritedEntry>, ApplicationError> {
     let mut listed = BTreeSet::new();
     let mut inherited = Vec::with_capacity(manifest.len());
     for carried in manifest {

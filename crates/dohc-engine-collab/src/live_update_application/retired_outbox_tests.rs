@@ -579,6 +579,29 @@ fn the_chain_walk_stops_at_its_budget_before_inherited_entries_resolve() {
     assert_eq!(work(&mut f), near, "the walk reads nothing past its budget");
 }
 
+/// Sol's finding on 4b3a3: a released tail that carried nothing resolves
+/// without walking its chain, so settlement, activation and release
+/// classification do the same work however long the history behind it grows.
+#[test]
+fn an_empty_manifest_resolves_without_walking_the_chain() {
+    let mut f = released_with_nothing_carried();
+    let tail = f.cut.retained_prefix.as_ref().unwrap().predecessor_activation_id.clone();
+    let work = |f: &mut Fixture| {
+        let counted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        f.store.count_work(Some(std::sync::Arc::downgrade(&counted))).unwrap();
+        let inherited = f.store.read_with(|conn| {
+            retirement::inherited_entries(conn, "namespace", &f.key, &f.binding.lineage_claim_id, Some(&tail))
+        });
+        f.store.count_work(None).unwrap();
+        assert!(inherited.unwrap().is_empty());
+        counted.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    chain_copies(&mut f, &tail, &tail, "near", 3, "elsewhere");
+    let near = work(&mut f);
+    chain_copies(&mut f, "near-3", &tail, "far", 1_000, "elsewhere");
+    assert_eq!(work(&mut f), near, "an empty manifest walks no predecessor");
+}
+
 /// A fixture a successor adopts as it is, by the case it shows.
 type QuarantineFixture = (&'static str, fn() -> Fixture);
 
