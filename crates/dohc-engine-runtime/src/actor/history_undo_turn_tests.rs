@@ -1339,15 +1339,19 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         // Fixed statement and result-row budgets, independent of member count.
         // Include SQL executed by trigger programs, not only root statements.
         assert!(
-            work.reads <= 16 + 112 * work.inverses.max(1) && work.writes <= 16 + 112 * work.inverses.max(1) && work.rows <= 32 + 224 * work.inverses.max(1),
+            work.reads <= 16 + 112 * work.inverses.max(1)
+                && work.writes <= 16 + 112 * work.inverses.max(1)
+                && work.rows <= 32 + 224 * work.inverses.max(1),
             "bounded store work per turn: {} member={:?} work={}",
             phase.phase,
             phase.member,
             serde_json::to_string(&work).unwrap()
         );
     }
-    assert!((2000usize.div_ceil(16)..=2000).contains(&times.len()),
-        "p95 includes every nonempty inverse turn");
+    assert!(
+        (2000usize.div_ceil(16)..=2000).contains(&times.len()),
+        "p95 includes every nonempty inverse turn"
+    );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }
 
@@ -1382,9 +1386,24 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
         // A write inverse replaces an existing search entry, including its FTS
         // shadow rows. The delete-inverse proof above keeps its smaller bounds.
         assert!(
-            w.reads <= if forward { 4 + 64 * w.sources } else { 16 + 112 * w.inverses.max(1) }
-                && w.writes <= if forward { 2 + 112 * w.sources } else { 16 + 496 * w.inverses.max(1) }
-                && w.rows <= if forward { 8 + 96 * w.sources } else { 32 + 480 * w.inverses.max(1) },
+            w.reads
+                <= if forward {
+                    4 + 64 * w.sources
+                } else {
+                    16 + 112 * w.inverses.max(1)
+                }
+                && w.writes
+                    <= if forward {
+                        2 + 112 * w.sources
+                    } else {
+                        16 + 496 * w.inverses.max(1)
+                    }
+                && w.rows
+                    <= if forward {
+                        8 + 96 * w.sources
+                    } else {
+                        32 + 480 * w.inverses.max(1)
+                    },
             "{}: reads={} writes={} rows={}",
             p.phase,
             w.reads,

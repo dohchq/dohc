@@ -274,20 +274,20 @@ fn unchanged_ranges(
             } else if let Some(offset) = left.find(right) {
                 ranges.push((ao[x] + offset..ao[x] + offset + right.len(), bo[y]));
             } else {
-        let chars = |s: &str| {
-            s.char_indices()
-                .map(|(i, _)| i)
-                .chain([s.len()])
-                .collect::<Vec<_>>()
-        };
-        let (ac, bc) = (chars(left), chars(right));
-        for (cr, cs) in matching(
-            &left.chars().collect::<Vec<_>>(),
-            &right.chars().collect::<Vec<_>>(),
-            deadline,
-        )? {
-            ranges.push((ao[x] + ac[cr.start]..ao[x] + ac[cr.end], bo[y] + bc[cs]));
-        }
+                let chars = |s: &str| {
+                    s.char_indices()
+                        .map(|(i, _)| i)
+                        .chain([s.len()])
+                        .collect::<Vec<_>>()
+                };
+                let (ac, bc) = (chars(left), chars(right));
+                for (cr, cs) in matching(
+                    &left.chars().collect::<Vec<_>>(),
+                    &right.chars().collect::<Vec<_>>(),
+                    deadline,
+                )? {
+                    ranges.push((ao[x] + ac[cr.start]..ao[x] + ac[cr.end], bo[y] + bc[cs]));
+                }
             }
         }
         if !r.is_empty() {
@@ -318,10 +318,20 @@ pub(crate) fn inverse_budgeted(
     after: &str,
     head: &str,
 ) -> Result<Option<String>, ()> {
-    inverse_until(before, after, head, Instant::now() + Duration::from_millis(25))
+    inverse_until(
+        before,
+        after,
+        head,
+        Instant::now() + Duration::from_millis(25),
+    )
 }
 
-fn inverse_until(before: &str, after: &str, head: &str, deadline: Instant) -> Result<Option<String>, ()> {
+fn inverse_until(
+    before: &str,
+    after: &str,
+    head: &str,
+    deadline: Instant,
+) -> Result<Option<String>, ()> {
     let unchanged = unchanged_ranges(after, head, deadline).ok_or(())?;
     Ok(inverse_in_ranges(before, after, head, unchanged))
 }
@@ -482,7 +492,6 @@ mod tests {
         assert_eq!(result, (r"[[new%5D#part\name|label]]".into(), 1));
     }
 
-
     #[test]
     fn megabyte_append_is_restored_or_left_unmatched_within_the_diff_budget() {
         let after = "a short note ending [[new]]";
@@ -490,12 +499,24 @@ mod tests {
         assert!(head.len() >= 1024 * 1024);
         match inverse_budgeted("a short note ending [[old]]", after, &head) {
             Ok(Some(restored)) => assert_eq!(restored, head.replacen("[[new]]", "[[old]]", 1)),
-            Err(()) => {}, // Expired hunks never supply a guessed target position.
+            Err(()) => {} // Expired hunks never supply a guessed target position.
             Ok(None) => panic!("an unchanged target must map unless its diff budget expires"),
         }
         assert!(unchanged_ranges(after, &head, Instant::now()).is_none());
-        let difficult = format!("{}[[new]]{}", "b".repeat(512*1024), "c".repeat(512*1024));
-        assert!(inverse_until("a short [[old]] note", "a short [[new]] note", &difficult, Instant::now()).is_err());
+        let difficult = format!(
+            "{}[[new]]{}",
+            "b".repeat(512 * 1024),
+            "c".repeat(512 * 1024)
+        );
+        assert!(
+            inverse_until(
+                "a short [[old]] note",
+                "a short [[new]] note",
+                &difficult,
+                Instant::now()
+            )
+            .is_err()
+        );
     }
 
     #[test]

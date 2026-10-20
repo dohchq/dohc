@@ -1424,15 +1424,27 @@ async fn competing_alias_families_stop_and_resume_without_a_workspace_revision()
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate() {
     let f = Fixture::new(1, 1);
     let guard = f.actor.link_rewrites.gate.clone().lock_owned().await;
-    let reply = tokio::time::timeout(Duration::from_secs(5), f.actor.history_undo_in_turns(
-        f.ws.clone(), "unrelated-missing-operation".into(), "unrelated-gate".into(), None,
-        f.root.to_path_buf(), Arc::new(NoFaults), 10, [Arc::default(), f.serial.clone()],
-        Arc::new(()), CancellationToken::new())).await.expect("Undo waited for a whole forward pass");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        f.actor.history_undo_in_turns(
+            f.ws.clone(),
+            "unrelated-missing-operation".into(),
+            "unrelated-gate".into(),
+            None,
+            f.root.to_path_buf(),
+            Arc::new(NoFaults),
+            10,
+            [Arc::default(), f.serial.clone()],
+            Arc::new(()),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("Undo waited for a whole forward pass");
     assert!(matches!(reply, Err(RuntimeError::Domain(_))));
     drop(guard);
     f.close().await;
