@@ -440,3 +440,82 @@ async fn history_operation_rpc_fence_reconciles_typing_and_uses_envelope_key() {
     );
     call(&transport, &handle, 107, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_after_outside_write_at_old_path_refuses_without_stalling_capture() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    write_file(scratch.path(), "old.md", b"Moved content.\n");
+    let (transport, handle) = open(&scratch).await;
+    reconcile_until_settled(&transport, &handle, 100).await;
+    let operation = "dohc-operation:outside-write";
+    let hold = call(
+        &transport,
+        &handle,
+        101,
+        "capture.hold",
+        json!({"operationId":operation}),
+    )
+    .await["holdId"]
+        .clone();
+    std::fs::rename(scratch.path().join("old.md"), scratch.path().join("new.md")).unwrap();
+    call_keyed(
+        &transport,
+        &handle,
+        102,
+        "versionedText.rename",
+        "rename",
+        json!({"versionId":"main","origin":"api","fromPath":"old.md","toPath":"new.md","captureHoldId":hold}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        103,
+        "capture.release",
+        json!({"holdId":hold}),
+    )
+    .await;
+    write_file(scratch.path(), "old.md", b"Outside content KEEP.\n");
+
+    // Desktop Undo reads the operation's History page before attempting Undo.
+    let started = std::time::Instant::now();
+    let page = call(
+        &transport,
+        &handle,
+        104,
+        "history.page",
+        json!({"workspaceId":WORKSPACE_ID,"operationId":operation}),
+    )
+    .await;
+    println!("History page after outside write: {:?}", started.elapsed());
+    assert_eq!(page["moments"].as_array().unwrap().len(), 1);
+    let started = std::time::Instant::now();
+    let refusal = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            105,
+            "history.undo",
+            Some(handle.clone()),
+            "undo-outside-write",
+            json!({"operationId":operation}),
+        ),
+    )
+    .await
+    .expect_err("the outside file occupies the old path");
+    println!(
+        "Undo after outside write: {:?} {refusal:?}",
+        started.elapsed()
+    );
+    assert!(refusal.message.contains("old path occupied"), "{refusal:?}");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
+        "Outside content KEEP.\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("new.md")).unwrap(),
+        "Moved content.\n"
+    );
+    call(&transport, &handle, 106, "workspace.close", json!({})).await;
+}
