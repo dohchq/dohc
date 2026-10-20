@@ -30,6 +30,7 @@ CREATE TABLE chat_conversation_file_link_work (
  after_id TEXT NOT NULL DEFAULT '',
  UNIQUE(workspace_id,channel_id,kind,key)
 ) STRICT;
+CREATE INDEX conversation_file_link_schedule ON chat_conversation_file_link_work(phase,work_id);
 CREATE VIEW chat_conversation_file_link_candidates AS
  SELECT a.*,t.channel_id FROM chat_attachments a
  JOIN chat_messages m ON m.workspace_id=a.workspace_id AND m.thread_id=a.thread_id AND m.message_id=a.message_id

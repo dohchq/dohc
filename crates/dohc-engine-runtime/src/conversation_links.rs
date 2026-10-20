@@ -58,6 +58,11 @@ fn finish(c: &Connection, work: &Work) -> Result<(), StorageError> {
 }
 
 fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
+    // Phase 2 is the rebuilding barrier. The phase index schedules all file
+    // repairs before releasing it, including work queued by other thread slices.
+    if w.kind == "thread" && w.phase == 2 {
+        return finish(c, w);
+    }
     if w.kind == "file" {
         let mut stmt = c
             .prepare_cached(
@@ -164,7 +169,11 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
             }
         }
         if keys.len() < BATCH as usize {
-            finish(c, w)?;
+            if w.kind == "reset" {
+                finish(c, w)?;
+            } else {
+                c.execute("UPDATE chat_conversation_file_link_work SET phase=2 WHERE work_id=?1 AND revision=?2",params![w.id,w.revision]).map_err(sql)?;
+            }
         } else if let Some(key) = keys.last() {
             c.execute("UPDATE chat_conversation_file_link_work SET after_id=?2 WHERE work_id=?1 AND revision=?3",params![w.id,key,w.revision]).map_err(sql)?;
         }
@@ -175,7 +184,7 @@ fn repair(c: &Connection, w: &Work) -> Result<(), StorageError> {
 /// One transaction processes at most 100 raw coordinates. Only demand enables the actor's scheduler.
 pub(crate) fn tick(store: &mut EngineStore) -> Result<bool, StorageError> {
     let work = store.read_with(|c| c.query_row("SELECT work_id,workspace_id,channel_id,kind,key,revision,phase,after_message,after_time,after_id
-        FROM chat_conversation_file_link_work ORDER BY work_id LIMIT 1", [], |r| Ok(Work {
+        FROM chat_conversation_file_link_work ORDER BY phase,work_id LIMIT 1", [], |r| Ok(Work {
             id:r.get(0)?,ws:r.get(1)?,channel:r.get(2)?,kind:r.get(3)?,key:r.get(4)?,revision:r.get(5)?,
             phase:r.get(6)?,message:r.get(7)?,time:r.get(8)?,after:r.get(9)?,
         })).optional().map_err(sql))?;

@@ -31,12 +31,18 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         s.write_with(&NoFaults,|c| {
             for i in 0..256 { let object=format!("f-{i:03}");c.execute("INSERT INTO file_objects VALUES('ws',?1,1)",[&object]).map_err(sql)?;
                 c.execute("INSERT INTO path_aliases VALUES('ws','main',?1,?2)",params![format!("notes/{object}.md"),object]).map_err(sql)?; }
+            for i in 0..32 {
+                let thread=format!("p-{i:02}");let message=format!("pm-{i:02}");
+                c.execute("INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id,lane) VALUES('ws',?1,'Measured',1,1,?2,?3)",params![thread,if i<16 {"a"} else {"b"},if i%2==0 {"posts"} else {"chat"}]).map_err(sql)?;
+                c.execute("INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws',?1,0,?2,'human','Ada','',1)",params![thread,message]).map_err(sql)?;
+            }
             for i in 0..history+unrelated {
-                let (thread,message)=if i<history {("t","m")} else {("u","n")};
+                let n=if i<history {i%16} else {16+i%16};let thread=format!("p-{n:02}");let message=format!("pm-{n:02}");
                 let object=format!("f-{:03}",if i<256 {i} else {0});
                 c.execute("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,?2,?3,'file',?4,?5)",
                     params![format!("id-{i:06}"),thread,message,object,i]).map_err(sql)?;
             }
+            for i in 0..64 {c.execute("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,'p-00','absent','file','f-000',?2)",params![format!("orphan-{i:03}"),history+unrelated+i]).map_err(sql)?;}
             Ok::<_,StorageError>(())
         }).unwrap();
         let work = Arc::new(AtomicU64::new(0));
@@ -70,6 +76,19 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         let mut slices = 0;
         let mut max_slice_us = 0;
         let start = Instant::now();
+        let mut resume_open_us = None;
+        if history >= 10_000 {
+            let begin = Instant::now();
+            assert!(tick(&mut s).unwrap());
+            max_slice_us = begin.elapsed().as_micros();
+            slices += 1;
+            s.count_work(None).unwrap();
+            drop(s);
+            let begin = Instant::now();
+            s = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2).unwrap();
+            resume_open_us = Some(begin.elapsed().as_micros());
+            exact_work(&s, work.clone());
+        }
         while {
             let start = Instant::now();
             let pending = tick(&mut s).unwrap();
@@ -103,21 +122,58 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         } else {
             baseline = Some((first_steps, second_steps));
         }
-        // Retained repair must yield rather than consume all unrelated mentions.
-        exec(
-            &mut s,
-            "DELETE FROM chat_attachments WHERE attachment_id='id-009999';",
-        );
+        work.store(0, Ordering::Relaxed);
+        let last_id = format!("id-{:06}", history - 1);
+        let start = Instant::now();
+        s.write_with(&NoFaults, |c| {
+            c.execute(
+                "DELETE FROM chat_attachments WHERE attachment_id=?1",
+                [&last_id],
+            )
+            .map_err(sql)
+        })
+        .unwrap();
+        let removal_us = start.elapsed().as_micros();
+        let removal_steps = work.swap(0, Ordering::Relaxed);
         let start = Instant::now();
         tick(&mut s).unwrap();
         let repair_slice_us = start.elapsed().as_micros();
         let repair_slice_steps = work.swap(0, Ordering::Relaxed);
         drain(&mut s);
-        // Reinsert so all comparison readers see the same admitted history.
-        if history == 10_000 {
-            attach(&mut s, "id-009999", Some("f-000"), 9999, "t", "m");
-            drain(&mut s);
+        attach(
+            &mut s,
+            &last_id,
+            Some("f-000"),
+            history - 1,
+            &format!("p-{:02}", (history - 1) % 16),
+            &format!("pm-{:02}", (history - 1) % 16),
+        );
+        drain(&mut s);
+        work.store(0, Ordering::Relaxed);
+        let start = Instant::now();
+        exec(
+            &mut s,
+            "UPDATE chat_threads SET channel_id='b' WHERE thread_id='p-15';",
+        );
+        let move_invalidate_us = start.elapsed().as_micros();
+        let mut move_slices = 0;
+        let mut move_max_us = 0;
+        let start = Instant::now();
+        while {
+            let begin = Instant::now();
+            let pending = tick(&mut s).unwrap();
+            move_max_us = move_max_us.max(begin.elapsed().as_micros());
+            pending
+        } {
+            move_slices += 1;
         }
+        let move_repair_us = start.elapsed().as_micros();
+        let move_steps = work.swap(0, Ordering::Relaxed);
+        exec(
+            &mut s,
+            "UPDATE chat_threads SET channel_id='a' WHERE thread_id='p-15';",
+        );
+        drain(&mut s);
         exec(&mut s, "DROP INDEX conversation_file_link_alias;");
         s.count_work(None).unwrap();
         drop(s);
@@ -173,9 +229,10 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
         assert_eq!(distinct.len(), 256);
         drop(actor);
         drop(supervisor);
-        results.push(json!({"history":history,"unrelated":unrelated,"aggregate":{"rows":aggregate_rows.len(),"us":aggregate_us,"vmSteps":aggregate_steps,"plan":aggregate_plan},
+        results.push(json!({"history":history,"unrelated":unrelated,"threads":32,"orphans":64,"aggregate":{"rows":aggregate_rows.len(),"us":aggregate_us,"vmSteps":aggregate_steps,"plan":aggregate_plan},
             "projection":{"firstUs":first_us,"continuationUs":second_us,"firstVmSteps":first_steps,"continuationVmSteps":second_steps,"firstBytes":first.to_string().len(),"continuationBytes":second.to_string().len(),"candidateWindow":101,"hydrationMaximum":100,"plan":page_plan},
-            "seed":{"slices":slices,"us":seed_us,"vmSteps":seed_steps,"maxActorSliceUs":max_slice_us},"repair":{"oneSliceUs":repair_slice_us,"vmSteps":repair_slice_steps},
+            "seed":{"resumeAfterRecords":if resume_open_us.is_some(){100}else{0},"resumeOpenUs":resume_open_us,"slices":slices,"us":seed_us,"vmSteps":seed_steps,"maxActorSliceUs":max_slice_us},"repair":{"invalidationUs":removal_us,"invalidationVmSteps":removal_steps,"oneSliceUs":repair_slice_us,"vmSteps":repair_slice_steps},
+            "threadMove":{"invalidationUs":move_invalidate_us,"repairUs":move_repair_us,"slices":move_slices,"maxSliceUs":move_max_us,"vmSteps":move_steps},
             "actualMentionDrain":{"pages":pages,"records":mentions,"bytes":bytes,"us":drain_us,"vmSteps":drain_steps},"readOnlyOpenUs":open_us}));
     }
     println!(

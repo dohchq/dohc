@@ -19,6 +19,7 @@ fn fixture() -> (ScratchDir, EngineStore) {
         INSERT INTO chat_channel_wire_ids VALUES('ws','wire-a','a'),('ws','wire-b','b');
         INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES
         ('ws','t','T',1,1,'a'),('ws','u','U',1,1,'b');
+        UPDATE chat_threads SET lane='chat' WHERE thread_id='t';
         INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES
         ('ws','t',0,'m','human','Ada','',1),('ws','u',0,'n','agent','Agent','',1);");
     (scratch, s)
