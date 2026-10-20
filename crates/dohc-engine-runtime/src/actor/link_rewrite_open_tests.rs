@@ -565,11 +565,12 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
     f.pass("fence-gap", Arc::new(NoFaults)).await.unwrap();
     f.settle_document("source-0000").await;
     f.type_document("source-0000", "typing [[new#part|label]] [[./new.md]] [old](old.md)").await;
-    let result = f.undo_open().await.unwrap();
-    assert!(result.not_restored.is_empty());
-    assert_eq!(f.text("source-0000.md").await, "typing [[old#part|label]] [[./old.md]] [old](old.md)");
+    let result = f.undo_open().await;
+    let text = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
+    assert!(result.unwrap().not_restored.is_empty());
+    assert_eq!(text, "typing [[old#part|label]] [[./old.md]] [old](old.md)");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -613,14 +614,17 @@ async fn forward_does_not_write_through_another_undos_internal_lease() {
     tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
     let held = capture.lock_owned().await;
     tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
-    let result=f.pass("other-undo-lease",Arc::new(NoFaults)).await.unwrap();
+    let result=f.pass("other-undo-lease",Arc::new(NoFaults)).await;
     drop(held);
-    assert_eq!(result["documents"],0);
-    assert_eq!(result["unchecked"],json!(["source-0000.md"]));
-    assert!(undo.await.unwrap().unwrap().not_restored.is_empty());
-    assert_eq!(f.text("source-0000.md").await,before);
+    let undone=undo.await.unwrap();
+    let text=f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
+    let result=result.unwrap();
+    assert_eq!(result["documents"],0);
+    assert_eq!(result["unchecked"],json!(["source-0000.md"]));
+    assert!(undone.unwrap().not_restored.is_empty());
+    assert_eq!(text,before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -642,13 +646,14 @@ async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage()
         lease
     };
     let (result,lease) = tokio::join!(f.undo_open(),reopen);
-    assert!(result.unwrap().not_restored.is_empty());
     let doc = f.document("source-0000").await;
-    assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
-    assert_eq!(doc.wikilink_spans().unwrap().1.len(),2,"reopened editor lost its native wikilink elements");
-    assert_eq!(f.text("source-0000.md").await,BODY);
+    let text=f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
+    assert!(result.unwrap().not_restored.is_empty());
+    assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("[[old#part"));
+    assert_eq!(doc.wikilink_spans().unwrap().1.len(),2,"reopened editor lost its native wikilink elements");
+    assert_eq!(text,BODY);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -656,7 +661,7 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
     let f = Fixture::new(1,1);
     let (lease,_) = f.open_document("source-0000").await;
     let key = DocKey::new(&f.ws,"main","source-0000").unwrap();
-    f.actor.run(move |store,_| {
+    let result=f.actor.run(move |store,_| {
         let marker = store.read_with(|c| dohc_engine_collab::read_marker_in(c,&key))?.unwrap();
         let doc = Ydoc::wire();
         let body = format!("{}{}", "[[a]] ".repeat(16), "x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES - 200));
@@ -666,9 +671,10 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
         let after = before.replacen("[[a]]","[[b]]",1);
         assert!(super::super::super::link_documents::prepare_doc(&doc,marker,&before,&after)?.is_none());
         Ok(())
-    }).await.unwrap();
+    }).await;
     drop(lease);
     f.close().await;
+    result.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -677,19 +683,21 @@ async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
     f.pass("unmapped-inverse",Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
     let (lease,_) = f.open_document_with_elements("source-0000",false).await;
-    let result = f.undo_open().await.unwrap();
-    assert_eq!(result.not_restored.len(),1);
-    assert_eq!(result.not_restored[0],"source-0000.md");
+    let result = f.undo_open().await;
     let request=format!("{}-undo",f.ws);
-    f.actor.run(move |store,_| {
-        let reasons: String=store.read_with(|c| c.query_row("SELECT errors_json FROM history_undo_plans WHERE request_id=?1",[request],|r|r.get(0))).unwrap();
-        assert!(reasons.contains("wikilink element unavailable"));
-        Ok(())
+    let reasons=f.actor.run(move |store,_| {
+        let reasons: String=store.read_with(|c| c.query_row("SELECT errors_json FROM history_undo_plans WHERE request_id=?1",[request],|r|r.get(0)).optional()).unwrap().unwrap_or_default();
+        Ok(reasons)
     }).await.unwrap();
-    assert_eq!(f.text("source-0001.md").await,BODY);
-    assert!(f.text("source-0000.md").await.contains("[[new#part"));
+    let restored=f.text("source-0001.md").await;
+    let untouched=f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
+    let result=result.unwrap();
+    assert_eq!(result.not_restored,["source-0000.md"]);
+    assert!(reasons.contains("wikilink element unavailable"));
+    assert_eq!(restored,BODY);
+    assert!(untouched.contains("[[new#part"));
 }
 
 #[derive(Default)]
