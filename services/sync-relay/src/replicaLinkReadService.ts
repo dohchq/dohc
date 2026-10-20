@@ -11,6 +11,7 @@ import {fileSideOf} from "./shareFilter";
 import type {createShareReadQueries} from "./shareReadQueries";
 
 export type ReplicaChangedObject = {versionId:string;objectId:string;path:string};
+type LinkReadInput = Omit<ReplicaCurrentViewReadInput,"principal"> & {principal:{kind:"link"}};
 export type ReplicaReadChangeListener = (workspace:string,view:ReplicaCurrentView,changed:ReplicaChangedObject[],reset?:boolean)=>void;
 export interface DevelopmentReplicaReads extends ReplicaCurrentViewSource {
   subscribeReadChanges(listener:ReplicaReadChangeListener):()=>void;
@@ -74,11 +75,11 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
     return {path,objectId:identity.object(["link",s.authorized.grant.grantId],s.workspace,row.objectId),
       blobSha256:row.sha256,contentKind:row.contentKind};
   };
-  function read<T>(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,run:(s:Snapshot)=>T,requestedPath?:string,watch=true) {
-    const result=withReplicaCurrentView(storage,input,source,s=>{
+  function read<T>(input:LinkReadInput,fresh:()=>unknown,run:(s:Snapshot)=>T,requestedPath?:string,watch=true) {
+    const result=withReplicaCurrentView(storage,{...input,principal:{kind:"link",requireSession:fresh}},source,s=>{
       if(s.files.some(f=>f.status!=="ready") || fileSideOf(s.authorized.effectiveSelector)!.access==="edit" && s.view.logCursor<storage.getEpochLogFloor(s.workspace))throw relayError("link_read_rate_limited");
       return run(s);
-    },requestedPath,true,{onAuthorized:()=>{fresh();},onStanding:authorized=>{
+    },requestedPath,true,{onStanding:authorized=>{
       if(!watch)return;
       hold(authorized);
       const workspace=authorized.share.workspaceId,now=Date.now();
@@ -93,7 +94,7 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
   }
   return {
     close,
-    inventory(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,requestedFolder?:string|null) {
+    inventory(input:LinkReadInput,fresh:()=>unknown,requestedFolder?:string|null) {
       return read(input,fresh,s=>{
         const state=window(s.workspace,s.view.revision);
         const selector=fileSideOf(s.authorized.effectiveSelector)!;
@@ -111,7 +112,7 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
           ...newestFilteredOpFreshness(s.workspace,s.authorized.effectiveSelector,epochLogFloor)};
       });
     },
-    feed(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,since:number,limit:number) {
+    feed(input:LinkReadInput,fresh:()=>unknown,since:number,limit:number) {
       return read(input,fresh,s=>{
         const state=window(s.workspace,s.view.revision);
         const epochLogFloor=storage.getEpochLogFloor(s.workspace);
@@ -137,7 +138,7 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
         return {ops,nextCursor:changes.length ? nextCursor : state.head,hasMore:nextCursor<state.head,epochLogFloor};
       });
     },
-    blob(input:ReplicaCurrentViewReadInput,fresh:()=>unknown,sha:string,includeBytes=true) {
+    blob(input:LinkReadInput,fresh:()=>unknown,sha:string,includeBytes=true) {
       return read(input,fresh,s=>{
         const match=[...s.rows].find(([,row])=>row.sha256===sha);
         if(!match)return null;

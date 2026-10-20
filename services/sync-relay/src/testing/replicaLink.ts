@@ -5,13 +5,17 @@ import {ReplicaWatches} from "../replicaWatches";
 import {hashLinkBearer} from "../linkSecurity";
 import {createReplicaReadPrincipal} from "../replicaReadPrincipal";
 import {inspectDatabase,json,jsonBody,LINK_KEY,request,seedLinkGrant,sha256,storagePath,testHandler,testStorage,type HandlerOverrides} from "./index";
-export async function fixture(access: "view"|"comment"|"edit" = "view", enabled = true, overrides:HandlerOverrides={}) {
+export async function fixture(access: "view"|"comment"|"edit"|"read-only"|"read-write" = "view", enabled = true, overrides:HandlerOverrides={}) {
   const storage=await testStorage(), activity=new DiscussionActivityHub(), watches=new ReplicaWatches(activity);
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner@dohc.test",createdAtMs:1});
   storage.claimWorkspaceIdentity({workspaceId:"w",replicationEpoch:"epoch",streamIdentity:"stream"});
-  storage.createShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner@dohc.test",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
+  const group=access === "read-only" || access === "read-write";
+  if(group) storage.appendLogBatch({workspaceId:"w",originId:"owner",ops:[{originSeq:0,opKind:"chat.channel.create",recordedAtMs:1,
+    payloadJson:JSON.stringify({wireId:"channel",channelId:"channel",kind:"channel",name:"Group",slug:"group",createdAtMs:1})}]});
+  storage.createShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner@dohc.test",selectorJson:JSON.stringify(group ?
+    {kind:"group",channelWireId:"channel",paths:["private/docs"],versionId:null} : {paths:["docs"],versionId:null}),createdAtMs:1},
     grant:{grantId:"named",shareId:"s",principalKind:"user",principalUserId:"reader@dohc.test",principalEmail:null,
-      access:"edit",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
+      access:group ? "read-write" : "edit",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   const secret="a".repeat(43);
   seedLinkGrant(storage,{shareId:"s",grantId:"link",secretHash:hashLinkBearer(secret,LINK_KEY),access,createdAtMs:1});
   const lease=createReplicaReadPrincipal(storage).issue("w","test");storage.bindReplicaCurrentView(lease);
@@ -29,15 +33,15 @@ export async function fixture(access: "view"|"comment"|"edit" = "view", enabled 
   const exchanged=await json(await h(request(null,"/sync/link-exchange",{...jsonBody({secret}),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":"e".repeat(64)}})));
   expect(exchanged.capabilityToken).toBeTypeOf("string");
   const send=(path:string,signal?:AbortSignal,headers:Record<string,string>={})=>h(request(null,path,{headers:{...headers,authorization:`LinkCapability ${exchanged.capabilityToken}`},signal}));
-  function publish(text="live",path="docs/a.md",objectId="object") {
+  function publish(text="live",path=group ? "private/docs/a.md" : "docs/a.md",objectId="object") {
     const previous=latest?.files ?? [];
-    latest={workspaceId:"w",revision:++revision,logCursor:0,journalCursor:0,
+    latest={workspaceId:"w",revision:++revision,logCursor:storage.readReplicaStanding("w")!.logSeq,journalCursor:0,
       files:[{versionId:"main",objectId,path,contentKind:"text",sha256:sha256(text),byteLength:Buffer.byteLength(text),lineageClaimId:null,restoreGeneration:null}],
       texts:[{sha256:sha256(text),text}],omitted:[]};
     for(const listener of listeners)listener("w",latest,[...previous,...latest.files]);
   }
   const retire=()=>{const old=latest;latest=undefined;if(old)for(const listener of listeners)listener("w",old,[],true);};
-  return {storage,activity,watches,h,send,savedSend:(path:string,headers:Record<string,string>={})=>saved(request(null,path,{headers:{...headers,authorization:`LinkCapability ${exchanged.capabilityToken}`}})),publish,source,retire,get latest(){return latest!;},omit(){latest={...latest!,revision:++revision,omitted:[{versionId:"main",objectId:"large",path:"docs/large.md",sha256:sha256("large"),reason:"text-frame-limit"}]};},lease,
+  return {storage,activity,watches,h,send,options,secret,capabilityToken:String(exchanged.capabilityToken),savedSend:(path:string,headers:Record<string,string>={})=>saved(request(null,path,{headers:{...headers,authorization:`LinkCapability ${exchanged.capabilityToken}`}})),publish,source,retire,get latest(){return latest!;},omit(){latest={...latest!,revision:++revision,omitted:[{versionId:"main",objectId:"large",path:"docs/large.md",sha256:sha256("large"),reason:"text-frame-limit"}]};},lease,
     db:inspectDatabase(storagePath(storage)),dispose:()=>{h.dispose();saved.dispose();watches.dispose();}};
 }
 

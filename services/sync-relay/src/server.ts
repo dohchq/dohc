@@ -554,6 +554,7 @@ export function createSyncRelayHandler({
     const capabilityToken = match[1]!;
     const capability = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
@@ -595,6 +596,7 @@ export function createSyncRelayHandler({
     if (!linkKey) throw invalidLinkCapability();
     const fresh = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
