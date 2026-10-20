@@ -3532,7 +3532,7 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
     )
     .unwrap();
     let activation = capture_imported_owner_activation(
-        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults,
+        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults, None,
     )
     .unwrap();
     assert_ne!(activation.source.source_digest, baseline);
@@ -3575,6 +3575,7 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         10,
         260,
         &NoFaults,
+        None,
         |tx, namespace, binding, _| {
             journal_live_base_in_tx(tx, namespace, binding, 260)
                 .map(|_| ())
@@ -4589,7 +4590,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     );
     assert!(complete(&mut store, end));
     let activation = capture_imported_owner_activation(
-        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults,
+        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults, None,
     )
     .unwrap();
 
@@ -4639,6 +4640,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
         10,
         260,
         &NoFaults,
+        None,
         |tx, namespace, binding, _| {
             journal_live_base_in_tx(tx, namespace, binding, 260)
                 .map(|_| ())
@@ -4708,7 +4710,8 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             &key,
             "note.md",
             &activation.activation_id,
-            1_000_000
+            1_000_000,
+            None
         ),
         Err(dohc_engine_collab::live_update_application::ApplicationError::HostedDocumentUnready)
     ));
@@ -4754,6 +4757,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
         "note.md",
         &activation.activation_id,
         1_000_000,
+        None,
     )
     .unwrap();
     assert_eq!(resumed.activation_id, activation.activation_id);

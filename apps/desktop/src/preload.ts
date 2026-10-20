@@ -55,6 +55,8 @@ import {
   WorkspacePathOpenFailedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
+  workspaceTrustOperations,
+  WorkspaceTrustChangedEvent,
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
@@ -347,6 +349,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.usageRecordStopped, UsageRecordStoppedEvent, () => listener()),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
+  ...operationBridge(workspaceTrustOperations, invoke),
+  onWorkspaceTrustChanged: (listener) =>
+    onEvent(CHANNELS.workspaceTrustChanged, WorkspaceTrustChangedEvent, listener),
   onAutomationHoldsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {

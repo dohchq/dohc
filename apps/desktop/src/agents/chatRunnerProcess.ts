@@ -1,5 +1,5 @@
-import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync } from "node:fs";
-import { delimiter, dirname, resolve } from "node:path";
+import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, resolve, win32 } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
@@ -78,8 +78,20 @@ function validPid(pid: number | undefined): pid is number {
   return pid !== undefined && Number.isSafeInteger(pid) && pid > 0;
 }
 
-function appendPathPrefix(prefix: string, current: string | undefined): string {
-  return current ? `${prefix}${delimiter}${current}` : prefix;
+// The runner starts in the workspace folder, so an empty or relative PATH
+// entry would let a program the workspace carries run in place of a real one.
+// Windows allows a quoted entry, such as "C:\Program Files\x"; keep it
+// unquoted. Elsewhere a quote is part of the name, so the entry is relative.
+function runnerSearchPath(
+  prefix: string,
+  current: string | undefined,
+  platform: NodeJS.Platform,
+): string {
+  const entries = (current ?? "")
+    .split(delimiter)
+    .map((entry) => (platform === "win32" ? entry.replace(/^"(.*)"$/u, "$1") : entry))
+    .filter((entry) => isAbsolute(entry));
+  return [prefix, ...entries].join(delimiter);
 }
 
 export function resolveDohcCliBinDirectory(input: {
@@ -181,10 +193,14 @@ export function createChatRunnerProcess(
       DOHC_CHAT_ACTOR: "agent",
       DOHC_RUN_ID: input.runId,
       DOHC_STATE_DIR: options.stateDir(),
-      PATH: appendPathPrefix(cliBin, process.env.PATH),
+      PATH: runnerSearchPath(cliBin, process.env.PATH, platform),
       ...(process.env.Path
-        ? { Path: appendPathPrefix(cliBin, process.env.Path) }
+        ? { Path: runnerSearchPath(cliBin, process.env.Path, platform) }
         : {}),
+      // cmd.exe looks in the current directory before PATH, so an npm shim's
+      // bare `node` would run a node.cmd at the workspace root. This turns
+      // that search off for the shim and for anything the agent starts.
+      ...(platform === "win32" ? { NoDefaultCurrentDirectoryInExePath: "1" } : {}),
     };
   }
 
@@ -197,6 +213,24 @@ export function createChatRunnerProcess(
     profile?: AgentLaunchProfile;
     prompt: string;
   }): RunnerProcess {
+    const logFd = prepareLog(input.logPath);
+    try {
+      return startRunner(input, logFd);
+    } catch (error) {
+      // The run's log says why too. A failed write must not hide the reason.
+      try {
+        writeSync(logFd, `${error instanceof Error ? error.message : String(error)}\n`);
+      } catch {}
+      throw error;
+    } finally {
+      closeSync(logFd);
+    }
+  }
+
+  function startRunner(
+    input: Parameters<typeof spawnConfiguredRunner>[0],
+    logFd: number,
+  ): RunnerProcess {
     const commandParts = input.profile
       ? [input.profile.executable, ...agentProfileArguments(input.profile)]
       : tokenizeRunnerCommand(input.command);
@@ -217,31 +251,36 @@ export function createChatRunnerProcess(
       threadId: input.threadId,
       runId: input.runId,
     });
-    const logFd = prepareLog(input.logPath);
-    try {
-      // Resolve inside the try so an invalid command fails this dispatch
-      // and the log descriptor closes in finally.
-      const resolved = resolveSpawnCommand(executable, args, {
-        env,
-        cwd: input.rootPath,
-      });
-      const child = spawnRunner(resolved.command, resolved.args, {
-        cwd: input.rootPath,
-        env,
-        // Detached cmd.exe shims can leave their child waiting for stdin on Windows.
-        // Windows cleanup uses taskkill; only POSIX needs a separate process group.
-        detached: platform !== "win32",
-        stdio: ["pipe", logFd, logFd],
-        windowsHide: true,
-        ...(resolved.windowsVerbatimArguments
-          ? { windowsVerbatimArguments: true }
-          : {}),
-      });
-      child.writeStdin(input.prompt);
-      return child;
-    } finally {
-      closeSync(logFd);
+    const resolved = resolveSpawnCommand(executable, args, {
+      env,
+      platform,
+      cwd: input.rootPath,
+    });
+    // libuv searches the child's cwd for a bare name before PATH, and only
+    // the parent's environment can turn that off. Refuse instead.
+    if (platform === "win32" && !win32.isAbsolute(resolved.command)) {
+      throw new Error(
+        resolved.windowsVerbatimArguments
+          ? "Windows' command interpreter (ComSpec) isn't set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc."
+          : /[\\/]/u.test(executable)
+            ? `${executable} doesn't exist. Use its full path in the runner command.`
+            : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
+      );
     }
+    const child = spawnRunner(resolved.command, resolved.args, {
+      cwd: input.rootPath,
+      env,
+      // Detached cmd.exe shims can leave their child waiting for stdin on Windows.
+      // Windows cleanup uses taskkill; only POSIX needs a separate process group.
+      detached: platform !== "win32",
+      stdio: ["pipe", logFd, logFd],
+      windowsHide: true,
+      ...(resolved.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: true }
+        : {}),
+    });
+    child.writeStdin(input.prompt);
+    return child;
   }
 
   function signalOwnedProcess(

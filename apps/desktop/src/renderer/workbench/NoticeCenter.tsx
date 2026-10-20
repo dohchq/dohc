@@ -107,11 +107,17 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// What Copy puts on the clipboard for a failed run's notice.
+// A failed automation run, or an agent run that says why it didn't start. Its
+// toast shows the body and stays until closed, and Copy sits beside its text.
+const isFailure = (notice: NoticeRow): boolean =>
+  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
+// What Copy puts on the clipboard for a failed run's notice. The notice store
+// already bounds the body, so Copy keeps all of the text the person sees.
 const failureDetails = (notice: NoticeRow): string =>
   errorDetails([
     ["Notice", notice.title],
-    ["Details", notice.body],
+    ["Details", notice.body, Number.POSITIVE_INFINITY],
     ["Automation", notice.target?.automation ?? ""],
     ["Run", notice.target?.run ?? ""],
     ["Time", new Date(notice.createdAtMs).toISOString()],
@@ -1317,7 +1323,8 @@ export function NoticeCenter(props: {
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
   // A failure's toast stays until it is closed; any other fades.
-  const sentToastFades = sentToast !== null && sentToast.notice.kind !== "automation-failed";
+  const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
+  const sentToastFades = sentToast !== null && !sentToastFails;
   useEffect(() => {
     if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
@@ -1397,6 +1404,16 @@ export function NoticeCenter(props: {
               <SenderMark kind={sentToast.notice.senderKind} />
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
+                {/* About four lines, then it scrolls, so a long reason never
+                    pushes the title and controls out of a short window. */}
+                {sentToastFails && sentToast.notice.body ? (
+                  <span
+                    data-testid="sent-notice-toast-body"
+                    className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                  >
+                    {sentToast.notice.body}
+                  </span>
+                ) : null}
               </span>
               {(retriesRun(sentToast.notice) || sentToast.retryable) && props.onRetrySentNotice ? (
                 <button
@@ -1411,7 +1428,7 @@ export function NoticeCenter(props: {
                   Try again
                 </button>
               ) : null}
-              {sentToast.notice.kind === "automation-failed" ? (
+              {sentToastFails ? (
                 <CopyButton
                   key={sentToastKey}
                   iconOnly
@@ -1773,7 +1790,7 @@ export function NoticeCenter(props: {
                       const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
                         ? () => props.onRetrySentNotice?.(notice)
                         : undefined;
-                      const copies = notice.kind === "automation-failed";
+                      const copies = isFailure(notice);
                       const running = runningKey === key;
                       // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
                       const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"

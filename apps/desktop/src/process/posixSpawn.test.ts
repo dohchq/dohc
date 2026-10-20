@@ -335,10 +335,14 @@ describe("processDescendants", () => {
     ).resolves.toBe(false);
   });
 
-  it("returns an empty list when the process table cannot be read", async () => {
+  it("returns an empty list when the process table cannot be read, and says so", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(
       processDescendants(100, () => Promise.reject(new Error("ps: not found"))),
     ).resolves.toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      "[desktop] could not read the process table, so this capture found nothing", expect.any(Error));
+    warn.mockRestore();
   });
 
   it("returns an empty list for a root with no children", async () => {

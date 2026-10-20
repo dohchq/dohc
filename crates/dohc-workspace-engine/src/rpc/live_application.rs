@@ -2592,6 +2592,7 @@ mod tests {
             activation_id: "activation".into(),
             source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
                 version: 1,
+                reader_source: false,
                 relay_database_namespace: "unload-test".into(),
                 workspace_id: "workspace".into(),
                 main_version_id: "main".into(),

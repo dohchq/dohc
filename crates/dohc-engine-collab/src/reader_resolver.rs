@@ -20,7 +20,9 @@ fn transient(failure: &Failure) -> bool {
 #[derive(PartialEq, Eq)]
 struct Key {
     document: DocKey,
-    marker: crate::Marker,
+    marker: Option<crate::Marker>,
+    authority: String,
+    lineage: String,
     restore_generation: Option<i64>,
     moment: String,
     path: String,
@@ -32,7 +34,7 @@ struct Key {
 
 #[cfg(test)]
 #[path = "reader_resolver_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// A miss leaves the writer before the caller starts or waits for the process.
 pub struct PendingProof {
@@ -60,7 +62,25 @@ impl PendingProof {
                     .unwrap()
                     .take()
                     .ok_or(Failure::Superseded)?;
+                let checkpoint =
+                    (request.method == Method::Construct).then(|| request.checkpoint.clone());
                 match self.reader.request(request).await? {
+                    Outcome::Constructed {
+                        proof,
+                        delta,
+                        checkpoint_sha256,
+                    } if checkpoint_sha256 == self.checkpoint_sha
+                        && proof.source_sha256 == self.source_sha
+                        && proof.source_byte_length == self.source_length
+                        && checkpoint.as_ref().is_some_and(|checkpoint| {
+                            constructed_source(checkpoint, &delta, &proof)
+                        }) =>
+                    {
+                        // Construct refreshes the old projection hash; constructed_source checks its replacement.
+                        // This is a proof on a clone. No returned edit enters the
+                        // live document, and no content clock may be changed.
+                        Ok(true)
+                    }
                     Outcome::Proved {
                         proof,
                         checkpoint_sha256,
@@ -94,6 +114,26 @@ struct Entry {
     retries: u8,
 }
 
+fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reader::Proof) -> bool {
+    let check = || -> Result<bool, CollabError> {
+        if !crate::replay_parity::reader_metadata_only(checkpoint, delta)? {
+            return Ok(false);
+        }
+        let doc = Ydoc::wire();
+        doc.apply(checkpoint)?;
+        doc.apply(delta)?;
+        Ok(!doc.has_pending_dependencies()
+            && doc.markdown_source_reference().is_some_and(|reference| {
+                reference.source_sha256 == proof.source_sha256
+                    && reference.projection_sha256 == proof.projection_sha256
+                    && doc
+                        .markdown_source(&reference)
+                        .is_some_and(|source| source.len() == proof.source_byte_length)
+            }))
+    };
+    check().unwrap_or(false)
+}
+
 /// Each cache belongs to one immutable reader configuration and build lifetime.
 /// Restart creates an empty cache. Entries retain strict proof of the exact checkpoint.
 pub struct ReaderResolver {
@@ -106,6 +146,63 @@ impl ReaderResolver {
             reader,
             entries: Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub(crate) fn resolve_snapshot(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+        doc: &Ydoc,
+        canonical: &str,
+        snapshot: &crate::reader_snapshot::SnapshotIdentity<'_>,
+        source: String,
+    ) -> Result<String, CollabError> {
+        let reference = doc
+            .markdown_source_reference()
+            .ok_or(CollabError::MarkdownReaderUnavailable)?;
+        if reference.source_sha256 != snapshot.digest || doc.markdown_source(&reference).is_none() {
+            return Err(CollabError::MarkdownReaderUnavailable);
+        }
+        let checkpoint = doc.encode_full_state();
+        let content_digest = crate::replay_parity::reader_checkpoint_content_digest(&checkpoint)?;
+        let request = Request {
+            method: if reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes()) {
+                Method::Construct
+            } else {
+                Method::Prove
+            },
+            document: Document {
+                workspace_id: key.workspace_id.clone(),
+                main_version_id: key.version_id.clone(),
+                object_id: key.object_id.clone(),
+                lineage_claim_id: snapshot.lineage.to_owned(),
+            },
+            current_path: snapshot.path.to_owned(),
+            source: source.as_bytes().to_vec(),
+            checkpoint,
+        };
+        let restore_generation = crate::live_update_application::restore_generation(conn, key)?;
+        let fresh = self.lookup(
+            Key {
+                document: key.clone(),
+                marker: crate::read_marker_in(conn, key)?,
+                authority: snapshot.authority.to_owned(),
+                lineage: snapshot.lineage.to_owned(),
+                restore_generation,
+                moment: snapshot.moment.to_owned(),
+                path: snapshot.path.to_owned(),
+                source_sha: snapshot.digest.to_owned(),
+                source_length: source.len(),
+                projection_sha: reference.projection_sha256,
+                content_digest,
+            },
+            request,
+            crate::hex_sha256(canonical.as_bytes()),
+        )?;
+        if !fresh {
+            return Err(CollabError::MarkdownReaderUnavailable);
+        }
+        Ok(source)
     }
 
     fn lookup(
@@ -226,7 +323,13 @@ pub fn resolve(
         return Err(CollabError::MarkdownReaderUnavailable);
     }
     let request = Request {
-        method: Method::Prove,
+        method: if reference.source_sha256 == source_sha
+            && reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes())
+        {
+            Method::Construct
+        } else {
+            Method::Prove
+        },
         document: Document {
             workspace_id: key.workspace_id.clone(),
             main_version_id: key.version_id.clone(),
@@ -240,7 +343,9 @@ pub fn resolve(
     let fresh = resolver.lookup(
         Key {
             document: key.clone(),
-            marker,
+            marker: Some(marker),
+            authority: "current-snapshot".into(),
+            lineage: request.document.lineage_claim_id.clone(),
             restore_generation,
             moment,
             path,

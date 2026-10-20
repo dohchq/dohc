@@ -198,7 +198,11 @@ pub(super) fn initialize(
     }
     let doc = Ydoc::wire();
     doc.apply(baseline)?;
-    doc.validate_public_baseline(baseline)?;
+    if doc.has_reader_source() {
+        doc.validate_reader_baseline(baseline)?;
+    } else {
+        doc.validate_public_baseline(baseline)?;
+    }
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         restore_operation_id: None,

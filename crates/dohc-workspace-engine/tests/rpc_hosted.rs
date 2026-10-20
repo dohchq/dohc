@@ -3072,6 +3072,7 @@ fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &s
     let full_state_digest = dohc_engine_storage::put_binary_blob(&tx, &full_state).expect("state");
     let source = ImportedOwnerSource {
         version: 1,
+        reader_source: false,
         relay_database_namespace: "hosted-relay".into(),
         workspace_id: WORKSPACE.into(),
         main_version_id: "main".into(),

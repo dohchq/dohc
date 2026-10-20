@@ -9,6 +9,7 @@ import type {
   createSitePreviewLifecycle,
 } from "../workspaces/sitePreviewLifecycle";
 import {
+  previewRunsAppCode,
   StartSitePreviewAnswer,
   StartSitePreviewPayload,
   type StartSitePreviewResult,
@@ -58,6 +59,8 @@ export interface StartSitePreviewDependencies<
     "acquire"
   >;
   isSharedView(workspaceId: string): boolean;
+  // Throws unless this computer trusts the workspace to run its apps' code.
+  assertMayRunAppCode(workspace: Workspace): Promise<unknown>;
   execute(
     input: SitePreviewExecutionInput,
   ): Promise<SitePreviewExecution<SitePreviewResultBody>>;
@@ -119,6 +122,10 @@ export function createStartSitePreviewHandler<
                 ),
                 payload.siteRoot,
               );
+              // Before the start replaces the preview that shows now.
+              if (previewRunsAppCode(site, payload.mode)) {
+                await dependencies.assertMayRunAppCode(workspace);
+              }
               return (signal) =>
                 dependencies.execute({
                   workspaceId: workspace.workspaceId,

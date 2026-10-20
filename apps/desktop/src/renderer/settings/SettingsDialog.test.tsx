@@ -151,6 +151,13 @@ const bridge = {
   openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
+  requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
+  restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => {
+    workspaceTrusted = false;
+    return { workspaceId, trusted: false };
+  }),
+  onWorkspaceTrustChanged: vi.fn(() => () => undefined),
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   setTitlebarTheme: vi.fn(async () => undefined),
   onUserSettingsChanged: vi.fn(
@@ -179,7 +186,10 @@ function stubClipboard() {
   });
 }
 
+let workspaceTrusted = false;
+
 beforeEach(() => {
+  workspaceTrusted = false;
   runActive = false;
   updateReady = false;
   // vi.clearAllMocks() clears calls, not implementations: restore the fake
@@ -199,6 +209,34 @@ afterEach(() => {
 });
 
 describe("SettingsDialog", () => {
+  it("shows this workspace's trust in Privacy, asks main to trust it, and restricts it again", async () => {
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    const control = await screen.findByTestId("workspace-trust-control");
+    const restricted = within(control).getByRole("radio", { name: "Restricted Mode" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+
+    // The person chose Stay in Restricted Mode in main's dialog.
+    await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
+    expect(bridge.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+
+    // The person chose Trust workspace.
+    workspaceTrusted = true;
+    await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
+    await waitFor(() => expect(within(control).getByRole("radio", { name: "Trusted" }).getAttribute("aria-checked")).toBe("true"));
+
+    await userEvent.click(restricted);
+    expect(bridge.restrictWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+  });
+
+  it("has no trust row in a shared view", async () => {
+    render(<SettingsDialog workspaceIsReady sharedView workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    await screen.findByTestId(settingsSectionPin("privacy"));
+    expect(screen.queryByTestId("settings-row-workspace-trust")).toBeNull();
+    expect(bridge.readWorkspaceTrust).not.toHaveBeenCalled();
+  });
+
   it("shows a failed-open state instead of loading workspace settings", async () => {
     const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection: "agents" as const,
       workspaceIsReady: false, workspaceOpenFailed: true, onClose: vi.fn() };

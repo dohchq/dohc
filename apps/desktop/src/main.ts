@@ -167,6 +167,7 @@ import {
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
+  workspaceTrustOperations,
   reportingOperations,
   usageRecordOperations,
   noticeOperations,
@@ -240,6 +241,7 @@ import {
 import {
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
+  createWorkspaceFolderWithFreshness,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import { createFolder, listFiles } from "./workspaces/workspaceFiles";
@@ -543,6 +545,8 @@ import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
+import { confirmWorkspaceTrust, createWorkspaceTrust, folderIdentity } from "./workspaces/workspaceTrust";
+import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import { REPORTING_BUILD, resolveReporting } from "./telemetry/reportingConfig";
@@ -604,6 +608,18 @@ const crashReports = createCrashReportStore({
     }
   },
 });
+// Whether this computer runs each workspace's app commands. Main's own
+// record, in this computer's dohc profile: nothing in a workspace sets it.
+const workspaceTrust = createWorkspaceTrust({ file: join(stateDir(), "workspace-trust.json") });
+
+// The windows showing a workspace follow its trust at once.
+function notifyWorkspaceTrustChanged(workspaceId: string, trusted: boolean): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
+    win.webContents.send(CHANNELS.workspaceTrustChanged, { workspaceId, trusted });
+  }
+}
+
 // A preview left by a dohc that ended while its dialog was open goes now.
 const crashReportPreview = createCrashReportPreview({
   path: join(stateDir(), "crash-report-to-send.txt"),
@@ -843,6 +859,7 @@ let linuxStableCliBinDir: string | undefined;
 const executeAppPreview = createAppPreviewExecution({
   get shareViewFiles() { return shareViewFiles; },
   get shareViewFilesTargetForPath() { return shareViewFilesTargetForPath; },
+  assertMayRunAppCode: (workspace) => workspaceTrust.assertTrusted(workspace),
 });
 
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
@@ -2011,7 +2028,14 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 // registry row. The folder is untouched; opening it again re-adopts the
 // manifest and its identity.
 const forgetWorkspace = createWorkspaceForget({
-  remove: workspaceId => removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId)),
+  // A forgotten workspace opened again is an existing folder: it starts in
+  // Restricted Mode.
+  // The grant goes first, so a failed write cannot leave one that returns
+  // when the folder opens again.
+  remove: async workspaceId => {
+    await workspaceTrust.restrict(workspaceId);
+    await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  },
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });
@@ -6092,8 +6116,9 @@ function registerIpcHandlers(): void {
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),
-    createWorkspaceFolder,
+    createWorkspaceFolder: createWorkspaceFolderWithFreshness,
     forgetWorkspace,
+    trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     openWorkspaceWindow: (workspace) =>
       desktopWindows.openWorkspaceInWindow(workspace, (window) => {
@@ -6916,8 +6941,24 @@ function registerIpcHandlers(): void {
     assertTrustedSender, senderWorkspaceAuthority, withRendererWorkspaceOperation,
     appCatalog: ownedSiteCatalog, appPreviews: sitePreviews,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
+    assertMayRunAppCode: (workspace) => workspaceTrust.assertTrusted(workspace),
     executeAppPreview,
   });
+
+  registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    trust: workspaceTrust,
+    identify: folderIdentity,
+    isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
+    confirm: (event, workspace) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      return confirmWorkspaceTrust({
+        showMessageBox: (options) => window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
+      }, workspace);
+    },
+    stopAppCommands: (operation) =>
+      operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
+    notifyChanged: notifyWorkspaceTrustChanged,
+  }));
 
   registerOpenWorkspaceIpcHandler<
     WebContents,

@@ -1,4 +1,5 @@
 import {
+  AppCommandStillRunningError,
   MAX_LOG_ENTRIES,
   type SiteLogEntry,
   type SiteProcessHandle,
@@ -260,7 +261,15 @@ export function createSitePreviewLifecycle<
     if (record.stopAttempt) return record.stopAttempt;
     const attempt = Promise.resolve()
       .then(() => record.handle.stop())
-      .then(() => {
+      .then(async () => {
+        // A stop counts once the command's processes are gone. Until then the
+        // record stays, so nothing starts over them and the next stop retries.
+        // A static preview runs no app process.
+        const { handle } = record;
+        if ("stillRunning" in handle) {
+          const left = await handle.stillRunning();
+          if (left.length > 0) throw new AppCommandStillRunningError(handle, left);
+        }
         if (activePreviews.get(key) === record) activePreviews.delete(key);
       })
       .finally(() => {
@@ -304,6 +313,27 @@ export function createSitePreviewLifecycle<
     } finally {
       await stopRetained(key, stopping);
     }
+  };
+
+  // A cancelled start's processes that outlived their stop, as a stopping
+  // preview, so a later stop retries them and no start runs over them.
+  const keepLeftRunning = (
+    key: string,
+    workspaceId: string,
+    siteRoot: string,
+    handle: SiteProcessHandle,
+  ): void => {
+    if (activePreviews.has(key)) return;
+    activePreviews.set(key, {
+      state: "stopping",
+      lastKnownState: "running",
+      workspaceId,
+      siteRoot,
+      handle,
+      releaseOrigin: null,
+      logs: handle.logs(),
+      stopAttempt: null,
+    });
   };
 
   const retainAndStop = async (
@@ -431,7 +461,15 @@ export function createSitePreviewLifecycle<
         await stopCurrent(key);
         requireCurrent();
 
-        const execution = await execute(pending.controller.signal);
+        let execution: SitePreviewExecution<T>;
+        try {
+          execution = await execute(pending.controller.signal);
+        } catch (error) {
+          if (error instanceof AppCommandStillRunningError) {
+            keepLeftRunning(key, startInput.workspaceId, startInput.siteRoot, error.handle);
+          }
+          throw error;
+        }
         if (!isCurrent()) {
           await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
             retainAndStop(
@@ -755,7 +793,13 @@ export function createSitePreviewLifecycle<
     }
   }
 
-  async function stopWorkspace(workspaceId: string): Promise<void> {
+  // `rejectOnFailure` answers with the stops that failed, as Restricted Mode
+  // needs to report. A workspace switch only logs them. Either way a failed
+  // stop keeps its handle, so the next call tries it again.
+  async function stopWorkspace(
+    workspaceId: string,
+    options: { rejectOnFailure?: boolean } = {},
+  ): Promise<void> {
     dropHolds(workspaceId);
     const pending = abortPending(
       [...pendingStarts].filter((start) => start.workspaceId === workspaceId),
@@ -764,10 +808,12 @@ export function createSitePreviewLifecycle<
     const snapshots = [...activePreviews.entries()]
       .filter(([, active]) => active.workspaceId === workspaceId)
       .map(([key, active]) => ({ key, handle: active.handle }));
+    const failures: unknown[] = [];
     await Promise.all([
       ...snapshots.map(({ key, handle }) =>
         runInKeyedLane(startLanes, key, () => stopCurrent(key, handle)).catch(
-          (error) => {
+          (error: unknown) => {
+            failures.push(error);
             console.warn(
               "[desktop] failed to stop site preview during workspace switch",
               error,
@@ -777,6 +823,21 @@ export function createSitePreviewLifecycle<
       ),
       ...draining.map((start) => start.settled),
     ]);
+    if (!options.rejectOnFailure) return;
+    // A stop that failed keeps its record, wherever it failed: in a stop
+    // above, in a cancelled start, or in a start's own cleanup after its
+    // command began. So an app command's record still held now is one this
+    // workspace still runs. A static preview started meanwhile runs no app
+    // code.
+    for (const record of activePreviews.values()) {
+      if (record.workspaceId !== workspaceId || !("command" in record.handle)) continue;
+      if (failures.some((failure) => failure instanceof AppCommandStillRunningError && failure.handle === record.handle)) continue;
+      failures.push(new AppCommandStillRunningError(record.handle, []));
+    }
+    if (failures.length === 0) return;
+    throw failures.length === 1
+      ? failures[0]
+      : new AggregateError(failures, "Some app previews did not stop.");
   }
 
   let stopAllPromise: Promise<void> | null = null;

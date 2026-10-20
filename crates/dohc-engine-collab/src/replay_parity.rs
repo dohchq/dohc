@@ -1998,6 +1998,84 @@ pub(crate) fn reader_checkpoint_content_digest(bytes: &[u8]) -> Result<String, C
         .collect())
 }
 
+/// A construction used as proof may refresh source metadata only. It cannot
+/// repair, normalize or drop any part of the checkpoint's document content.
+pub(crate) fn reader_metadata_only(checkpoint: &[u8], delta: &[u8]) -> Result<bool, CollabError> {
+    let base = scan_v2(checkpoint)?;
+    let candidate = scan_v2(delta)?;
+    fn block(wire: &WireStructure, id: ID) -> Option<&BlockDescriptor> {
+        let blocks = wire.blocks.get(&id.client)?;
+        blocks
+            .get(
+                blocks
+                    .partition_point(|b| b.id.clock <= id.clock)
+                    .checked_sub(1)?,
+            )
+            .filter(|b| id.clock < b.id.clock + b.len)
+    }
+    fn source_item(base: &WireStructure, candidate: &WireStructure, mut id: ID) -> bool {
+        let mut remaining = base.blocks.values().map(Vec::len).sum::<usize>()
+            + candidate.blocks.values().map(Vec::len).sum::<usize>();
+        while remaining > 0 {
+            remaining -= 1;
+            let Some(b) = block(candidate, id).or_else(|| block(base, id)) else {
+                return false;
+            };
+            if b.kind != BlockKind::Item {
+                return false;
+            }
+            if let Some(ParentDescriptor::Root(root)) = &b.parent {
+                return root == "meta"
+                    && b.parent_sub
+                        .as_deref()
+                        .is_some_and(crate::ydoc::reader_source_meta_key);
+            }
+            // A map replacement inherits its parent and key from an origin.
+            if b.parent.is_some() {
+                return false;
+            }
+            let Some(origin) = b.left_origin.or(b.right_origin) else {
+                return false;
+            };
+            id = origin;
+        }
+        false
+    }
+    for blocks in candidate.blocks.values() {
+        for b in blocks {
+            if !source_item(&base, &candidate, b.id) {
+                return Ok(false);
+            }
+        }
+    }
+    for (&client, ranges) in &candidate.deleted_ranges {
+        for &(start, end) in ranges {
+            let mut clock = start;
+            while clock < end {
+                if let Some((_, deleted_end)) =
+                    base.deleted_ranges.get(&client).and_then(|ranges| {
+                        ranges
+                            .iter()
+                            .find(|(start, end)| *start <= clock && clock < *end)
+                    })
+                {
+                    clock = end.min(*deleted_end);
+                    continue;
+                }
+                let id = ID::new(client, clock);
+                if !source_item(&base, &candidate, id) {
+                    return Ok(false);
+                }
+                let Some(b) = block(&candidate, id).or_else(|| block(&base, id)) else {
+                    return Ok(false);
+                };
+                clock = end.min(b.id.clock + b.len);
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError> {
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
