@@ -1,5 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
-import { desktopPins, activityPin, settingsNavPin, settingsSectionPin } from "../src/testPins";
+import { desktopPins, activityPin, editorTabTestId, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { test, expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,7 +8,9 @@ import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp"
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openWorkspaceFromFirstRun,
+  writeWorkspaceFiles,
   type TempWorkspace,
 } from "./helpers/workspace";
 
@@ -143,6 +145,106 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await expect(desktop.page.getByTestId(desktopPins.settingsWarning).first()).toBeVisible();
     await expect(desktop.page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
     expect(fatalLogs(desktop)).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// The surfaces around open work that a theme change repaints.
+const THEMED_SURFACES = {
+  "active tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="true"]',
+  "other tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="false"]',
+  editor: ".cm-editor",
+  gutter: ".cm-gutters",
+};
+
+interface ThemeWatch {
+  colors(): Record<string, string>;
+  firstFrame: Promise<Record<string, string>>;
+}
+
+// Records the surfaces' colors in the first frame drawn after the next theme
+// change.
+async function watchNextThemeChange(page: Page): Promise<void> {
+  await page.evaluate((surfaces) => {
+    const colors = () => Object.fromEntries(Object.entries(surfaces).flatMap(([name, selector]) => {
+      const style = getComputedStyle(document.querySelector(selector)!);
+      return [[`${name} fill`, style.backgroundColor], [`${name} text`, style.color]];
+    }));
+    const firstFrame = new Promise<Record<string, string>>((resolve) => {
+      const observer = new MutationObserver(() => {
+        observer.disconnect();
+        requestAnimationFrame(() => resolve(colors()));
+      });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    });
+    (window as Window & { themeWatch?: ThemeWatch }).themeWatch = { colors, firstFrame };
+  }, THEMED_SURFACES);
+}
+
+// The first frame after the change already has the colors the window keeps
+// once every transition has ended.
+async function expectThemeChangeInOneFrame(page: Page): Promise<void> {
+  const first = await page.evaluate(() => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.firstFrame);
+  await expect
+    .poll(() => page.evaluate(() => document.getAnimations().some((animation) => animation instanceof CSSTransition)))
+    .toBe(false);
+  const settled = await page.evaluate(() => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.colors());
+  expect(first).toEqual(settled);
+}
+
+test("a theme change repaints open tabs and the editor in one frame", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    const lines = Array.from({ length: 120 }, (_, index) => `export const limit${index} = ${index};`);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes.md", contents: "# Notes\n\nA paragraph.\n" },
+      { path: "limits.js", contents: `${lines.join("\n")}\n` },
+    ]);
+    desktop = await openWorkspace(temp);
+    const page = desktop.page;
+    await explorerRow(page, "notes.md").click();
+    await expect(page.getByTestId(editorTabTestId("notes.md"))).toBeVisible();
+    await explorerRow(page, "limits.js").click();
+    await expect(page.getByTestId(editorTabTestId("limits.js"))).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".cm-content")).toBeVisible();
+
+    await openSettings(page);
+    await page.getByTestId(settingsNavPin("appearance")).click();
+    await page.getByRole("radio", { name: "Light" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await watchNextThemeChange(page);
+    await page.getByRole("radio", { name: "Dark" }).click();
+    await expectThemeChangeInOneFrame(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+    // Following the system, the change keeps the editor, its scroll and its
+    // selection. Playwright's page starts with a light color scheme.
+    await page.getByRole("radio", { name: "System" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await closeSettings(page);
+    await page.locator(".cm-scroller").evaluate((scroller) => {
+      scroller.scrollTop = 600;
+    });
+    await page.locator(".cm-line", { hasText: /^export const limit40 =/ }).click({ position: { x: 4, y: 6 } });
+    await page.keyboard.press("Shift+End");
+    await page.locator(".cm-editor").evaluate((editor) => {
+      (window as Window & { themedEditor?: Element }).themedEditor = editor;
+    });
+    const editorState = () => page.evaluate(() => ({
+      sameEditor: document.querySelector(".cm-editor") === (window as Window & { themedEditor?: Element }).themedEditor,
+      scrollTop: document.querySelector(".cm-scroller")!.scrollTop,
+      selection: getSelection()?.toString(),
+    }));
+    const before = await editorState();
+    expect(before).toEqual({ sameEditor: true, scrollTop: 600, selection: "export const limit40 = 40;" });
+    await watchNextThemeChange(page);
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectThemeChangeInOneFrame(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    expect(await editorState()).toEqual(before);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
