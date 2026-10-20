@@ -103,6 +103,33 @@ describe("Schedules run on", () => {
     expect(screen.queryByTestId("settings-row-schedule-host")).toBeNull();
   });
 
+  it("names the other computer that runs a workspace that never synced, and asks before this computer takes over", async () => {
+    const takeOverScheduleHost = vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" }));
+    install({
+      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's laptop" })),
+      takeOverScheduleHost,
+    });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
+    expect(elsewhere.textContent).toContain("Ice's laptop");
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(takeOverScheduleHost).not.toHaveBeenCalled();
+    expect(within(elsewhere).getByRole("alert").textContent).toBe("If Ice's laptop is still on, a run can repeat.");
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(takeOverScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", generation: 0 });
+    expect((await screen.findByTestId("schedule-host-note")).textContent).toBe("This computer");
+    expect(screen.queryByTestId("schedule-host-elsewhere")).toBeNull();
+  });
+
+  it("offers to take over when dohc cannot read which computer runs a workspace that never synced", async () => {
+    install({ readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: null })) });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
+    expect(elsewhere.textContent).toContain("Another computer");
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(within(elsewhere).getByRole("alert").textContent).toBe("If another computer is still on, a run can repeat.");
+  });
+
   it("checks again after a note, as when the connection comes back", async () => {
     const onError = vi.fn();
     const readScheduleHost = vi.fn()

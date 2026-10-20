@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
-import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
+import { recordNeverSynced, recordSynced, runSchedulesOn } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   computerLabel,
@@ -505,21 +505,36 @@ describe("automation hosts", () => {
 });
 
 describe("the automation host", () => {
-  it("is the synced workspace's host as read, or this computer when the workspace never synced", async () => {
+  const laptop = { installId: "install-laptop", label: "Laptop" };
+  const desk = { installId: "install-desk", label: "Desk" };
+
+  it("is the synced workspace's host as read, or the computer that made a workspace that never synced", async () => {
     const root = await createTestScratch("dohc-automation-host-");
     await mkdir(join(root, ".dohc"), { recursive: true });
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, () => true)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, () => false)).toBe(false);
-    expect(await isAutomationHost({ rootPath: root }, () => true), "no record of whether it synced").toBe(false);
-    await recordNeverSynced(root);
-    expect(await isAutomationHost({ rootPath: root }, () => false)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, shareView: {} }, () => true), "shared with this person").toBe(false);
-    expect(await isAutomationHost(null, () => true)).toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, () => 7), "its only computer runs at 0").toBe(0);
-    expect(await automationHostGeneration({ rootPath: root, remote: {} }, () => 7)).toBe(7);
+    expect(await isAutomationHost({ rootPath: root, remote: {} }, laptop, () => true)).toBe(true);
+    expect(await isAutomationHost({ rootPath: root, remote: {} }, laptop, () => false)).toBe(false);
+    expect(await isAutomationHost({ rootPath: root }, laptop, () => true), "no record of whether it synced").toBe(false);
+    await recordNeverSynced(root, laptop);
+    expect(await isAutomationHost({ rootPath: root }, laptop, () => false)).toBe(true);
+    expect(await isAutomationHost({ rootPath: root, shareView: {} }, laptop, () => true), "shared with this person").toBe(false);
+    expect(await isAutomationHost(null, laptop, () => true)).toBe(false);
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => 7), "its one computer runs at 0").toBe(0);
+    expect(await automationHostGeneration({ rootPath: root, remote: {} }, laptop, () => 7)).toBe(7);
     await recordSynced(root);
-    expect(await isAutomationHost({ rootPath: root }, () => true), "synced before, so another computer may be the host").toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, () => 7)).toBeNull();
+    expect(await isAutomationHost({ rootPath: root }, laptop, () => true), "synced before, so another computer may be the host").toBe(false);
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => 7)).toBeNull();
+  });
+
+  it("is one computer of two that read a copied folder that never synced, until the other takes over", async () => {
+    const root = await createTestScratch("dohc-automation-host-copied-");
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await recordNeverSynced(root, laptop);
+    // iCloud Drive or a copy carries the same folder to the desk.
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => null)).toBe(0);
+    expect(await automationHostGeneration({ rootPath: root }, desk, () => null), "the desk did not make it").toBeNull();
+    expect(await runSchedulesOn(root, desk)).toBe(true);
+    expect(await automationHostGeneration({ rootPath: root }, desk, () => null)).toBe(0);
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => null), "the laptop stops at its next read").toBeNull();
   });
 
   it("answers the generation it runs at only while it runs", async () => {

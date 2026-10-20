@@ -5073,9 +5073,9 @@ describe("Collection automations that a Group message starts", () => {
   it("subscribes in a workspace that never synced, whose only computer this is, and not in one that synced before", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     // No remote: the workspace does not sync now.
-    const host = () => automationHostGeneration({ rootPath: w.root }, () => null);
+    const host = () => automationHostGeneration({ rootPath: w.root }, { installId: "laptop", label: "Laptop" }, () => null);
     const neverSynced = w.makeExecutor({ groupHost: host });
     await neverSynced.open();
     await w.until(() => w.subscriptions.has("collection:Tasks#task"));
@@ -5412,7 +5412,7 @@ describe("Collection automations that a Group message starts", () => {
       clearTimer: (cleared) => { for (const timer of timers) if (timer === cleared) timer.done = true; },
     });
     const executor = w.makeExecutor({
-      groupHost: () => automationHostGeneration(workspace, () => hosts.runsAt("ws")),
+      groupHost: () => automationHostGeneration(workspace, { installId, label: installId }, () => hosts.runsAt("ws")),
       // The relay answers only for the current generation, as main.ts reads it.
       groupRelayRecord: async (generation) => {
         if (relay.down) throw new TypeError("fetch failed");
@@ -5518,7 +5518,7 @@ describe("Collection automations that a Group message starts", () => {
   it("keeps its subscriptions when a workspace that never synced turns sync on", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
@@ -5546,7 +5546,7 @@ describe("Collection automations that a Group message starts", () => {
   ] as const)("drops its subscriptions when a workspace that never synced turns sync on and %s", async (_case, start) => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);

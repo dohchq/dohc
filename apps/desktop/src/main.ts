@@ -304,7 +304,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced, runSchedulesOn, scheduleComputer, type Computer } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
 import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
@@ -2058,7 +2058,7 @@ const forgetWorkspace = createWorkspaceForget({
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   canonicalizeRoot: canonicalWorkspaceRoot,
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
-  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome() }),
+  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
   remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
@@ -3038,6 +3038,11 @@ let cachedLocalInstallationId: string | null = null;
 function localInstallationId(): string {
   return cachedLocalInstallationId ??= readOrCreateLocalInstallationId(join(stateDir(), "dohc-local-id.json"),
     (message, error) => console.error(`[desktop] ${message}`, error));
+}
+
+// This installation, with its computer's name as settings show it.
+function thisComputer(): Computer {
+  return { installId: localInstallationId(), label: computerLabel(hostname()) };
 }
 
 // The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
@@ -4129,6 +4134,12 @@ async function releaseIdleWorkspaces(): Promise<void> {
 
 const AUTOMATION_HOST_REQUEST_TIMEOUT_MS = 15_000;
 
+function announceScheduleHost(workspaceId: string): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send(CHANNELS.scheduleHostChanged, workspaceId);
+  }
+}
+
 // Which of the owner's computers runs each open synced workspace's
 // schedules, as the relay records it.
 const automationHosts = createAutomationHosts({
@@ -4161,9 +4172,7 @@ const automationHosts = createAutomationHosts({
   stored: (workspaceId) => findWorkspace(workspaceId)?.automationHost,
   store: (workspaceId, host) => {
     setWorkspaceAutomationHost(workspaceId, host);
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send(CHANNELS.scheduleHostChanged, workspaceId);
-    }
+    announceScheduleHost(workspaceId);
   },
   startedHere: (workspaceId, startAfterMs, floorMs) => automationScheduler.startedHere(workspaceId, startAfterMs, floorMs),
   hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
@@ -4231,9 +4240,22 @@ async function scheduleHostState(
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return { kind: "none" };
   if (entry.remote === undefined) {
-    return (await readSyncHistory(entry.rootPath)) === "never-synced"
-      ? { kind: "this-computer" }
-      : { kind: "note", message: "Turn on sync to run this workspace's schedules." };
+    const here = thisComputer();
+    let host = await scheduleComputer(entry.rootPath, here);
+    const elsewhere = host === "unreadable" || (host !== null && host.installId !== here.installId);
+    // Taking over, this computer runs them from now on. The other one stops
+    // at its next read, and may have run anything before now.
+    if (change?.action === "take-over" && elsewhere) {
+      host = (await runSchedulesOn(entry.rootPath, here)) ? here : null;
+      if (host !== null) {
+        automationScheduler.startedHere(workspaceId, null, null);
+        collectionAutomationsOf(workspaceId)?.hostChanged();
+        announceScheduleHost(workspaceId);
+      }
+    }
+    if (host === null) return { kind: "note", message: "Turn on sync to run this workspace's schedules." };
+    if (host === "unreadable") return { kind: "another-computer", label: null };
+    return host.installId === here.installId ? { kind: "this-computer" } : { kind: "another-computer", label: host.label };
   }
   let credentials: CloudSessionCredentials;
   let credentialGeneration: number;
@@ -4294,7 +4316,7 @@ async function scheduleHostState(
 // Whether this computer runs a workspace's schedules: it is the automation
 // host, with a synced workspace's host read again when the copy is old.
 async function runsSchedulesHere(workspaceId: string): Promise<boolean> {
-  return await isAutomationHost(findWorkspace(workspaceId), () => automationHosts.runsHere(workspaceId));
+  return await isAutomationHost(findWorkspace(workspaceId), thisComputer(), () => automationHosts.runsHere(workspaceId));
 }
 
 // Turning sync on or opening a share records it in the folder and the
@@ -4483,7 +4505,7 @@ function createCollectionAutomationsFor(
     onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
-      computer: { installId: localInstallationId(), label: computerLabel(hostname()) },
+      computer: thisComputer(),
       throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
       primaryUserId: localUserId(),
       lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
@@ -4532,7 +4554,7 @@ function createCollectionAutomationsFor(
     }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
-    groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
+    groupHost: () => automationHostGeneration(findWorkspace(workspaceId), thisComputer(), () => automationHosts.runsAt(workspaceId)),
     groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
     reachRelayRecord: (generation) => automationReachRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
@@ -5822,7 +5844,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     }, folder);
   },
   register: async (rootPath) => {
-    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal" });
+    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
     const workspace = WorkspaceSummary.parse(created);
     registerPhysicalWorkspace(created);
     return workspace;
@@ -6134,6 +6156,7 @@ function registerIpcHandlers(): void {
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),
+    thisComputer,
     createWorkspaceFolder: createWorkspaceFolderWithFreshness,
     forgetWorkspace,
     trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),

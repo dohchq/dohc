@@ -998,7 +998,7 @@ describe("a shared workspace forgotten and attached again", () => {
 
     // Shared with Ana, who can edit Trip.
     await mkdir(join(root, ".dohc"));
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, { installId: "install-here", label: "This Mac" });
     store.register({ workspaceId: WORKSPACE, rootPath: root, kind: "personal", mode: "local-first" });
     await recordSynced(root);
     store.setRemote(WORKSPACE, remote);

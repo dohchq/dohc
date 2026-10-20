@@ -12,10 +12,13 @@ import { SettingRow } from "./SettingRow";
 // "Schedules run on": which of the owner's computers, or their dohc server,
 // runs this workspace's schedules. The server heads the list while it runs
 // automations. Choosing another starts a handover; while it waits, the old
-// computer's last check-in shows, with a way to take over without it.
+// computer's last check-in shows, with a way to take over without it. A
+// workspace that does not sync runs them on the one computer its folder
+// names; another computer shows that one, with a way to take over.
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
+type TakeOverFrom = Pick<ScheduleHostComputer, "kind" | "label" | "thisComputer">;
 type Loaded = { status: "loading" } | { status: "ready"; state: ScheduleHostResult } | { status: "failed" };
 
 export function ScheduleHostRow(props: { workspaceId: string; onError?: (message: string) => void }) {
@@ -78,6 +81,51 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
     if (confirmingTakeOver) cancelRef.current?.focus();
   }, [confirmingTakeOver]);
 
+  // Asks first, since the old computer may still run what is due.
+  const takeOverControls = (from: TakeOverFrom, generation: number) => confirmingTakeOver ? (
+    <div className="flex flex-col gap-2">
+      <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
+        {from.kind === "server"
+          ? "If this server has not stopped, a run can repeat."
+          : `If ${computerInSentence(from)} is still on, a run can repeat.`}
+      </p>
+      <div className="flex gap-2">
+        <PrimaryButton size="compact" aria-describedby={warningId} disabled={busy} onClick={() => takeOver(generation)}>
+          Take over now
+        </PrimaryButton>
+        <SecondaryButton
+          ref={cancelRef}
+          size="compact"
+          aria-describedby={warningId}
+          disabled={busy}
+          onClick={cancelTakeOver}
+        >
+          Cancel
+        </SecondaryButton>
+      </div>
+    </div>
+  ) : (
+    <SecondaryButton
+      ref={takeOverRef}
+      size="compact"
+      className="self-start"
+      disabled={busy}
+      onClick={() => setConfirmingTakeOver(true)}
+    >
+      Take over now
+    </SecondaryButton>
+  );
+  const takeOver = (generation: number) =>
+    void run(
+      () => bridge().takeOverScheduleHost({ workspaceId, generation }),
+      "dohc could not take over this workspace's schedules.",
+    );
+  const cancelTakeOver = () => {
+    setConfirmingTakeOver(false);
+    // The trigger comes back in place of the confirmation.
+    requestAnimationFrame(() => takeOverRef.current?.focus());
+  };
+
   if (loaded.status === "loading") return null;
   if (loaded.status === "failed") {
     return (
@@ -88,6 +136,18 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   }
   const { state } = loaded;
   if (state.kind === "none") return null;
+  if (state.kind === "another-computer") {
+    const from = { kind: "computer" as const, label: state.label ?? "another computer", thisComputer: false };
+    return (
+      <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
+        <div data-testid="schedule-host-elsewhere" className="flex flex-col gap-2">
+          <span className="text-[12px] text-muted">{state.label ?? "Another computer"}</span>
+          {/* Moving them needs no answer from the other computer: it stops at its next read. */}
+          {takeOverControls(from, 0)}
+        </div>
+      </SettingRow>
+    );
+  }
   if (state.kind === "this-computer" || state.kind === "note") {
     return (
       <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
@@ -111,16 +171,6 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
       () => bridge().chooseScheduleHost({ workspaceId, installId: computer.installId, generation: state.generation }),
       "dohc could not move this workspace's schedules.",
     );
-  const takeOver = () =>
-    void run(
-      () => bridge().takeOverScheduleHost({ workspaceId, generation: state.generation }),
-      "dohc could not take over this workspace's schedules.",
-    );
-  const cancelTakeOver = () => {
-    setConfirmingTakeOver(false);
-    // The trigger comes back in place of the confirmation.
-    requestAnimationFrame(() => takeOverRef.current?.focus());
-  };
   // One tab stop for the list; arrows, Home, and End move between computers.
   const focusedIndex = state.computers.findIndex((computer) => computer.installId === focusedId);
   const chosenIndex = state.computers.findIndex((computer) => computer.installId === shown.hostInstallId);
@@ -184,39 +234,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                 ? `Waiting for ${handingOver.label} to hand over. Last seen ${dayFormat.format(handingOver.lastSeenMs)}.`
                 : `Waiting for ${computerInSentence(handingOver)} to hand over.`}
             </p>
-            {confirmingTakeOver ? (
-              <div className="flex flex-col gap-2">
-                <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
-                  {handingOver.kind === "server"
-                    ? "If this server has not stopped, a run can repeat."
-                    : `If ${computerInSentence(handingOver)} is still on, a run can repeat.`}
-                </p>
-                <div className="flex gap-2">
-                  <PrimaryButton size="compact" aria-describedby={warningId} disabled={busy} onClick={takeOver}>
-                    Take over now
-                  </PrimaryButton>
-                  <SecondaryButton
-                    ref={cancelRef}
-                    size="compact"
-                    aria-describedby={warningId}
-                    disabled={busy}
-                    onClick={cancelTakeOver}
-                  >
-                    Cancel
-                  </SecondaryButton>
-                </div>
-              </div>
-            ) : (
-              <SecondaryButton
-                ref={takeOverRef}
-                size="compact"
-                className="self-start"
-                disabled={busy}
-                onClick={() => setConfirmingTakeOver(true)}
-              >
-                Take over now
-              </SecondaryButton>
-            )}
+            {takeOverControls(handingOver, state.generation)}
           </div>
         ) : null}
       </div>

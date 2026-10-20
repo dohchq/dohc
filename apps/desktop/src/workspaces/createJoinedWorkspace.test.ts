@@ -9,7 +9,7 @@ import type { RegistryEntry } from "./registryStore";
 
 // Folder creation against a real folder, as main wires it.
 const createRealFolder = async (input: { rootPath: string; workspaceId: string; kind: "personal" }) =>
-  createWorkspaceFolder({ ...input, homeDir: await createTestScratch("dohc-join-home-") });
+  createWorkspaceFolder({ ...input, homeDir: await createTestScratch("dohc-join-home-"), computer: { installId: "install-here", label: "This Mac" } });
 
 function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root) {
   const registry = new Map<string, RegistryEntry>();

@@ -29,7 +29,7 @@ const linkType = process.platform === "win32" ? "junction" : "dir";
 
 async function create(rootPath: string) {
   const homeDir = await createTestScratch("dohc-fresh-home-");
-  return createWorkspaceFolderWithFreshness({ rootPath, homeDir, kind: "personal" });
+  return createWorkspaceFolderWithFreshness({ rootPath, homeDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } });
 }
 
 describe("New workspace's claim that it made a folder from nothing", () => {

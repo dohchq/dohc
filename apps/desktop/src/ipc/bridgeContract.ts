@@ -6399,8 +6399,10 @@ const ScheduleHostComputer = z.object({
 });
 export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
 export const ScheduleHostResult = z.discriminatedUnion("kind", [
-  // A workspace that never synced runs its schedules here, its only computer.
+  // A workspace that never synced runs its schedules on one computer: this
+  // one, or the one named, which is null when dohc cannot read its record.
   z.object({ kind: z.literal("this-computer") }),
+  z.object({ kind: z.literal("another-computer"), label: z.string().min(1).max(64).nullable() }),
   // A shared view never runs schedules.
   z.object({ kind: z.literal("none") }),
   // dohc cannot ask the relay; `message` says what to do.
@@ -6489,7 +6491,9 @@ export const scheduleHostOperations = {
     }),
     result: ScheduleHostResult, guard: "trusted-sender",
   },
-  // Ends a handover without the old computer. A run can repeat if it is still on.
+  // Ends a handover without the old computer, or moves a workspace that never
+  // synced to this computer, at generation 0. A run can repeat if the old
+  // computer is still on.
   takeOverScheduleHost: {
     capabilityId: "automation.host.takeover",
     scope: "workspace",

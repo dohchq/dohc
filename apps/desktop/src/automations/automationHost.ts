@@ -7,7 +7,7 @@ import {
   type RelayAutomationComputer,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
-import { readSyncHistory } from "../workspaces/syncHistory";
+import { scheduleComputer, type Computer } from "../workspaces/syncHistory";
 
 // Which of the owner's computers runs a synced workspace's schedules
 // (ADR 0012). The relay records one host per workspace. This computer runs
@@ -206,26 +206,28 @@ type HostedWorkspace = { remote?: unknown; shareView?: unknown; rootPath: string
 /**
  * The automation host generation this computer runs a workspace at, or null
  * when it is not the host. For a synced workspace, `relayGeneration`
- * answers from the relay's record. One that does not sync has this
- * computer as its host, at generation 0, only when its folder says it
- * never synced: this is its only computer. A workspace shared with this
- * person is never theirs to run.
+ * answers from the relay's record. One that does not sync has one host, at
+ * generation 0: the computer its folder names, when its folder says it
+ * never synced. A workspace shared with this person is never theirs to run.
  */
 export async function automationHostGeneration(
   workspace: HostedWorkspace,
+  here: Computer,
   relayGeneration: () => number | null | Promise<number | null>,
 ): Promise<number | null> {
   if (workspace === null || workspace.shareView !== undefined) return null;
   if (workspace.remote !== undefined) return await relayGeneration();
-  return (await readSyncHistory(workspace.rootPath)) === "never-synced" ? 0 : null;
+  const host = await scheduleComputer(workspace.rootPath, here);
+  return host !== null && host !== "unreadable" && host.installId === here.installId ? 0 : null;
 }
 
 /** Whether this computer is a workspace's automation host; see automationHostGeneration. */
 export async function isAutomationHost(
   workspace: HostedWorkspace,
+  here: Computer,
   relayNamesThis: () => boolean | Promise<boolean>,
 ): Promise<boolean> {
-  return (await automationHostGeneration(workspace, async () => ((await relayNamesThis()) ? 0 : null))) !== null;
+  return (await automationHostGeneration(workspace, here, async () => ((await relayNamesThis()) ? 0 : null))) !== null;
 }
 
 export function createAutomationHosts(dependencies: AutomationHostsDependencies) {
