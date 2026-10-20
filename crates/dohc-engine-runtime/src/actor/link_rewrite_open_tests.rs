@@ -677,7 +677,13 @@ async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
     let (lease,_) = f.open_document_with_elements("source-0000",false).await;
     let result = f.undo_open().await.unwrap();
     assert_eq!(result.not_restored.len(),1);
-    assert_eq!(result.not_restored[0].path,"source-0000.md");
+    assert_eq!(result.not_restored[0],"source-0000.md");
+    let request=format!("{}-undo",f.ws);
+    f.actor.run(move |store,_| {
+        let reasons: String=store.read_with(|c| c.query_row("SELECT errors_json FROM history_undo_plans WHERE request_id=?1",[request],|r|r.get(0))).unwrap();
+        assert!(reasons.contains("wikilink element unavailable"));
+        Ok(())
+    }).await.unwrap();
     assert_eq!(f.text("source-0001.md").await,BODY);
     assert!(f.text("source-0000.md").await.contains("[[new#part"));
     drop(lease);

@@ -634,7 +634,7 @@ impl VersionFence {
         let mut held = HashMap::new();
         for member in &result.moments {
             if held.contains_key(&member.object_id)
-                || (member.operation == dohc_engine_domain::MomentOp::Write && lock(&self.sessions).values().any(|session| {
+                || (member.operation == "write" && lock(&self.sessions).values().any(|session| {
                     session.key.workspace_id == open.workspace_id
                         && session.key.version_id == result.version_id
                         && session.key.object_id == member.object_id
