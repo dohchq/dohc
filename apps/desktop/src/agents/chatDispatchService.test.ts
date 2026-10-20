@@ -110,6 +110,7 @@ class FakeRunnerProcess implements RunnerProcess {
 
 interface FixtureOptions {
   workspaceAttachmentId?: symbol;
+  platform?: NodeJS.Platform;
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   dispatchNoticeFailures?: Error[];
@@ -625,7 +626,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       listRecoveriesRaw(dispatchWorkspace.workspaceId),
     spawnRunner,
     killProcessGroup,
-    platform: "linux",
+    platform: options.platform ?? "linux",
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -1335,6 +1336,29 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(
       second.threadId,
     );
+  });
+
+  it("says why a runner could not start in the run's notice and the self-test", async () => {
+    const fixture = await createFixture({
+      platform: "win32",
+      runner: { command: "dohc-missing-runner -p" },
+    });
+    const reason = "Couldn't find dohc-missing-runner on PATH. Use its full path in the runner command.";
+    await createAgentThread(fixture, { body: "Plan day 2", authorUserId: "user_local" });
+
+    await activate(fixture);
+
+    await vi.waitFor(() => {
+      expect(fixture.notices).toEqual([expect.objectContaining({
+        title: "Your agent's run in \"Plan day 2\" failed to start",
+        body: reason,
+      })]);
+    });
+    expect(fixture.spawnCalls).toEqual([]);
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+      ok: false,
+      detail: expect.stringContaining(`Runner self-test could not start. ${reason} Log: `),
+    });
   });
 
   it("releases the live slot when the final run-message lookup rejects", async () => {

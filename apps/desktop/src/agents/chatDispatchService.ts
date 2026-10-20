@@ -1,6 +1,6 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
 import { configuredRunnerCommand } from "./agentToolCatalog";
-import { NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";
@@ -74,6 +74,20 @@ function runNoticeTitle(outcome: RunOutcome, thread: string): string {
   if (!thread) return sentence(null);
   const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
   return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
+}
+
+// A run that failed to start says why in its notice, and the start error
+// says what to do next. Other outcomes have no body. A body holds no control
+// characters, or the notice store would refuse it.
+function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome): string {
+  if (outcome !== "not-started" || !run.failureReason) return "";
+  const reason = [...run.failureReason
+    .slice(`${RUNNER_START_FAILURE}: `.length)
+    .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
+    .trim()];
+  return reason.length <= NOTICE_BODY_MAX_CHARS
+    ? reason.join("")
+    : `${reason.slice(0, NOTICE_BODY_MAX_CHARS - 1).join("")}…`;
 }
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -660,7 +674,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
       title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
-      body: "",
+      body: runNoticeBody(run, outcome),
       target: { thread: run.threadId, run: run.runId },
     });
   }
@@ -1602,7 +1616,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reportError(error);
         return {
           ok: false,
-          detail: `Runner self-test could not start. Log: ${logPath}`,
+          detail: `Runner self-test could not start. ${
+            error instanceof Error && error.message ? `${error.message} ` : ""
+          }Log: ${logPath}`,
         };
       }
     } finally {
