@@ -1615,7 +1615,7 @@ test("only a full nightly verification of main counts as verified", () => {
 
 // Answers the commands the nightly job runs. The job's run is 9. Run 8 ran
 // earlier, and run 10 is someone else's dispatch that starts at the same time.
-function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical", dryRun = false } = {}) {
+function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical", dryRun = false, dispatchFails = false, dispatchLost = false } = {}) {
   const calls = [];
   const tag = "v0.1.1-nightly.20261020.42.1";
   let dispatched = false;
@@ -1640,7 +1640,12 @@ function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNight
       const ours = { databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9", displayTitle: runTitle(NIGHTLY_HEAD, dryRun) };
       return ok(JSON.stringify(dispatched ? [others, ours, earlier] : [earlier]));
     }
-    if (line.startsWith("gh workflow run")) { dispatched = true; return ok(""); }
+    if (line.startsWith("gh workflow run")) {
+      if (dispatchFails) return { status: 1, stdout: "", stderr: "HTTP 500" };
+      dispatched = true;
+      // GitHub accepted the dispatch, but gh lost the response.
+      return dispatchLost ? { status: 1, stdout: "", stderr: "connection reset" } : ok("");
+    }
     if (line.startsWith("gh run view 9")) {
       const answer = viewAnswers[Math.min(viewCount++, viewAnswers.length - 1)];
       return answer === "error" ? { status: 1, stdout: "", stderr: "HTTP 502" } : ok(JSON.stringify(answer));
@@ -1737,10 +1742,21 @@ test("a nightly adds missing macOS files to the newest nightly first, except to 
   assert.match(report, /adding the macOS files to v0\.1\.1-nightly\.20261019\.41\.1 failed with exit code 1/);
   assert.match(report, /node scripts\/release-desktop-macos\.mjs --version v0\.1\.1-nightly\.20261019\.41\.1 --channel nightly/);
 
+  // A later step that fails still reports the repair.
+  const thenFails = fakeNightly({ lastNightly: { ...YESTERDAY, assets: ["nightly.yml"] }, dispatchFails: true });
+  assert.match(await runNightly({}, nightlyHost(thenFails).deps), /^Added the macOS files to v0\.1\.1-nightly\.20261019\.41\.1, which published without them\.\n\nThe nightly job stopped: gh workflow run failed, and no run titled "Desktop Release nightly for a+" appeared within 5 minutes:\nHTTP 500$/);
+
   const legacy = fakeNightly({ lastNightly: { tag: "v0.1.1-nightly.20260622.15.1", commit: NIGHTLY_HEAD, publishedAt: "2026-06-22T09:42:56Z", assets: ["latest.yml"] } });
   const legacyHost = nightlyHost(legacy);
   assert.equal(await runNightly({}, legacyHost.deps), null);
   assert.deepEqual(legacyHost.macs, []);
+});
+
+test("a nightly follows its run when gh loses the dispatch's response", async () => {
+  const lost = fakeNightly({ dispatchLost: true });
+  const host = nightlyHost(lost);
+  assert.match(await runNightly({}, host.deps), /^Published \[v0\.1\.1-nightly\.20261020\.42\.1\]/);
+  assert.deepEqual(host.macs, [lost.tag]);
 });
 
 test("a nightly whose macOS files fail reports the command that finishes them", async () => {
@@ -1827,13 +1843,14 @@ setInterval(() => {}, 1000);
 });
 
 test("the nightly LaunchAgent runs at 04:00 in the login session from a clean checkout of main, and reports when it cannot update it", () => {
-  const definition = nightlyAgentDefinition({ checkout: "/Users/maker/dohc-release/driver", queue: "/Users/maker/dev/worktrees/_verification", logPath: "/Users/maker/dohc-release/nightly.log", path: "/usr/bin:/bin" });
+  const definition = nightlyAgentDefinition({ checkout: "/Users/maker/dohc-release/driver", source: "git@github.com:dohchq/dohc.git", queue: "/Users/maker/dev/worktrees/_verification", logPath: "/Users/maker/dohc-release/nightly.log", path: "/usr/bin:/bin" });
   assert.match(definition, new RegExp(`<key>Label</key><string>${RegExp.escape(NIGHTLY_AGENT_LABEL)}</string>`));
   assert.match(definition, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
   assert.match(definition, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>0<\/integer>/);
   assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec node scripts\/release-nightly\.mjs report "The nightly job could not check out main/);
   assert.match(definition, /exec node scripts\/release-nightly\.mjs report "The nightly job could not fetch main/);
-  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><\/array>/);
+  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><string>git@github\.com:dohchq\/dohc\.git<\/string><\/array>/);
+  assert.match(definition, /git fetch --quiet "\$1" main/, "it fetches from the repository install checked, not the clone's origin");
   assert.match(definition, /<key>DOHC_VERIFICATION_QUEUE_ROOT<\/key><string>\/Users\/maker\/dev\/worktrees\/_verification<\/string>/);
   assert.match(definition, /<key>StandardOutPath<\/key><string>\/Users\/maker\/dohc-release\/nightly\.log<\/string>/);
 });

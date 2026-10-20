@@ -161,6 +161,7 @@ Ice decided on 2026-10-20 that it publishes without asking each time.
 Every rule above still applies.
 
 At 04:00 local time, launchd fetches `main` into its own clone in `~/dohc-release/driver`.
+It fetches from the `dohchq/dohc` URL that `install` checked, whatever the clone's own origin says.
 It discards anything else in that clone, then runs `node scripts/release-nightly.mjs run` from it.
 The job stops unless the clone is clean and on `main`. The job:
 
@@ -179,7 +180,7 @@ The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
 The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.
 The system releases the lock when the last process holding it exits, so a crash leaves no stale lock.
 A command that finds it held stops at once, and the job reports that night on #2281.
-`install` and `uninstall` also refuse while the lock is held, so stopping the job through them never interrupts the macOS command.
+`install` and `uninstall` also run under the lock, so stopping the job through them never interrupts the macOS command.
 A logout, a shutdown, a forced kill, or stopping the LaunchAgent by hand with `launchctl bootout` still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
 
 The job needs all of these:

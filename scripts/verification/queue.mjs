@@ -711,7 +711,7 @@ export function nightlyAgentDefinition(root, path = launchPath()) {
  * Unload a LaunchAgent and wait until launchd lets it go. bootout returns while the job may still be stopping;
  * launchd kills a job that has not stopped 20 seconds after it was asked to.
  */
-async function unloadLaunchAgent(label, { command = launchctl, waitMs = 60_000, pollMs = 200 } = {}) {
+export async function unloadLaunchAgent(label, { command = launchctl, waitMs = 60_000, pollMs = 200 } = {}) {
   command(["bootout", `${guiDomain()}/${label}`]);
   for (const deadline = Date.now() + waitMs; command(["print", `${guiDomain()}/${label}`]).status === 0; await sleep(pollMs)) {
     if (Date.now() > deadline) throw new Error(`launchd did not unload ${label}.`);

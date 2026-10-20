@@ -13,10 +13,10 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { RELEASE_LOCK, RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
-import { LOCK_BUSY, heldLockOptions, releaseLockHeld, underReleaseLock } from "./release-lock.mjs";
+import { LOCK_BUSY, heldLockOptions, underReleaseLock } from "./release-lock.mjs";
 import { repoRootFromScript } from "./resolve-desktop-release.mjs";
 import { LEGACY_NIGHTLIES } from "./select-upgrade-nightly.mjs";
-import { guiDomain, launchAgentsDir, launchPath, listRequests, plist, plistText, queueRoot, terminalStates } from "./verification/queue.mjs";
+import { guiDomain, launchAgentsDir, launchPath, listRequests, plist, plistText, queueRoot, terminalStates, unloadLaunchAgent } from "./verification/queue.mjs";
 
 export const NIGHTLY_AGENT_LABEL = "app.dohc.release-nightly";
 // The issue that tracks the alpha. The job reports there, as the release owners do.
@@ -108,11 +108,13 @@ const dispatchedRuns = (run, repo) => JSON.parse(read(run, "gh", [
 /** Dispatches Desktop Release on main for `commit` and returns the run it started. */
 export async function dispatchNightly(run, { commit, dryRun, repo = RELEASE_REPOSITORY, wait = delay, now = Date.now, findMs = 5 * 60_000, pollMs = 10_000 }) {
   const earlier = new Set(dispatchedRuns(run, repo).map(entry => entry.databaseId));
-  read(run, "gh", ["workflow", "run", WORKFLOW, "-R", repo, "--ref", "main", "-f", "channel=nightly", "-f", "platforms=windows-linux", "-f", `dry_run=${dryRun}`, "-f", `commit=${commit}`]);
+  // gh can fail after GitHub accepted the dispatch, so the job looks for the run either way.
+  const dispatched = run("gh", ["workflow", "run", WORKFLOW, "-R", repo, "--ref", "main", "-f", "channel=nightly", "-f", "platforms=windows-linux", "-f", `dry_run=${dryRun}`, "-f", `commit=${commit}`]);
   for (const deadline = now() + findMs; now() < deadline; await wait(pollMs)) {
     const started = dispatchedRuns(run, repo).find(entry => !earlier.has(entry.databaseId) && entry.displayTitle === runTitle(commit, dryRun));
     if (started) return started;
   }
+  if (dispatched.status !== 0) throw new Error(`gh workflow run failed, and no run titled "${runTitle(commit, dryRun)}" appeared within ${findMs / 60_000} minutes:\n${dispatched.stderr.trim()}`);
   throw new Error(`GitHub accepted the dispatch, but no run titled "${runTitle(commit, dryRun)}" appeared within ${findMs / 60_000} minutes.`);
 }
 
@@ -170,13 +172,12 @@ export async function runNightly({ dryRun = false }, {
   addMacFiles = tag => spawnSync(process.execPath, [join(repoRootFromScript(), "scripts/release-desktop-macos.mjs"), "--version", tag, "--channel", "nightly"], { cwd: repoRootFromScript(), ...heldLockOptions(RELEASE_LOCK) }).status,
 } = {}) {
   checkCheckout(run, repo);
-  const reports = [];
-  const finish = report => [...reports, report].filter(Boolean).join("\n\n") || null;
   if (!dryRun) {
     if (!root) return "The Mac's verification queue is not installed here, so no nightly can be verified. Nothing was dispatched.";
     if (!(await queueIdle())) return `The verification queue was still busy after ${QUEUE_WAIT_MS / 3_600_000} hours. Nothing was dispatched.`;
   }
   const github = readGitHub(run, repo);
+  const reports = [];
   // A nightly that published without its macOS files, after a failure or a lost run, gets them first.
   const last = github.lastNightly;
   if (!dryRun && last && !LEGACY_NIGHTLIES.includes(last.tag) && !last.assets.includes(MAC_MANIFEST)) {
@@ -184,10 +185,22 @@ export async function runNightly({ dryRun = false }, {
     const status = addMacFiles(last.tag);
     reports.push(status === 0 ? `Added the macOS files to ${last.tag}, which published without them.` : `For ${last.tag}, ${macFailure(last.tag, status)}`);
   }
+  // A later step that throws still reports the repair above.
+  let tonight;
+  try {
+    tonight = await publishTonight({ dryRun, github, run, repo, wait, now, log, verifiedHead, addMacFiles });
+  } catch (error) {
+    tonight = `The nightly job stopped: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  return [...reports, tonight].filter(Boolean).join("\n\n") || null;
+}
+
+/** Decides tonight's nightly and, when it goes ahead, dispatches it and adds its macOS files. Returns the report, or null. */
+async function publishTonight({ dryRun, github, run, repo, wait, now, log, verifiedHead, addMacFiles }) {
   const decision = nightlyDecision({ ...github, verifiedHead: dryRun ? github.head : verifiedHead(), now: now(), dryRun });
   if (decision.kind === "skip") {
     log(`Skipped: ${decision.reason}`);
-    return finish(decision.report ? `Skipped tonight's ${dryRun ? "dry run" : "nightly"}. ${decision.reason}` : null);
+    return decision.report ? `Skipped tonight's ${dryRun ? "dry run" : "nightly"}. ${decision.reason}` : null;
   }
   const started = await dispatchNightly(run, { commit: github.head, dryRun, repo, wait, now });
   log(`Dispatched ${started.url} for ${short(started.headSha)}.`);
@@ -195,74 +208,73 @@ export async function runNightly({ dryRun = false }, {
   try {
     conclusion = await waitForRun(run, started.databaseId, { repo, wait, now });
   } catch (error) {
-    return finish(`The job lost track of [Desktop Release](${started.url}) for ${short(github.head)}: ${error instanceof Error ? error.message : String(error)} If it publishes, the next night adds its macOS files.`);
+    return `The job lost track of [Desktop Release](${started.url}) for ${short(github.head)}: ${error instanceof Error ? error.message : String(error)} If it publishes, the next night adds its macOS files.`;
   }
   if (conclusion === null) {
-    return finish(`[Desktop Release](${started.url}) for ${short(github.head)} was still going after ${RUN_WAIT_MS / 3_600_000} hours. Check that the runners on ICE-PC are online. If it publishes, the next night adds its macOS files.`);
+    return `[Desktop Release](${started.url}) for ${short(github.head)} was still going after ${RUN_WAIT_MS / 3_600_000} hours. Check that the runners on ICE-PC are online. If it publishes, the next night adds its macOS files.`;
   }
   if (conclusion !== "success") {
     // The workflow refuses to build when main is no longer at the requested commit.
     if (started.headSha !== github.head) {
-      return finish(`main moved to ${short(started.headSha)} after the checks passed on ${short(github.head)}, so [Desktop Release](${started.url}) refused to build it. Nothing was published.`);
+      return `main moved to ${short(started.headSha)} after the checks passed on ${short(github.head)}, so [Desktop Release](${started.url}) refused to build it. Nothing was published.`;
     }
-    return finish(`[Desktop Release](${started.url}) for ${short(github.head)} ended with "${conclusion}". ${dryRun ? "The dry run did not pass." : "Nothing was published."}`);
+    return `[Desktop Release](${started.url}) for ${short(github.head)} ended with "${conclusion}". ${dryRun ? "The dry run did not pass." : "Nothing was published."}`;
   }
-  if (dryRun) return finish(`The dry run of Desktop Release passed for ${short(github.head)}: [run](${started.url}). It published nothing.`);
+  if (dryRun) return `The dry run of Desktop Release passed for ${short(github.head)}: [run](${started.url}). It published nothing.`;
   const release = publishedNightly(run, github.head, repo);
-  if (!release) return finish(`[Desktop Release](${started.url}) succeeded for ${short(github.head)}, but no published nightly is tagged on that commit. Check the release before adding the macOS files.`);
+  if (!release) return `[Desktop Release](${started.url}) succeeded for ${short(github.head)}, but no published nightly is tagged on that commit. Check the release before adding the macOS files.`;
   log(`Published ${release.tag}. Adding the macOS files.`);
   const status = addMacFiles(release.tag);
-  if (status !== 0) return finish(`Published [${release.tag}](${release.url}) for Windows and Linux ([run](${started.url})), but ${macFailure(release.tag, status)}`);
-  return finish(`Published [${release.tag}](${release.url}) from ${short(github.head)} for Windows, Linux and macOS ([run](${started.url})).`);
+  if (status !== 0) return `Published [${release.tag}](${release.url}) for Windows and Linux ([run](${started.url})), but ${macFailure(release.tag, status)}`;
+  return `Published [${release.tag}](${release.url}) from ${short(github.head)} for Windows, Linux and macOS ([run](${started.url})).`;
 }
 
 /**
  * The LaunchAgent that runs the job at 04:00 in the login session, where the
  * login keychain is open. Each night starts from main's reviewed code: the
- * launcher fetches main into a checkout nothing else uses and discards
+ * launcher fetches main from the repository install checked, whatever the
+ * clone's origin says, into a checkout nothing else uses, and discards
  * anything else in it. When that fails, the previous night's code reports it.
  */
-export function nightlyAgentDefinition({ checkout = DRIVER_CHECKOUT, queue, logPath = NIGHTLY_LOG, path = launchPath() }) {
+export function nightlyAgentDefinition({ checkout = DRIVER_CHECKOUT, source, queue, logPath = NIGHTLY_LOG, path = launchPath() }) {
   const script = [
     'cd "$0" || exit 1',
-    'for attempt in 1 2 3; do git fetch --quiet origin main && break; if [ "$attempt" = 3 ]; then exec node scripts/release-nightly.mjs report "The nightly job could not fetch main into $0, so nothing ran tonight."; fi; sleep 300; done',
+    'for attempt in 1 2 3; do git fetch --quiet "$1" main && break; if [ "$attempt" = 3 ]; then exec node scripts/release-nightly.mjs report "The nightly job could not fetch main into $0, so nothing ran tonight."; fi; sleep 300; done',
     'git checkout --quiet --force --detach FETCH_HEAD && git clean -ffdxq || exec node scripts/release-nightly.mjs report "The nightly job could not check out main in $0, so nothing ran tonight."',
     "exec node scripts/release-nightly.mjs run",
   ].join("\n");
-  return plist(NIGHTLY_AGENT_LABEL, { PATH: path, DOHC_VERIFICATION_QUEUE_ROOT: queue }, `  <key>ProgramArguments</key><array>${["/bin/sh", "-c", script, checkout].map(plistText).join("")}</array>
+  return plist(NIGHTLY_AGENT_LABEL, { PATH: path, DOHC_VERIFICATION_QUEUE_ROOT: queue }, `  <key>ProgramArguments</key><array>${["/bin/sh", "-c", script, checkout, source].map(plistText).join("")}</array>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key>${plistText(logPath)}
   <key>StandardErrorPath</key>${plistText(logPath)}`);
 }
 
-// Stopping the LaunchAgent mid-release would kill the macOS command before it locks the release keychain.
-function refuseDuringRun() {
-  if (releaseLockHeld(RELEASE_LOCK)) throw new Error(`A release command on this Mac is running. Wait for it to finish; see ${NIGHTLY_LOG}.`);
-}
-
-function install({ run = capture } = {}) {
+// install and uninstall run under the release lock, so stopping the LaunchAgent never interrupts a release.
+async function install({ run = capture } = {}) {
   if (process.platform !== "darwin") throw new Error("The nightly job runs on the Mac that holds the release keychain.");
-  refuseDuringRun();
   const queue = queueRoot();
   if (!queue) throw new Error("Install the verification queue first (pnpm verify:queue install). The job releases only what its nightly verification passed.");
+  // The launcher fetches main from this URL each night, so only dohchq/dohc's code runs with these credentials.
+  const source = read(run, "git", ["remote", "get-url", "origin"]).trim();
+  if (!new RegExp(`^(git@github\\.com:|https://github\\.com/|ssh://git@github\\.com/)${RELEASE_REPOSITORY}(\\.git)?$`).test(source)) {
+    throw new Error(`Install from a checkout whose origin is ${RELEASE_REPOSITORY} on GitHub, not ${source}.`);
+  }
   if (!existsSync(join(DRIVER_CHECKOUT, ".git"))) {
-    const origin = read(run, "git", ["remote", "get-url", "origin"]).trim();
-    if (!new RegExp(`[:/]${RELEASE_REPOSITORY}(\\.git)?$`).test(origin)) throw new Error(`Install from a checkout whose origin is ${RELEASE_REPOSITORY}, not ${origin}.`);
     mkdirSync(WORK_ROOT, { recursive: true });
-    read(run, "git", ["clone", "--quiet", origin, DRIVER_CHECKOUT]);
+    read(run, "git", ["clone", "--quiet", source, DRIVER_CHECKOUT]);
   }
   const file = join(launchAgentsDir(), `${NIGHTLY_AGENT_LABEL}.plist`);
   mkdirSync(launchAgentsDir(), { recursive: true });
-  writeFileSync(file, nightlyAgentDefinition({ queue }));
-  run("launchctl", ["bootout", `${guiDomain()}/${NIGHTLY_AGENT_LABEL}`]);
+  writeFileSync(file, nightlyAgentDefinition({ source, queue }));
+  // bootout returns before launchd lets the job go, and a bootstrap then fails.
+  await unloadLaunchAgent(NIGHTLY_AGENT_LABEL);
   read(run, "launchctl", ["bootstrap", guiDomain(), file]);
   console.log(`Installed ${NIGHTLY_AGENT_LABEL}. It runs at 04:00 from ${DRIVER_CHECKOUT} and logs to ${NIGHTLY_LOG}.`);
 }
 
-function uninstall({ run = capture } = {}) {
-  refuseDuringRun();
-  run("launchctl", ["bootout", `${guiDomain()}/${NIGHTLY_AGENT_LABEL}`]);
+async function uninstall() {
+  await unloadLaunchAgent(NIGHTLY_AGENT_LABEL);
   rmSync(join(launchAgentsDir(), `${NIGHTLY_AGENT_LABEL}.plist`), { force: true });
   console.log(`Removed ${NIGHTLY_AGENT_LABEL}. ${DRIVER_CHECKOUT} stays; delete it if you no longer need it.`);
 }
@@ -275,17 +287,18 @@ function post(report) {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  if (command === "install") return install();
-  if (command === "uninstall") return uninstall();
   if (command === "report" && rest.length === 1) return post(rest[0]);
-  if (command !== "run" || rest.some(arg => arg !== "--dry-run")) throw new Error(USAGE);
-  // The whole run, including the macOS command it starts, holds the release lock.
+  const valid = ["install", "uninstall"].includes(command) ? rest.length === 0 : command === "run" && rest.every(arg => arg === "--dry-run");
+  if (!valid) throw new Error(USAGE);
+  // A run holds the release lock throughout, including the macOS command it starts.
   const locked = await underReleaseLock(RELEASE_LOCK);
-  if (locked === LOCK_BUSY) post("Another release command on the Mac mini was running, so the nightly job did not run tonight.");
+  if (locked === LOCK_BUSY && command === "run") post("Another release command on the Mac mini was running, so the nightly job did not run tonight.");
   if (locked !== null) {
     process.exitCode = locked;
     return;
   }
+  if (command === "install") return install();
+  if (command === "uninstall") return uninstall();
   const dryRun = rest.includes("--dry-run");
   console.log(`\n[${new Date().toISOString()}] Nightly ${dryRun ? "dry run" : "release"} starting.`);
   const report = await runNightly({ dryRun }).catch(error => `The nightly job stopped: ${error instanceof Error ? error.message : String(error)}`);
