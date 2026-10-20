@@ -365,7 +365,7 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
-    let f = Fixture::new(64, 64);
+    let f = Fixture::new(2000, 5000);
     let (lease, doc) = f.open_document("source-0000").await;
     let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
     let update = doc.richdoc_append_paragraph("forward typing");
@@ -404,7 +404,7 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
     });
     assert_eq!(
         f.pass("open-contention", Arc::new(NoFaults)).await.unwrap()["documents"],
-        64
+        2000
     );
     let (forward_gap, forward_wait) = typing.await.unwrap();
     assert!(forward_gap <= 1);
