@@ -109,9 +109,7 @@ export function firstOpenBaseExceeds(
   const { baseBytes } = sizes;
   const larger = Math.max(baseBytes, sizes.stateUpdateBytes);
   const fullStateBytes = larger + sizes.nativeGrowthBytes;
-  if (baseBytes > MAX_YDOC_UPDATE_BYTES || fullStateBytes > MAX_YDOC_UPDATE_BYTES) {
-    return "update-limit";
-  }
+  if (fullStateBytes > MAX_YDOC_UPDATE_BYTES) return "update-limit";
   if (activationCaptureBytes(larger, fullStateBytes, bounds.descriptorBytes) > bounds.maxCaptureBytes) {
     return "capture-budget";
   }
@@ -152,6 +150,8 @@ export function buildFirstOpenBase(
   } catch {
     return refused("invalid-base");
   }
+  // Refused before anything decodes it.
+  if (base.byteLength > MAX_YDOC_UPDATE_BYTES) return refused("update-limit");
   const nativeGrowthBytes = nativeFullStateGrowth(base);
   if (nativeGrowthBytes === undefined) return refused("unsupported-source");
   // A base too large on its own is refused before validation.

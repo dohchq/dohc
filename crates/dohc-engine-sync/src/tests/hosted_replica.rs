@@ -2409,6 +2409,152 @@ fn live_writes_journal_and_push_under_the_service_host_origin() {
     assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 1);
 }
 
+/// A hosted document with a lineage seeded here and never claimed, in a
+/// replica whose push state would let an ordinary replica originate its base.
+fn unclaimed_after_push() -> (ScratchDir, EngineStore, dohc_engine_collab::DocKey) {
+    let (scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-a").unwrap();
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "seeded on the host");
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &key,
+        &update,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("doc-a.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ensure_parent_row: true,
+            ..Default::default()
+        },
+        &NoFaults,
+        2_000,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws',?1,-1)",
+                [HOST],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    assert!(
+        store
+            .read_with(|conn| crate::ydoc_origination::can_originate_local_bases_in_tx(conn, "ws"))
+            .unwrap()
+    );
+    (scratch, store, key)
+}
+
+fn claim_status(store: &EngineStore, key: &dohc_engine_collab::DocKey) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT lineage_claim_status FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_hosted_replica_originates_no_base_even_after_it_pushed() {
+    let (_scratch, mut store, key) = unclaimed_after_push();
+    let before = (coordinates(&store), last_outbound_seq(&store));
+    let originated = store
+        .write_with(&NoFaults, |tx| {
+            crate::originate_ydoc_base_in_tx(tx, &key, "doc-a.md", None, None, 3_000)
+        })
+        .unwrap();
+    assert_eq!(
+        originated,
+        TxnOutcome::Committed(BaseOrigination::NothingToDo)
+    );
+    assert_eq!(claim_status(&store, &key), "unclaimed");
+    assert_eq!((coordinates(&store), last_outbound_seq(&store)), before);
+}
+
+/// Records each lineage a sweep asks about.
+#[derive(Default)]
+struct AskedLeases(std::sync::Mutex<Vec<String>>);
+
+impl LeaseProbe for AskedLeases {
+    fn is_live(&self, key: &dohc_engine_collab::DocKey) -> bool {
+        self.0.lock().unwrap().push(key.object_id.clone());
+        false
+    }
+}
+
+#[test]
+fn a_hosted_replicas_sweep_visits_no_unclaimed_lineage() {
+    let (_scratch, mut store, key) = unclaimed_after_push();
+    let before = (coordinates(&store), last_outbound_seq(&store));
+    let asked = AskedLeases::default();
+    let declined = store
+        .write_with(&NoFaults, |tx| {
+            crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &asked, 3_000)
+        })
+        .unwrap();
+    assert_eq!(declined, TxnOutcome::Committed(Vec::new()));
+    assert!(
+        asked.0.lock().unwrap().is_empty(),
+        "the sweep stops before any lineage"
+    );
+    assert_eq!(claim_status(&store, &key), "unclaimed");
+    assert_eq!((coordinates(&store), last_outbound_seq(&store)), before);
+}
+
+/// Applying a delta asks to originate its document's base, so a hosted pull
+/// reaches origination through every delta it imports.
+#[test]
+fn a_hosted_pull_that_reaches_origination_commits_its_work_and_cursor() {
+    let (_scratch, mut store, _key) = unclaimed_after_push();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "hosted b");
+    let base = doc.encode_full_state();
+    let delta = doc.plaintext_insert(8, " edited");
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    for (seq, update, is_base) in [(0, base, true), (1, delta, false)] {
+        let sha = dohc_engine_storage::hex_sha256(&update);
+        feed.blobs.lock().unwrap().insert(sha.clone(), update);
+        feed.append(envelope(
+            "peer",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "doc-b",
+                "path": "b.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "lineageClaimId": lineage,
+                "isBaseState": is_base
+            }),
+        ));
+    }
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(replica(&store).main_cursor, 3);
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    assert_eq!(claim_status(&store, &key), "exact");
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b edited")]));
+    assert!(
+        coordinates(&store).iter().all(|(origin, _)| origin != HOST),
+        "the host journals nothing of its own"
+    );
+}
+
 /// Journal one live Y.Doc update to a hosted document under the host's origin.
 fn journal_live_update(store: &mut EngineStore, object_id: &str, update: &[u8]) -> i64 {
     let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).unwrap();

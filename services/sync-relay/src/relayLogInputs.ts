@@ -18,6 +18,8 @@ export const SHARE_MEMBER_ORIGIN_PREFIX = "relay:share-member:";
 // Only the service host's own feed accepts writes from these origins, so they
 // never collide with an owner device's coordinates.
 export const SERVICE_HOST_ORIGIN_PREFIX = "service-host:";
+// Only the relay writes a document's first live base, under an origin it derives.
+export const FIRST_OPEN_ORIGIN_PREFIX = "service-host:first-open:";
 
 export function namedShareOrigin(shareId: string, userId: string, originId: string): string {
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
@@ -44,6 +46,9 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[],
 function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
   if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
     throw badRequest(serviceHost ? "originId must use the service host prefix" : "originId is reserved for service host writes");
+  }
+  if (originId.startsWith(FIRST_OPEN_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for relay first-open bases");
   }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");

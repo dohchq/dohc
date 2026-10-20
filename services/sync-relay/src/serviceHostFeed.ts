@@ -108,8 +108,12 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
   return hostedWriter(scope, opKind, payload) !== null;
 }
 
-/** Why the relay refused one of the host's ops. */
-export type HostedRefusalReason = "outside-hosted-documents";
+/**
+ * Why the relay refused one of the host's ops. `base-state-from-host`: a
+ * `ydoc.update` not explicitly a delta. A host continues lineages; it never
+ * starts one.
+ */
+export type HostedRefusalReason = "outside-hosted-documents" | "base-state-from-host";
 
 /**
  * The decision for one new coordinate. An op may name only blobs the host
@@ -119,8 +123,10 @@ export type HostedRefusalReason = "outside-hosted-documents";
  * the host uploads it and retries. A document out of the share settles that way.
  */
 function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): "accepted" | "departed" | HostedRefusalReason {
-  const objectId = hostedWriter(scope, op.opKind, JSON.parse(op.payloadJson));
+  const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+  const objectId = hostedWriter(scope, op.opKind, payload);
   if (objectId === null) return "outside-hosted-documents";
+  if (op.opKind === "ydoc.update" && payload.isBaseState !== false) return "base-state-from-host";
   const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
   const unknown = blobs.filter(sha256 => !known(sha256));
   if (unknown.length) throw logBlobsMissing(unknown);
@@ -267,7 +273,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     if (head === "log" && route.length === 1 && request.method === "POST") {
       // Each coordinate gets its own decision. A refused op still takes its
       // coordinate, as a relay-written refusal, so the host's later ops land.
-      // What the scope already rules out is refused, and a blob out of reach
+      // What the scope already rules out, and any base, is refused, and a blob out of reach
       // fails the request, before preparation, which must never probe a blob
       // the host may not name; the rest is decided again under the append's
       // writer, where the scope cannot move.

@@ -10,6 +10,7 @@ import {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
 } from "@dohc/ydoc-projection/live-journal-validation";
+import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
 import { encodeRichdocSeed, seedClientId } from "@dohc/ydoc-projection/richdoc-seed";
 import * as projectionImport from "../../../packages/ydoc-projection/src/import-export.js";
 import type { NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
@@ -275,6 +276,17 @@ describe("first-open base", () => {
 
   it("refuses a base the live validator refuses", () => {
     expect(buildFirstOpenBase(policy, input("Body", { currentPath: "docs/a.txt" }))).toEqual({ kind: "refused", reason: "invalid-base" });
+  });
+
+  it("refuses a base over the engine's update limit before decoding it", () => {
+    // Bytes no decoder reads, so decoding them would throw instead of refusing.
+    const oversized = new Uint8Array(MAX_YDOC_UPDATE_BYTES + 1).fill(0xff);
+    expect(() => Y.decodeUpdate(oversized)).toThrow();
+    const encode = vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(oversized);
+    try {
+      expect(buildFirstOpenBase(policy, input("Body"))).toEqual({ kind: "refused", reason: "update-limit" });
+      expect(encode).toHaveBeenCalled();
+    } finally { encode.mockRestore(); }
   });
 
   it("refuses a base its activation could not capture or verify", () => {

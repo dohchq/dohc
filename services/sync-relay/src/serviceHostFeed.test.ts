@@ -5,7 +5,7 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFee
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {hostedRowDecision, hostedWriteAllowed} from "./serviceHostFeed";
-import {parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
+import {assertClientLogProvenance, FIRST_OPEN_ORIGIN_PREFIX, parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
 import {stableJsonStringify} from "./canonicalJson";
 import {filterOpForShare, type AnyShareSelector} from "./shareFilter";
@@ -325,6 +325,104 @@ it("keeps a refused row's coordinate without its payload, its blobs or any proje
   const marked = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
   marked.relayAdmission = "refused";
   expect(() => f.storage.appendLogBatch({workspaceId: ws, originId: "owner-device", ops: [marked]})).toThrow(/written only by the relay/);
+});
+
+// Bases the host may not publish: everything but an explicit `isBaseState: false`.
+function hostedBases(update: {sha256: string}): Array<[string, Record<string, unknown>]> {
+  const {isBaseState: _delta, ...unmarked} = ydoc(binding.objectId, "docs/a.md", update);
+  return [true, undefined, null, "false", 0].map(isBaseState =>
+    ["ydoc.update", isBaseState === undefined ? unmarked : {...unmarked, isBaseState}]);
+}
+
+it("refuses a hosted base at its coordinate before preparation, whatever its blob", async () => {
+  const f = await fixture();
+  const own = blob("host base");
+  await f.upload(own);
+  const projections = () => ["sync_relay_current_files", "sync_relay_object_paths", "sync_relay_object_moments", "sync_relay_version_snapshot_blobs"]
+    .map(table => f.raw.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count);
+  const before = projections();
+  const prepared: string[] = [];
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
+  // Valid but for being bases: one the host uploaded, one only the owner holds, and one nobody holds.
+  const bases = [...hostedBases(own), hostedBases(P)[0]!, hostedBases({sha256: "a".repeat(64)})[0]!];
+  const first = await (await f.push(bases)).json() as PushAnswer;
+  expect(first).toMatchObject({inserted: 7, currentMaxOriginSeq: 6});
+  expect(first.refusals).toEqual(bases.map((_, originSeq) => ({originId: HOST_ORIGIN, originSeq, opKind: "ydoc.update", reason: "base-state-from-host"})));
+  // The route refused each before preparation could read its blob.
+  expect(prepared).toEqual(bases.map(() => "relay.refused"));
+  for (const [originSeq, [opKind, payload]] of bases.entries()) {
+    expect(f.hostCoordinate(originSeq)).toMatchObject({opKind: "relay.refused", recordedAtMs: 3,
+      payloadJson: stableJsonStringify({opKind, payloadSha256: sha256Hex(stableJsonStringify(payload)), reason: "base-state-from-host"})});
+  }
+  expect(projections()).toEqual(before);
+  expect(await f.blobStatus(P.sha256)).toBe(404);
+  expect(JSON.stringify(await f.read())).not.toContain(HOST_ORIGIN);
+
+  // A delta lands at the next coordinate of the same origin.
+  const delta = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", own)] satisfies [string, Record<string, unknown>];
+  expect(await (await f.push([delta], 7)).json()).toMatchObject({inserted: 1, currentMaxOriginSeq: 7});
+  expect(f.hostCoordinate(7)).toMatchObject({opKind: "ydoc.update", payloadJson: stableJsonStringify(delta[1])});
+
+  // Out of scope now, a retry still gets the original refusals, without preparing them again.
+  f.enroll("docs/b.md");
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 31});
+  prepared.length = 0;
+  expect(await (await f.push(bases)).json()).toEqual({...first, inserted: 0, skipped: 7, currentMaxOriginSeq: 7});
+  expect(prepared).toEqual(bases.map(() => "relay.refused"));
+});
+
+it("refuses a hosted base again under the append's writer", async () => {
+  const f = await fixture();
+  const own = blob("raced base");
+  await f.upload(own);
+  // The route reads each coordinate as held, so it leaves every decision to the writer.
+  f.storage.maxOriginSeq = () => Number.MAX_SAFE_INTEGER;
+  const prepared: string[] = [];
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
+  const bases = hostedBases(own);
+  const delta = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", own)] satisfies [string, Record<string, unknown>];
+  const response = await (await f.push([...bases, delta])).json() as PushAnswer;
+  expect(prepared).toEqual([...bases, delta].map(() => "ydoc.update"));
+  expect(response).toMatchObject({inserted: 6, currentMaxOriginSeq: 5});
+  expect(response.refusals).toEqual(bases.map((_, originSeq) => ({originId: HOST_ORIGIN, originSeq, opKind: "ydoc.update", reason: "base-state-from-host"})));
+  for (const originSeq of bases.keys()) expect(f.hostCoordinate(originSeq)).toMatchObject({opKind: "relay.refused"});
+  expect(f.hostCoordinate(5)).toMatchObject({opKind: "ydoc.update"});
+});
+
+it("keeps owner bases readable by the host", async () => {
+  const f = await fixture();
+  const base = {...ydoc(binding.objectId, "docs/a.md", B), isBaseState: true};
+  f.append(["ydoc.update", base]);
+  expect((await f.read()).ops.find(op => op.originId === "owner-device" && op.payload.isBaseState === true)?.payload).toEqual(base);
+  expect(await f.blobStatus(B.sha256)).toBe(200);
+});
+
+it("reserves first-open origins for the relay, before any coordinate", async () => {
+  const f = await fixture();
+  const prepared: string[] = [];
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.prepareLogAppend = async (input, signal) => {prepared.push(input.originId); return prepare(input, signal);};
+  const delta = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)] satisfies [string, Record<string, unknown>];
+  const reserved = [FIRST_OPEN_ORIGIN_PREFIX, `${FIRST_OPEN_ORIGIN_PREFIX}${"a".repeat(64)}`, `${FIRST_OPEN_ORIGIN_PREFIX}any:suffix`];
+  for (const originId of reserved) {
+    for (const ops of [[], [delta], hostedBases(Y).slice(0, 1)]) {
+      const response = await f.push(ops, 0, originId);
+      expect(response.status, originId).toBe(400);
+      expect(await response.json()).toMatchObject({error: "originId is reserved for relay first-open bases"});
+    }
+    expect(f.storage.fetchLogCoordinate({workspaceId: ws, originId, originSeq: 0}), originId).toBeNull();
+  }
+  expect(prepared).toEqual([]);
+  expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_log WHERE origin_id LIKE 'service-host:%'").get()!.count).toBe(0);
+  // Other host origins still write, even ones that start alike.
+  for (const originId of [HOST_ORIGIN, "service-host:first-open", "service-host:first-opener"]) {
+    expect((await f.push([delta], 0, originId)).status, originId).toBe(200);
+  }
+  // Every other route refuses them as it refuses any host origin.
+  expect(() => assertClientLogProvenance(`${FIRST_OPEN_ORIGIN_PREFIX}x`, [])).toThrow("reserved for service host writes");
 });
 
 it("lets collection take a blob whose digest only a refusal names, in a small or a scanned sweep", async () => {

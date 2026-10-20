@@ -76,6 +76,18 @@ fn invalid(reason: &'static str) -> SyncError {
     SyncError::InvalidInput { reason }
 }
 
+/// Why a hosted replica's audit cannot name a base it would journal itself.
+const HOSTED_BASE_REFUSED: &str = "a hosted replica cannot publish a base";
+
+/// Only the relay starts a hosted document's lineage, so an audit there may
+/// name only a base already in its history. Failing rolls back the audit too.
+fn refuse_hosted_base(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
+    if crate::hosted::is_hosted(tx, workspace_id)? {
+        return Err(invalid(HOSTED_BASE_REFUSED));
+    }
+    Ok(())
+}
+
 fn scope<'a>(namespace: &'a str, binding: &'a LiveObjectBinding) -> [&'a str; 5] {
     [
         namespace,
@@ -347,6 +359,7 @@ pub fn journal_live_base_in_tx(
                         "native base has an unresolved publication coordinate",
                     ));
                 }
+                refuse_hosted_base(tx, &binding.workspace_id)?;
                 let origin_id: String = tx
                     .query_row(
                         "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
@@ -398,6 +411,7 @@ pub fn journal_live_base_in_tx(
         if let Some(existing) = existing {
             existing
         } else {
+            refuse_hosted_base(tx, &binding.workspace_id)?;
             let origin_id = tx
                 .query_row(
                     "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",

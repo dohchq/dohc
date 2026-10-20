@@ -1102,10 +1102,8 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
 }
 
-#[test]
-fn retained_base_export_preserves_a_different_current_marker() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
+/// Give the document another current lineage, leaving the fixture's retained.
+fn replace_current_lineage(f: &mut Fixture) -> String {
     let replacement_doc = dohc_engine_collab::Ydoc::wire();
     replacement_doc.apply(&f.bytes).unwrap();
     replacement_doc
@@ -1121,6 +1119,165 @@ fn retained_base_export_preserves_a_different_current_marker() {
         tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",[&replacement]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
+    replacement
+}
+
+/// Make the workspace a hosted replica of the document. Its journal numbers
+/// on from the rows it already has.
+fn host(store: &mut EngineStore) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO hosted_replicas(workspace_id,last_outbound_seq,created_at_ms) \
+                 SELECT 'ws',MAX(origin_seq),0 FROM replication_log WHERE workspace_id='ws'; \
+                 INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) \
+                 VALUES ('ws','object','note.md','ready',0);",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+}
+
+/// Everything a base publication writes.
+#[derive(Debug, PartialEq)]
+struct PublicationState {
+    operations: Vec<ReplicationEnvelope>,
+    lineage_claim_id: Option<String>,
+    base_origin_id: Option<String>,
+    base_origin_seq: Option<i64>,
+    candidates: i64,
+    publications: i64,
+    last_outbound_seq: i64,
+}
+
+fn publication_state(store: &EngineStore) -> PublicationState {
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let marker = store
+        .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
+        .unwrap()
+        .unwrap();
+    PublicationState {
+        operations: operations(store),
+        lineage_claim_id: marker.lineage_claim_id,
+        base_origin_id: marker.base_origin_id,
+        base_origin_seq: marker.base_origin_seq,
+        candidates: count(store, "ydoc_base_relay_candidates"),
+        publications: count(store, "live_audit_base_publications"),
+        last_outbound_seq: store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT last_outbound_seq FROM hosted_replicas WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap(),
+    }
+}
+
+/// A hosted audit that would journal its own base fails, and its transaction
+/// keeps neither the base nor the audit.
+fn assert_hosted_base_refused(f: &mut Fixture) {
+    let before = publication_state(&f.store);
+    let refused = f.store.write_with(&NoFaults, |tx| {
+        journal_live_base_in_tx(tx, "relay", &f.binding, 102)
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: HOSTED_BASE_REFUSED
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(publication_state(&f.store), before);
+}
+
+#[test]
+fn a_hosted_replica_refuses_a_current_lineages_unpublished_base() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    host(&mut f.store);
+    assert_eq!(publication_state(&f.store).base_origin_seq, None);
+    assert_hosted_base_refused(&mut f);
+}
+
+#[test]
+fn a_hosted_replica_refuses_a_retained_lineages_unpublished_base() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    replace_current_lineage(&mut f);
+    host(&mut f.store);
+    assert_hosted_base_refused(&mut f);
+}
+
+#[test]
+fn a_hosted_replica_publishes_its_audit_against_an_imported_base() {
+    for retained in [false, true] {
+        let mut f = fixture(false);
+        bootstrap(&mut f, false).unwrap();
+        if retained {
+            replace_current_lineage(&mut f);
+        }
+        host(&mut f.store);
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                let lineage = &f.binding.lineage_claim_id;
+                let payload = crate::ydoc_update_payload(
+                    &key,
+                    "note.md",
+                    ContentKind::Richdoc,
+                    lineage,
+                    lineage,
+                    None,
+                    None,
+                    true,
+                );
+                tx.execute(
+                    "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     VALUES ('ws','owner-device',0,'ydoc.update',?1,10,1)",
+                    [payload.to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                if !retained {
+                    dohc_engine_collab::record_base_coordinate_in_tx(
+                        tx,
+                        dohc_engine_collab::BaseCoordinateRecord {
+                            key: &key,
+                            lineage_claim_id: lineage,
+                            origin_id: "owner-device",
+                            origin_seq: 0,
+                            relay_seq: Some(4),
+                            now_ms: 10,
+                        },
+                    )
+                    .map_err(SyncError::corrupt)?;
+                }
+                journal_live_base_in_tx(tx, "relay", &f.binding, 102)
+            })
+            .unwrap();
+        let coordinate = &published(&f).payload["record"]["baseCoordinate"];
+        assert_eq!(
+            coordinate["originId"], "owner-device",
+            "retained: {retained}"
+        );
+        assert_eq!(coordinate["originSeq"], 0, "retained: {retained}");
+        assert!(
+            !operations(&f.store)
+                .iter()
+                .any(|op| op.op_kind == "ydoc.update"),
+            "retained: {retained}"
+        );
+    }
+}
+
+#[test]
+fn retained_base_export_preserves_a_different_current_marker() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    let replacement = replace_current_lineage(&mut f);
     contact(&mut f.store);
     enrollment::prepare_exports(
         &mut f.store,
