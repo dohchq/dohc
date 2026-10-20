@@ -10,7 +10,7 @@ const historyAdmittedContent = `op_kind IN ('moment.append','ydoc.update') AND r
 export function replicaHistoryReplacement(storage: StorageContext, workspace: string, version: string, object: string,
   fromLog: number, toLog: number, fromJournal: number, toJournal: number,
   file: ReplicaCurrentView["files"][number]): [number | null, number | null] {
-  const logs = statement(storage,`SELECT relay_seq,op_kind,CASE WHEN op_kind='moment.append' THEN payload_json END AS payload_json,
+  const logs = statement(storage,`SELECT relay_seq,op_kind,CASE WHEN op_kind='moment.append' THEN payload_json END AS moment_payload,
     settlement_admission_json FROM sync_relay_log WHERE workspace_id=?
     AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
     AND relay_seq>? AND relay_seq<=? AND ${historyAdmittedContent}
@@ -19,7 +19,7 @@ export function replicaHistoryReplacement(storage: StorageContext, workspace: st
   for (const row of logs) {
     let same=false;
     if (row.op_kind==="moment.append") {
-      const payload=JSON.parse(String(row.payload_json));
+      const payload=JSON.parse(String(row.moment_payload));
       const moment=objectMomentFromMomentValue(payload);
       const binding=row.settlement_admission_json && JSON.parse(String(row.settlement_admission_json)).status==="accepted"
         ? payload.settlementReference?.record?.binding : undefined;

@@ -170,8 +170,9 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         await schedule(entry).catch(() => {});
       }
       if (!entry.stopping) {
+        const attempted=entry.pendingView;
         const persisted=persist(entry);
-        if (sampleHistory) {
+        if (sampleHistory && (!attempted || persisted)) {
           if (!persisted) options.storage.sampleReplicaHistory(entry.lease);
           armHistory(entry);
         }
@@ -470,9 +471,9 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   return {
     activate,
     // Recipient reads apply their own selector and fences in the read transaction.
-    currentReadView(workspaceId: string) {
+    currentReadView(workspaceId: string, readStored = () => options.storage.readReplicaCurrentView(workspaceId)) {
       const entry = entries.get(workspaceId);
-      const stored = options.storage.readReplicaCurrentView(workspaceId);
+      const stored = readStored();
       const memory = entry && standingCurrent(entry.lease) ? entry.newest : undefined;
       const view = memory && (!stored || memory.logCursor >= stored.logCursor && memory.journalCursor >= stored.journalCursor) ? memory : stored;
       if (!view) return null;
