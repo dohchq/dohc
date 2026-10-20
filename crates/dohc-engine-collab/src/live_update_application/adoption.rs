@@ -90,12 +90,18 @@ mod tests {
                 .write_with(&NoFaults, |tx| {
                     tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
                         .unwrap();
+                    let seeded = Ydoc::wire();
+                    seeded.apply(&bytes)?;
+                    if seeded.has_reader_source() {
+                        return Ok::<_, CollabError>(());
+                    }
                     assert!(retain_owner_base_source_in_tx(
                         tx,
                         &key,
                         "owner.md",
                         &hex_sha256(&bytes),
-                        &source
+                        &source,
+                        None,
                     )?);
                     Ok::<_, CollabError>(())
                 })
@@ -241,6 +247,7 @@ mod tests {
                 100,
                 10,
                 &NoFaults,
+                None,
                 |_, _, _, _| Ok(()),
             )
         }
@@ -743,6 +750,7 @@ mod tests {
             100,
             10,
             &NoFaults,
+            None,
             |_, _, _, _| Ok(())
         )
         .is_err());
@@ -1069,6 +1077,7 @@ mod tests {
                 100,
                 10,
                 &Crash(point),
+                None,
                 |_, _, _, _| Ok(())
             )
             .is_err());
@@ -1257,6 +1266,7 @@ pub(super) fn read_adoption_source(
     namespace: &str,
     adoption_id: &str,
     binding: &LiveObjectBinding,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<Option<VerifiedAdoptionSource>, ApplicationError> {
     let Some((moment, digest, length, imported)) =
         read_adoption_source_metadata(conn, namespace, adoption_id, binding)?
@@ -1270,6 +1280,31 @@ pub(super) fn read_adoption_source(
             || hex_sha256(&full) != source.full_state_digest
         {
             return Err(ApplicationError::Corrupt);
+        }
+        if source.reader_source {
+            let doc = Ydoc::wire();
+            doc.apply(&full)?;
+            if !doc.has_reader_source() {
+                return Err(ApplicationError::Corrupt);
+            }
+            crate::reader_snapshot::resolve(
+                conn,
+                &DocKey::new(
+                    &binding.workspace_id,
+                    &binding.main_version_id,
+                    &binding.object_id,
+                )?,
+                &doc,
+                &doc.project(ContentKind::Richdoc)?.content,
+                &crate::reader_snapshot::SnapshotIdentity {
+                    moment: &source.source_moment_id,
+                    path: &binding.current_path,
+                    digest: &source.source_digest,
+                    lineage: &binding.lineage_claim_id,
+                    authority: adoption_id,
+                },
+                resolver,
+            )?;
         }
     }
     let text: String = text::read_sized(conn, &digest, length).map_err(read_sql)?;
@@ -1378,6 +1413,7 @@ pub fn adopt_owner_committed(
     max_events: usize,
     now_ms: i64,
     faults: &dyn FaultInjector,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
     follow_up: impl FnOnce(
         &Transaction<'_>,
         &str,
@@ -1414,7 +1450,7 @@ pub fn adopt_owner_committed(
         let present:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path) WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text')",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path],|r|r.get(0)).map_err(read_sql)?;
         if !present { return Err(ApplicationError::Conflict); }
-        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b)?
+        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b,resolver)?
             .ok_or(invalid("owner adoption source evidence missing"))?;
         let evidence_digest = if let Some(source) = &imported_source {
             if source.native_head_sequence != cut.expected_local_sequence { return Err(ApplicationError::Conflict); }
@@ -1457,15 +1493,17 @@ pub fn adopt_owner_committed(
         require_local_replay_budget(tx, &key, max_bytes)?;
         let local = durable::load_doc_in(tx, &key)?;
         if let Some(source) = &imported_source {
-            let full = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-            if full.len() != source.full_state_byte_length || hex_sha256(&full) != source.full_state_digest {
+            if !super::activation::matches_imported_state(tx, &local, source, max_bytes)? {
                 return Err(ApplicationError::Conflict);
             }
         }
         let journal = Ydoc::wire();
         journal.apply(&cut.baseline_bytes)?;
-        journal.validate_public_baseline(&cut.baseline_bytes)?;
+        if imported_source.is_some() && journal.has_reader_source() {
+            journal.validate_reader_baseline(&cut.baseline_bytes)?;
+        } else {
+            journal.validate_public_baseline(&cut.baseline_bytes)?;
+        }
         for event in &cut.events { journal.apply(&event.update_bytes)?; }
         if local.has_missing_updates() || journal.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));

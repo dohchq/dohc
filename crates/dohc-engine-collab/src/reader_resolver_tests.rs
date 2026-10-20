@@ -75,6 +75,138 @@ fn canonical_staging_clears_the_reader_marker_with_the_witness() {
 }
 
 #[test]
+fn source_recording_cannot_silently_downgrade_a_reader_document() {
+    let (_, _, doc, source, _) = fixture();
+    let before = doc.encode_full_state();
+    let result = doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &source);
+    assert!(matches!(
+        result,
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert_eq!(doc.encode_full_state(), before);
+    assert!(doc.has_reader_source());
+}
+
+#[test]
+fn frontmatter_source_recording_keeps_the_reader_marker() {
+    let (_, _, doc, source, _) = fixture();
+    let markdown = format!("---\ntitle: changed\n---\n{source}");
+    doc.frontmatter_set_preserving_markdown_source("title", "changed", &markdown)
+        .unwrap();
+    assert!(doc.has_reader_source());
+    assert_eq!(
+        doc.markdown_source(&doc.markdown_source_reference().unwrap())
+            .as_deref(),
+        Some(markdown.as_str())
+    );
+}
+
+#[test]
+fn ordinary_source_recording_and_frontmatter_edits_do_not_create_a_reader_marker() {
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "plain paragraph")
+        .unwrap();
+    assert!(!doc.has_reader_source());
+    doc.frontmatter_set_preserving_markdown_source(
+        "title",
+        "changed",
+        "---\ntitle: changed\n---\nplain paragraph",
+    )
+    .unwrap();
+    assert!(!doc.has_reader_source());
+}
+
+#[test]
+fn construction_as_proof_refuses_body_deletions() {
+    use yrs::{updates::decoder::Decode, ReadTxn, Transact, XmlFragment};
+    let (_, _, live, _, _) = fixture();
+    let before = live.encode_full_state();
+    let clone = yrs::Doc::new();
+    clone
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = clone.transact().state_vector();
+    let body = clone.get_or_insert_xml_fragment("body");
+    let length = body.len(&clone.transact());
+    assert!(length > 0);
+    body.remove_range(&mut clone.transact_mut(), 0, length);
+    let delta = clone.transact().encode_state_as_update_v1(&vector);
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    assert_eq!(live.encode_full_state(), before);
+}
+
+#[test]
+fn construction_as_proof_cannot_change_content_or_unknown_metadata() {
+    let (_, _, doc, _, _) = fixture();
+    let before = doc.encode_full_state();
+    let body = doc.richdoc_append_paragraph("must not be repaired by proof");
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &body).unwrap());
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact, Xml, XmlFragment};
+    for key in ["schemaVersion", "dohcLineageEpoch", "foreign"] {
+        let raw = yrs::Doc::new();
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&before).unwrap())
+            .unwrap();
+        let vector = raw.transact().state_vector();
+        raw.get_or_insert_map("meta")
+            .insert(&mut raw.transact_mut(), key, "changed");
+        let delta = raw.transact().encode_state_as_update_v1(&vector);
+        assert!(
+            !crate::replay_parity::reader_metadata_only(&before, &delta).unwrap(),
+            "{key}"
+        );
+    }
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = raw.transact().state_vector();
+    let root = raw.get_or_insert_xml_fragment("body");
+    let element = root.get(&raw.transact(), 0).unwrap();
+    let yrs::XmlOut::Element(element) = element else {
+        panic!("expected element")
+    };
+    element.insert_attribute(&mut raw.transact_mut(), "foreign", "value");
+    let delta = raw.transact().encode_state_as_update_v1(&vector);
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    // The body edit above belongs only to this local test document. Proof
+    // construction receives immutable checkpoint bytes, never that document.
+    let (_, _, live, _, _) = fixture();
+    let unchanged = live.encode_full_state();
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    assert_eq!(live.encode_full_state(), unchanged);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn real_reader_proves_frontmatter_source_without_rewriting_live_state() {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let (conn, key, doc, source, _) = fixture();
+    let resolver = ReaderResolver::new(Arc::new(Reader::new(Some(config))));
+    let markdown = format!("---\ntitle: changed\n---\n{source}");
+    doc.frontmatter_set_preserving_markdown_source("title", "changed", &markdown)
+        .unwrap();
+    let sha = crate::hex_sha256(markdown.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, markdown, markdown.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    let before = doc.encode_full_state();
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(
+        lookup(&conn, &key, &doc, &resolver).unwrap(),
+        Some(markdown)
+    );
+    assert_eq!(doc.encode_full_state(), before);
+    assert!(doc.has_reader_source());
+}
+
+#[test]
 fn restore_generation_sql_errors_keep_their_storage_cause() {
     let (conn, key, doc, _, resolver) = fixture();
     conn.execute("DROP TABLE live_restore_fences", []).unwrap();
@@ -120,6 +252,20 @@ fn expired_proofs_must_match_the_engine_projection() {
         manifest: manifest_path,
     }))));
     let (conn, key, doc, _, _) = fixture();
+    // Force prove, rather than metadata-only construction, to exercise Expired.
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap())
+        .unwrap();
+    let before = raw.transact().state_vector();
+    raw.get_or_insert_map("meta").insert(
+        &mut raw.transact_mut(),
+        "dohcMarkdownSourceProjectionSha256",
+        "0".repeat(64),
+    );
+    doc.apply(&raw.transact().encode_state_as_update_v1(&before))
+        .unwrap();
     let proof = pending(lookup(&conn, &key, &doc, &resolver));
     run(proof.resolve());
     assert!(
@@ -405,7 +551,7 @@ fn dispatch_drops_the_request_even_while_the_verdict_is_retained() {
     assert_eq!(resolver.entries.lock().unwrap().len(), 1);
 }
 
-fn run(future: impl std::future::Future<Output = ()>) {
+pub(crate) fn run(future: impl std::future::Future<Output = ()>) {
     struct Wake(std::thread::Thread);
     impl std::task::Wake for Wake {
         fn wake(self: Arc<Self>) {
@@ -503,4 +649,48 @@ fn real_reader_checks_the_current_witness_and_holds_without_a_runtime() {
         lookup(&conn, &key, &doc, &unavailable),
         Err(CollabError::MarkdownReaderUnavailable)
     ));
+}
+
+/// Each caller applies these wire mutations before selecting its own authority.
+pub(crate) fn witness_case(case: &str) -> (Vec<u8>, String) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let data: Value = serde_json::from_str(include_str!("../tests/reader-resolver.json")).unwrap();
+    let bytes = STANDARD
+        .decode(
+            data[if case == "stale" {
+                "stale"
+            } else {
+                "checkpoint"
+            }]
+            .as_str()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut source = data["source"].as_str().unwrap().to_owned();
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    let map = raw.get_or_insert_map("meta");
+    match case {
+        "forged" => {
+            source = "- forged body\n".into();
+            let mut tx = raw.transact_mut();
+            map.insert(&mut tx, "dohcMarkdownSource", source.as_str());
+            map.insert(
+                &mut tx,
+                "dohcMarkdownSourceSha256",
+                crate::hex_sha256(source.as_bytes()),
+            );
+        }
+        "partial" => {
+            map.remove(&mut raw.transact_mut(), "dohcMarkdownSourceSha256");
+        }
+        "valid" | "stale" => {}
+        _ => panic!("unknown witness case"),
+    }
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    (bytes, source)
 }

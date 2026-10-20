@@ -26,6 +26,7 @@ pub fn retain_owner_base_source_in_tx(
     path: &str,
     baseline_digest: &str,
     source: &OwnerSeedSource,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<bool, CollabError> {
     let marker = durable::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.content_kind != ContentKind::Richdoc
@@ -67,9 +68,25 @@ pub fn retain_owner_base_source_in_tx(
         }
         Err(error) => return Err(error),
     };
-    let projection = doc
-        .preserved_markdown_source(&canonical)
-        .unwrap_or(canonical);
+    let projection = if doc.has_reader_source() {
+        crate::reader_snapshot::resolve(
+            tx,
+            key,
+            &doc,
+            &canonical,
+            &crate::reader_snapshot::SnapshotIdentity {
+                moment: &source.moment_id,
+                path,
+                digest: &source.blob_sha256,
+                lineage: baseline_digest,
+                authority: baseline_digest,
+            },
+            resolver,
+        )?
+    } else {
+        doc.preserved_markdown_source(&canonical)
+            .unwrap_or(canonical)
+    };
     if projection != text {
         return Ok(false);
     }
@@ -100,6 +117,60 @@ mod tests {
     use super::*;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+
+    #[test]
+    fn reader_origination_never_substitutes_a_seed_for_a_larger_document() {
+        let (baseline, _) = crate::reader_resolver::tests::witness_case("valid");
+        let scratch = dohc_test_scratch::ScratchDir::new_named("reader-origination").unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        write(&mut store, "source", "source", 1);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        durable::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &baseline,
+            &NoFaults,
+            1,
+        )
+        .unwrap();
+        let independent = Ydoc::wire();
+        independent
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "independent seed")
+            .unwrap();
+        let update = independent.encode_full_state();
+        crate::record_local_update(
+            &mut store,
+            &mut crate::WriterDocCache::new(),
+            &key,
+            &update,
+            crate::LocalAppend {
+                is_seed: true,
+                ..Default::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let encoded = durable::encode_origination_base_in_tx(tx, &key)?.unwrap();
+                let doc = durable::load_doc_in(tx, &key)?;
+                let replay = Ydoc::wire();
+                replay.apply(&encoded.base)?;
+                assert!(crate::replay_parity::structurally_equal_v2(&doc, &replay)?);
+                assert!(!crate::replay_parity::structurally_equal_v2(
+                    &doc,
+                    &independent
+                )?);
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+    }
 
     fn write(store: &mut EngineStore, text: &str, moment: &str, now: i64) {
         VersionedTextStore::new(store)
@@ -184,6 +255,7 @@ mod tests {
                         "owner.md",
                         &hex_sha256(&baseline),
                         &source,
+                        None,
                     )
                 })
                 .unwrap();
@@ -232,7 +304,7 @@ mod tests {
                 .write_with(&NoFaults, |tx| {
                     tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
                         .unwrap();
-                    retain_owner_base_source_in_tx(tx, &key, "owner.md", &digest, &source)
+                    retain_owner_base_source_in_tx(tx, &key, "owner.md", &digest, &source, None)
                 })
                 .unwrap(),
             TxnOutcome::Committed(true)
@@ -276,7 +348,7 @@ mod tests {
         };
         let rollback = store.write_with(&NoFaults, |tx| {
             assert!(retain_owner_base_source_in_tx(
-                tx, &key, "owner.md", &digest, &source
+                tx, &key, "owner.md", &digest, &source, None
             )?);
             Err::<(), _>(corrupt("abort after retaining source"))
         });
@@ -289,7 +361,7 @@ mod tests {
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &missing
+                    tx, &key, "owner.md", &digest, &missing, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(false)
@@ -297,7 +369,7 @@ mod tests {
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &source
+                    tx, &key, "owner.md", &digest, &source, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(true)
@@ -310,13 +382,13 @@ mod tests {
         };
         assert!(store
             .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                tx, &key, "owner.md", &digest, &later
+                tx, &key, "owner.md", &digest, &later, None
             ))
             .is_err());
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &source
+                    tx, &key, "owner.md", &digest, &source, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(true)

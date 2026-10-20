@@ -586,25 +586,30 @@ impl ActorLiveApplicationHandle {
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<OwnerAdoptionAck, RuntimeError> {
         current(&self.actor, &self.token)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::AdoptOwner {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                application: self.application.clone(),
-                cut,
-                max_bytes,
-                max_events,
-                faults,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::AdoptOwner {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    application: self.application.clone(),
+                    cut: cut.clone(),
+                    max_bytes,
+                    max_events,
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            current(&self.actor, &self.token)?;
+            if !super::wait_for_reader(&result, attempt).await {
+                return result;
+            }
+        }
+        unreachable!()
     }
     #[allow(clippy::too_many_arguments)]
     pub async fn settle(
@@ -658,25 +663,31 @@ impl ActorLiveApplicationHandle {
             })
             .into());
         }
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::Bootstrap {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                application: self.application.clone(),
-                input,
-                bytes,
-                root,
-                faults,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        let bytes = Arc::new(bytes);
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::Bootstrap {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    application: self.application.clone(),
+                    input: input.clone(),
+                    bytes: bytes.clone(),
+                    root: root.clone(),
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            current(&self.actor, &self.token)?;
+            if !super::wait_for_reader(&result, attempt).await {
+                return result;
+            }
+        }
+        unreachable!()
     }
 
     /// Apply committed bytes through the actor-owned store and cache.
@@ -885,7 +896,7 @@ pub(super) enum Request {
         token: Token,
         application: ApplicationHandle,
         input: LiveApplicationBootstrap,
-        bytes: Vec<u8>,
+        bytes: Arc<Vec<u8>>,
         root: std::path::PathBuf,
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
@@ -1193,7 +1204,7 @@ impl Request {
                         max_bytes,
                         max_events,
                         now_ms,
-                        faults.as_ref(),
+                        faults.as_ref(), cache.reader_resolver.as_deref(),
                         |tx, namespace, binding, count| {
                             dohc_engine_sync::journal_live_base_in_tx(tx, namespace, binding, now_ms)
                                 .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
@@ -1266,7 +1277,7 @@ impl Request {
                         cache,
                         &application,
                         input,
-                        bytes,
+                        bytes.as_slice(),
                         faults.as_ref(),
                         |tx, written, namespace, binding| {
                             dohc_engine_sync::journal_live_base_in_tx(
@@ -1489,8 +1500,8 @@ impl ActorHandle {
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<dohc_engine_collab::live_update_application::ImportedOwnerActivation, RuntimeError>
     {
-        self.run(move |store, _cache| {
-            let _reservation = reservation;
+        self.run_with_reader_retry(move |store, cache| {
+            let _reservation = reservation.clone();
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -1510,14 +1521,15 @@ impl ActorHandle {
                 }
                 .into());
             }
-            let result = if let Some(activation_id) = activation_id {
+            let result = if let Some(activation_id) = activation_id.as_ref() {
                 dohc_engine_collab::live_update_application::resume_imported_owner_activation(
                     store,
                     &namespace,
                     &key,
                     &path,
-                    &activation_id,
+                    activation_id,
                     max_bytes,
+                    cache.reader_resolver.as_deref(),
                 )?
             } else {
                 dohc_engine_collab::live_update_application::capture_imported_owner_activation(
@@ -1527,6 +1539,7 @@ impl ActorHandle {
                     &path,
                     max_bytes,
                     &dohc_engine_storage::NoFaults,
+                    cache.reader_resolver.as_deref(),
                 )?
             };
             if token.is_cancelled() {

@@ -833,7 +833,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocAppend, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             ydoc_record_update_on_store(
                 store,
                 cache,
@@ -842,12 +842,12 @@ impl ActorHandle {
                 content_kind,
                 regime,
                 &update,
-                actor_origin_id,
-                attribution,
-                expected_lineage_claim_id,
+                actor_origin_id.clone(),
+                attribution.clone(),
+                expected_lineage_claim_id.clone(),
                 require_empty_lineage,
-                seed_source,
-                request_id,
+                seed_source.clone(),
+                request_id.clone(),
                 true,
                 now_ms,
                 faults.as_ref(),
@@ -2075,6 +2075,7 @@ pub(super) fn ydoc_record_update_on_store(
     // actually survived the commit.
     let mut sharing_declined: Option<SharingDeclined> = None;
     let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
+    let reader_resolver = doc_cache.reader_resolver.clone();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -2123,6 +2124,7 @@ pub(super) fn ydoc_record_update_on_store(
                 actor_origin_id.as_deref(),
                 attribution.as_ref(),
                 seed_source.as_ref(),
+                reader_resolver.as_deref(),
                 &mut sharing_declined,
                 outcome,
                 now_ms,
@@ -4427,6 +4429,7 @@ fn journal_local_append_in_tx(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
     sharing_declined: &mut Option<SharingDeclined>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
@@ -4469,6 +4472,7 @@ fn journal_local_append_in_tx(
                     path,
                     &base_snapshot_sha,
                     source,
+                    resolver,
                 )?;
             }
             true
@@ -4557,6 +4561,7 @@ pub(super) fn journal_recovery_append_in_tx(
         update,
         actor_origin_id,
         attribution,
+        None,
         None,
         &mut None,
         outcome,

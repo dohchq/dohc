@@ -19,6 +19,19 @@ function fixture() {
 }
 
 describe("native imported owner activation", () => {
+  it("preserves the reader requirement in Rust's field order", () => {
+    const { row, bytes } = fixture();
+    const ordinary = JSON.stringify(parseNativeOwnerActivationSource(row.source, "notes.md", 1000));
+    const source = Object.fromEntries(Object.entries({ ...row.source, readerSource: true }).reverse());
+    const captured = parseNativeOwnerActivation({ ...row, source }, bytes, "notes.md", 1000);
+    expect(JSON.stringify(captured.source)).toBe(ordinary.replace('{"version":1,', '{"version":1,"readerSource":true,'));
+  });
+
+  it.each([false, 0, 1, "true", null])("rejects a noncanonical reader requirement: %s", (readerSource) => {
+    const { row } = fixture();
+    expect(() => parseNativeOwnerActivationSource({ ...row.source, readerSource }, "notes.md", 1000)).toThrow();
+  });
+
   it("keeps original lineage separate from full current state and uses the real session", () => {
     const { row, bytes } = fixture();
     const captured = parseNativeOwnerActivation(row, bytes, "notes.md", 1000);
