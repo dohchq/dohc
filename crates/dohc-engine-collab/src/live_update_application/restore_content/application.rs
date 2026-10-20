@@ -362,7 +362,7 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             let saved = read_saved(tx, &held, &operation.operation_id, &mut budget)?;
-            let proposal = prepare_in(tx, &held, &input.preparation, budget.remaining, max_events)?;
+            let proposal = prepare_in(tx, &held, &input.preparation, budget.remaining, max_events, self.reader_resolver.as_deref().or(cache.reader_resolver.as_deref()))?;
             if proposal.receipt.candidate_digest != input.candidate_digest
                 || proposal.receipt.native_source_manifest_digest != input.native_source_manifest_digest
                 || proposal.receipt.replacement_ranges != input.admitted.first_seen

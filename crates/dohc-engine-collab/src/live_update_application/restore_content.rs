@@ -45,6 +45,9 @@ pub struct NativeRestoreProposalReceipt {
     pub accepted_history: NativeRestoreHistoryProof,
     pub native_sources: Vec<NativeRestoreSource>,
     pub native_source_manifest_digest: String,
+    /// Stored artifact selected before replacing an E head with a native point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_prefix_moment: Option<String>,
 }
 
 /// Constructed only after native verification or verified durable replay.
@@ -56,9 +59,14 @@ pub struct NativeRestoreProposal {
     frozen_state_bytes: Vec<u8>,
     point_state_bytes: Vec<u8>,
     native_source_bytes: Vec<Vec<u8>>,
+    #[serde(skip)]
+    reader_source: Option<String>,
 }
 
 impl NativeRestoreProposal {
+    pub(super) fn reader_source(&self) -> Option<&str> {
+        self.reader_source.as_deref()
+    }
     pub fn receipt(&self) -> &NativeRestoreProposalReceipt {
         &self.receipt
     }
@@ -266,7 +274,14 @@ impl ApplicationOwner {
             live: false,
         };
         let outcome = store.write_with(faults, |tx| {
-            prepare_in(tx, &held, &input, max_bytes, max_events)
+            prepare_in(
+                tx,
+                &held,
+                &input,
+                max_bytes,
+                max_events,
+                self.reader_resolver.as_deref(),
+            )
         })?;
         match outcome {
             TxnOutcome::Committed(proposal) => Ok(proposal),
@@ -281,6 +296,7 @@ fn prepare_in(
     input: &NativeRestorePreparation,
     max_bytes: usize,
     max_events: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<NativeRestoreProposal, ApplicationError> {
     let operation = &input.fence.operation;
 
@@ -387,9 +403,21 @@ fn prepare_in(
         ));
     }
     let point_projection = point.project(ContentKind::Richdoc)?.content;
-    let markdown = point
-        .preserved_markdown_source(&point_projection)
-        .unwrap_or_else(|| point_projection.clone());
+    let markdown = if point.has_reader_source() {
+        point_source(
+            tx,
+            held,
+            &point,
+            &point_projection,
+            input,
+            resolver,
+            &mut budget,
+        )?
+    } else {
+        point
+            .preserved_markdown_source(&point_projection)
+            .unwrap_or_else(|| point_projection.clone())
+    };
     if hex_sha256(point_projection.as_bytes()) != input.point.projection_digest
         || hex_sha256(markdown.as_bytes()) != input.point.markdown_digest
     {
@@ -405,6 +433,23 @@ fn prepare_in(
         let json: String = tx.query_row("SELECT proposal_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation.operation_id],|r|r.get(0)).map_err(read_sql)?;
         let receipt: NativeRestoreProposalReceipt =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        if frozen.has_reader_source() && !point.has_reader_source() {
+            let moment = receipt
+                .reader_prefix_moment
+                .as_deref()
+                .ok_or(ApplicationError::Corrupt)?;
+            prefix_source(
+                tx,
+                held,
+                &frozen,
+                input,
+                resolver,
+                Some(moment),
+                &mut budget,
+            )?;
+        } else if receipt.reader_prefix_moment.is_some() {
+            return Err(ApplicationError::Corrupt);
+        }
         if receipt.fence != input.fence || receipt.point != input.point {
             return Err(ApplicationError::Conflict);
         }
@@ -433,6 +478,9 @@ fn prepare_in(
             return Err(ApplicationError::Corrupt);
         }
         verify_candidate(
+            tx,
+            held,
+            resolver,
             &previous,
             &candidate_bytes,
             &point_state_bytes,
@@ -445,6 +493,7 @@ fn prepare_in(
             frozen_state_bytes,
             point_state_bytes,
             native_source_bytes,
+            reader_source: point.has_reader_source().then_some(markdown),
         };
         if let Some(applied) = &applied {
             application::verify_saved(
@@ -457,12 +506,45 @@ fn prepare_in(
         }
         return Ok(proposal);
     }
+    let reader_prefix_moment = if frozen.has_reader_source() && !point.has_reader_source() {
+        Some(prefix_source(
+            tx,
+            held,
+            &frozen,
+            input,
+            resolver,
+            None,
+            &mut budget,
+        )?)
+    } else {
+        None
+    };
     let frozen_state_bytes = budget.state(&frozen)?;
     let point_state_bytes = budget.state(&point)?;
     let before = frozen.state_vector();
     let before_state_vector = frozen.encode_state_vector();
-    let candidate_bytes =
-        frozen.rewrite_richdoc_preserving_source_bounded(&markdown, &point, budget.remaining)?;
+    let reader_client = if point.has_reader_source() {
+        let frozen_digest =
+            crate::replay_parity::reader_checkpoint_content_digest(&frozen_state_bytes)?;
+        let digest = hex_sha256(
+            &serde_json::to_vec(&(&input.fence, &input.point, &frozen_digest))
+                .map_err(|_| ApplicationError::Corrupt)?,
+        );
+        let client =
+            u64::from_str_radix(&digest[..13], 16).map_err(|_| ApplicationError::Corrupt)?;
+        if frozen.state_vector().get(&yrs::ClientID::new(client)) != 0 {
+            return Err(ApplicationError::Conflict);
+        }
+        Some(client)
+    } else {
+        None
+    };
+    let candidate_bytes = frozen.rewrite_richdoc_preserving_source_bounded(
+        &markdown,
+        &point,
+        budget.remaining,
+        reader_client,
+    )?;
     budget.charge(candidate_bytes.len())?;
     let after = frozen.state_vector();
     let mut replacement_ranges = Vec::new();
@@ -502,10 +584,14 @@ fn prepare_in(
         selected_history: selected_history.proof,
         native_sources,
         native_source_manifest_digest,
+        reader_prefix_moment,
     };
     let check = Ydoc::wire();
     check.apply(&frozen_state_bytes)?;
     verify_candidate(
+        tx,
+        held,
+        resolver,
         &check,
         &candidate_bytes,
         &point_state_bytes,
@@ -527,6 +613,7 @@ fn prepare_in(
         frozen_state_bytes,
         point_state_bytes,
         native_source_bytes,
+        reader_source: point.has_reader_source().then_some(markdown),
     })
 }
 
@@ -536,6 +623,7 @@ pub(super) fn applied_proposal(
     input: &NativeRestoreApplication,
     max_bytes: usize,
     max_events: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(NativeRestoreProposal, NativeRestoreApplicationReceipt), ApplicationError> {
     input.validate_budget(max_bytes, max_events)?;
     let mut budget = Budget {
@@ -555,7 +643,14 @@ pub(super) fn applied_proposal(
     {
         return Err(ApplicationError::Conflict);
     }
-    let proposal = prepare_in(tx, held, &input.preparation, budget.remaining, max_events)?;
+    let proposal = prepare_in(
+        tx,
+        held,
+        &input.preparation,
+        budget.remaining,
+        max_events,
+        resolver,
+    )?;
     Ok((proposal, receipt))
 }
 
@@ -602,7 +697,11 @@ fn origin(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_candidate(
+    conn: &Connection,
+    held: &Registration,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
     doc: &Ydoc,
     candidate: &[u8],
     point_bytes: &[u8],
@@ -618,14 +717,37 @@ fn verify_candidate(
     let point = Ydoc::wire();
     point.apply(point_bytes)?;
     let point_projection = point.project(ContentKind::Richdoc)?.content;
-    let source = point
-        .preserved_markdown_source(&point_projection)
-        .unwrap_or_else(|| point_projection.clone());
+    let input = NativeRestorePreparation {
+        fence: receipt.fence.clone(),
+        point: receipt.point.clone(),
+    };
+    let source = if point.has_reader_source() {
+        point_source(
+            conn,
+            held,
+            &point,
+            &point_projection,
+            &input,
+            resolver,
+            budget,
+        )?
+    } else {
+        point
+            .preserved_markdown_source(&point_projection)
+            .unwrap_or_else(|| point_projection.clone())
+    };
     let before = doc.state_vector();
     doc.apply(candidate)?;
     let projection = doc.project(ContentKind::Richdoc)?.content;
     let final_bytes = budget.state(doc)?;
-    doc.validate_public_baseline(&final_bytes)?;
+    let exact = if doc.has_reader_source() {
+        let exact = point_source(conn, held, doc, &projection, &input, resolver, budget)?;
+        doc.validate_reader_baseline(&final_bytes)?;
+        Some(exact)
+    } else {
+        doc.validate_public_baseline(&final_bytes)?;
+        doc.preserved_markdown_source(&projection)
+    };
     let mut ranges = Vec::new();
     for (&client, &end) in doc.state_vector().iter() {
         let start = before.get(&client);
@@ -657,7 +779,7 @@ fn verify_candidate(
     if doc.has_missing_updates()
         || actual != expected
         || projection != point_projection
-        || doc.preserved_markdown_source(&projection).as_deref() != Some(source.as_str())
+        || exact.as_deref() != Some(source.as_str())
         || hex_sha256(source.as_bytes()) != receipt.point.markdown_digest
         || hex_sha256(projection.as_bytes()) != receipt.point.projection_digest
         || doc.canonical_content_sha256() != receipt.final_content_digest
@@ -668,4 +790,71 @@ fn verify_candidate(
         ));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prefix_source(
+    conn: &Connection,
+    held: &Registration,
+    doc: &Ydoc,
+    input: &NativeRestorePreparation,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
+    moment: Option<&str>,
+    budget: &mut Budget,
+) -> Result<String, ApplicationError> {
+    let b = &held.binding;
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let authority = serde_json::to_string(&(&held.namespace, b, &input.fence, &input.point))
+        .map_err(|_| ApplicationError::Corrupt)?;
+    let (moment, length) = crate::reader_snapshot::verify_restore_prefix(
+        conn,
+        &key,
+        doc,
+        &crate::reader_snapshot::SnapshotIdentity {
+            moment: moment.unwrap_or(""),
+            path: &b.current_path,
+            digest: "",
+            lineage: &b.lineage_claim_id,
+            authority: &authority,
+            restore_fence: Some(input.fence.operation.new_fence),
+        },
+        resolver,
+        budget.remaining,
+    )?;
+    budget.charge(length + moment.len())?;
+    Ok(moment)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn point_source(
+    conn: &Connection,
+    held: &Registration,
+    doc: &Ydoc,
+    canonical: &str,
+    input: &NativeRestorePreparation,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
+    budget: &mut Budget,
+) -> Result<String, ApplicationError> {
+    let b = &held.binding;
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let authority = serde_json::to_string(&(&held.namespace, b, &input.fence, &input.point))
+        .map_err(|_| ApplicationError::Corrupt)?;
+    let source = crate::reader_snapshot::resolve_history(
+        conn,
+        &key,
+        doc,
+        canonical,
+        &crate::reader_snapshot::SnapshotIdentity {
+            moment: "",
+            path: &b.current_path,
+            digest: &input.point.markdown_digest,
+            lineage: &b.lineage_claim_id,
+            authority: &authority,
+            restore_fence: Some(input.fence.operation.new_fence),
+        },
+        resolver,
+        budget.remaining,
+    )?;
+    budget.charge(source.len())?;
+    Ok(source)
 }

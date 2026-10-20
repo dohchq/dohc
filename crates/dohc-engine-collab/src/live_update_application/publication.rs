@@ -32,7 +32,7 @@ fn native_accepted(
         through,
         budget,
         accepted_history::CHECKPOINT_EVENTS as usize,
-        false,
+        accepted_history::HistoryPurpose::Native,
     )?;
     Ok(Some((held.binding, held.namespace, history.doc)))
 }

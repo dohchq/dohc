@@ -322,9 +322,6 @@ impl ApplicationOwner {
             if terminal != input.terminal || sequence != input.applied_sequence || marker.head_update_seq < sequence {
                 return Err(ApplicationError::Conflict);
             }
-            if durable::load_doc_in(tx, &key)?.has_reader_source() {
-                return Err(CollabError::MarkdownReaderUnavailable.into());
-            }
             let receipt = NativeRestoreFenceReceipt {
                 operation: input.clone(),
                 local_head_sequence: marker.head_update_seq,

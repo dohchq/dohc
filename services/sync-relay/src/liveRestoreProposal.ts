@@ -123,7 +123,7 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
   }
   const row = configRecord(JSON.parse(json), ["fence", "point", "candidateDigest", "frozenStateDigest", "pointStateDigest",
     "finalContentDigest", "beforeStateVector", "afterStateVector", "replacementRanges", "originEvidenceDigest",
-    "selectedHistory", "acceptedHistory", "nativeSources", "nativeSourceManifestDigest"]);
+    "selectedHistory", "acceptedHistory", "nativeSources", "nativeSourceManifestDigest"], ["readerPrefixMoment"]);
   const fence = parseNativeRestoreFenceReceipt(row.fence);
   const point = configRecord(row.point, ["journalCursor", "receiptDigest", "markdownDigest", "projectionDigest"]);
   const vector = (value: unknown) => array(value, budget.maxBytes, v => {const n = integer(v);require(n <= 255);return n;});
@@ -156,7 +156,8 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
     pointStateDigest: parseLiveUpdateDigest(row.pointStateDigest), finalContentDigest: parseLiveUpdateDigest(row.finalContentDigest),
     beforeStateVector: vector(row.beforeStateVector), afterStateVector: vector(row.afterStateVector), replacementRanges,
     originEvidenceDigest: parseLiveUpdateDigest(row.originEvidenceDigest), selectedHistory, acceptedHistory, nativeSources,
-    nativeSourceManifestDigest: manifestDigest};
+    nativeSourceManifestDigest: manifestDigest,
+    ...(row.readerPrefixMoment === undefined ? {} : {readerPrefixMoment: parseLiveUpdateIdentifier(row.readerPrefixMoment)})};
 }
 export type NativeRestoreProposalReceipt = ReturnType<typeof parseNativeRestoreProposalReceipt>;
 type NativeRestoreSourceIdentity = Pick<NativeRestoreProposalReceipt["nativeSources"][number], "source">;

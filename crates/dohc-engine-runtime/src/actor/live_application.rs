@@ -141,28 +141,35 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreResumeReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::ResumeRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                root,
-                now_ms,
-                faults,
-                cancel,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(receipt)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::ResumeRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    root: root.clone(),
+                    now_ms,
+                    faults: faults.clone(),
+                    cancel: cancel.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -210,29 +217,36 @@ impl ActorLiveApplicationOwner {
     ) -> Result<LiveSettlementResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::SettleRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                root,
-                now_ms,
-                faults,
-                cancel,
-                reservation,
-                observer,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::SettleRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    root: root.clone(),
+                    now_ms,
+                    faults: faults.clone(),
+                    cancel: cancel.clone(),
+                    reservation: reservation.clone(),
+                    observer: observer.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// Apply one saved proposal through the current actor owner.
@@ -275,27 +289,34 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreApplicationReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::ApplyRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                now_ms,
-                faults,
-                reservation,
-                observer,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(receipt)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::ApplyRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    now_ms,
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    observer: observer.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// The authenticated caller keeps proof memory reserved through queued preparation.
@@ -310,27 +331,34 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreProposal, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(
-                Request::PrepareRestore {
-                    workspace_id: self.workspace_id.clone(),
-                    token: self.token.clone(),
-                    input: Box::new(input),
-                    coordinate,
-                    max_bytes,
-                    max_events,
-                    faults,
-                    reservation,
-                    reply,
-                },
-            )))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let proposal = receive_reserved(receive).await?;
-        current(&self.actor, &self.token)?;
-        Ok(proposal)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(
+                    Request::PrepareRestore {
+                        workspace_id: self.workspace_id.clone(),
+                        token: self.token.clone(),
+                        input: Box::new(input.clone()),
+                        coordinate: coordinate.clone(),
+                        max_bytes,
+                        max_events,
+                        faults: faults.clone(),
+                        reservation: reservation.clone(),
+                        reply,
+                    },
+                )))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// Fence through the same writer queue as local and committed updates.
@@ -1032,6 +1060,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner.configure_reader_resolver(cache.reader_resolver.clone());
                     if cancel.is_cancelled() { return Err(RuntimeError::Cancelled); }
                     owner.resume_restore(store, *input, coordinate, max_bytes, max_events,
                         now_ms, faults.as_ref(), |conn, binding, moment, markdown| {
@@ -1071,6 +1100,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner.configure_reader_resolver(cache.reader_resolver.clone());
                     if cancel.is_cancelled() {return Err(RuntimeError::Cancelled);}
                     owner.with_restore_settlement(store,*input,coordinate,max_bytes,max_events,|store,audit| {
                         let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel)?;
@@ -1101,6 +1131,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner.configure_reader_resolver(cache.reader_resolver.clone());
                     owner
                         .apply_restore_with_facts(
                             store,
@@ -1145,6 +1176,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner.configure_reader_resolver(cache.reader_resolver.clone());
                     owner
                         .prepare_restore(
                             store,
@@ -1445,7 +1477,7 @@ fn settle_audited(
         false,
         Some(&binding.lineage_claim_id),
         Some(audit.expected_head().to_owned()),
-        None,
+        audit.restored_source().map(ToOwned::to_owned),
         "configured-live-application",
         &(),
         now_ms,

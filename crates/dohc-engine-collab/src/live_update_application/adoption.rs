@@ -1301,6 +1301,7 @@ pub(super) fn read_adoption_source(
                     path: &binding.current_path,
                     digest: &source.source_digest,
                     lineage: &binding.lineage_claim_id,
+                    restore_fence: None,
                     authority: adoption_id,
                 },
                 resolver,

@@ -201,7 +201,7 @@ where
             let source = crate::reader_snapshot::resolve(tx, &key, &doc, &canonical,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path: &binding.current_path, digest: &input.projected_markdown_digest,
-                    lineage: &binding.lineage_claim_id, authority: &authority,
+                    lineage: &binding.lineage_claim_id, restore_fence: None, authority: &authority,
                 }, cache.reader_resolver.as_deref()).map_err(ApplicationError::from).map_err(E::from)?;
             Some(source)
         } else {
