@@ -5,6 +5,7 @@
 use super::owner_activations::{
     activation_by_id, current_activation, lineage_origin_id, ActivationAdoption, OwnerActivation,
 };
+use super::released_protection::RetainedContribution;
 use super::*;
 use crate::owner_outbox::{
     OwnerDeliveryReceipt, OwnerOutboxError, OwnerOutboxNativeOrigin, OwnerOutboxNativeSource,
@@ -686,6 +687,174 @@ pub(crate) fn retained_suffix(
         through,
         earliest_carried,
     }))
+}
+
+/// What the released chain ending at `tail` retains that no proof covers:
+/// each Carried delivery its manifest lists that no host applied here, and
+/// each other outbox entry of the chain that is pending, saved a receipt
+/// nothing here applied or accepted, or holds neither a receipt nor a strict
+/// terminal representation. Beside it, the path and restore generation the
+/// tail's release bound. Missing or conflicting evidence refuses; it never
+/// reads as nothing retained.
+pub(crate) fn unproven_retained(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: &str,
+) -> Result<(String, i64, Vec<RetainedContribution>), ApplicationError> {
+    let activation = activation_by_id(conn, namespace, tail)?
+        .filter(|found| found.released && found.key == *doc && found.lineage_claim_id == lineage)
+        .ok_or(ApplicationError::Conflict)?;
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&activation.binding_json).map_err(|_| ApplicationError::Corrupt)?;
+    let generation: Option<i64> = conn
+        .query_row(
+            "SELECT released_restore_generation FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2",
+            params![namespace, tail],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    let generation = generation.ok_or(ApplicationError::Corrupt)?;
+    let mut unproven = Vec::new();
+    let mut listed = BTreeSet::new();
+    for inherited in inherited_entries(conn, namespace, doc, lineage, Some(tail))? {
+        let receipt = inherited.receipt;
+        listed.insert(receipt.delivery_id.clone());
+        if !applied(conn, namespace, &receipt.delivery_id)? {
+            unproven.push(RetainedContribution::Carried {
+                delivery_id: receipt.delivery_id,
+                update_digest: receipt.update_digest,
+                journal_cursor: receipt.journal_cursor,
+            });
+        }
+    }
+    type Row = (
+        String,
+        i64,
+        String,
+        String,
+        bool,
+        Option<String>,
+        Option<String>,
+    );
+    let rows = conn
+        .prepare(
+            "WITH RECURSIVE chain(activation_id) AS (SELECT ?5 UNION
+               SELECT v.predecessor_activation_id FROM live_owner_activations v JOIN chain c
+                 ON v.relay_database_namespace=?6 AND v.activation_id=c.activation_id
+               WHERE v.predecessor_activation_id IS NOT NULL)
+             SELECT e.outbox_id,e.sequence,e.delivery_id,e.update_digest,e.pending,
+                e.accepted_receipt_json,e.terminal_reason
+             FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+             WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
+               AND (e.native_source_json IS NULL
+                 OR json_extract(e.native_source_json,'$.adoptionId') IN (SELECT activation_id FROM chain))
+               AND NOT (e.pending=0 AND e.accepted_receipt_json IS NOT NULL AND (
+                 EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?6
+                   AND a.delivery_id=e.delivery_id AND a.update_digest=e.update_digest)
+                 OR EXISTS(SELECT 1 FROM live_accepted_updates h WHERE h.relay_database_namespace=?6
+                   AND h.delivery_id=e.delivery_id AND h.update_sha256=e.update_digest)))
+             ORDER BY e.outbox_id,e.sequence",
+        )
+        .map_err(read_sql)?
+        .query_map(
+            params![
+                doc.workspace_id,
+                doc.version_id,
+                doc.object_id,
+                lineage,
+                tail,
+                namespace
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .map_err(read_sql)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(read_sql)?;
+    for (outbox_id, sequence, delivery_id, update_digest, pending, receipt, terminal) in rows {
+        if listed.contains(&delivery_id) {
+            continue;
+        }
+        if !pending {
+            if let Some(receipt) = &receipt {
+                let saved = saved_receipt(receipt)?;
+                if saved.delivery_id != delivery_id || saved.update_digest != update_digest {
+                    return Err(ApplicationError::Conflict);
+                }
+            } else if terminal.is_some() {
+                if strictly_terminal(conn, namespace, doc, lineage, tail, &outbox_id, sequence)? {
+                    continue;
+                }
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        unproven.push(RetainedContribution::Outbox {
+            outbox_id,
+            sequence,
+            delivery_id,
+            update_digest,
+        });
+    }
+    unproven.sort();
+    Ok((binding.current_path, generation, unproven))
+}
+
+/// Whether the entry at `sequence` of `outbox_id` ended in a strict terminal
+/// representation of the released chain ending at `tail`: a refusal, or a
+/// seed its activation abandoned. A refused owner draft names no activation.
+fn strictly_terminal(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: &str,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<bool, ApplicationError> {
+    if let Some(refusal) = refused_entry(conn, namespace, doc, lineage, outbox_id, sequence)? {
+        return match refusal.source {
+            None => Ok(true),
+            Some(source) => {
+                Ok(
+                    chained_retiring(conn, namespace, doc, lineage, tail, &source.adoption_id)?
+                        .is_some(),
+                )
+            }
+        };
+    }
+    let Some(entry) = native_entries(
+        conn,
+        doc,
+        lineage,
+        "e.outbox_id=?5 AND e.sequence=?6",
+        params![outbox_id, sequence],
+    )?
+    .pop() else {
+        return Ok(false);
+    };
+    match chained_retiring(
+        conn,
+        namespace,
+        doc,
+        lineage,
+        tail,
+        &entry.source.adoption_id,
+    )? {
+        Some(retiring) => is_abandoned_seed(conn, namespace, &retiring, &entry),
+        None => Ok(false),
+    }
 }
 
 /// An entry's retained native source, valid for that entry: within its

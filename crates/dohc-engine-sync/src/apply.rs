@@ -475,6 +475,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled(_)
         | SyncError::ProjectionTooLarge { .. }
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }

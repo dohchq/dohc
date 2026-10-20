@@ -41,6 +41,7 @@ mod tests {
     include!("inherited_tests.rs");
     include!("resume_tests.rs");
     include!("released_capture_tests.rs");
+    include!("released_protection_tests.rs");
 
     struct Fixture {
         store: EngineStore,

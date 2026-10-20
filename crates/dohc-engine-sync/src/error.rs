@@ -43,6 +43,13 @@ pub enum SyncError {
     CoordinateDiverged,
     #[error("replication state is not ready: {reason}")]
     RetryableState { reason: &'static str },
+    /// A released chain's tail protects the lineage, and the update could
+    /// destroy what it retains. It holds with the binding admission built;
+    /// nothing records a refusal.
+    #[error("replication state is not ready: released-lineage-unsettled")]
+    ReleasedLineageUnsettled(
+        Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
+    ),
     #[error(
         "Y.Doc projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )]
@@ -157,6 +164,7 @@ impl SyncError {
             | SyncError::SequenceGap
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
+            | SyncError::ReleasedLineageUnsettled(_)
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. }
             | SyncError::FaultCrash => ShareDisposition::Abort,
@@ -170,7 +178,9 @@ impl SyncError {
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
-            SyncError::RetryableState { .. } => "retryable-state",
+            SyncError::RetryableState { .. } | SyncError::ReleasedLineageUnsettled(_) => {
+                "retryable-state"
+            }
             SyncError::ProjectionTooLarge { .. } => "projection-too-large",
             SyncError::UnsupportedOperation => "invalid-input",
             // The boundary class is "the share does not cover this op". The
@@ -336,6 +346,43 @@ impl RelayError {
 
 pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::live_update_application::{IncomingCoordinate, ReleasedLineageBinding};
+
+    /// A released lineage's hold is retryable state that carries its
+    /// binding: a share pull aborts on it, nothing records it as a refusal,
+    /// and its message names no part of the binding.
+    #[test]
+    fn a_released_lineage_hold_is_retryable_state_and_never_a_refusal() {
+        let error = SyncError::ReleasedLineageUnsettled(Box::new(ReleasedLineageBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "a".repeat(64),
+            current_path: Some("private/plan.md".into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 3,
+                relay_seq: 9,
+            },
+            head_digest: "b".repeat(64),
+            tails: Vec::new(),
+        }));
+        assert_eq!(error.code(), "retryable-state");
+        assert_eq!(error.share_disposition(), ShareDisposition::Abort);
+        assert!(crate::apply::refusal_reason(&error).is_none());
+        assert_eq!(
+            error.to_string(),
+            "replication state is not ready: released-lineage-unsettled"
+        );
+    }
 }
 
 /// Relay transport errors preserve the TS class-per-condition contract while

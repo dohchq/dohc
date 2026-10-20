@@ -47,6 +47,11 @@ pub mod owner_activations;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+mod released_protection;
+pub use released_protection::{
+    protection, IncomingCoordinate, ProtectedTail, Protection, ProtectionKey,
+    ReleasedLineageBinding, RetainedContribution, RetainedCoverage,
+};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;

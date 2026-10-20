@@ -1226,6 +1226,31 @@ impl Ydoc {
         })
     }
 
+    /// Remove the [`ROOT_BODY`] block at `index` and return the encoded v1
+    /// delta.
+    pub fn richdoc_remove_block(&self, index: u32) -> Vec<u8> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        self.with_delta(|txn| frag.remove_range(txn, index, 1))
+    }
+
+    /// Insert `text` at a UTF-16 `offset` into the text of the [`ROOT_BODY`]
+    /// block at `index` and return the encoded v1 delta. None when that block
+    /// holds no text first.
+    pub fn richdoc_insert_text(&self, index: u32, offset: u32, text: &str) -> Option<Vec<u8>> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let content = {
+            let txn = self.doc.transact();
+            match frag.get(&txn, index) {
+                Some(XmlOut::Element(element)) => match element.get(&txn, 0) {
+                    Some(XmlOut::Text(content)) => content,
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        };
+        Some(self.with_delta(|txn| content.insert(txn, offset, text)))
+    }
+
     /// Rewrite the document's projected content to `markdown` and return one
     /// encoded v1 update — the conflict-resolution fold. The user chose these
     /// exact bytes over the lineage's current projection, so the update

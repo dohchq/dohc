@@ -2484,6 +2484,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         store, cache, op, faults, leases, true,
                     ),
                 };
+                // The pass keeps only the hold's reason; its binding is not
+                // persisted with the hold yet.
+                let routed = match routed {
+                    Err(SyncError::ReleasedLineageUnsettled(_)) => Err(SyncError::RetryableState {
+                        reason: crate::hosted::RELEASED_LINEAGE_UNSETTLED,
+                    }),
+                    routed => routed,
+                };
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         holding.stop_at_withheld_parent(op, reason);
@@ -4514,11 +4522,15 @@ impl Holding {
     }
 
     /// Stop a ready hosted document at `op`, whose conflict parent the feed
-    /// withholds: it can wait indefinitely, so the document is held there
-    /// and retains nothing, as one that is not ready.
+    /// withholds or whose released lineage is unsettled: it can wait
+    /// indefinitely, so the document is held there and retains nothing, as
+    /// one that is not ready.
     fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
-            && reason == crate::hosted::CONFLICT_PARENT_WITHHELD
+            && matches!(
+                reason,
+                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+            )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {
             unready.insert(object_id.to_owned());

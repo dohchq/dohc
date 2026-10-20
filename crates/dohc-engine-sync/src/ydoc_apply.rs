@@ -1881,6 +1881,80 @@ pub fn admit_capture_in_tx(
     }
 }
 
+/// What a synced row would do to the head's lineage.
+enum Incoming<'a> {
+    /// A base state, or a delta of another lineage: never an ordinary update.
+    Replacement,
+    /// An ordinary update at `path`.
+    Update { bytes: &'a [u8], path: &'a str },
+}
+
+/// Hold `op` while a released chain's tail protects the head's `lineage` and
+/// the row could destroy what the tail retains: any replacement, and an
+/// update that lands off the tail's binding or that structural inspection
+/// does not admit. The hold carries the binding and records no refusal.
+fn hold_released_lineage(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    lineage: &str,
+    op: &ReplicationEnvelope,
+    relay_seq: i64,
+    incoming: Incoming<'_>,
+) -> Result<(), SyncError> {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationError, IncomingCoordinate, Protection, ProtectionKey, protection,
+    };
+    let identity: Option<(String, String)> = tx
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let (replication_epoch, stream_identity) = identity.clone().unwrap_or_default();
+    let coordinate = IncomingCoordinate {
+        replication_epoch,
+        stream_identity,
+        origin_id: op.origin_id.clone(),
+        origin_seq: op.origin_seq,
+        relay_seq,
+    };
+    let protected = protection(
+        tx,
+        &ProtectionKey {
+            doc: key,
+            lineage_claim_id: lineage,
+            incoming: &coordinate,
+        },
+    )
+    .map_err(|error| match error {
+        ApplicationError::Storage(error) => SyncError::Storage(error),
+        ApplicationError::Collab(error) => map_collab_hard_error(error),
+        _ => local_corruption("released lineage evidence does not read"),
+    })?;
+    let Protection::Protected { binding, head } = protected else {
+        return Ok(());
+    };
+    if identity.is_none() {
+        return Err(local_corruption(
+            "a protected lineage's replica has no sync identity",
+        ));
+    }
+    let destructive = match incoming {
+        Incoming::Replacement => true,
+        Incoming::Update { bytes, path } => {
+            binding.moved(path)
+                || dohc_engine_collab::inspect_update(&head, bytes)
+                    != dohc_engine_collab::UpdateInspection::Admissible
+        }
+    };
+    if destructive {
+        return Err(SyncError::ReleasedLineageUnsettled(binding));
+    }
+    Ok(())
+}
+
 /// The durable file head that must remain canonical after a non-Y.Doc
 /// mutation commits.
 pub enum ResultingHead<'a> {
@@ -4697,6 +4771,19 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         };
         let base_payload = &payload;
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            if let Some(lineage) = dohc_engine_collab::read_marker_in(tx, &claim_key)
+                .map_err(map_collab_hard_error)?
+                .and_then(|marker| marker.lineage_claim_id)
+            {
+                hold_released_lineage(
+                    tx,
+                    &claim_key,
+                    &lineage,
+                    op,
+                    relay_seq,
+                    Incoming::Replacement,
+                )?;
+            }
             let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
                 op.origin_id.clone(),
                 op.origin_seq,
@@ -5152,6 +5239,16 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 envelope,
                 faults,
                 |tx, op| {
+                    if let Some(lineage) = marker.lineage_claim_id.as_deref() {
+                        hold_released_lineage(
+                            tx,
+                            &key,
+                            lineage,
+                            op,
+                            relay_seq,
+                            Incoming::Replacement,
+                        )?;
+                    }
                     let inactive = apply_inactive_delta_in_tx(
                         tx,
                         &key,
@@ -5203,6 +5300,17 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         envelope,
         faults,
         |tx, op| {
+            hold_released_lineage(
+                tx,
+                &key,
+                &payload.lineage_claim_id,
+                op,
+                relay_seq,
+                Incoming::Update {
+                    bytes: &remote.bytes,
+                    path: &update_path,
+                },
+            )?;
             let projected = apply_remote_update_in_transaction_with_projection(
                 tx,
                 gate_cache,

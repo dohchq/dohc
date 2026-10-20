@@ -128,25 +128,17 @@ pub(super) const LINEAGE_NAMESPACES_SQL: &str =
      WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
      ORDER BY relay_database_namespace";
 
-/// Decide, before capture records `text` at `path`, what it may do with the
-/// lineage's Y.Doc `head`. Only the released window is decided here: no
-/// activation of the lineage is current in any namespace, and a persisted
-/// namespace keeps a released chain tail. There the fold would rewrite `head`
-/// to the file, deleting whatever the chain's settlement never projected.
-/// Bytes capture last recorded change nothing. Changed bytes fold only over a
-/// base proven to be the file, structurally `head`, with no dependency
-/// missing, within `max_bytes` of proof input. Anything else refuses.
-pub fn released_capture(
+/// The released window of a document lineage: no activation of it is current
+/// in any namespace, and each namespace listed, in namespace order, keeps a
+/// released chain tail, named beside it. Empty outside the window. Disk
+/// capture and synced ingress each decide their own policy inside it.
+pub(super) fn released_window(
     conn: &Connection,
     key: &DocKey,
     lineage: &str,
-    path: &str,
-    text: &str,
-    head: &Ydoc,
-    max_bytes: usize,
-) -> Result<ReleasedCapture, ApplicationError> {
+) -> Result<Vec<(String, String)>, ApplicationError> {
     if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
-        return Ok(ReleasedCapture::Ordinary);
+        return Ok(Vec::new());
     }
     let namespaces = conn
         .prepare(LINEAGE_NAMESPACES_SQL)
@@ -162,10 +154,33 @@ pub fn released_capture(
     for namespace in namespaces {
         if let Some(tail) = owner_activations::released_chain_tail(conn, &namespace, key, lineage)?
         {
-            // A tail whose record does not read refuses, never captures.
-            super::retirement::released_tail(conn, &namespace, &tail)?;
-            tails.push(namespace);
+            tails.push((namespace, tail));
         }
+    }
+    Ok(tails)
+}
+
+/// Decide, before capture records `text` at `path`, what it may do with the
+/// lineage's Y.Doc `head`. Only the [released window](released_window) is
+/// decided here. There the fold would rewrite `head` to the file, deleting
+/// whatever the chain's settlement never projected. Bytes capture last
+/// recorded change nothing. Changed bytes fold only over a base proven to be
+/// the file, structurally `head`, with no dependency missing, within
+/// `max_bytes` of proof input. Anything else refuses.
+pub fn released_capture(
+    conn: &Connection,
+    key: &DocKey,
+    lineage: &str,
+    path: &str,
+    text: &str,
+    head: &Ydoc,
+    max_bytes: usize,
+) -> Result<ReleasedCapture, ApplicationError> {
+    let mut tails = Vec::new();
+    for (namespace, tail) in released_window(conn, key, lineage)? {
+        // A tail whose record does not read refuses, never captures.
+        super::retirement::released_tail(conn, &namespace, &tail)?;
+        tails.push(namespace);
     }
     if tails.is_empty() {
         return Ok(ReleasedCapture::Ordinary);

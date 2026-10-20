@@ -54,6 +54,11 @@ pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
 /// document is held at the child until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
+/// A Y.Doc row that could destroy work a released chain's tail retains
+/// ([`crate::SyncError::ReleasedLineageUnsettled`]). Its document waits there
+/// until that work is resolved; nothing arriving later releases it.
+pub(crate) const RELEASED_LINEAGE_UNSETTLED: &str = "released-lineage-unsettled";
+
 /// A moment or Y.Doc row whose path a document outside the scope, or the file
 /// a parked one left, still holds here. It waits until that path is free.
 pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";

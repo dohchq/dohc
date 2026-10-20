@@ -527,6 +527,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         // Retryable state conditions are transient by definition; Internal is
         // the retry-eligible class on this surface (InvalidParams is terminal).
         | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled(_)
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::LiveDocumentBindingActive

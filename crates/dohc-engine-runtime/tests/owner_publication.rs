@@ -5619,3 +5619,1136 @@ async fn a_released_window_capture_folds_over_a_proven_equal_base() {
     );
     w.close().await;
 }
+
+/// The text the released chain retains, inside the file's one paragraph.
+const RETAINED: &str = " Retained.";
+
+/// How the released chain retains [`RETAINED`], as release classifies it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Retained {
+    /// An owner edit the relay accepted and the host never applied.
+    Carried,
+    /// An edit ordinary sync brought before the lineage adopted, so the
+    /// adoption seed holds it. The relay accepted the seed and the host
+    /// never applied it.
+    Seed,
+    /// An owner edit still pending when Stop began, which the relay's
+    /// journal answered during reconciliation.
+    Own,
+}
+
+/// A host whose root activation released with [`RETAINED`] unapplied, its
+/// document back in the scope with no activation current. Fields drop in
+/// order: the actor closes before its scratch tree goes.
+struct RetainedWindow {
+    owner: dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+    actor: ActorHandle,
+    supervisor: WorkspaceSupervisor,
+    store: EngineStore,
+    first: ImportedOwnerActivation,
+    coordinate: ApplicationHostCoordinate,
+    boundary: Option<RetainedPrefixBody>,
+    lineage: String,
+    base: Vec<u8>,
+    /// The digest of the delivery that retains [`RETAINED`].
+    retained_digest: String,
+    /// What ordinary sync brought the host before its lineage adopted.
+    synced: Vec<Vec<u8>>,
+    root: ScratchDir,
+}
+
+fn owner_source_base() -> Vec<u8> {
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    serde_json::from_value(source["bytes"].clone()).unwrap()
+}
+
+/// A workspace store holding the document's base as ordinary sync brought
+/// it, under `origin`.
+fn window_store(root: &ScratchDir, origin: &str, base: &[u8], lineage: &str) -> EngineStore {
+    let mut store = EngineStore::open(&engine_db_path(root).unwrap(), 0).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    execute(&mut store, &format!("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','{origin}','epoch','stream',1);
+        INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','{origin}',0);
+        INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','1','epoch','stream')"));
+    import_envelope(&mut store, "owner-peer", 1, base, lineage, true);
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    store
+}
+
+async fn retained_window(retained: Retained) -> RetainedWindow {
+    let root = ScratchDir::new().unwrap();
+    let base = owner_source_base();
+    let lineage = hex_sha256(&base);
+    let mut store = window_store(&root, "origin", &base, &lineage);
+    let edited = Ydoc::wire();
+    edited.apply(&base).unwrap();
+    let inside = edited
+        .richdoc_insert_text(1, "Starting together.".len() as u32, RETAINED)
+        .unwrap();
+    let mut synced = Vec::new();
+    if retained == Retained::Seed {
+        // The edit, and a paragraph added and removed: a deletion both
+        // sides hold before the window.
+        let scratch = edited.richdoc_append_paragraph("Scratch");
+        let removed = edited.richdoc_remove_block(2);
+        synced = vec![inside.clone(), scratch, removed];
+        for (index, update) in synced.iter().enumerate() {
+            import_envelope(
+                &mut store,
+                &format!("peer-{index}"),
+                2 + index as i64,
+                update,
+                &lineage,
+                false,
+            );
+        }
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&engine_db_path(&root).unwrap(), 3)
+        .unwrap()
+        .actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    let first = actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            window_key(),
+            WINDOW_PATH.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    owner
+        .register("relay".into(), coordinate.clone(), window_binding(&lineage))
+        .await
+        .unwrap()
+        .adopt_owner(
+            imported_cut(&first, None),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    if retained != Retained::Seed {
+        record_owned(&actor, &lineage, inside, "retained").await;
+    }
+    let (_, delivery_id, retained_digest) = latest_pending(&store);
+    if retained == Retained::Seed {
+        assert_eq!(retained_digest, hex_sha256(&first.full_state), "the seed");
+    }
+    let accepted = LiveUpdateReceipt {
+        delivery_id,
+        update_digest: retained_digest.clone(),
+        journal_cursor: 2,
+        accepting_host_epoch: 1,
+    };
+    if retained != Retained::Own {
+        accept_latest(&actor, &store, 2).await;
+    }
+    // Stop: Phase A, settlement with nothing applied, the document parks,
+    // and the release. Its document returns with no activation current.
+    let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+        namespace: "relay".into(),
+        max_deliveries: 8,
+        max_applications: 8,
+    };
+    let key = RetirementKey {
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        activation_id: first.activation_id.clone(),
+        restore_fence_generation: 0,
+        accepted_through: 10,
+    };
+    owner
+        .begin_retirement(scope.clone(), coordinate.clone(), key.clone(), false)
+        .await
+        .unwrap();
+    if retained == Retained::Own {
+        let journal = JournalEvidence {
+            receipts: vec![accepted],
+            absent: vec![],
+        };
+        owner
+            .reconcile_activation(scope.clone(), key.clone(), None, Some(journal))
+            .await
+            .unwrap();
+    }
+    owner
+        .settle_retirement(
+            scope.clone(),
+            coordinate.clone(),
+            key.clone(),
+            None,
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: adoption_reconstruction(),
+                reservation: Arc::new(()),
+            },
+        )
+        .await
+        .unwrap();
+    execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+          VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
+        INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+    let Release::Released { boundary, .. } = owner
+        .release_activation(scope, coordinate.clone(), key, 40)
+        .await
+        .unwrap()
+    else {
+        panic!("{retained:?}: released");
+    };
+    execute(
+        &mut store,
+        "UPDATE hosted_documents SET scope_generation=1,state='ready';
+        UPDATE hosted_replicas SET scope_token='scope'",
+    );
+    RetainedWindow {
+        owner,
+        actor,
+        supervisor,
+        store,
+        first,
+        coordinate,
+        boundary,
+        lineage,
+        base,
+        retained_digest,
+        synced,
+        root,
+    }
+}
+
+impl RetainedWindow {
+    fn head(&self) -> Ydoc {
+        dohc_engine_collab::load_persisted(&self.store, &window_key())
+            .unwrap()
+            .unwrap()
+            .doc
+    }
+
+    fn native(&self) -> Vec<u8> {
+        self.head().encode_full_state()
+    }
+
+    fn text(&self) -> String {
+        self.head().project(ContentKind::Richdoc).unwrap().content
+    }
+
+    async fn close(self) {
+        self.owner.close().await.unwrap();
+        self.supervisor.close_all().unwrap();
+    }
+}
+
+/// Every row a synced update, its refusal or its application could write.
+fn ingress_rows(store: &EngineStore) -> Vec<String> {
+    let mut rows: Vec<String> = [
+        "moments",
+        "snapshots",
+        "ydoc_docs",
+        "ydoc_updates",
+        "ydoc_snapshots",
+        "ydoc_deferred_updates",
+        "replication_log",
+        "replication_pending_refusals",
+        "relay_deferred_ops",
+        "owner_ydoc_outbox_entries",
+        "live_owner_activations",
+        "live_device_settlements",
+        "live_device_update_applications",
+        "live_accepted_updates",
+    ]
+    .iter()
+    .flat_map(|table| {
+        store
+            .read_with(|conn| {
+                let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        let values = (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(format!("{table}: {values:?}"))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+    })
+    .collect();
+    rows.sort();
+    rows
+}
+
+/// Whether the host journaled `op`'s coordinate: a hosted replica's ack.
+fn journaled(store: &EngineStore, op: &dohc_engine_sync::ReplicationEnvelope) -> bool {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM replication_log WHERE origin_id=?1 AND origin_seq=?2)",
+                rusqlite::params![op.origin_id, op.origin_seq],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The owner's desktop: its own store, holding the lineage as ordinary sync
+/// brought it, and its file. Fields drop in order.
+struct Desktop {
+    actor: ActorHandle,
+    supervisor: WorkspaceSupervisor,
+    store: EngineStore,
+    root: ScratchDir,
+}
+
+async fn desktop_of(base: &[u8], lineage: &str, synced: &[Vec<u8>]) -> Desktop {
+    let root = ScratchDir::new().unwrap();
+    let mut store = window_store(&root, "desktop", base, lineage);
+    for (index, update) in synced.iter().enumerate() {
+        import_envelope(
+            &mut store,
+            &format!("peer-{index}"),
+            2 + index as i64,
+            update,
+            lineage,
+            false,
+        );
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&engine_db_path(&root).unwrap(), 3)
+        .unwrap()
+        .actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    Desktop {
+        actor,
+        supervisor,
+        store,
+        root,
+    }
+}
+
+impl Desktop {
+    fn file(&self) -> String {
+        std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
+    }
+
+    /// The last `ydoc.update` this desktop journaled, as the relay serves
+    /// it, with its bytes.
+    fn journaled_update(&self) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        let (origin_id, origin_seq, payload, recorded_at_ms): (String, i64, String, i64) = self
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log
+                     WHERE op_kind='ydoc.update' AND imported=0 ORDER BY origin_seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let bytes = self
+            .store
+            .get_binary_blob(payload["updateBlobSha256"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let op = dohc_engine_sync::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "workspace".into(),
+            origin_id,
+            origin_seq,
+            relay_seq: None,
+            op_kind: "ydoc.update".into(),
+            payload,
+            recorded_at_ms,
+        };
+        (op, bytes)
+    }
+
+    /// A disk edit to `text` that capture folds into the Y.Doc.
+    async fn fold(&self, text: &str) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        self.actor
+            .capture_ingest(
+                dohc_engine_runtime::CaptureIngest {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    path: WINDOW_PATH.into(),
+                    text: text.into(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 60,
+                    request_id: None,
+                    claim_foreign_head: true,
+                },
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        self.journaled_update()
+    }
+
+    /// The person types a new paragraph of `text` in the desktop's editor.
+    async fn append(
+        &self,
+        lineage: &str,
+        text: &str,
+    ) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
+        let doc = dohc_engine_collab::load_persisted(&self.store, &window_key())
+            .unwrap()
+            .unwrap()
+            .doc;
+        record_owned(
+            &self.actor,
+            lineage,
+            doc.richdoc_append_paragraph(text),
+            text,
+        )
+        .await;
+        self.journaled_update()
+    }
+
+    async fn close(self) {
+        self.supervisor.close_all().unwrap();
+    }
+}
+
+/// The relay's hosted feed for the host's scope. Each row keeps its origin
+/// coordinate and takes the next relay position after the host's cursor.
+struct HostedFeed {
+    documents: Vec<dohc_engine_sync::HostedScopeDocument>,
+    rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
+    blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+}
+
+impl HostedFeed {
+    fn new(documents: &[(&str, &str)]) -> Self {
+        Self {
+            documents: documents
+                .iter()
+                .map(|(object_id, path)| dohc_engine_sync::HostedScopeDocument {
+                    object_id: (*object_id).into(),
+                    path: (*path).into(),
+                })
+                .collect(),
+            rows: Default::default(),
+            blobs: Default::default(),
+        }
+    }
+
+    fn serve(
+        &self,
+        mut op: dohc_engine_sync::ReplicationEnvelope,
+        bytes: Vec<u8>,
+    ) -> dohc_engine_sync::ReplicationEnvelope {
+        let mut rows = self.rows.lock().unwrap();
+        op.relay_seq = Some(10 + rows.len() as i64);
+        rows.push(op.clone());
+        self.blobs.lock().unwrap().insert(hex_sha256(&bytes), bytes);
+        op
+    }
+
+    /// A text write that creates `object_id` at `path`.
+    fn create(
+        &self,
+        object_id: &str,
+        path: &str,
+        text: &str,
+    ) -> dohc_engine_sync::ReplicationEnvelope {
+        let sha = hex_sha256(text.as_bytes());
+        self.serve(
+            dohc_engine_sync::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: "workspace".into(),
+                origin_id: "neighbour".into(),
+                origin_seq: 0,
+                relay_seq: None,
+                op_kind: "moment.append".into(),
+                payload: serde_json::json!({
+                    "momentId": "moment-neighbour", "versionId": "main", "objectId": object_id,
+                    "objectCreatedAtMs": 1, "path": path, "recordedAtMs": 2_000, "operation": "write",
+                    "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+                    "payloadAfterBlobSha256": sha, "payloadAfterPath": path,
+                    "metadata": {"origin": "sync"}, "beforePresent": "absent"
+                }),
+                recorded_at_ms: 2_000,
+            },
+            text.as_bytes().to_vec(),
+        )
+    }
+}
+
+macro_rules! refused_relay_methods {
+    ($($method:ident($request:ty) -> $response:ty;)*) => {
+        $(fn $method(&self, _req: $request) -> Result<$response, dohc_engine_sync::RelayError> {
+            Err(dohc_engine_sync::RelayError::InvalidResponse)
+        })*
+    };
+}
+
+impl dohc_engine_sync::RelayTransport for HostedFeed {
+    fn pull_hosted(
+        &self,
+        req: dohc_engine_sync::HostedPullRequest,
+    ) -> Result<dohc_engine_sync::HostedPullResponse, dohc_engine_sync::RelayError> {
+        let ops: Vec<_> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.relay_seq.unwrap() > req.cursor)
+            .filter(|op| {
+                req.object_id
+                    .as_ref()
+                    .is_none_or(|object_id| op.payload["objectId"] == object_id.as_str())
+            })
+            .cloned()
+            .collect();
+        Ok(dohc_engine_sync::HostedPullResponse {
+            scope: dohc_engine_sync::HostedScope {
+                token: "scope".into(),
+                documents: self.documents.clone(),
+            },
+            next_cursor: ops.last().map_or(req.cursor, |op| op.relay_seq.unwrap()),
+            ops,
+            has_more: false,
+        })
+    }
+
+    fn download_blobs(
+        &self,
+        req: dohc_engine_sync::BlobDownloadBatchRequest,
+    ) -> Result<dohc_engine_sync::BlobDownloadBatchResponse, dohc_engine_sync::RelayError> {
+        let blobs = self.blobs.lock().unwrap();
+        Ok(dohc_engine_sync::BlobDownloadBatchResponse {
+            results: req
+                .blobs
+                .iter()
+                .map(|blob| {
+                    blobs
+                        .get(&blob.sha256)
+                        .cloned()
+                        .map(|bytes| dohc_engine_sync::BlobDownloadResponse { bytes })
+                        .ok_or(dohc_engine_sync::RelayError::BlobMissing)
+                })
+                .collect(),
+        })
+    }
+
+    fn lookup_log_coordinate(
+        &self,
+        _req: dohc_engine_sync::LogCoordinateRequest,
+    ) -> Result<dohc_engine_sync::LogCoordinateResponse, dohc_engine_sync::RelayError> {
+        Ok(dohc_engine_sync::LogCoordinateResponse::Absent)
+    }
+
+    refused_relay_methods! {
+        push(dohc_engine_sync::PushRequest) -> dohc_engine_sync::PushResponse;
+        pull(dohc_engine_sync::PullRequest) -> dohc_engine_sync::PullResponse;
+        probe(dohc_engine_sync::ProbeRequest) -> dohc_engine_sync::ProbeResponse;
+        claim_workspace(dohc_engine_sync::ClaimRequest) -> dohc_engine_sync::ClaimResponse;
+        rotate_epoch(dohc_engine_sync::EpochRequest) -> dohc_engine_sync::EpochResponse;
+        blobs_have(dohc_engine_sync::BlobHaveRequest) -> dohc_engine_sync::BlobHaveResponse;
+        upload_blob(dohc_engine_sync::BlobUploadRequest) -> ();
+        upload_key_envelope(dohc_engine_sync::KeyEnvelopeRequest) -> dohc_engine_sync::KeyEnvelopeResponse;
+        download_key_envelope(dohc_engine_sync::KeyEnvelopeDownloadRequest) -> dohc_engine_sync::KeyEnvelopeDownloadResponse;
+        shared_channel_pull(dohc_engine_sync::SharedChannelRequest) -> dohc_engine_sync::SharedChannelResponse;
+        share_log_push(dohc_engine_sync::ShareLogPushRequest) -> dohc_engine_sync::PushResponse;
+        share_view_pull(dohc_engine_sync::ShareViewRequest) -> dohc_engine_sync::ShareViewResponse;
+        share_blob(dohc_engine_sync::ShareBlobRequest) -> dohc_engine_sync::BlobDownloadResponse;
+        share_blob_upload(dohc_engine_sync::ShareBlobUploadRequest) -> ();
+        share_proposal_submit(dohc_engine_sync::ShareProposalSubmitRequest) -> dohc_engine_sync::ShareProposalSubmitResponse;
+        share_collection_write(dohc_engine_sync::ShareCollectionWriteRequest) -> dohc_engine_sync::ShareCollectionWriteResponse;
+    }
+}
+
+/// One hosted pass of the host over `client`'s feed.
+fn hosted_pass(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    cache: &mut dohc_engine_collab::WriterDocCache,
+) -> dohc_engine_sync::HostedPassOutcome {
+    client
+        .pull_hosted_workspace(
+            store,
+            cache,
+            "workspace",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        )
+        .unwrap()
+}
+
+/// `pass` stopped `object` before `op`, which it held unapplied.
+fn stopped_before(
+    pass: &dohc_engine_sync::HostedPassOutcome,
+    op: &dohc_engine_sync::ReplicationEnvelope,
+) -> bool {
+    pass.pending_cursor.as_ref().is_some_and(|cursor| {
+        cursor.reads.get("object").is_some_and(|read| {
+            read.cursor == op.relay_seq.unwrap() - 1
+                && read.stopped == Some(dohc_engine_sync::HostedHold::WorkWaiting)
+        })
+    })
+}
+
+/// Sol's 4b2i-1 ruling, the production shape: the owner's desktop folds a
+/// disk edit into its own store and journals the `ydoc.update`, and the
+/// host's hosted pull delivers it after Stop released the activation with
+/// retained work in the file's existing paragraph: a Carried edit, an
+/// acknowledged seed, and the owner's edit pending at Stop. The fold is
+/// canonical Markdown with no metadata writes, so its deletions alone hold
+/// it. The document stops before the row, which is not acknowledged; native
+/// structure and every retained record stay as they were.
+#[tokio::test]
+async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
+    for retained in [Retained::Carried, Retained::Seed, Retained::Own] {
+        let case = format!("{retained:?}");
+        let mut w = retained_window(retained).await;
+        assert!(
+            w.text().contains(&format!("Starting together.{RETAINED}")),
+            "{case}: {}",
+            w.text()
+        );
+        let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+        let file = desktop.file();
+        assert!(!file.contains(RETAINED), "{case}: {file}");
+        let (fold, bytes) = desktop.fold(&format!("{file}\nA desktop edit.\n")).await;
+        assert_eq!(
+            dohc_engine_collab::inspect_update(&w.head(), &bytes),
+            dohc_engine_collab::UpdateInspection::Hold(
+                dohc_engine_collab::StructuralHold::LiveDeletion
+            ),
+            "{case}"
+        );
+        let (native, rows) = (w.native(), ingress_rows(&w.store));
+        let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+        let fold = feed.serve(fold, bytes);
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        assert!(w.text().contains(RETAINED), "{case}: {}", w.text());
+        assert_eq!(w.native(), native, "{case}: native structure");
+        assert_eq!(ingress_rows(&w.store), rows, "{case}: retained records");
+        assert!(!journaled(&w.store, &fold), "{case}: acknowledged");
+        assert_eq!((pass.applied, pass.refused), (0, 0), "{case}");
+        assert!(
+            stopped_before(&pass, &fold),
+            "{case}: {:?}",
+            pass.pending_cursor
+        );
+        // The hold carries the binding admission built.
+        let held = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &fold,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
+            panic!("{case}: {held:?}");
+        };
+        assert_eq!(
+            binding.incoming,
+            IncomingCoordinate {
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: fold.origin_id.clone(),
+                origin_seq: fold.origin_seq,
+                relay_seq: fold.relay_seq.unwrap(),
+            },
+            "{case}"
+        );
+        assert_eq!(binding.head_digest, hex_sha256(&native), "{case}");
+        let [tail] = binding.tails.as_slice() else {
+            panic!("{case}: {:?}", binding.tails);
+        };
+        assert_eq!(
+            (tail.namespace.as_str(), tail.activation_id.as_str()),
+            ("relay", w.first.activation_id.as_str()),
+            "{case}"
+        );
+        assert!(
+            matches!(&tail.coverage, RetainedCoverage::Unproven { unproven, .. }
+                if matches!(unproven.as_slice(), [RetainedContribution::Carried { update_digest, .. }] if *update_digest == w.retained_digest)),
+            "{case}: {:?}",
+            tail.coverage
+        );
+        assert_eq!(w.native(), native, "{case}");
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// An update that only adds content applies in the released window, though
+/// it repeats a deletion both sides already hold, and the successor then
+/// captures and adopts. The retained seed survives both.
+#[tokio::test]
+async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_adopts() {
+    let mut w = retained_window(Retained::Seed).await;
+    assert!(!w.text().contains("Scratch"), "{}", w.text());
+    let desktop = desktop_of(&w.base, &w.lineage, &w.synced).await;
+    let (append, bytes) = desktop.append(&w.lineage, "A desktop paragraph").await;
+    assert_eq!(
+        dohc_engine_collab::inspect_update(&w.head(), &bytes),
+        dohc_engine_collab::UpdateInspection::Admissible
+    );
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let append = feed.serve(append, bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let pass = hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(pass.applied, 1, "{:?}", pass.pending_cursor);
+    assert!(journaled(&w.store, &append));
+    let text = w.text();
+    assert!(
+        text.contains("A desktop paragraph") && text.contains(RETAINED),
+        "{text}"
+    );
+    // The desktop's fold over the same head still holds, and the cache the
+    // append warmed keeps the applied head.
+    let (fold, bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let native = w.native();
+    client.transport().serve(fold, bytes);
+    hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(w.native(), native);
+    let cached = w
+        .store
+        .read_with(|conn| {
+            Ok::<_, dohc_engine_collab::CollabError>(
+                cache
+                    .doc_for_consumer(conn, &window_key())?
+                    .map(|doc| doc.encode_full_state()),
+            )
+        })
+        .unwrap();
+    assert!(
+        cached.is_none_or(|cached| cached == native),
+        "the cache keeps the applied head"
+    );
+    // A safe update through the same cache still applies over that head.
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&native).unwrap();
+        doc.richdoc_append_paragraph("After the held fold")
+    };
+    w.store.put_binary_blob(&safe).unwrap();
+    let mut after = ydoc_row("after", &safe, &w.lineage, WINDOW_PATH, false);
+    after.relay_seq = Some(30);
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        &mut w.store,
+        &mut cache,
+        &after,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            applied.primary,
+            dohc_engine_sync::ApplyDisposition::Applied(_)
+        ),
+        "{:?}",
+        applied.primary
+    );
+    assert!(w.text().contains("After the held fold") && w.text().contains(RETAINED));
+    // The append's pass commits; the fold's, still holding, never did.
+    let committed = client
+        .commit_hosted_cursor(
+            &mut w.store,
+            "workspace",
+            pass.pending_cursor.as_ref().unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    w.actor
+        .materialize_replay_pending(w.root.path().to_owned(), "workspace".into(), 50)
+        .await
+        .unwrap();
+    let next = w
+        .actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            window_key(),
+            WINDOW_PATH.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.source.predecessor_activation_id.as_deref(),
+        Some(w.first.activation_id.as_str())
+    );
+    let boundary = w
+        .boundary
+        .clone()
+        .expect("an adopted chain keeps its boundary");
+    w.owner
+        .register_activation(
+            "relay".into(),
+            w.coordinate.clone(),
+            window_binding(&w.lineage),
+            next.activation_id.clone(),
+        )
+        .await
+        .unwrap()
+        .adopt_owner(
+            imported_cut(
+                &next,
+                Some(RetainedPrefix {
+                    terminal_receipt: boundary.terminal_receipt,
+                    event_count: boundary.event_count,
+                    history_evidence_digest: boundary.history_evidence_digest,
+                    predecessor_activation_id: w.first.activation_id.clone(),
+                }),
+            ),
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert!(w.text().contains(RETAINED));
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Another device's `ydoc.update` of the document, before the relay places it.
+fn ydoc_row(
+    origin: &str,
+    bytes: &[u8],
+    lineage: &str,
+    path: &str,
+    base: bool,
+) -> dohc_engine_sync::ReplicationEnvelope {
+    dohc_engine_sync::ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "workspace".into(),
+        origin_id: origin.into(),
+        origin_seq: 0,
+        relay_seq: None,
+        op_kind: "ydoc.update".into(),
+        payload: serde_json::json!({
+            "versionId":"main", "objectId":"object", "path":path, "contentKind":"richdoc",
+            "updateBlobSha256":hex_sha256(bytes), "lineageClaimId":lineage, "isBaseState":base
+        }),
+        recorded_at_ms: 70,
+    }
+}
+
+/// The hold is one document's: the pass applies a neighbour and commits,
+/// later rows of the held document wait unapplied, and the document reads
+/// its own rows from there. Each later pass, and one after a restart, holds
+/// again with nothing written and no more work. A held document never
+/// reaches successor capture, and loses nothing.
+#[tokio::test]
+async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
+    let mut w = retained_window(Retained::Carried).await;
+    execute(
+        &mut w.store,
+        "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+        VALUES ('workspace','neighbour','notes/neighbour.md','ready',1)",
+    );
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    // A later row of the same document that would apply on its own.
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("After the fold")
+    };
+    let feed = HostedFeed::new(&[("neighbour", "notes/neighbour.md"), ("object", WINDOW_PATH)]);
+    let fold = feed.serve(fold, fold_bytes);
+    let later = feed.serve(
+        ydoc_row("later", &safe, &w.lineage, WINDOW_PATH, false),
+        safe,
+    );
+    let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let (native, rows) = (w.native(), ingress_rows(&w.store));
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 1, "the neighbour");
+    assert!(journaled(&w.store, &created));
+    assert!(!journaled(&w.store, &fold) && !journaled(&w.store, &later));
+    assert_eq!(w.native(), native);
+    assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
+    assert!(!pass.has_more, "no work retries hot");
+    let committed = client
+        .commit_hosted_cursor(
+            &mut w.store,
+            "workspace",
+            pass.pending_cursor.as_ref().unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    assert_ne!(ingress_rows(&w.store), rows, "the neighbour applied");
+    let rows = ingress_rows(&w.store);
+    let replica = dohc_engine_sync::read_hosted_replica(&w.store, "workspace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replica.documents["object"].status,
+        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
+    );
+    assert_eq!(
+        replica.documents["neighbour"].status,
+        dohc_engine_sync::HostedDocumentStatus::Ready
+    );
+    let again = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(
+        stopped_before(&again, &fold) && !again.has_more && again.applied == 0,
+        "{again:?}"
+    );
+    assert_eq!(
+        (w.native(), ingress_rows(&w.store)),
+        (native.clone(), rows.clone()),
+        "redelivered"
+    );
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    let restarted = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(
+        stopped_before(&restarted, &fold) && !restarted.has_more && restarted.applied == 0,
+        "{restarted:?}"
+    );
+    assert_eq!(
+        (w.native(), ingress_rows(&w.store)),
+        (native.clone(), rows),
+        "after a restart"
+    );
+    let captured = w
+        .actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            window_key(),
+            WINDOW_PATH.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await;
+    assert!(captured.is_err(), "a held document is not ready");
+    assert_eq!(w.native(), native);
+    assert!(w.text().contains(RETAINED));
+    desktop.close().await;
+    w.close().await;
+}
+
+/// The ingress gate's own sites: a base state, a delta of another lineage
+/// and an update at another path hold while protected, never passing as an
+/// ordinary update. The same update at the document's path applies.
+#[tokio::test]
+async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
+    let mut w = retained_window(Retained::Carried).await;
+    let fresh = Ydoc::wire().richdoc_append_paragraph("Another lineage");
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("Safe")
+    };
+    let row = |store: &mut EngineStore,
+               origin: &str,
+               relay_seq: i64,
+               bytes: &[u8],
+               lineage: &str,
+               path: &str,
+               base: bool| {
+        store.put_binary_blob(bytes).unwrap();
+        let mut op = ydoc_row(origin, bytes, lineage, path, base);
+        op.relay_seq = Some(relay_seq);
+        op
+    };
+    let other_lineage = "e".repeat(64);
+    let lineage = w.lineage.clone();
+    let cases = [
+        (
+            "a base state",
+            row(
+                &mut w.store,
+                "base",
+                20,
+                &fresh,
+                &hex_sha256(&fresh),
+                WINDOW_PATH,
+                true,
+            ),
+        ),
+        (
+            "another lineage",
+            row(
+                &mut w.store,
+                "lineage",
+                21,
+                &safe,
+                &other_lineage,
+                WINDOW_PATH,
+                false,
+            ),
+        ),
+        (
+            "another path",
+            row(
+                &mut w.store,
+                "path",
+                22,
+                &safe,
+                &lineage,
+                "notes/moved.md",
+                false,
+            ),
+        ),
+    ];
+    let native = w.native();
+    for (case, op) in &cases {
+        let held = dohc_engine_sync::apply_replication_envelope(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            op,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        assert!(
+            matches!(
+                held,
+                Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(_))
+            ),
+            "{case}: {held:?}"
+        );
+        assert_eq!(w.native(), native, "{case}");
+        assert!(!journaled(&w.store, op), "{case}");
+    }
+    let op = row(
+        &mut w.store,
+        "safe",
+        23,
+        &safe,
+        &lineage,
+        WINDOW_PATH,
+        false,
+    );
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        &mut w.store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            applied.primary,
+            dohc_engine_sync::ApplyDisposition::Applied(_)
+        ),
+        "{:?}",
+        applied.primary
+    );
+    assert!(w.text().contains("Safe") && w.text().contains(RETAINED));
+    w.close().await;
+}
+
+/// With nothing retained, a released chain protects nothing: the desktop's
+/// fold applies in the window as it does outside it.
+#[tokio::test]
+async fn with_nothing_retained_a_desktop_fold_applies_in_the_released_window() {
+    let mut w = adopted_window(false).await;
+    w.release().await;
+    execute(
+        &mut w.store,
+        "UPDATE hosted_replicas SET scope_token='scope'",
+    );
+    let desktop = desktop_of(&w.base, &w.lineage, &[w.covered_bytes.clone()]).await;
+    let edited = format!("{}\nA desktop edit.\n", desktop.file());
+    let (fold, bytes) = desktop.fold(&edited).await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let fold = feed.serve(fold, bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(pass.applied, 1, "{:?}", pass.pending_cursor);
+    assert!(journaled(&w.store, &fold));
+    let projection = |store: &EngineStore| {
+        dohc_engine_collab::load_persisted(store, &window_key())
+            .unwrap()
+            .unwrap()
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+    };
+    assert!(projection(&w.store).contains("A desktop edit."));
+    assert_eq!(projection(&w.store), projection(&desktop.store));
+    desktop.close().await;
+    w.close().await;
+}
