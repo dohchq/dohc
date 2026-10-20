@@ -17,7 +17,7 @@ pub fn write_fingerprint_db(db_path: &Path, schema_version: i64) -> FixtureResul
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(dohc_engine_storage::sqlite_path(db_path))?;
+    let conn = Connection::open(db_path)?;
     conn.execute_batch("CREATE TABLE legacy_marker (x INTEGER)")?;
     conn.pragma_update(None, "user_version", schema_version)?;
     // Explicit close so no handle lingers (Windows: an open handle blocks the
@@ -32,7 +32,7 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(dohc_engine_storage::sqlite_path(db_path))?;
+    let conn = Connection::open(db_path)?;
     conn.execute_batch("CREATE TABLE someone_elses_table (y TEXT)")?;
     // user_version stays 0.
     conn.close().map_err(|(_, err)| err)?;
@@ -52,10 +52,7 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 /// create the `-shm` file a WAL database needs, so it must find one already
 /// there. Then drop the writer while this is held.
 pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open_with_flags(
-        dohc_engine_storage::sqlite_path(db_path),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.execute_batch("BEGIN")?;
     // Any read will do; `sqlite_schema` exists in every database.
     let _snapshot: i64 =

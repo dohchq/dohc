@@ -162,10 +162,7 @@ fn binary_blob_integrity_check_fails_closed_on_tampered_bytes() {
     }
     // Tamper: overwrite the bytes under the same key via a raw connection.
     {
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(
-            (scratch.db_path()).as_ref(),
-        ))
-        .expect("raw open");
+        let conn = Connection::open(scratch.db_path()).expect("raw open");
         conn.execute(
             "UPDATE binary_blobs SET bytes = ?1 WHERE sha256 = ?2",
             rusqlite::params![b"CORRUPTED".to_vec(), key],
@@ -413,7 +410,7 @@ fn unsupported_fingerprint_open_is_refused_and_preserves_evidence() {
     let db = scratch.db_path();
     // Build a v1 (foreign-fingerprint) database with a table.
     {
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("raw");
+        let conn = Connection::open(&db).expect("raw");
         conn.execute_batch("CREATE TABLE legacy (x INTEGER);")
             .expect("ddl");
         conn.pragma_update(None, "user_version", 1).expect("uv");
@@ -462,7 +459,7 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
         write_doc(&mut store, "doc-a", "kept");
     }
     {
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("raw");
+        let conn = Connection::open(&db).expect("raw");
         conn.execute_batch(NEWER_BUILD_MIGRATION)
             .expect("a newer build migrates");
         conn.close().expect("close");
@@ -497,8 +494,7 @@ fn a_newer_build_that_restamps_the_schema_version_is_named_as_newer() {
         let db = scratch.db_path();
         drop(EngineStore::open(&db, 1).expect("open"));
         {
-            let conn =
-                Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("raw");
+            let conn = Connection::open(&db).expect("raw");
             conn.execute_batch(NEWER_BUILD_MIGRATION)
                 .expect("a newer build migrates");
             conn.pragma_update(None, "user_version", version)
@@ -535,7 +531,7 @@ fn refusing_a_newer_store_leaves_its_wal_frames_in_place() {
     let wal = scratch.sub("engine.db-wal");
     drop(EngineStore::open(&db, 1).expect("open"));
     {
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("raw");
+        let conn = Connection::open(&db).expect("raw");
         // The newer build crashes, so nothing checkpoints its commit.
         conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
             .expect("no checkpoint on close");
@@ -576,7 +572,7 @@ fn corrupt_page1_header_classifies_as_corruption_not_unsupported() {
         drop(store);
     }
     {
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).expect("raw");
+        let conn = Connection::open(&db).expect("raw");
         conn.pragma_update(None, "user_version", 99).expect("uv");
         conn.close().expect("close");
     }
@@ -762,10 +758,7 @@ fn corrupt_materialization_rows_refuse_loading_without_rewriting_the_ledger() {
                 .preimage,
             Preimage::Absent
         );
-        let db = Connection::open(dohc_engine_storage::sqlite_path(
-            (scratch.db_path()).as_ref(),
-        ))
-        .expect("open ledger");
+        let db = Connection::open(scratch.db_path()).expect("open ledger");
         db.execute_batch(&format!(
             "UPDATE materialization_jobs SET {mutation} WHERE job_id = 'j1'"
         ))
@@ -930,8 +923,7 @@ fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
     let mut store = EngineStore::open(&path, 1_000).expect("open the engine store");
 
     // A second connection takes the write lock and keeps it.
-    let blocker = Connection::open(dohc_engine_storage::sqlite_path(path.as_ref()))
-        .expect("open a second connection");
+    let blocker = Connection::open(&path).expect("open a second connection");
     blocker
         .execute_batch("BEGIN IMMEDIATE")
         .expect("the blocker takes the write lock");
@@ -1004,8 +996,7 @@ fn displacement_group_commit_rolls_back_every_row_on_failure() {
     invalid.displaced_name = one.displaced_name.clone();
     // Duplicate names may not be unique in old stores; force a trigger error
     // after the first insertion to prove transaction-wide rollback.
-    let conn = Connection::open(dohc_engine_storage::sqlite_path((sc.db_path()).as_ref()))
-        .expect("connection");
+    let conn = Connection::open(sc.db_path()).expect("connection");
     conn.execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON materialization_displacements WHEN NEW.job_id = 'j2' BEGIN SELECT RAISE(ABORT, 'injected'); END;").expect("trigger");
     assert!(store.open_displacements(&[one.clone(), invalid]).is_err());
     assert!(

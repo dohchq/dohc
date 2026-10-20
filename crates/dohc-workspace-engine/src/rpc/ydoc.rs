@@ -2228,8 +2228,7 @@ mod tests {
             .await
             .unwrap();
         let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
-        let raw =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
         let folded: Vec<_> = (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS - 1)
             .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"}))
             .collect();
@@ -2544,7 +2543,7 @@ mod tests {
         })).await.unwrap();
         let (baseline, lineage, sequence) = {
             let db = rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(db_path.as_ref()),
+                &db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();
@@ -2814,7 +2813,7 @@ mod tests {
         *handle = serde_json::from_value(reopened["workspace"].clone()).unwrap();
         let snapshot = || {
             let db = rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(db_path),
+                db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();
@@ -3370,7 +3369,7 @@ mod tests {
 
         fn parked(&self) -> i64 {
             rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(self.db_path.as_ref()),
+                &self.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")
@@ -3593,8 +3592,7 @@ mod tests {
             let handle: WorkspaceHandle =
                 serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
             let db_path = service.open(Some(&handle)).expect("open").db_path.clone();
-            let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
-                .expect("engine db");
+            let db = rusqlite::Connection::open(&db_path).expect("engine db");
             db.execute_batch(&format!(
                 "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
                  VALUES ('{workspace_id}','local-origin','epoch','stream',1); \
@@ -3709,7 +3707,7 @@ mod tests {
 
         fn head(&self) -> i64 {
             rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(self.db_path.as_ref()),
+                &self.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")

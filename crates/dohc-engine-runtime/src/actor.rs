@@ -1482,11 +1482,9 @@ mod saturation_tests {
             );
         }
         // No actor command follows open: a reader observes autonomous resume.
-        let reader = rusqlite::Connection::open_with_flags(
-            dohc_engine_storage::sqlite_path(db.as_ref()),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let reader =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let ready: bool = reader.query_row(

@@ -304,8 +304,7 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
         std::fs::read_to_string(scratch.path().join(FILE)).unwrap(),
         outside
     );
-    let inspection =
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let inspection = rusqlite::Connection::open(&db).unwrap();
     let status: String = inspection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id=?1",

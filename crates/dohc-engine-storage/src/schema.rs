@@ -747,7 +747,7 @@ mod tests {
                 dohc_test_scratch::ScratchDir::new_named("live-application-schema").unwrap();
             let path = directory.path().join("store.sqlite");
             drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!("DROP TABLE {table}"))
                 .unwrap();
@@ -774,7 +774,7 @@ mod tests {
                 dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
             let path = directory.path().join("store.sqlite");
             drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!("DROP TABLE {table}"))
                 .unwrap();
@@ -834,7 +834,7 @@ mod tests {
         let directory = dohc_test_scratch::ScratchDir::new_named("schema-copy").unwrap();
         let path = directory.path().join("store.sqlite");
         std::fs::write(&path, image).unwrap();
-        let conn = rusqlite::Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
         conn.pragma_update(None, "foreign_keys", false).unwrap();
         (directory, path, conn)
     }
@@ -988,7 +988,7 @@ mod tests {
         let image = closed_schema_image();
         let (_directory, path, conn) = copied_schema_connection(&image);
         super::validate_v2(&conn).unwrap();
-        let writer = rusqlite::Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+        let writer = rusqlite::Connection::open(&path).unwrap();
         writer
             .execute_batch("BEGIN IMMEDIATE; DROP TABLE live_audit_base_publications; COMMIT;")
             .unwrap();
@@ -1031,7 +1031,7 @@ mod tests {
         writer
             .pragma_update(None, "journal_mode", "DELETE")
             .unwrap();
-        let reader = rusqlite::Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+        let reader = rusqlite::Connection::open(&path).unwrap();
         reader.busy_timeout(std::time::Duration::ZERO).unwrap();
         writer.execute_batch("BEGIN EXCLUSIVE;").unwrap();
         assert!(matches!(

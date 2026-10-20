@@ -2154,9 +2154,7 @@ mod tests {
         assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
         if restore_fence {
             let db = rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(
-                    (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-                ),
+                scratch.path().join(".dohc/engine/engine.db"),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();
@@ -2398,9 +2396,7 @@ mod tests {
                     .is_ok()
             );
             let db = rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(
-                    (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-                ),
+                scratch.path().join(".dohc/engine/engine.db"),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap();

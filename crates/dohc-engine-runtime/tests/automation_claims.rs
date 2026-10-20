@@ -944,7 +944,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
             case.name
         );
         let has_unattributed = case.creator.is_none() || case.editor == Some(None);
-        let recorded: String = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+        let recorded: String = rusqlite::Connection::open(&db)
             .expect("read history")
             .query_row(
                 "SELECT author_json FROM moments WHERE workspace_id=?1 AND object_id=?2 AND metadata_origin='ydoc' ORDER BY moment_order DESC LIMIT 1",
@@ -1327,8 +1327,7 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
         "a cancelled command writes nothing"
     );
     let subscriptions: i64 = {
-        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-            .expect("open db");
+        let conn = rusqlite::Connection::open(&db).expect("open db");
         conn.query_row(
             "SELECT COUNT(*) FROM automation_subscriptions WHERE workspace_id = ?1",
             [WS],

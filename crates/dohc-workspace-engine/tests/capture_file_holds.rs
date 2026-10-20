@@ -198,10 +198,7 @@ impl Fixture {
 async fn capture_hold_leaves_siblings_healthy() {
     let f = Fixture::new().await;
     let status = f.status().await;
-    let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let sibling: String = db.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.path='sibling.txt'", [WS], |r| r.get(0)).unwrap();
     assert_eq!(sibling, "Sibling.\n");
     assert_eq!(status["degraded"], false, "{status}");
@@ -219,7 +216,7 @@ async fn capture_hold_leaves_siblings_healthy() {
 async fn fix1_capture_release_drains_parked_path_without_reopen() {
     let f = Fixture::new().await;
     let db = engine_db_path(&f.scratch).unwrap();
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
     let generation: i64 = conn.query_row("SELECT moment_order FROM moments WHERE workspace_id=?1 AND path=?2 ORDER BY moment_order DESC LIMIT 1", [WS,HELD], |r| r.get(0)).unwrap();
     // A real durable relay intent for the pre-hold head, parked by the same
     // boundary that an incoming relay page uses.
@@ -252,10 +249,7 @@ async fn fix1_unheld_capture_supersedes_older_parked_intent() {
     std::fs::write(f.scratch.path().join(HELD), "Representable.\n").unwrap();
     f.scan().await;
     assert_eq!(f.status().await["heldFiles"], json!([]));
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let (generation, sha): (i64, String) = conn.query_row(
         "SELECT m.moment_order,s.blob_sha256 FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
         [WS, HELD], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -334,10 +328,7 @@ async fn capture_hold_retries_changed_bytes() {
     write_file(f.scratch.path(), HELD, b"Representable now.\n");
     f.scan().await;
     assert_eq!(f.status().await["heldFiles"], json!([]));
-    let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let captured: String = db.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.path=?2", [WS, HELD], |r| r.get(0)).unwrap();
     assert_eq!(captured, "Representable now.\n");
     f.close().await;
@@ -417,10 +408,7 @@ async fn capture_hold_switches_away_and_back_without_adopting_outside_bytes() {
     )
     .await;
     assert!(result.is_object(), "{result}");
-    let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let active: String = db
         .query_row(
             "SELECT COALESCE((SELECT version_id FROM active_versions WHERE workspace_id=?1), (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1))",
@@ -456,10 +444,7 @@ async fn capture_hold_switches_away_and_back_without_adopting_outside_bytes() {
 async fn fix1_released_path_drains_despite_sibling_io_failure() {
     use std::os::windows::fs::OpenOptionsExt;
     let f = Fixture::new().await;
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let generation: i64 = conn.query_row("SELECT moment_order FROM moments WHERE workspace_id=?1 AND path=?2 ORDER BY moment_order DESC LIMIT 1", [WS,HELD], |r| r.get(0)).unwrap();
     conn.execute("INSERT INTO materialization_jobs(job_id,workspace_id,target_path,content_sha256,preimage_sha256,target_generation,status,created_at_ms,operation,preimage_present) VALUES ('relay-partial-proof',?1,?2,?3,?4,?5,'pending',5,'write',1)",
         rusqlite::params![WS,HELD,dohc_engine_storage::hex_sha256(SEED.as_bytes()),dohc_engine_storage::hex_sha256(outside().as_bytes()),generation]).unwrap();
@@ -522,10 +507,7 @@ async fn switch_hold_release(action: &str) {
     }
     f.scan().await;
     assert_eq!(f.status().await["heldFiles"], json!([]));
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let texts: Vec<(String, String)> = conn.prepare("SELECT s.version_id,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.path=?2 ORDER BY s.version_id").unwrap()
         .query_map([WS,HELD], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
     if action == "delete" || action == "rename" {
@@ -635,10 +617,7 @@ async fn switch_hold_rewrite_release(target_path: &str) {
         std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
         "Target version.\n"
     );
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     #[cfg(windows)]
     assert_stored_leaf(f.scratch.path(), target_path);
     let source: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2", [WS,HELD], |r| r.get(0)).unwrap();
@@ -717,10 +696,7 @@ async fn switching_versions_with_equal_bytes_preserves_the_selected_spelling() {
         .await;
         assert_stored_leaf(f.scratch.path(), path);
         f.reopen().await;
-        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-            (engine_db_path(&f.scratch).unwrap()).as_ref(),
-        ))
-        .unwrap();
+        let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
         let text: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3", [WS,version,path], |r| r.get(0)).unwrap();
         assert_eq!(text, "Target version.\n");
     }
@@ -755,10 +731,7 @@ async fn review_round_trip_then_repair_makes_no_conflict_copies() {
         std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
         repaired
     );
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let target: String=conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='later' AND s.path=?2", [WS,HELD], |r| r.get(0)).unwrap();
     assert_eq!(target, "Target version.\n");
     f.close().await;
@@ -772,10 +745,7 @@ async fn review2_ancestor_release(repair: bool) {
         json!({"workspaceId":WS,"versionId":"later"}),
     )
     .await;
-    let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (engine_db_path(&f.scratch).unwrap()).as_ref(),
-    ))
-    .unwrap();
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending'", [WS,child], |row| row.get(0)).unwrap();
     assert_eq!(pending, 1, "the descendant must wait as a durable job");
     if repair {
@@ -831,10 +801,7 @@ async fn history_operation_fence_scopes_capture_holds_and_preserves_ownership() 
             "versionId":"main", "origin":"api", "fromPath":from, "toPath":"moved.md", "captureHoldId":hold
         })).await;
         f.call("capture.release", json!({"holdId":hold})).await;
-        let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-            (engine_db_path(&f.scratch).unwrap()).as_ref(),
-        ))
-        .unwrap();
+        let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
         let count = || {
             db.query_row(
                 "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",

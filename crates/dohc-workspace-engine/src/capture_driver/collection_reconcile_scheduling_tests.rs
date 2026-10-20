@@ -277,7 +277,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
         &["tasks/collection.yaml", "tasks/alpha.md"],
     );
 
-    let object_id = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let object_id = rusqlite::Connection::open(&db)
         .expect("open database observer")
         .query_row(
             "SELECT object_id FROM path_aliases \
@@ -353,15 +353,14 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
             .await
             .clean
         );
-        let state: String =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-                .unwrap()
-                .query_row(
-                    "SELECT adoption_state FROM collection_records WHERE file_path='tasks/beta.md'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
+        let state: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT adoption_state FROM collection_records WHERE file_path='tasks/beta.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
             state.starts_with("deferred-conflict"),
             "the sibling must remain pending: {state}"
@@ -372,8 +371,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
                 .contains("id: rec_")
         );
     }
-    let observer = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("idle reconcile observer");
+    let observer = rusqlite::Connection::open(&db).expect("idle reconcile observer");
     wait_for_link_drain(&observer).await;
     let data_version = || {
         observer
@@ -453,7 +451,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
             .expect("read adopted record")
             .contains("id: rec_")
     );
-    let adoption_state = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let adoption_state = rusqlite::Connection::open(&db)
         .expect("open adopted-state observer")
         .query_row(
             "SELECT adoption_state FROM collection_records \
@@ -490,7 +488,7 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         &["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"],
     );
 
-    let object_id = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let object_id = rusqlite::Connection::open(&db)
         .expect("open database observer")
         .query_row(
             "SELECT object_id FROM path_aliases \
@@ -506,7 +504,7 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
     let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("first record key");
     let lease = leases.acquire(&key).expect("hold first record lease");
 
-    let bindings: i64 = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap().query_row(
+    let bindings: i64 = rusqlite::Connection::open(&db).unwrap().query_row(
         "SELECT COUNT(*) FROM collection_records WHERE workspace_id=?1 AND file_path='tasks/beta.md'", [WORKSPACE_ID], |row| row.get(0)).unwrap();
     assert_eq!(
         bindings, 0,
@@ -569,19 +567,18 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         beta_after_first.contains("id: rec_"),
         "an unrelated candidate must adopt in the same pass"
     );
-    let (alpha_state, beta_state) =
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-            .expect("open first-pass state observer")
-            .query_row(
-                "SELECT \
+    let (alpha_state, beta_state) = rusqlite::Connection::open(&db)
+        .expect("open first-pass state observer")
+        .query_row(
+            "SELECT \
                 MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
                 MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
              FROM collection_records \
              WHERE workspace_id = ?1 AND version_id = 'main'",
-                [WORKSPACE_ID],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("first-pass adoption states");
+            [WORKSPACE_ID],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("first-pass adoption states");
     assert_eq!(alpha_state, "pending-lossless");
     assert_eq!(beta_state, "adopted");
 
@@ -589,9 +586,9 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
     while let Ok(notice) = notices.try_recv() {
         emitted.push(notice);
     }
-    let beta_record_id: String = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap().query_row(
+    let beta_record_id: String = rusqlite::Connection::open(&db).unwrap().query_row(
         "SELECT record_id FROM collection_records WHERE workspace_id=?1 AND file_path='tasks/beta.md'", [WORKSPACE_ID], |row| row.get(0)).unwrap();
-    let claims: i64 = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap().query_row(
+    let claims: i64 = rusqlite::Connection::open(&db).unwrap().query_row(
         "SELECT COUNT(*) FROM automation_claims WHERE workspace_id=?1 AND record_id=?2 AND change_kind='added'", rusqlite::params![WORKSPACE_ID, beta_record_id], |row| row.get(0)).unwrap();
     assert_eq!(
         claims, 1,
@@ -718,7 +715,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     })
     .join()
     .expect("collection adoption setup thread");
-    let record_id = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let record_id = rusqlite::Connection::open(&db)
         .expect("open binding observer")
         .query_row(
             "SELECT record_id FROM collection_records \
@@ -787,7 +784,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
         .expect("acknowledge the already-captured adopted-file baseline");
 
     let expected = if deferred_same_id {
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap().execute(
+        rusqlite::Connection::open(&db).unwrap().execute(
             "UPDATE collection_records SET adoption_state='deferred-conflict' WHERE file_path='tasks/alpha.md'", []).unwrap();
         let changed = adopted.replace("Alpha task", "Changed task");
         std::fs::write(&record_path, &changed).unwrap();
@@ -843,7 +840,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
         "the changed record capture settles cleanly"
     );
     let restored = std::fs::read_to_string(&record_path).expect("read restored record");
-    let state: String = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let state: String = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row(
             "SELECT adoption_state FROM collection_records WHERE file_path='tasks/alpha.md'",
@@ -931,7 +928,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
     })
     .join()
     .expect("malformed collection capture setup thread");
-    let binding_count = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let binding_count = rusqlite::Connection::open(&db)
         .expect("open binding observer")
         .query_row(
             "SELECT COUNT(*) FROM collection_records \
@@ -1045,7 +1042,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         .clean,
         "the repaired collection record capture settles cleanly"
     );
-    let pending = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let pending = rusqlite::Connection::open(&db)
         .expect("open pending record observer")
         .query_row(
             "SELECT record_id,adoption_state,index_initialized FROM collection_records \
@@ -1098,7 +1095,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         .clean,
         "the imported repaired record adopts cleanly"
     );
-    let indexed = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    let indexed = rusqlite::Connection::open(&db)
         .expect("open indexed record observer")
         .query_row(
             "SELECT r.record_id,r.adoption_state,r.index_initialized,f.value_json \
@@ -1188,8 +1185,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
     .join()
     .expect("collection adoption thread");
 
-    let observer = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open database observer");
+    let observer = rusqlite::Connection::open(&db).expect("open database observer");
     let adoption_state = observer
         .query_row(
             "SELECT adoption_state FROM collection_records \
@@ -1292,7 +1288,7 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
     // no DocKey accepts (a control byte): the repair pass fails after the
     // collection reconcile above has committed its adoption.
     let sha = "a".repeat(64);
-    rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
+    rusqlite::Connection::open(&db)
         .expect("open database seeder")
         .execute_batch(&format!(
             "INSERT INTO binary_blobs (sha256,byte_length,bytes)                  VALUES ('{sha}',1,X'00');
@@ -1404,11 +1400,11 @@ async fn refused_collection_flush(persistent: bool) {
     .await
     .unwrap();
     assert!(!driver.status().degraded());
-    let writer = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let writer = rusqlite::Connection::open(&db).unwrap();
     writer
         .execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE refused_capture_load(body BLOB)")
         .unwrap();
-    let reader = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let reader = rusqlite::Connection::open(&db).unwrap();
     reader
         .execute_batch("BEGIN; SELECT * FROM refused_capture_load")
         .unwrap();
@@ -1523,17 +1519,13 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
                 return;
             }
             assert_eq!(step.changed_paths, ["tasks/alpha.md"]);
-            let writer =
-                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(listener_db.as_ref()))
-                    .unwrap();
+            let writer = rusqlite::Connection::open(&listener_db).unwrap();
             writer
                 .execute_batch(
                     "PRAGMA wal_autocheckpoint=0; CREATE TABLE partial_reconcile_load(body BLOB)",
                 )
                 .unwrap();
-            let reader =
-                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(listener_db.as_ref()))
-                    .unwrap();
+            let reader = rusqlite::Connection::open(&listener_db).unwrap();
             reader
                 .execute_batch("BEGIN; SELECT * FROM partial_reconcile_load")
                 .unwrap();

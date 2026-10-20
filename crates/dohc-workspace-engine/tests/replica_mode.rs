@@ -155,10 +155,7 @@ async fn replica_open_forces_passive_without_capture_or_dispatch_recovery() {
         )
         .await
         .unwrap();
-    let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (root.path().join(".dohc/engine/engine.db")).as_ref(),
-    ))
-    .unwrap();
+    let db = rusqlite::Connection::open(root.path().join(".dohc/engine/engine.db")).unwrap();
     let role: String = db
         .query_row("SELECT store_role FROM engine_ownership", [], |r| r.get(0))
         .unwrap();

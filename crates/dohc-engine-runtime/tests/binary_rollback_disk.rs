@@ -397,8 +397,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
         BYTES
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read generations");
+    let connection = rusqlite::Connection::open(&db).expect("read generations");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "main-mutation");
     let (higher_generation, restore_generation): (i64, i64) = connection
         .query_row(
@@ -513,8 +512,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
         .expect("workspace B higher-generation write");
 
     let restore_job_id = binary_rollback_job_identity(WORKSPACE_A, "main", "a-mutation");
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read generation ledger");
+    let connection = rusqlite::Connection::open(&db).expect("read generation ledger");
     let (restore_generation, other_generation, restore_workspace, other_workspace): (
         i64,
         i64,
@@ -551,8 +549,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
         std::fs::read(root_b.path().join("shared.bin")).expect("workspace B file"),
         OTHER_LINEAGE_BYTES
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read restore status");
+    let connection = rusqlite::Connection::open(&db).expect("read restore status");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id = ?1",
@@ -640,8 +637,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
         "the completed restore fence must not suppress a post-rollback write"
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("read job ledger");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "tip-mutation");
     let (restore_generation, write_generation, restore_status, write_status): (
         i64,
@@ -843,8 +839,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
     let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "cancelled-rename");
     let write_job_id = binary_rename_write_job_id(&rollback_identity);
     let delete_job_id = binary_rename_delete_job_id(&rollback_identity);
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("open job ledger");
     connection
         .execute(
             "UPDATE materialization_jobs SET status='cancelled', completed_at_ms=30 \
@@ -885,8 +880,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
     // even though the outcome reports Conflict; the already-terminal delete
     // stays cancelled. This proves the post-replay ledger state instead of
     // only the pre-replay setup above.
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("reopen job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("reopen job ledger");
     let statuses_after_replay: (String, String) = connection
         .query_row(
             "SELECT write.status, delete_job.status \
@@ -1022,8 +1016,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
         .await
         .expect("retry pending rename delete");
     assert!(!scratch.path().join("new-pending.bin").exists());
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read delete job");
+    let connection = rusqlite::Connection::open(&db).expect("read delete job");
     let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "pending-rename");
     let delete_job_id = binary_rename_delete_job_id(&rollback_identity);
     let status: String = connection
@@ -1107,8 +1100,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
     let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "conflicted-rollback");
     let write_job_id = binary_rename_write_job_id(&rollback_identity);
     let delete_job_id = binary_rename_delete_job_id(&rollback_identity);
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read rollback jobs");
+    let connection = rusqlite::Connection::open(&db).expect("read rollback jobs");
     let (write_status, delete_status): (String, String) = connection
         .query_row(
             "SELECT write.status, delete_job.status \
@@ -1442,8 +1434,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
         .await
         .expect("colliding normal rename");
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read retained rows");
+    let connection = rusqlite::Connection::open(&db).expect("read retained rows");
     let retained_before: Vec<(String, String, String, i64)> = {
         let mut statement = connection
             .prepare(
@@ -1488,8 +1479,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
     );
     assert!(!scratch.path().join("unrelated-old.bin").exists());
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("verify retained rows");
+    let connection = rusqlite::Connection::open(&db).expect("verify retained rows");
     let retained_after: Vec<(String, String, String, i64)> = {
         let mut statement = connection
             .prepare(
@@ -1719,8 +1709,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
         0
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("read job ledger");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "inactive-delete");
     let status: String = connection
         .query_row(
@@ -1751,8 +1740,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
             .expect("activation restores file to disk"),
         BYTES
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read drained job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("read drained job ledger");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "inactive-delete");
     let status: String = connection
         .query_row(
@@ -1875,8 +1863,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
         std::fs::read(scratch.path().join("switch-back.bin")).expect("projected main bytes"),
         BYTES
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read restore status");
+    let connection = rusqlite::Connection::open(&db).expect("read restore status");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "switch-back-delete");
     let status: String = connection
         .query_row(
@@ -1938,8 +1925,7 @@ async fn post_commit_active_version_lookup_failure_returns_committed_rollback() 
         "the response describes a rollback that is already durable"
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read pending restore");
+    let connection = rusqlite::Connection::open(&db).expect("read pending restore");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "lookup-mutation");
     let status: String = connection
         .query_row(
@@ -2039,8 +2025,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
         UPDATED_BYTES
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read pending A restore");
+    let connection = rusqlite::Connection::open(&db).expect("read pending A restore");
     let restore_job_id = binary_rollback_job_identity(WORKSPACE_A, "main", "workspace-a-write");
     let status: String = connection
         .query_row(
@@ -2103,8 +2088,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
         0,
         "the stale ordinary write is superseded without touching disk"
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read ordinary job");
+    let connection = rusqlite::Connection::open(&db).expect("read ordinary job");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id = ?1",
@@ -2280,8 +2264,7 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
         .expect("stage current bytes");
     drop(store);
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open job ledger");
+    let connection = rusqlite::Connection::open(&db).expect("open job ledger");
     connection
         .execute(
             "INSERT INTO materialization_jobs \
@@ -2316,8 +2299,7 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
         UPDATED_BYTES,
         "the older global job must not replay over a newer scoped completion"
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read terminal status");
+    let connection = rusqlite::Connection::open(&db).expect("read terminal status");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id = ?1",
@@ -2460,8 +2442,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
         0,
         "a completed reprojection must leave its suppression available to capture"
     );
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("read active version");
+    let connection = rusqlite::Connection::open(&db).expect("read active version");
     let active_version_id: String = connection
         .query_row(
             "SELECT version_id FROM active_versions WHERE workspace_id = ?1",

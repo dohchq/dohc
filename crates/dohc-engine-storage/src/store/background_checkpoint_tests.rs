@@ -83,7 +83,7 @@ fn a_pinned_wal_refuses_before_the_callback_then_resumes() {
     let db = root.join("engine.db");
     let mut store = store(&db);
     write(&mut store, 0).unwrap();
-    let reader = Connection::open(crate::sqlite_path(db.as_ref())).unwrap();
+    let reader = Connection::open(&db).unwrap();
     reader
         .execute_batch("BEGIN; SELECT * FROM undo_checkpoint_load")
         .unwrap();

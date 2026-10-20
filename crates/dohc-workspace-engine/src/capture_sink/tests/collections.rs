@@ -36,7 +36,7 @@ fn excessive_quote_depth_is_held_in_both_collection_capture_routes() {
         ingest(&mut sink, path).unwrap();
         sink.reconcile_collections_observed(None).unwrap();
         seed_captured_richdoc_lineage(&sink, path);
-        let conn = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+        let conn = Connection::open(&db).unwrap();
         let completed = format!(
             "---\nTitle: Completed\n---\n{} too deep\n",
             "> ".repeat(121)
@@ -190,8 +190,7 @@ fn set_richdoc_frontmatter_and_settle(
 }
 
 fn enable_sync_for_collection_test(db: &Path) {
-    let connection = Connection::open(dohc_engine_storage::sqlite_path(db))
-        .expect("open collection test database");
+    let connection = Connection::open(db).expect("open collection test database");
     connection
         .execute(
             "INSERT INTO sync_identity \
@@ -916,8 +915,7 @@ fn oversized_collection_adoption_retries_after_watcher_shrinks_record() {
     let record_id = collection_record(&db, "tasks/oversized.md")
         .and_then(|(record_id, state)| (state == "pending-lossless").then_some(record_id).flatten())
         .expect("pending oversized adoption");
-    let mut connection = Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open decline connection");
+    let mut connection = Connection::open(&db).expect("open decline connection");
     let transaction = connection.transaction().expect("begin decline transaction");
     decline_oversized_collection_adoption_in_tx(
         &transaction,
@@ -2052,8 +2050,7 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
     let object_id = snapshot(&db, "tasks/blocked.md")
         .expect("record snapshot")
         .object_id;
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open conflict connection");
+    let connection = rusqlite::Connection::open(&db).expect("open conflict connection");
     connection
         .execute(
             "INSERT INTO conflicts (\
@@ -2086,8 +2083,7 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
         "Blocked\n"
     );
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref()))
-        .expect("open resolution connection");
+    let connection = rusqlite::Connection::open(&db).expect("open resolution connection");
     connection
         .execute(
             "UPDATE conflicts SET status = 'resolved', updated_at_ms = 20 \
@@ -2261,8 +2257,7 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
     sink.reconcile_collections_observed(None)
         .expect("adopt nested-list record");
     assert_eq!(adopted_record_id(&db, path), RECORD_ID);
-    let connection =
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
     let key = dohc_engine_collab::DocKey::new(
         WORKSPACE_ID,
         VERSION_ID,
@@ -2292,8 +2287,7 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
         indexed_collection_field(&db, path, "status").unwrap().0,
         "\"done\""
     );
-    let connection =
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
     let recovery: (String, String, Option<String>) = connection
         .query_row(
             "SELECT before.text,after.text,m.before_latest_moment_id FROM moments m

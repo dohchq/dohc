@@ -762,8 +762,7 @@ async fn narrowing_path_policy_journals_the_retirement_delete() {
     wait_for_text(&transport, &handle, "notes/a.md", Some("tracked history")).await;
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     {
-        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db_path.as_ref()))
-            .expect("open sync setup");
+        let conn = rusqlite::Connection::open(&db_path).expect("open sync setup");
         conn.execute("INSERT INTO sync_identity (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) VALUES (?1, 'owner-device', 'epoch', 'stream', 1)", [WORKSPACE_ID]).expect("owner identity");
         conn.execute("INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) VALUES (?1, 'owner-device', 0)", [WORKSPACE_ID]).expect("enable outgoing journal");
     }
@@ -3091,8 +3090,7 @@ async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction(
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await;
 
     let db = scratch.path().join(".dohc/engine/engine.db");
-    let observer =
-        rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+    let observer = rusqlite::Connection::open(&db).unwrap();
     // Enlarge one real capture transaction deterministically, without a load run.
     // The snapshot trigger's payload commits atomically with the captured file.
     observer
@@ -3108,8 +3106,7 @@ async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction(
     probe.release();
     tokio::time::timeout(WAIT, async {
         loop {
-            let probe_connection =
-                rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+            let probe_connection = rusqlite::Connection::open(&db).unwrap();
             let log: i64 = probe_connection
                 .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1))
                 .unwrap();

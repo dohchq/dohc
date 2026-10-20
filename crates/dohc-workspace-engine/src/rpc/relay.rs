@@ -2482,7 +2482,7 @@ mod tests {
         /// How many relations the workspace's Collections hold.
         fn edges(&self) -> i64 {
             rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(self.open.db_path.as_ref()),
+                &self.open.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")
@@ -2499,10 +2499,7 @@ mod tests {
         }
 
         fn engine_db(&self) -> rusqlite::Connection {
-            let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-                self.open.db_path.as_ref(),
-            ))
-            .expect("engine db");
+            let conn = rusqlite::Connection::open(&self.open.db_path).expect("engine db");
             conn.busy_timeout(std::time::Duration::from_secs(5))
                 .expect("busy timeout");
             conn
@@ -2634,7 +2631,7 @@ mod tests {
         fn stored_cursor(&self) -> Option<String> {
             use rusqlite::OptionalExtension;
             rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(self.open.db_path.as_ref()),
+                &self.open.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")
@@ -3694,7 +3691,7 @@ mod tests {
         }
         let edges = || {
             rusqlite::Connection::open_with_flags(
-                dohc_engine_storage::sqlite_path(f.open.db_path.as_ref()),
+                &f.open.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")
@@ -3850,10 +3847,7 @@ mod tests {
         );
         // A marker the store cannot read fails the claim.
         let export_lane = |lane: i64| {
-            let db = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-                f.open.db_path.as_ref(),
-            ))
-            .expect("engine db");
+            let db = rusqlite::Connection::open(&f.open.db_path).expect("engine db");
             db.pragma_update(None, "ignore_check_constraints", true)
                 .expect("pragma");
             db.execute(

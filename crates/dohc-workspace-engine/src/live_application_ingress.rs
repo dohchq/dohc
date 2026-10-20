@@ -1445,10 +1445,8 @@ pub(crate) mod tests {
             );
             assert!(response.output_guard.as_ref().unwrap().is_current());
             assert!(ingress.budget.available_permits() < budget);
-            let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-                (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-            ))
-            .unwrap();
+            let raw =
+                rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
             let rows:(i64,i64,i64)=raw.query_row("SELECT (SELECT COUNT(*) FROM live_device_bootstraps),(SELECT COUNT(*) FROM moments WHERE object_id='two'),(SELECT COUNT(*) FROM engine_search_files_fts WHERE object_id='two' AND text=?1)",[markdown],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
             assert_eq!(rows, (1, 1, 1));
             drop(response);
@@ -1651,8 +1649,7 @@ pub(crate) mod tests {
             "stream IDs cannot be reused"
         );
         let db = _scratch.path().join(".dohc/engine/engine.db");
-        let raw =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path((db).as_ref())).unwrap();
+        let raw = rusqlite::Connection::open(db).unwrap();
         assert_eq!(
             raw.query_row(
                 "SELECT COUNT(*) FROM live_device_update_applications",
@@ -1707,10 +1704,8 @@ pub(crate) mod tests {
                 config().max_uploads
             );
         }
-        let raw = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-            (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-        ))
-        .unwrap();
+        let raw =
+            rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
         assert_eq!(
             raw.query_row(
                 "SELECT COUNT(*) FROM live_device_update_applications",

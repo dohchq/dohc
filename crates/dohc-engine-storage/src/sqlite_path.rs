@@ -3,7 +3,7 @@ use std::path::Path;
 /// Use the ordinary Windows spelling when it names exactly the same file.
 /// SQLite otherwise mistakes a verbatim drive path for UNC and shares SHM
 /// handles whose concurrent read-lock bookkeeping can strand WAL readers.
-pub fn sqlite_path(path: &Path) -> &Path {
+pub(crate) fn sqlite_path(path: &Path) -> &Path {
     #[cfg(windows)]
     {
         let Some(text) = path.to_str() else {
@@ -16,7 +16,8 @@ pub fn sqlite_path(path: &Path) -> &Path {
         if bytes.len() < 3
             || !bytes[0].is_ascii_alphabetic()
             || &bytes[1..3] != b":\\"
-            || text.encode_utf16().count() >= 260
+            // Leave room for SQLite's -journal sidecar below MAX_PATH.
+            || disk.encode_utf16().count() + "-journal".len() >= 260
         {
             return path;
         }
@@ -123,16 +124,16 @@ mod tests {
 
     #[test]
     fn length_limit_counts_utf16_units() {
-        let boundary = format!(r"\\?\C:\{}", "a".repeat(252));
+        let boundary = format!(r"\\?\C:\{}", "a".repeat(248));
         assert_eq!(sqlite_path(Path::new(&boundary)), Path::new(&boundary[4..]));
         let too_long = format!("{boundary}a");
         assert_eq!(
             sqlite_path(Path::new(&too_long)).as_os_str(),
             Path::new(&too_long).as_os_str()
         );
-        let short = format!(r"\\?\C:\{}", "\u{1f980}".repeat(125));
+        let short = format!(r"\\?\C:\{}", "\u{1f980}".repeat(124));
         assert_eq!(sqlite_path(Path::new(&short)), Path::new(&short[4..]));
-        let long = format!(r"\\?\C:\{}", "\u{1f980}".repeat(127));
+        let long = format!(r"\\?\C:\{}", "\u{1f980}".repeat(125));
         assert_eq!(
             sqlite_path(Path::new(&long)).as_os_str(),
             Path::new(&long).as_os_str()
@@ -184,4 +185,42 @@ mod tests {
             non_unicode
         );
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn fresh_stores_create_and_reopen_at_path_length_boundary() {
+    use crate::{EngineStore, NoFaults, StorageError};
+    use dohc_test_scratch::ScratchDir;
+
+    fn create_and_reopen(path: &Path) -> Result<(), StorageError> {
+        let mut store = EngineStore::open(path, 0)?;
+        store.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE path_probe(n); INSERT INTO path_probe VALUES(42)")
+                .map_err(StorageError::persist_public)
+        })?;
+        drop(store);
+        let reopened = EngineStore::open(path, 1)?;
+        let value: i64 = reopened.read_with(|conn| {
+            conn.query_row("SELECT n FROM path_probe", [], |row| row.get(0))
+                .map_err(StorageError::persist_public)
+        })?;
+        assert_eq!(value, 42);
+        Ok(())
+    }
+
+    let mut failures = Vec::new();
+    for units in 251..=255 {
+        let scratch = ScratchDir::new().unwrap();
+        let root_units = scratch.path().to_str().unwrap().encode_utf16().count();
+        let parent = scratch.join("a".repeat(units - root_units - 11));
+        std::fs::create_dir(&parent).unwrap();
+        let path = std::fs::canonicalize(parent).unwrap().join("engine.db");
+        assert_eq!(path.to_str().unwrap()[4..].encode_utf16().count(), units);
+        match create_and_reopen(&path) {
+            Ok(()) => eprintln!("plain path {units}: created and reopened"),
+            Err(error) => failures.push(format!("plain path {units}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

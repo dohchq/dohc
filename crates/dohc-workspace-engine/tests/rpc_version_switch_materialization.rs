@@ -138,10 +138,8 @@ async fn post_commit_collection_reconcile_failure_does_not_mask_committed_switch
         .expect("collection schema");
     let feature = create_feature(&transport, &handle, 3, &workspace_id).await;
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-    ))
-    .expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .expect("sqlite busy timeout");
@@ -313,10 +311,8 @@ async fn version_fork_replays_pending_secret_write_before_capture_scan() {
         }),
     )
     .await;
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-    ))
-    .expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
     let status: String = connection
         .query_row(
             "SELECT status FROM materialization_jobs WHERE job_id = ?1",
@@ -394,10 +390,8 @@ async fn capture_suppresses_a_secret_write_materialized_by_version_switch() {
     switch_to(&transport, &handle, 7, &workspace_id, &feature).await;
     call(&transport, &handle, 8, "capture.flush", json!({})).await;
 
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-    ))
-    .expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
     let capture_owned: i64 = connection
         .query_row(
             "SELECT m.capture_owned FROM secret_files f \
@@ -475,10 +469,8 @@ async fn switching_skips_content_already_equal_to_target() {
         .modified()
         .expect("after modified");
     assert_eq!(after, before, "equal target content must not be rewritten");
-    let connection = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-        (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-    ))
-    .expect("sqlite");
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
     let jobs: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM materialization_jobs \
@@ -640,10 +632,8 @@ async fn equal_byte_secret_switch_publishes_each_versions_spelling() {
             "KEY=same\n"
         );
         call(&transport, &handle, index + 1, "capture.flush", json!({})).await;
-        let conn = rusqlite::Connection::open(dohc_engine_storage::sqlite_path(
-            (scratch.path().join(".dohc/engine/engine.db")).as_ref(),
-        ))
-        .unwrap();
+        let conn =
+            rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
         let count: i64 = conn.query_row("SELECT count(*) FROM secret_files WHERE workspace_id=?1 AND version_id=?2 AND path=?3", rusqlite::params![workspace_id, version, leaf], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
     }

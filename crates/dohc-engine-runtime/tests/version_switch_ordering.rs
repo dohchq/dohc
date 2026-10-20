@@ -638,8 +638,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
         "feature"
     );
     supervisor.close(&database).expect("close");
-    let connection =
-        Connection::open(dohc_engine_storage::sqlite_path(database.as_ref())).expect("sqlite");
+    let connection = Connection::open(&database).expect("sqlite");
     let jobs: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM materialization_jobs \
@@ -735,8 +734,7 @@ async fn switch_projection_generation_does_not_advance_moment_order() {
         .expect("post-switch mutation");
 
     supervisor.close(&database).expect("close");
-    let connection =
-        Connection::open(dohc_engine_storage::sqlite_path(database.as_ref())).expect("sqlite");
+    let connection = Connection::open(&database).expect("sqlite");
     let projection_generation: i64 = connection
         .query_row(
             "SELECT MAX(target_generation) FROM materialization_jobs \
@@ -1014,8 +1012,7 @@ async fn switch_leaves_the_same_bytes_alone_when_only_their_kind_differs() {
         BYTES
     );
     supervisor.close(&database).expect("close");
-    let connection =
-        Connection::open(dohc_engine_storage::sqlite_path(database.as_ref())).expect("sqlite");
+    let connection = Connection::open(&database).expect("sqlite");
     let jobs: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM materialization_jobs \

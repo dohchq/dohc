@@ -601,8 +601,7 @@ fn tampered_ciphertext_fails_closed_on_materialize() {
 
     // Flip a byte in the stored ciphertext (simulating on-disk corruption).
     {
-        let conn =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
         let ct: String = conn
             .query_row("SELECT ciphertext_base64 FROM secret_files", [], |r| {
                 r.get(0)
@@ -671,8 +670,7 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
 
     // Splice `.env`'s whole sealed record onto the `prod.env` row.
     {
-        let conn =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
         let spliced = conn
             .execute(
                 "UPDATE secret_files SET \
@@ -875,8 +873,7 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
 
     // Insert the TS-produced sealed row directly (bypassing Rust encryption).
     {
-        let conn =
-            rusqlite::Connection::open(dohc_engine_storage::sqlite_path(db.as_ref())).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         conn.execute(
             "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, auth_tag_base64, \

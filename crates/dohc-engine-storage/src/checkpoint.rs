@@ -669,11 +669,8 @@ mod tests {
             write(&mut s, 0, 1024);
             s.read_with(|conn| conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)"))
                 .unwrap();
-            let reader = Connection::open_with_flags(
-                crate::sqlite_path(path.as_ref()),
-                OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .unwrap();
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             reader
                 .execute_batch("BEGIN; SELECT * FROM checkpoint_load")
                 .unwrap();
@@ -750,7 +747,7 @@ mod tests {
             let scratch = ScratchDir::new().unwrap();
             let path = scratch.path().join("engine.db");
             if upgrading {
-                let mut conn = Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+                let mut conn = Connection::open(&path).unwrap();
                 let before = BASELINE_MIGRATIONS
                     .iter()
                     .position(|m| m.id == "v2-persisted-links")
@@ -801,7 +798,7 @@ mod tests {
     fn fresh_schema_larger_than_the_writer_bound_finishes_before_publication() {
         let scratch = ScratchDir::new().unwrap();
         let path = scratch.path().join("engine.db");
-        let mut conn = Connection::open(crate::sqlite_path(path.as_ref())).unwrap();
+        let mut conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
             .unwrap();
         let tx = conn.transaction().unwrap();
@@ -822,7 +819,7 @@ mod tests {
 
     fn store_before_link_migration(path: &Path) -> Connection {
         use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
-        let mut conn = Connection::open(crate::sqlite_path(path)).unwrap();
+        let mut conn = Connection::open(path).unwrap();
         conn.set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
             true,
@@ -867,11 +864,8 @@ mod tests {
             let scratch = ScratchDir::new().unwrap();
             let path = scratch.path().join("engine.db");
             let conn = store_before_link_migration(&path);
-            let reader = Connection::open_with_flags(
-                crate::sqlite_path(path.as_ref()),
-                OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .unwrap();
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             reader
                 .execute_batch("BEGIN; SELECT * FROM checkpoint_load;")
                 .unwrap();
@@ -1206,11 +1200,7 @@ mod tests {
         // observable even when an empty WAL would report no checkpoint work.
         s.read_with(|c| c.execute_batch("CREATE TABLE reopen_probe(id INTEGER PRIMARY KEY); INSERT INTO reopen_probe VALUES(1);"))
             .unwrap();
-        let reader = Connection::open_with_flags(
-            crate::sqlite_path(path.as_ref()),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         reader
             .execute_batch("BEGIN; SELECT * FROM reopen_probe;")
             .unwrap();
