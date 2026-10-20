@@ -482,7 +482,7 @@ export const monitorPort = 4250;
 export const launchAgentLabel = "app.dohc.verification-queue";
 export const nightlyAgentLabel = "app.dohc.verification-nightly";
 export const launchAgentsDir = (home = homedir()) => join(home, "Library", "LaunchAgents");
-const guiDomain = () => `gui/${process.getuid()}`;
+export const guiDomain = () => `gui/${process.getuid()}`;
 const launchctl = args => spawnSync("launchctl", args, { encoding: "utf8" });
 
 /** The command that starts the installed service. Starting a running task or LaunchAgent does nothing. */
@@ -657,8 +657,8 @@ export function taskDefinition(root) {
 `;
 }
 
-const plistText = text => `<string>${text.replace(/[&<>]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</string>`;
-const plist = (label, env, entries) => `<?xml version="1.0" encoding="UTF-8"?>
+export const plistText = text => `<string>${text.replace(/[&<>]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</string>`;
+export const plist = (label, env, entries) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>

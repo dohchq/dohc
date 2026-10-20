@@ -70,8 +70,19 @@ The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
 This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
-Start the runner's `run.cmd` when building a release.
-The runner can stay offline between releases.
+[Scheduled nightlies](#publish-nightlies-on-a-schedule) need both runners online at 04:00 UTC+8.
+On the release PC, start each runner when you sign in, and keep the PC awake.
+Locking the screen is fine. Signing out stops the Windows runner's desktop session.
+In PowerShell, with each runner's folder and the WSL distribution filled in:
+
+```powershell
+$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "<runner folder>\run.cmd" -WorkingDirectory "<runner folder>")
+Register-ScheduledTask -TaskName "dohc Linux runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -- bash -lc 'cd <runner folder in WSL> && ./run.sh'")
+```
+
+Without a schedule, start the runner's `run.cmd` when building a release.
 
 ### Use WSL2 for Linux builds
 
@@ -139,6 +150,48 @@ If any package fails, the publish job does not run.
 To publish, dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`.
 Then [add the macOS files](#add-the-macos-files) the same day. The Mac command always signs and notarizes.
 
+### Publish nightlies on a schedule
+
+On the Mac mini, a LaunchAgent publishes each nightly with nobody at the Mac.
+Ice decided on 2026-10-20 that it publishes without asking each time.
+Every rule above still applies.
+
+At 04:00 local time, launchd updates a clean clone of `main` in `~/dohc-release/driver`.
+It then runs `node scripts/release-nightly.mjs run` from that clone. The job:
+
+1. Waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
+2. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
+3. Skips the night when the Mac's nightly verification has not passed on `main`'s head commit.
+4. Skips the night when no Windows or no Linux release runner is online.
+5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`. If `main` moved after the checks, it cancels that run.
+6. Waits up to 6 hours for the run. When the run publishes, it [adds the macOS files](#add-the-macos-files) to the new release.
+
+The job comments on #2281 after each published nightly and each failure.
+It also comments when it skips for a reason someone must fix, such as an offline runner.
+A night with nothing new posts nothing.
+The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
+Only one run happens at a time.
+
+The job needs all of these:
+
+- The Mac's verification queue, installed with `pnpm verify:queue install`.
+- A [saved release keychain password](#let-releases-run-unattended).
+- `gh` signed in with admin access to `dohchq/dohc`, which reading the runners' status needs.
+- A signed-in session. launchd runs the job only there, where the login keychain is open.
+
+Install or remove the LaunchAgent from a checkout of `main`:
+
+```sh
+node scripts/release-nightly.mjs install
+node scripts/release-nightly.mjs uninstall
+```
+
+To check the workflow without publishing, run a dry run by hand. It dispatches with `dry_run=true`, waits for the run, and adds no macOS files:
+
+```sh
+node scripts/release-nightly.mjs run --dry-run
+```
+
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
@@ -203,6 +256,7 @@ GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
 
 Follow these steps for every published release, nightly or stable.
 Run the command as soon as the workflow publishes.
+The [scheduled nightly job](#publish-nightlies-on-a-schedule) runs it for each nightly it publishes.
 A Mac updater reads `<channel>-mac.yml` from the newest release on its channel.
 Until this command uploads that file, a Mac on that channel shows no update and no error.
 It updates at its first check after the file arrives.
