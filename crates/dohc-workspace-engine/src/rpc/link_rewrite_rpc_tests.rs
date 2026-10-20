@@ -1,9 +1,12 @@
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
 use super::*;
 use dohc_engine_domain::{
     DomainError, RenameTextFile, VersionedTextStore, WriteText, write_text_in_tx,
 };
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::Request,
 };
 use dohc_engine_storage::{EngineStore, NoFaults};
@@ -35,22 +38,22 @@ async fn rpc(
     method: &str,
     key: &str,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            Request {
-                id: 100,
-                method: method.into(),
-                workspace: Some(handle.clone()),
-                deadline_ms: None,
-                idempotency_key: Some(key.into()),
-                progress: false,
-                params: json!({"operationId":OP}),
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
-        .result
+    common::call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        Request {
+            id: 100,
+            method: method.into(),
+            workspace: Some(handle.clone()),
+            deadline_ms: None,
+            idempotency_key: Some(key.into()),
+            progress: false,
+            params: json!({"operationId":OP}),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method}: {error:?}"))
+    .result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

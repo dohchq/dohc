@@ -173,19 +173,38 @@ impl Fixture {
         request: &str,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Value, RuntimeError> {
-        self.actor
-            .history_rewrite_links(
-                self.ws.clone(),
-                OP.into(),
-                request.into(),
-                None,
-                self.root.to_path_buf(),
-                self.leases.clone(),
-                self.serial.clone(),
-                faults,
-                CancellationToken::new(),
-            )
-            .await
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            let result = self
+                .actor
+                .history_rewrite_links(
+                    self.ws.clone(),
+                    OP.into(),
+                    request.into(),
+                    None,
+                    self.root.to_path_buf(),
+                    self.leases.clone(),
+                    self.serial.clone(),
+                    faults.clone(),
+                    CancellationToken::new(),
+                )
+                .await;
+            match result {
+                Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return result;
+                    }
+                    tokio::time::sleep(backoff.min(remaining)).await;
+                    if Instant::now() >= deadline {
+                        return result;
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(1));
+                }
+                result => return result,
+            }
+        }
     }
     async fn text(&self, path: &str) -> String {
         let (ws, path) = (self.ws.clone(), path.to_owned());
@@ -539,6 +558,30 @@ struct CrashNth {
     nth: usize,
     seen: AtomicUsize,
 }
+struct CrashAfterDocuments {
+    store: Mutex<EngineStore>,
+    request: String,
+    documents: usize,
+}
+impl FaultInjector for CrashAfterDocuments {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point != FaultPoint::StorageAfterCommitBeforeAck {
+            return FaultAction::Continue;
+        }
+        let documents: Option<usize> = self.store.lock().unwrap().read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(payload_hash,'$[2].documents') FROM engine_requests WHERE request_id=?1 AND kind='history-link-rewrites'",
+                [&self.request],
+                |row| row.get(0),
+            ).optional()
+        }).unwrap();
+        if documents == Some(self.documents) {
+            FaultAction::Crash
+        } else {
+            FaultAction::Continue
+        }
+    }
+}
 impl FaultInjector for CrashNth {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         if point == self.point && self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.nth {
@@ -744,11 +787,26 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
             nth: 3,
             seen: AtomicUsize::new(0),
         });
-        assert!(matches!(
-            f.pass("crash-rewrite", faults).await,
-            Err(RuntimeError::OperationCrashed)
-        ));
+        let result = f.pass("crash-rewrite", faults).await;
+        assert!(
+            matches!(result, Err(RuntimeError::OperationCrashed)),
+            "{result:?}"
+        );
         f.restart().await;
+        assert_eq!(
+            f.actor
+                .history_operation(f.ws.clone(), OP.into())
+                .await
+                .unwrap()
+                .moments
+                .len(),
+            if point == FaultPoint::StorageBeforePersist {
+                2
+            } else {
+                3
+            },
+            "the second source and its receipt share the crash boundary"
+        );
         let result = f.pass("crash-rewrite", Arc::new(NoFaults)).await.unwrap();
         assert_eq!(result["documents"], 3);
         assert_eq!(result["links"], 6);
@@ -968,10 +1026,10 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         Ok(())
     }).await.unwrap();
 
-    let crash = Arc::new(CrashNth {
-        point: FaultPoint::StorageAfterCommitBeforeAck,
-        nth: 1001,
-        seen: AtomicUsize::new(0),
+    let crash = Arc::new(CrashAfterDocuments {
+        store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
+        request: "performance".into(),
+        documents: 1000,
     });
     let result = f.pass("performance", crash).await;
     assert!(
