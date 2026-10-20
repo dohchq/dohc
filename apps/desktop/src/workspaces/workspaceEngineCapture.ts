@@ -475,8 +475,11 @@ export type WorkspaceEngineYDocProviderSession = Omit<
 };
 
 // The session this layer holds, which keeps the evict the public one drops.
+// `setTextAside` puts the document's text in Notices and answers the draft's
+// id, or null without a draft store.
 type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
   evict(): Promise<void>;
+  setTextAside(): Promise<string | null>;
 };
 
 // Whether a document's file has existed. Once true, never false. One object
@@ -804,7 +807,10 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
-  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
+  // Sets a document's text aside in Notices and answers the draft's id.
+  // `discardUnsentState` removes that draft once a save wrote the text.
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<string>;
+  discardUnsentState?: (draftId: string) => Promise<void>;
   hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
   waitForTypingRecovery?: () => Promise<void>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
@@ -2605,6 +2611,23 @@ export function createWorkspaceEngineCapture(
       fileFact.existed = true;
     };
     const settleCovers = new Map<string, number>();
+    // Puts text in Notices through the app's draft store, and answers the
+    // draft's id. A refusal tells the person, since the text is then only in
+    // the open document.
+    const preserveText = async (doc: Y.Doc, contentKind: YdocContentKind | undefined): Promise<string> => {
+      try {
+        if (!sessionObjectId || contentKind === undefined || !options.preserveUnsentState) {
+          throw new Error("Y.Doc recovery has no object identity.");
+        }
+        return await options.preserveUnsentState({ path: input.path, objectId: sessionObjectId, contentKind, doc });
+      } catch (error) {
+        const name = input.path.split("/").at(-1) ?? input.path;
+        const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
+        onError(`draft preservation of ${input.path}`, error);
+        input.onEditRefused?.("draft-preservation", message);
+        throw error;
+      }
+    };
     const settleOwed = (): boolean =>
       !settleForgiven && updatesSettled < updatesCounted;
     const openGeneration = async (
@@ -2691,18 +2714,7 @@ export function createWorkspaceEngineCapture(
               retired.destroy();
             },
             preserveUnsentState: options.preserveUnsentState ? async doc => {
-              try {
-                if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
-                await options.preserveUnsentState!({
-                  path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
-                });
-              } catch (error) {
-                const name = input.path.split("/").at(-1) ?? input.path;
-                const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
-                onError(`draft preservation of ${input.path}`, error);
-                input.onEditRefused?.("draft-preservation", message);
-                throw error;
-              }
+              await preserveText(doc, opened?.contentKind);
             } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id, lane) => {
@@ -3427,6 +3439,11 @@ export function createWorkspaceEngineCapture(
       get doc() {
         if (canonicalDoc === null) throw closedError();
         return canonicalDoc;
+      },
+      setTextAside() {
+        if (!options.preserveUnsentState) return Promise.resolve(null);
+        if (canonicalDoc === null) return Promise.reject(closedError());
+        return preserveText(canonicalDoc, contentKind);
       },
       initialUpdate,
       ...(objectId ? { objectId } : {}),
@@ -4410,6 +4427,28 @@ export function createWorkspaceEngineCapture(
           if (digest.kind === "unverifiable") return false;
           return digest.kind === "changed" || digest.sha256 !== settled;
         };
+        // While its file is deleted outside dohc, the document's text is only
+        // in this session: once the session is released, capture retires the
+        // path and the document's history goes with it. So from the first
+        // save refused over the missing file until a save writes the file,
+        // Notices keeps a draft of the newest text, through a crash or any
+        // close. The chain holds the draft's id.
+        let textSetAside: Promise<string | null> = Promise.resolve(null);
+        const setTextAside = (): void => {
+          textSetAside = textSetAside.then(async (previous) => {
+            if (entry === null || (await absentHeadDiskState(rootPath, input.path)) !== "missing") return previous;
+            // A draft the store refused has told the person.
+            const draft = await entry.session.setTextAside().catch(() => null);
+            if (draft === null) return previous;
+            if (previous !== null && previous !== draft) await discardDraft(previous);
+            return draft;
+          });
+        };
+        const discardDraft = (draft: string): Promise<boolean> =>
+          (options.discardUnsentState?.(draft) ?? Promise.resolve()).then(() => true, (error: unknown) => {
+            onError(`discard of the draft of ${input.path}`, error);
+            return false;
+          });
         const onSettled = async (
           result: {
             sha256: string;
@@ -4446,6 +4485,10 @@ export function createWorkspaceEngineCapture(
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
             return false;
           }
+          // The file has the text, so a draft set aside for it goes. One the
+          // store did not remove waits for the next save.
+          textSetAside = textSetAside.then(async (draft) =>
+            draft === null || (await discardDraft(draft)) ? null : draft);
           // The engine just wrote this path's settled content to disk — the
           // proof a stand-down marker denies. This fires for every
           // settle on this session, including the pre-close one a rename's
@@ -4598,6 +4641,7 @@ export function createWorkspaceEngineCapture(
           if (!(error instanceof YdocOwnerDraftPendingError)) {
             onError(`ydoc settle of ${input.path}`, error);
           }
+          if (isConflictStaleTargetCause(error)) setTextAside();
           reportSaveState(
             settleFailureSaveState(error),
             saveToken,
@@ -5273,7 +5317,9 @@ export function createWorkspaceEngineCapture(
         let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
         const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
           if (shuttingDown && quitClose) return quitClose;
-          const closing = shuttingDown && closeInFlight ? closeInFlight : attemptCloseEntry(opts);
+          // A close waits for the draft its refused save sets aside.
+          const closing = shuttingDown && closeInFlight ? closeInFlight
+            : attemptCloseEntry(opts).finally(() => textSetAside);
           closeInFlight = closing;
           if (shuttingDown) quitClose = closing;
           const completed = (): void => {
@@ -5404,16 +5450,6 @@ export function createWorkspaceEngineCapture(
             if (shuttingDown ||
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
               try {
-                // Text its file never got, and the file was deleted outside
-                // dohc: after the release, nothing would lead back to it.
-                // Notices keeps it, after a restart too.
-                const unsavedOverDeletedFile = !liveEntry.orphaned && fileFact.existed && updatesSeen !== updatesSettled &&
-                  (await absentHeadDiskState(rootPath, input.path)) === "missing";
-                if (unsavedOverDeletedFile && options.preserveUnsentState && session.objectId) {
-                  await options.preserveUnsentState({
-                    path: input.path, objectId: session.objectId, contentKind: session.contentKind, doc: session.doc,
-                  });
-                }
                 await session.evict();
                 quitEvictionFailure = null;
                 dischargedByEvict = true;

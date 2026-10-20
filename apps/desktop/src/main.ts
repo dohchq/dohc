@@ -22,7 +22,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, listLiveDraftRecovery, removeLiveDraft, removeLiveDraftCopies, preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -2433,6 +2433,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
         preserveUnsentState: draft => preserveUnsentLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
         ),
+        discardUnsentState: draftId => removeLiveDraft(join(stateDir(), "live-draft-recovery"), draftId),
         hasRetainedLiveDraft: (path, objectId) => hasRetainedLiveDraft(
           join(stateDir(), "live-draft-recovery"), workspace.workspaceId, path, objectId,
         ),
@@ -4840,7 +4841,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
         }, { workspace: binding.workspace });
         return statuses[path] ?? null;
       }).catch(() => null),
-      preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
+      preserveDraft: async draft => { await preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft); },
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
       // The attachment, not the root's spelling: the registry keeps the root

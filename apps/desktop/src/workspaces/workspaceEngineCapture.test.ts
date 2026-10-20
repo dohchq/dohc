@@ -39,6 +39,7 @@ import {
 import {
   DaemonRefusalError,
   YdocOwnerDraftPendingError,
+  YdocReleasedWithSettleFailureError,
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -165,6 +166,7 @@ const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 interface CaptureOptions {
   diskWriter?: EngineDiskWriter;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
+  discardUnsentState?: WorkspaceEngineCaptureOptions["discardUnsentState"];
   store?: CaptureVersionedTextStore;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
@@ -1920,6 +1922,50 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
     expect(errors).toHaveBeenCalledWith("draft preservation of notes/a.md", draftError);
     await engine.stop();
+  });
+
+  // dohc#2308. A replicated document's release can succeed over a refused
+  // save, and its session is then gone. Its text, set aside when the save
+  // over the deleted file was first refused, stays set aside. A draft the
+  // store refuses tells the person.
+  it.each(["kept", "refused"] as const)("sets a deleted file's text aside before a replicated release (%s)", async (store) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const drafts: string[] = [];
+    const preserveUnsentState = vi.fn(async ({doc}: {doc: Y.Doc}) => {
+      if (store === "refused") throw new Error("Draft storage refused.");
+      drafts.push(doc.getText("plainText").toString());
+      return "a".repeat(64);
+    });
+    const discardUnsentState = vi.fn(async () => undefined);
+    const notices = vi.fn();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
+          close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    if (store === "kept") {
+      expect(drafts).toEqual(["typed"]);
+      expect(notices).not.toHaveBeenCalled();
+    } else {
+      expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
+    }
+    engine.beginShutdown();
+    await engine.stop();
+    expect(discardUnsentState).not.toHaveBeenCalled();
   });
 
   it("settles and retires every live Y.Doc session before stopping the capture", async () => {

@@ -104,8 +104,8 @@ export async function removeLiveDraftCopies(directory: string, workspaceId: stri
   catch {return before.filter(record => !removed.has(record.recordId));}
 }
 
-/** Exact CRDT recovery complements the renderer's user-visible set-aside text. */
-export async function preserveLiveDraft(directory: string, workspaceId: string, draft: LiveDraft): Promise<void> {
+/** Exact CRDT recovery complements the renderer's user-visible set-aside text. Answers the draft's id. */
+export async function preserveLiveDraft(directory: string, workspaceId: string, draft: LiveDraft): Promise<string> {
   if (classifyEngineFilePathForRead(draft.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
   const content = JSON.stringify({ version: 1, workspaceId, path: draft.path, objectId: draft.objectId,
     ...(draft.remoteWorkspaceId !== undefined ? { remoteWorkspaceId: draft.remoteWorkspaceId } : { contentKind: draft.contentKind, text: draft.text }),
@@ -121,15 +121,21 @@ export async function preserveLiveDraft(directory: string, workspaceId: string, 
     await rm(temporary, { force: true }).catch(() => {});
     activeTemporaryDrafts.delete(temporary);
   }
+  return digest;
+}
+
+/** Removes the draft `preserveLiveDraft` answered with this id. */
+export async function removeLiveDraft(directory: string, draftId: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(draftId)) throw new Error("This is not a draft id.");
+  await rm(join(directory, `${draftId}.json`), { force: true });
 }
 
 export async function preserveUnsentLiveDraft(directory: string, workspaceId: string, input: {
   path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc;
-}): Promise<void> {
+}): Promise<string> {
   const update = Y.encodeStateAsUpdate(input.doc);
   if (input.contentKind === "scene") {
-    await preserveLiveDraft(directory, workspaceId, {path: input.path, objectId: input.objectId, contentKind: "scene", update});
-    return;
+    return await preserveLiveDraft(directory, workspaceId, {path: input.path, objectId: input.objectId, contentKind: "scene", update});
   }
   const snapshot = new Y.Doc();
   try {
@@ -138,7 +144,7 @@ export async function preserveUnsentLiveDraft(directory: string, workspaceId: st
     if (input.contentKind === "plaintext") text = snapshot.getText("plainText").toString();
     else if (input.contentKind === "richdoc") text = (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(snapshot);
     else throw new Error("This document format cannot enter text draft recovery.");
-    await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update });
+    return await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update });
   } finally { snapshot.destroy(); }
 }
 
