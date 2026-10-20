@@ -201,7 +201,7 @@ fn pending_publication(
         SELECT j.job_id,j.target_path,j.operation,j.preimage_present,j.preimage_sha256
         FROM materialization_jobs j WHERE j.workspace_id=?1 AND j.status='pending'
           AND j.target_path IN (SELECT path FROM paths)
-        ORDER BY j.created_at_ms,j.job_id").map_err(StorageError::corrupt_public)?;
+        ORDER BY j.target_generation,j.job_id").map_err(StorageError::corrupt_public)?;
     let jobs = stmt
         .query_map(params![ws, operation, version], |r| {
             Ok((
@@ -219,6 +219,7 @@ fn pending_publication(
         dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
     let mut paths = std::collections::HashMap::new();
     let mut unpublished = std::collections::HashMap::new();
+    // Ordinary jobs carry their moment_order as target_generation.
     // The oldest preimage describes disk before the entire pending chain.
     for (_, path, kind, present, sha) in &jobs {
         if token.is_cancelled() {
@@ -461,7 +462,7 @@ impl ActorHandle {
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
                     .map_err(StorageError::corrupt_public)?;
-                // Another caller can persist between admission and this snapshot.
+                // A prior attempt may have persisted before losing its reply.
                 if let Some((plan, _, _)) =
                     store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref()))?
                 {
@@ -558,7 +559,7 @@ impl ActorHandle {
                 }
             }
             let read_db = db.clone();
-            let loaded = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 let store = EngineStore::open_read_only(&read_db)?;
                 let (plan, cursor, _) = store
                     .read_with(|conn| {
@@ -574,11 +575,7 @@ impl ActorHandle {
                 Ok::<_, RuntimeError>((Arc::new(plan), cursor))
             })
             .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-            if loaded.1 != 0 {
-                inputs.clear();
-            }
-            loaded
+            .map_err(|_| RuntimeError::ActorUnavailable)??
         };
         // Completed replays leave any parked file jobs to the placement continuation.
         let mut placement_cursor = if prepared_cursor == plan.members.len() {
@@ -690,6 +687,9 @@ impl ActorHandle {
                 "member-inverse"
             };
             let turn_token = token.clone();
+            let turn_budget = std::time::Duration::from_millis(5);
+            #[cfg(test)]
+            let turn_budget = tests::turn_budget(&request).unwrap_or(turn_budget);
             let next = self.run_undo_turn(request.clone(),phase,Some(prepared_cursor),move |store,cache| {
                 let _guards = (_capture,_sessions);
                 if turn_token.is_cancelled() { return Err(RuntimeError::Cancelled); }
@@ -698,7 +698,8 @@ impl ActorHandle {
                     let mut index = usize::try_from(cursor).map_err(|_| corrupt())?;
                     let mut batch = batch;
                     if complete { return Ok((p.members.len(),false,batch)); }
-                    if index != prepared_cursor { return Ok((index,false,std::collections::VecDeque::new())); }
+                    // undo_gate keeps the prepared inputs aligned with the durable cursor.
+                    debug_assert_eq!(index, prepared_cursor);
                     let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                     if active != p.version { return Err(DomainError::InvalidInput {reason:"An Undo is still running. Switch versions when it finishes."}.into()); }
                     let started = std::time::Instant::now();
@@ -753,7 +754,7 @@ impl ActorHandle {
                             index += 1;
                             committed = true;
                             tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,index as i64,if index==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
-                            if turn_token.is_cancelled() || started.elapsed() >= std::time::Duration::from_millis(5) { break; }
+                            if turn_token.is_cancelled() || started.elapsed() >= turn_budget { break; }
                         }
                         Ok(())
                     })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) };

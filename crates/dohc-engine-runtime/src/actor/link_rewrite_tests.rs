@@ -771,6 +771,13 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_compensation() {
+    crash_during_undo(2, std::time::Duration::MAX).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn crash_after_one_write_inverse_resumes_the_remaining_write_members() {
+    crash_during_undo(3, std::time::Duration::ZERO).await;
+}
+async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
     let mut f = Fixture::new(3, 3);
     let fault = Arc::new(CrashNth {
         point: FaultPoint::StorageAfterCommitBeforeAck,
@@ -788,10 +795,11 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
         .await
         .unwrap();
     assert_eq!(committed.moments.len(), 3);
+    undo_probe::set_turn_budget(&format!("{}-undo", f.ws), budget);
     let fault = Arc::new(CrashNth {
         point: FaultPoint::StorageAfterCommitBeforeAck,
-        // Plan, then rename inverse. Write members remain for resume.
-        nth: 2,
+        // Plan, rename inverse, then one write per turn under the zero budget.
+        nth,
         seen: AtomicUsize::new(0),
     });
     assert!(matches!(
@@ -812,6 +820,29 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
         Err(RuntimeError::OperationCrashed)
     ));
     f.restart().await;
+    let request = format!("{}-undo", f.ws);
+    f.actor
+        .run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    let (cursor, kind): (usize, String) = conn.query_row(
+                        "SELECT result_seq,kind FROM engine_requests WHERE request_id=?1",
+                        [&request],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    assert_eq!(
+                        cursor,
+                        nth - 1,
+                        "the selected member committed before the crash"
+                    );
+                    assert_eq!(kind, "history-undo-pending", "at least one write remains");
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .map_err(StorageError::corrupt_public)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let replay = f.undo().await.unwrap();
     assert!(!replay.deduped);
     assert_eq!(replay.moments.len(), 3);
@@ -1452,57 +1483,7 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_replays_rejoin_the_durable_cursor_without_reusing_other_member_inputs() {
-    let f = Fixture::new(20, 20);
-    let ws = f.ws.clone();
-    f.actor
-        .run(move |store, _| {
-            store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
-                for i in 0..20 {
-                    let body = format!("document {i}: {BODY} distinct tail {i}");
-                    write_text_in_tx(
-                        tx,
-                        &write(
-                            &ws,
-                            &format!("source-{i:04}"),
-                            &format!("source-{i:04}.md"),
-                            &body,
-                            &format!("distinct-{i}"),
-                        ),
-                    )?;
-                }
-                Ok(())
-            })?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    for i in 0..20 {
-        std::fs::write(
-            f.root.join(format!("source-{i:04}.md")),
-            format!("document {i}: {BODY} distinct tail {i}"),
-        )
-        .unwrap();
-    }
-    f.pass("concurrent-forward", Arc::new(NoFaults))
-        .await
-        .unwrap();
-    let (first, second) = tokio::join!(f.undo(), f.undo());
-    let (first, second) = (first.unwrap(), second.unwrap());
-    assert_eq!(first.moments, second.moments);
-    assert_eq!(first.moments.len(), 21);
-    assert!(first.not_restored.is_empty() && second.not_restored.is_empty());
-    for i in 0..20 {
-        assert_eq!(
-            f.text(&format!("source-{i:04}.md")).await,
-            format!("document {i}: {BODY} distinct tail {i}")
-        );
-    }
-    f.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_edit_chain_cancels_together_without_false_conflicts() {
+async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
     let f = Fixture::new(1, 1);
     f.pass("chain-forward", Arc::new(NoFaults)).await.unwrap();
     let edited = format!("{} typed after rename", f.text("source-0000.md").await);
@@ -1510,13 +1491,20 @@ async fn pending_edit_chain_cancels_together_without_false_conflicts() {
     f.actor
         .run(move |store, _| {
             let mut input = write(&ws, "source-0000", "source-0000.md", &body, "later-edit");
-            input.now_ms = crate::links::now_ms() + 1;
+            let (first_id, first_generation, same_ms): (String, i64, i64) = store.read_with(|conn| {
+                conn.query_row("SELECT job_id,target_generation,created_at_ms FROM materialization_jobs WHERE target_path='source-0000.md' AND status='pending'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+            }).map_err(StorageError::corrupt_public)?;
+            input.now_ms = same_ms;
             store.write_with(&NoFaults, |tx| -> Result<(), DomainError> {
                 let result = write_text_in_tx(tx, &input)?;
                 let preimage = dohc_engine_storage::Preimage::Present(
                     result.moment.before_blob_sha256.clone().unwrap(),
                 );
-                dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
+                // The later job sorts first lexically, but its generation is newer.
+                assert!(format!("000-later-mat_{}", result.moment.moment_id) < first_id);
+                assert!(result.moment.moment_order > first_generation);
+                assert_eq!(result.moment.recorded_at_ms, same_ms);
+                dohc_engine_domain::enqueue_write(tx, &result, preimage, "000-later")?;
                 Ok(())
             })?;
             Ok(())

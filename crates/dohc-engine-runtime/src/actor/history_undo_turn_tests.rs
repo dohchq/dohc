@@ -91,6 +91,7 @@ type Hook = (std::sync::mpsc::Sender<()>, Arc<Barrier>);
 #[derive(Default)]
 struct Probe {
     times: Vec<Duration>,
+    turn_budget: Option<Duration>,
     phases: Vec<Phase>,
     actor_totals: Option<dohc_engine_storage::capture_phase::Snapshot>,
     hook: Option<Hook>,
@@ -99,6 +100,22 @@ struct Probe {
 fn probes() -> &'static Mutex<std::collections::HashMap<String, Probe>> {
     static PROBES: OnceLock<Mutex<std::collections::HashMap<String, Probe>>> = OnceLock::new();
     PROBES.get_or_init(Mutex::default)
+}
+// Override only the elapsed-time cutoff; the production 16-member cap still applies.
+pub(in crate::actor) fn set_turn_budget(request: &str, budget: Duration) {
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .turn_budget = Some(budget);
+}
+pub(super) fn turn_budget(request: &str) -> Option<Duration> {
+    probes()
+        .lock()
+        .unwrap()
+        .get(request)
+        .and_then(|p| p.turn_budget)
 }
 #[derive(Clone, serde::Serialize)]
 struct Phase {
@@ -1134,6 +1151,7 @@ async fn concurrent_replay_reports_only_its_own_committed_work() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     let (root, supervisor, actor) = setup(2000);
+    set_turn_budget("turn-perf", Duration::MAX);
     let hold = actor.hold_link_drain();
     actor
         .run(|store, _| {
@@ -1348,9 +1366,10 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
             serde_json::to_string(&work).unwrap()
         );
     }
-    assert!(
-        (2000usize.div_ceil(16)..2000).contains(&times.len()),
-        "at least one turn must commit multiple members"
+    assert_eq!(
+        times.len(),
+        2000usize.div_ceil(16),
+        "a fixed budget must fill every 16-member batch"
     );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }
