@@ -240,10 +240,24 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
     }));
     const before = await editorState();
     expect(before).toEqual({ sameEditor: true, scrollTop: 600, selection: "export const limit40 = 40;" });
+    // A transition already on screen keeps running through the change.
+    await page.evaluate(async () => {
+      const element = document.body.appendChild(document.createElement("div"));
+      element.id = "running-transition";
+      element.style.transition = "opacity 60s linear";
+      void getComputedStyle(element).opacity;
+      element.style.opacity = "0";
+      await element.getAnimations()[0]!.ready;
+    });
     await watchNextThemeChange(page);
     await page.emulateMedia({ colorScheme: "dark" });
-    await expectThemeChangeInOneFrame(page);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    expect(await page.locator("#running-transition").evaluate((element) => {
+      const playState = element.getAnimations()[0]?.playState;
+      element.remove();
+      return playState;
+    })).toBe("running");
+    await expectThemeChangeInOneFrame(page);
     expect(await editorState()).toEqual(before);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
