@@ -61,6 +61,7 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
+On Windows, put Git's `bin` folder first on the runner's `PATH`. Otherwise a `bash` step runs `C:\Windows\System32\bash.exe`, which starts WSL.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
 Run the Windows runner in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
@@ -74,19 +75,22 @@ This keeps release engine builds within the local disk, slot, and compiler budge
 A runner that stays online runs any workflow job that targets its labels, including a pull request's.
 Before the repository is public, set Settings, Actions, General, "Approval for running fork pull request workflows from contributors" to "Require approval for all external contributors".
 Never approve a fork run that changes `.github/` or targets these runners' labels.
-Otherwise that run's code would run as you on the release PC, beside the toolchains the next signed build uses.
+Otherwise that run's code would run as you on the release PC, beside the toolchains and the Windows `node_modules` that the next signed build uses.
+Windows jobs keep `node_modules` and the Rust `target` folder between runs, because deleting `node_modules` there takes over 15 minutes.
+`pnpm install --frozen-lockfile` does not check the contents of packages already in `node_modules`.
 
 On the release PC, start each runner when you sign in, and keep the PC awake. Stay signed in: signing out stops both runners.
-In PowerShell, with each runner's folder and the WSL distribution filled in:
+In PowerShell, with each runner's folder, Git's folder, and the WSL distribution filled in:
 
 ```powershell
 $t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "<runner folder>\run.cmd" -WorkingDirectory "<runner folder>")
+$git = "<Git folder>\bin"
+Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c set `"PATH=$git;%PATH%`" && run.cmd" -WorkingDirectory "<runner folder>")
 Register-ScheduledTask -TaskName "dohc Linux runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -- bash -lc 'cd <runner folder in WSL> && ./run.sh'")
 ```
 
-Without a schedule, start the runner's `run.cmd` when building a release.
+Without a schedule, start the runner's `run.cmd` when building a release, with Git's `bin` folder first on `PATH`.
 
 ### Use WSL2 for Linux builds
 
