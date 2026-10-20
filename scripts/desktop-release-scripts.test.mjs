@@ -1771,10 +1771,16 @@ test("the nightly job waits for the verification queue to finish, up to its limi
 
 test("release commands on the Mac take one lock, hand it to the macOS command they start, and lose it only with the last process holding it", { skip: process.platform === "win32" }, async t => {
   const dir = await mkdtemp(join(tmpdir(), "dohc-release-lock-"));
+  // A pid file holds a positive pid or does not exist. Signalling 0 would hit this test's own process group.
+  const pidOf = role => {
+    const pid = Number(readFileSync(join(dir, `${role}.pid`), "utf8"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`${role}.pid holds no pid`);
+    return pid;
+  };
   // Whatever the outcome, stop every command this test started.
   t.after(() => {
     for (const role of ["parent", "child", "other", "graceful"]) {
-      try { process.kill(Number(readFileSync(join(dir, `${role}.pid`), "utf8")), "SIGKILL"); } catch { /* not started or already gone */ }
+      try { process.kill(pidOf(role), "SIGKILL"); } catch { /* not started or already gone */ }
     }
   });
   const lock = join(dir, "release.lock");
@@ -1782,14 +1788,16 @@ test("release commands on the Mac take one lock, hand it to the macOS command th
   const lockModule = pathToFileURL(fileURLToPath(new URL("./release-lock.mjs", import.meta.url))).href;
   // A release command: "parent" starts a child release command under its hold, as the nightly job starts the macOS command.
   await writeFile(script, `import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { heldLockOptions, underReleaseLock } from ${JSON.stringify(lockModule)};
 const [lock, role, dir] = process.argv.slice(2);
 const locked = await underReleaseLock(lock);
 if (locked !== null) process.exit(locked);
 if (role === "parent") spawn(process.execPath, [process.argv[1], lock, "child", dir], heldLockOptions(lock));
 if (role === "graceful") process.on("SIGTERM", () => setTimeout(() => { writeFileSync(dir + "/cleaned", ""); process.exit(0); }, 200));
-writeFileSync(dir + "/" + role + ".pid", String(process.pid));
+// Written whole, then renamed, so a reader never sees an empty pid file.
+writeFileSync(dir + "/" + role + ".pid.tmp", String(process.pid));
+renameSync(dir + "/" + role + ".pid.tmp", dir + "/" + role + ".pid");
 setInterval(() => {}, 1000);
 `);
   const clean = { ...process.env, DOHC_RELEASE_LOCK_HELD: "", DOHC_RELEASE_LOCK_FD: "" };
@@ -1797,7 +1805,6 @@ setInterval(() => {}, 1000);
     for (const deadline = Date.now() + 10_000; !check(); await new Promise(resolve => setTimeout(resolve, 50))) if (Date.now() > deadline) assert.fail(what);
   };
   const competing = () => promisify(execFile)(process.execPath, [script, lock, "other", dir], { timeout: 10_000, env: clean }).then(() => 0, error => error.code);
-  const pidOf = role => Number(readFileSync(join(dir, `${role}.pid`), "utf8"));
 
   const job = spawn(process.execPath, [script, lock, "parent", dir], { stdio: "ignore", env: clean });
   await until(() => existsSync(join(dir, "child.pid")), "the child release command never started");

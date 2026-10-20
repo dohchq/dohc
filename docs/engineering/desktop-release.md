@@ -180,7 +180,7 @@ The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `
 The system releases the lock when the last process holding it exits, so a crash leaves no stale lock.
 A command that finds it held stops at once, and the job reports that night on #2281.
 `install` and `uninstall` also refuse while the lock is held, so stopping the job through them never interrupts the macOS command.
-A logout, a shutdown, or a forced kill still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
+A logout, a shutdown, a forced kill, or stopping the LaunchAgent by hand with `launchctl bootout` still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
 
 The job needs all of these:
 
