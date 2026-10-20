@@ -835,7 +835,6 @@ async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled(
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
     let f = Fixture::new(1, 1);
@@ -849,31 +848,64 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
     let ws = f.ws.clone();
     let leases = f.leases.clone();
     let queued_key = key.clone();
-    f.actor.run(move |store, cache| {
-        dohc_engine_collab::claim_base(store, &queued_key, ContentKind::Richdoc, &base, &NoFaults, 8)?;
-        let claim = dohc_engine_collab::hex_sha256(&base);
-        let blob = store.put_binary_blob(&update)?;
-        let envelope = dohc_engine_sync::ReplicationEnvelope {
-            workspace_id: ws, origin_id: "parked-peer".into(), origin_seq: 0,
-            relay_seq: Some(1), op_kind: "ydoc.update".into(), recorded_at_ms: 8,
-            settlement_admission: None, admitted_author_snapshot: None,
-            payload: json!({"versionId":"main","objectId":"source-0000",
+    f.actor
+        .run(move |store, cache| {
+            dohc_engine_collab::claim_base(
+                store,
+                &queued_key,
+                ContentKind::Richdoc,
+                &base,
+                &NoFaults,
+                8,
+            )?;
+            let claim = dohc_engine_collab::hex_sha256(&base);
+            let blob = store.put_binary_blob(&update)?;
+            let envelope = dohc_engine_sync::ReplicationEnvelope {
+                workspace_id: ws,
+                origin_id: "parked-peer".into(),
+                origin_seq: 0,
+                relay_seq: Some(1),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 8,
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                payload: json!({"versionId":"main","objectId":"source-0000",
                 "path":"source-0000.md","contentKind":"richdoc",
                 "updateBlobSha256":blob,"lineageClaimId":claim,"isBaseState":false}),
-        };
-        dohc_engine_sync::apply_replication_envelope(store, cache, &envelope, &NoFaults, &leases)?;
-        let queued: i64 = store.read_with(|c| c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r|r.get(0)))?;
-        assert_eq!(queued, 1);
-        Ok(())
-    }).await.unwrap();
+            };
+            dohc_engine_sync::apply_replication_envelope(
+                store, cache, &envelope, &NoFaults, &leases,
+            )?;
+            let queued: i64 = store.read_with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
+                    r.get(0)
+                })
+            })?;
+            assert_eq!(queued, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
     let undone = f.undo_open().await;
     let text = f.text("source-0000.md").await;
-    let (queued, drained, projected) = f.actor.run(move |store, cache| {
-        let queued: i64 = store.read_with(|c| c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r|r.get(0)))?;
-        let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, cache, &key, &NoFaults)?;
-        let projected = store.read_with(|c| dohc_engine_collab::load_doc_in(c, &key))?.project(ContentKind::Richdoc)?.content;
-        Ok((queued, drained.drained, projected))
-    }).await.unwrap();
+    let (queued, drained, projected) = f
+        .actor
+        .run(move |store, cache| {
+            let queued: i64 = store.read_with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
+                    r.get(0)
+                })
+            })?;
+            let drained =
+                dohc_engine_sync::drain_deferred_ydoc_for_key(store, cache, &key, &NoFaults)?;
+            let projected = store
+                .read_with(|c| dohc_engine_collab::load_doc_in(c, &key))?
+                .project(ContentKind::Richdoc)?
+                .content;
+            Ok((queued, drained.drained, projected))
+        })
+        .await
+        .unwrap();
     drop(lease);
     f.close().await;
     assert!(undone.unwrap().not_restored.is_empty());
@@ -887,15 +919,21 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmappable_preflight_then_close_uses_the_disk_inverse() {
     let f = Fixture::new(1, 1);
-    f.pass("close-unmappable", Arc::new(NoFaults)).await.unwrap();
+    f.pass("close-unmappable", Arc::new(NoFaults))
+        .await
+        .unwrap();
     f.publish().await;
     let (lease, _) = f.open_document_with_elements("source-0000", false).await;
     let request = format!("{}-undo", f.ws);
     let (receive, barrier) = undo_probe::pause_inverse(&request);
     let close = async move {
-        tokio::task::spawn_blocking(move || receive.recv().unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || receive.recv().unwrap())
+            .await
+            .unwrap();
         drop(lease);
-        tokio::task::spawn_blocking(move || barrier.wait()).await.unwrap();
+        tokio::task::spawn_blocking(move || barrier.wait())
+            .await
+            .unwrap();
     };
     let (result, ()) = tokio::join!(f.undo_open(), close);
     let text = f.text("source-0000.md").await;
@@ -910,7 +948,11 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("settle-error", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
-    f.type_document("source-0000", "typing [[new#part|label]] [[./new.md]] [old](old.md)").await;
+    f.type_document(
+        "source-0000",
+        "typing [[new#part|label]] [[./new.md]] [old](old.md)",
+    )
+    .await;
     f.actor.run(|store,_| {
         store.write_with(&NoFaults, |tx| {
             tx.execute_batch("CREATE TRIGGER fail_preflight_settle BEFORE INSERT ON moments WHEN NEW.object_id='source-0000' BEGIN SELECT RAISE(ABORT,'settle unavailable'); END;").map_err(StorageError::persist_public)?;
@@ -920,9 +962,19 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
     }).await.unwrap();
     let result = f.undo_open().await;
     let request = format!("{}-undo", f.ws);
-    let errors: String = f.actor.run(move |store,_| {
-        Ok(store.read_with(|c| c.query_row("SELECT errors_json FROM history_undo_plans WHERE request_id=?1",[request],|r|r.get(0)))?)
-    }).await.unwrap();
+    let errors: String = f
+        .actor
+        .run(move |store, _| {
+            Ok(store.read_with(|c| {
+                c.query_row(
+                    "SELECT errors_json FROM history_undo_plans WHERE request_id=?1",
+                    [request],
+                    |r| r.get(0),
+                )
+            })?)
+        })
+        .await
+        .unwrap();
     let restored = f.text("source-0001.md").await;
     drop(lease);
     f.close().await;

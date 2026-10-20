@@ -580,58 +580,64 @@ impl ActorHandle {
                         .is_some_and(|(is_open, _)| is_open(&key));
                 if live {
                     loop {
-                    let key = key.clone();
-                    let (path, root2, recorder2, token2) = (
-                        member.effect.path.clone(),
-                        root.clone(),
-                        recorder.clone(),
-                        token.clone(),
-                    );
-                    let outcome = self
-                        .run(move |store, cache| {
-                            let usable = super::super::link_documents::baseline(
-                                store,
-                                cache,
-                                &root2,
-                                &key,
-                                &path,
-                                &token2,
-                                recorder2.as_ref(),
-                                |_| true,
-                            )?;
-                            let head = store.read_with(|c| {
-                                signature(c, &key.workspace_id, &key.version_id, &key.object_id)
-                            })?;
-                            let sha = store.read_with(|c| {
-                                rename_head_sha(
-                                    c,
-                                    &key.workspace_id,
-                                    &key.version_id,
-                                    &key.object_id,
-                                )
-                            })?;
-                            Ok((usable, head, sha))
-                        })
-                        .await;
-                    match outcome {
-                        Ok((usable, head, sha)) => {
-                            member.head = head;
-                            member.sha = Some(sha);
-                            locked_since = None;
-                            if !usable {
-                                member.settle_error = Some("document projection unavailable".into());
+                        let key = key.clone();
+                        let (path, root2, recorder2, token2) = (
+                            member.effect.path.clone(),
+                            root.clone(),
+                            recorder.clone(),
+                            token.clone(),
+                        );
+                        let outcome = self
+                            .run(move |store, cache| {
+                                let usable = super::super::link_documents::baseline(
+                                    store,
+                                    cache,
+                                    &root2,
+                                    &key,
+                                    &path,
+                                    &token2,
+                                    recorder2.as_ref(),
+                                    |_| true,
+                                )?;
+                                let head = store.read_with(|c| {
+                                    signature(c, &key.workspace_id, &key.version_id, &key.object_id)
+                                })?;
+                                let sha = store.read_with(|c| {
+                                    rename_head_sha(
+                                        c,
+                                        &key.workspace_id,
+                                        &key.version_id,
+                                        &key.object_id,
+                                    )
+                                })?;
+                                Ok((usable, head, sha))
+                            })
+                            .await;
+                        match outcome {
+                            Ok((usable, head, sha)) => {
+                                member.head = head;
+                                member.sha = Some(sha);
+                                locked_since = None;
+                                if !usable {
+                                    member.settle_error =
+                                        Some("document projection unavailable".into());
+                                }
+                                break;
                             }
-                            break;
+                            Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                                Self::wait_undo_checkpoint(
+                                    &token,
+                                    &mut locked_since,
+                                    checkpoint.clone(),
+                                )
+                                .await?;
+                            }
+                            Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
+                            Err(error) => {
+                                member.settle_error = Some(error.to_string());
+                                break;
+                            }
                         }
-                        Err(RuntimeError::Storage(StorageError::FileLocked)) => {
-                            Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone()).await?;
-                        }
-                        Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
-                        Err(error) => {
-                            member.settle_error = Some(error.to_string());
-                            break;
-                        }
-                    }
                     }
                 }
                 let (w, v, o, member) = (
@@ -811,7 +817,13 @@ impl ActorHandle {
                             let member = &p.members[prepared_cursor + offset];
                             Prepared {
                                 inverse: inverse_store.read_with(|conn| {
-                                    inverse_input(conn, &p.workspace, &p.version, &p.operation, member)
+                                    inverse_input(
+                                        conn,
+                                        &p.workspace,
+                                        &p.version,
+                                        &p.operation,
+                                        member,
+                                    )
                                 }),
                                 disk: disk_check(&disk_root, member),
                             }
