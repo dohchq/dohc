@@ -693,7 +693,9 @@ impl ActorHandle {
             match next {
                 Ok((cursor, committed, remaining)) => {
                     if committed {
-                        for input in remaining.into_iter().rev() { inputs.push_front(input); }
+                        for input in remaining.into_iter().rev() {
+                            inputs.push_front(input);
+                        }
                     } else {
                         inputs.clear();
                     }
