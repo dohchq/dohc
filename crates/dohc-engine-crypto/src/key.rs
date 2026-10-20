@@ -256,8 +256,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         // other local users (the file itself is 0600 below), on a Mac
         // through an ACL entry the workspace folder passes on either.
         #[cfg(target_vendor = "apple")]
-        dohc_macos_files::create_dir_all_uninherited(parent, 0o700)
-            .map_err(|err| key_create_error(&err))?;
+        dohc_macos_files::ensure_private_dir(parent).map_err(|err| key_create_error(&err))?;
         #[cfg(not(target_vendor = "apple"))]
         {
             let mut builder = std::fs::DirBuilder::new();

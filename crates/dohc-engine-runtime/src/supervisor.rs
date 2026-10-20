@@ -492,9 +492,9 @@ fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
     })?;
     // Owner-only on Unix, so other users cannot reach the store. Windows has
     // no mode; ACLs govern access there. On macOS a mode does not limit an ACL
-    // entry, so the folder also takes none of the workspace folder's.
+    // entry, so each open also removes any the folder has.
     #[cfg(target_vendor = "apple")]
-    let created = dohc_macos_files::create_dir_all_uninherited(parent, 0o700);
+    let created = dohc_macos_files::ensure_private_dir(parent);
     #[cfg(not(target_vendor = "apple"))]
     let created = {
         let mut builder = std::fs::DirBuilder::new();

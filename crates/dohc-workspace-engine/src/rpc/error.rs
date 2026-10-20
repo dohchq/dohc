@@ -613,7 +613,13 @@ fn map_search_code(error: &SearchError) -> ErrorCode {
 }
 
 pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
-    WireError::new(ErrorCode::InvalidParams, error.to_string())
+    let code = match error {
+        // The code every other path sends this refusal with, which the
+        // desktop matches.
+        root_binding::RootBindingError::VolumeSharesNewFiles => ErrorCode::Internal,
+        _ => ErrorCode::InvalidParams,
+    };
+    WireError::new(code, error.to_string())
 }
 
 pub(super) fn initial_capture_updating() -> WireError {
@@ -868,6 +874,7 @@ mod tests {
         assert_eq!(write.message, "volume-shares-new-files");
         let root =
             super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
+        assert_eq!(root.code, dohc_engine_protocol::ErrorCode::Internal);
         assert_eq!(root.message, "volume-shares-new-files");
     }
 

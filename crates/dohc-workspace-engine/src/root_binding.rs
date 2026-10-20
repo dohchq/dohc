@@ -29,8 +29,8 @@ pub enum RootBindingError {
     /// [`dohc_engine_files::privacy_denied`].
     #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
     PrivacyDenied,
-    /// The volume gave the engine's new folder ACL entries, as a network
-    /// share can, so the store in it could not be kept private.
+    /// The volume keeps ACL entries on the engine's folder, as a network
+    /// share can, so the store in it cannot be kept private.
     #[error("volume-shares-new-files")]
     VolumeSharesNewFiles,
 }
@@ -158,10 +158,11 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
 
 fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     let parent = marker.parent().ok_or(RootBindingError::Unwritable)?;
-    // A mode does not limit an ACL entry, so on a Mac the folder takes none
-    // of the workspace folder's, and nothing the engine creates in it does.
+    // A mode does not limit an ACL entry, so on a Mac each open makes the
+    // folder 0700 with no entries, whoever created it, and refuses one that
+    // another user owns or a volume keeps shared.
     #[cfg(target_os = "macos")]
-    let created = dohc_macos_files::create_dir_all_uninherited(parent, 0o700);
+    let created = dohc_macos_files::ensure_private_dir(parent);
     #[cfg(not(target_os = "macos"))]
     let created = {
         let mut builder = std::fs::DirBuilder::new();
@@ -389,15 +390,18 @@ mod tests {
         );
         assert!(excluded(older.path()));
 
-        // SQLite writes through a symlinked engine folder, so the folder it
-        // resolves to is the one to exclude.
+        // A link at the engine folder is refused before anything is written
+        // through it, so the folder it names is left as it was.
         let linked = ScratchDir::new().expect("scratch");
         let target = linked.join("elsewhere");
         std::fs::create_dir_all(&target).expect("target");
         std::fs::create_dir_all(linked.join(".dohc")).expect("dohc");
         std::os::unix::fs::symlink(&target, linked.join(".dohc/engine")).expect("symlink");
-        write_new_root_binding(linked.path()).expect("mint");
-        assert!(excluded_at(&target));
+        assert!(matches!(
+            write_new_root_binding(linked.path()),
+            Err(RootBindingError::Unwritable)
+        ));
+        assert!(!excluded_at(&target));
     }
 
     #[test]
