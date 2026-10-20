@@ -127,6 +127,11 @@ export function EmailShareForm(props: {
             >
               {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
             </p>
+            {access === "edit" && (
+              <p className="m-0 text-[11px] leading-relaxed text-subtle">
+                People who can edit can see the full History.
+              </p>
+            )}
           </div>
 
           <p className="m-0 text-xs leading-relaxed text-muted">
