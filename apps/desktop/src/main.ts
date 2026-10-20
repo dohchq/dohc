@@ -152,7 +152,7 @@ import {
   type IpcMainEvent,
   type WebContents,
 } from "electron";
-import { watch, existsSync, lstatSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { watch, existsSync, lstatSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
@@ -5734,6 +5734,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
+    // The process exits right after this line, so it is written synchronously.
+    reportQuit: (line) => { try { writeSync(1, `${line}\n`); } catch { /* No stdout to report to. */ } },
   },
 });
 

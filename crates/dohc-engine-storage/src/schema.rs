@@ -330,7 +330,7 @@ fn open_engine_db_configured(
     reject_undersized_database(path)?;
 
     let mut conn = Connection::open_with_flags(
-        path,
+        crate::sqlite_path(path),
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
@@ -438,8 +438,9 @@ pub(crate) fn open_engine_db_read_only(
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::corrupt)?;
+    let conn =
+        Connection::open_with_flags(crate::sqlite_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(StorageError::corrupt)?;
     count_open_work(&conn, work)?;
     apply_session_pragmas(&conn)?;
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
