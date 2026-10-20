@@ -140,7 +140,7 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
                 break;
             }
         }
-        // Main's mention page does not have migration 64's hydration index.
+        // Main's mention page does not have migration 65's hydration index.
         exec(&mut s, "DROP INDEX conversation_file_link_alias;");
         drop(s);
         let supervisor = WorkspaceSupervisor::new();

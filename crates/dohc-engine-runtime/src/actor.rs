@@ -35,6 +35,7 @@ mod chats;
 mod checked_deletes;
 mod collections;
 mod history_operations;
+mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 mod journal;
 mod live_application;
@@ -206,6 +207,7 @@ pub struct WorkspaceActor {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
@@ -369,6 +371,7 @@ impl WorkspaceActor {
                     claims: ClaimAnnouncer::default(),
                     link_metrics,
                     link_drain_holds,
+                    link_rewrites: Arc::default(),
                     current_views: Arc::default(),
                     link_resolvers: Arc::default(),
                 };
@@ -403,6 +406,7 @@ impl WorkspaceActor {
             retained_root: self.retention_root.clone(),
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
+            link_rewrites: Arc::clone(&self.link_rewrites),
             current_views: Arc::clone(&self.current_views),
             link_resolvers: Arc::clone(&self.link_resolvers),
         }
@@ -497,6 +501,7 @@ pub struct ActorHandle {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
@@ -1176,6 +1181,7 @@ mod saturation_tests {
             link_drain_holds: holds,
             current_views: Arc::default(),
             link_resolvers: Arc::default(),
+            link_rewrites: Arc::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);

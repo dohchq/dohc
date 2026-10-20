@@ -3339,11 +3339,32 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 64,
+        id: "v2-ydoc-files-seen",
+        sql: V2_YDOC_FILES_SEEN_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 65,
         id: "v2-chat-conversation-file-links",
         sql: include_str!("conversation_file_links.sql"),
         sets_user_version: None,
     },
 ];
+
+/// Documents whose file a `ydoc.open` found on disk while the version had no
+/// head for it: New File's empty file, before capture records it. A moment
+/// records every other file a document has had. Together they tell a session
+/// that continues the document whether its missing file was deleted.
+const V2_YDOC_FILES_SEEN_DDL: &str = "\
+CREATE TABLE ydoc_files_seen (
+    workspace_id TEXT NOT NULL,
+    version_id   TEXT NOT NULL,
+    object_id    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
 
 /// The ordinary pull pass whose applied pages await their terminal commit.
 /// A replication identity change abandons it.
@@ -4386,6 +4407,10 @@ mod tests {
                 "60447cc5e4274b65f3f9e71a830288acfc896ac0899d471e8bcebaf754519695",
             ),
             (
+                "v2-ydoc-files-seen",
+                "85a36c7e1b7e392360e0caf3136b589cfcf0e052d4a26c53118e1ce045b32b5d",
+            ),
+            (
                 "v2-chat-conversation-file-links",
                 "a976e7546ecf2efacaa0e885b966bfaac96f4c2b1c3ca24f417fbf3b645bdd22",
             ),
@@ -4402,7 +4427,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scheduled migration 64 alias-index measurement"]
+    #[ignore = "scheduled migration 65 alias-index measurement"]
     fn conversation_links_measure_migration_alias_index_on_large_store() {
         assert!(
             !std::hint::black_box(cfg!(debug_assertions)),
@@ -4474,14 +4499,56 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn conversation_links_migrations_64_and_65_apply_in_order_from_fresh_and_main_64() {
+        for resume_at_main_64 in [false, true] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut conn = open_bare(&path);
+            let ctx = MigrationContext::current(1);
+            let before = migration_index("v2-chat-conversation-file-links");
+            let predecessor = &BASELINE_MIGRATIONS[before - 1];
+            assert_eq!((predecessor.ordinal, predecessor.id), (64, "v2-ydoc-files-seen"));
+            assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
+            let prior = if resume_at_main_64 {
+                run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+                let row: (String, String) = conn.query_row(
+                    "SELECT id,checksum FROM engine_migrations WHERE ordinal=64 AND completed_at IS NOT NULL",
+                    [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                assert_eq!(row, (predecessor.id.into(), migration_checksum(predecessor.sql)));
+                conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main');
+                    INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','named','Main',1);
+                    INSERT INTO ydoc_files_seen VALUES('ws','main','seen-before-links');").unwrap();
+                drop(conn);
+                conn = open_bare(&path);
+                Some(row)
+            } else { None };
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let rows: Vec<(i64, String, String)> = conn.prepare(
+                "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal>=64 AND completed_at IS NOT NULL ORDER BY ordinal"
+            ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+                .collect::<Result<_,_>>().unwrap();
+            assert_eq!(rows, vec![
+                (64, predecessor.id.into(), migration_checksum(predecessor.sql)),
+                (65, "v2-chat-conversation-file-links".into(), migration_checksum(BASELINE_MIGRATIONS[before].sql)),
+            ]);
+            if let Some(prior) = prior {
+                assert_eq!((rows[0].1.clone(), rows[0].2.clone()), prior);
+                assert_eq!(conn.query_row("SELECT object_id FROM ydoc_files_seen", [], |r| r.get::<_,String>(0)).unwrap(), "seen-before-links");
+            }
+            assert_eq!(conn.query_row("SELECT count(*) FROM chat_conversation_file_link_state", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+        }
+    }
+
     #[test]
     fn conversation_links_upgrade_preserves_mentions_without_startup_backfill() {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-chat-conversation-file-links");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 63);
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 64);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 64);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws','old','t','m','file','f',1);").unwrap();
         assert!(

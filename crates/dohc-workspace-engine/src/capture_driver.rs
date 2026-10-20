@@ -1545,7 +1545,7 @@ async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
-    operation_id: Option<&str>,
+    undo: Option<(&str, &std::collections::HashSet<String>)>,
 ) -> Result<ManifestSeed, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
@@ -1554,11 +1554,14 @@ async fn manifest_seed(
         }
         Err(error) => return Err(error),
     };
-    let entries = if let Some(operation) = operation_id {
+    let entries = if let Some((operation, excluded)) = undo {
         // Include authored heads so outside edits reconcile into the affected objects.
         actor
             .history_operation_capture_seed(workspace_id.to_owned(), operation.to_owned())
             .await?
+            .into_iter()
+            .filter(|entry| !excluded.contains(&entry.path))
+            .collect()
     } else {
         actor
             .capture_manifest_seed(workspace_id.to_owned(), version_id)
@@ -2611,7 +2614,7 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
-    operation_id: Option<&str>,
+    undo: Option<(&str, &std::collections::HashSet<String>)>,
     provenance: CaptureProvenance,
     events: EngineEvents,
     token: CancellationToken,
@@ -2620,12 +2623,12 @@ pub(crate) async fn reconcile_full_for_switch(
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
-    let seed = manifest_seed(root, actor, workspace_id, operation_id)
+    let seed = manifest_seed(root, actor, workspace_id, undo)
         .await
         .map_err(|_| SwitchReconcileError::Unavailable)?
         .into_scan_seed();
     let captured_root = bind_capture_root(root).map_err(|_| SwitchReconcileError::Unavailable)?;
-    let paths = if let Some(operation) = operation_id {
+    let paths = if let Some((operation, excluded)) = undo {
         let group = actor
             .history_operation(workspace_id.to_owned(), operation.to_owned())
             .await
@@ -2634,6 +2637,7 @@ pub(crate) async fn reconcile_full_for_switch(
             .moments
             .into_iter()
             .flat_map(|m| std::iter::once(m.path).chain(m.before_path))
+            .filter(|path| !excluded.contains(path))
             .collect();
         paths.sort();
         paths.dedup();
@@ -2701,9 +2705,6 @@ pub(crate) async fn reconcile_full_for_switch(
             };
             if !applied || deferred {
                 Err(SwitchReconcileError::ApplyFailed)
-            } else if operation_id.is_some() {
-                // Undo checks every affected hold atomically with its inverse commit.
-                Ok(manifest_changed)
             } else {
                 Ok(manifest_changed)
             }
