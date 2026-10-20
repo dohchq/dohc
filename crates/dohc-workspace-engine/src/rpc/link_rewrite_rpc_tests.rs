@@ -269,5 +269,5 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     service.workspace_close(Some(handle)).await.unwrap();
 }
 
-#[path="link_rewrite_open_rpc_tests.rs"]
+#[path = "link_rewrite_open_rpc_tests.rs"]
 mod open_documents;

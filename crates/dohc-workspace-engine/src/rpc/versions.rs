@@ -337,7 +337,8 @@ impl EngineService {
     }
 }
 #[cfg(test)]
-static CLOSE_WRITE_SESSION: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+static CLOSE_WRITE_SESSION: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
 #[cfg(test)]
 pub(super) fn mutate_close_write_session(id: String) {
     lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).insert(id);
@@ -863,7 +864,8 @@ impl VersionFence {
                 let view = version_fence_session_view(&sessions, &handle, &session_id)?;
                 let keep_write = undo && undo_writes.contains(&view.key.object_id);
                 #[cfg(test)]
-                let keep_write = keep_write && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
+                let keep_write = keep_write
+                    && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
                 if keep_write {
                     settle_ydoc_session_for_version_fence(
                         &sessions,
