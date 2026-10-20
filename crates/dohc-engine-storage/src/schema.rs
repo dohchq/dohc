@@ -367,11 +367,8 @@ fn open_engine_db_configured(
         }
     }
 
-    // Step 4: the store is ours. Only its owner may read it, through any
-    // name. Actor connections leave close checkpoints to the background
-    // connection, including failed startup and worker exits.
-    #[cfg(unix)]
-    restrict_store_files(path)?;
+    // Step 4: the store is ours. Actor connections leave close checkpoints
+    // to the background connection, including failed startup and worker exits.
     conn.set_db_config(
         DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
         background_checkpoints,
@@ -434,36 +431,6 @@ fn open_engine_db_configured(
         checkpoints,
         freshly_created: disposition == Disposition::Fresh,
     })
-}
-
-/// Give the store and any journal beside it mode 0600. A mode belongs to the
-/// file, not its name, so this also closes a hard link another user made
-/// while the store's folder was open to them. SQLite gives a journal it
-/// creates later the store's mode.
-#[cfg(unix)]
-fn restrict_store_files(path: &Path) -> Result<(), StorageError> {
-    use std::os::unix::fs::PermissionsExt;
-    let failed = |err: std::io::Error| match err.kind() {
-        std::io::ErrorKind::PermissionDenied => StorageError::PermissionDenied {
-            source: Some(Box::new(err)),
-        },
-        _ => StorageError::persist(err),
-    };
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut name = path.as_os_str().to_owned();
-        name.push(suffix);
-        let file = match std::fs::File::open(&name) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(failed(err)),
-        };
-        let mode = file.metadata().map_err(failed)?.permissions().mode();
-        if mode & 0o077 != 0 {
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(failed)?;
-        }
-    }
-    Ok(())
 }
 
 /// Open an existing, fully migrated v2 store without creating files, changing
@@ -702,33 +669,6 @@ mod tests {
                 "passive role must override checkpoint opt-in"
             );
         }
-    }
-
-    /// A store an earlier build left 0644, with a hard link another user
-    /// made while its folder was open to them, is 0600 under both names
-    /// after an open. A new store and its journals are 0600 too.
-    #[cfg(unix)]
-    #[test]
-    fn a_read_write_open_gives_the_store_and_its_journals_mode_0600() {
-        use std::os::unix::fs::PermissionsExt;
-        let mode =
-            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-        let scratch = dohc_test_scratch::ScratchDir::new_named("store-mode").unwrap();
-        let path = scratch.path().join("engine.db");
-        let store = crate::EngineStore::open(&path, 1).unwrap();
-        for suffix in ["", "-wal", "-shm"] {
-            let mut name = path.as_os_str().to_owned();
-            name.push(suffix);
-            assert_eq!(mode(std::path::Path::new(&name)), 0o600, "{suffix}");
-        }
-        drop(store);
-
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let linked = scratch.path().join("kept-by-another-user");
-        std::fs::hard_link(&path, &linked).unwrap();
-        drop(crate::EngineStore::open(&path, 2).unwrap());
-        assert_eq!(mode(&path), 0o600);
-        assert_eq!(mode(&linked), 0o600);
     }
 
     use super::REQUIRED_TABLES;

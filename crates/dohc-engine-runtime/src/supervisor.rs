@@ -200,7 +200,7 @@ impl WorkspaceSupervisor {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
         if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
-            ensure_parent_dir(db_path)?;
+            prepare_store(db_path)?;
         }
         let mut dead: Option<WorkspaceActor> = None;
         let identity;
@@ -307,7 +307,7 @@ impl WorkspaceSupervisor {
     /// generation. Generation continuity is preserved even if the predecessor's
     /// worker panicked (a dead predecessor is treated as already-closed).
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
-        ensure_parent_dir(db_path)?;
+        prepare_store(db_path)?;
 
         let (old, next_generation, mode, identity) = {
             let mut guard = lock(&self.registry);
@@ -485,7 +485,9 @@ enum Action {
     Reserve,
 }
 
-fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
+/// Create the store's folder and keep it and the store private before
+/// SQLite opens anything there.
+fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
     let parent = db_path.parent().ok_or(RuntimeError::Identity {
         reason: "engine.db path has no parent directory",
         source: None,
@@ -525,7 +527,54 @@ fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
     created.map_err(|err| RuntimeError::Identity {
         reason: "could not create engine.db parent directory",
         source: Some(err),
-    })
+    })?;
+    #[cfg(unix)]
+    restrict_store_files(db_path).map_err(|err| RuntimeError::Identity {
+        reason: "could not keep the engine store private",
+        source: Some(err),
+    })?;
+    Ok(())
+}
+
+/// Give the store and any journal beside it mode 0600 and, on a Mac, no ACL
+/// entries. A mode and an ACL belong to the file, not its name, so a hard
+/// link another user made while the store's folder was open to them reads
+/// nothing afterwards. A link at any of these names, or anything but a file,
+/// is refused. On a Mac, a network volume keeps its server's modes and ACLs,
+/// so nothing changes there. The files are never opened: closing a
+/// descriptor on one would drop the locks SQLite holds on it. A file SQLite
+/// creates later takes the store's mode and none of the private folder's
+/// entries.
+#[cfg(unix)]
+fn restrict_store_files(db_path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let path = Path::new(&name);
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "an engine store file is a link or not a file",
+            ));
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            if !dohc_macos_files::is_local_at(path)? {
+                continue;
+            }
+            dohc_macos_files::remove_acl_entries_at(path)?;
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
 }
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock
@@ -583,6 +632,112 @@ mod tests {
             assert_eq!(acl_lines(path), 0, "{}", path.display());
         }
         supervisor.close(&db).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    #[cfg(unix)]
+    fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        name.into()
+    }
+
+    /// A store an earlier build left 0644 with the ACL entry its folder
+    /// passed on, and a hard link another user made while that folder was
+    /// open to them, reads as its owner's alone under both names after the
+    /// next open, and so do its journals. Once the link is gone, it opens.
+    #[cfg(unix)]
+    #[test]
+    fn an_open_keeps_an_old_store_private_under_every_name() {
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(target_vendor = "apple")]
+        let has_entries = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8(listing.stdout).unwrap().lines().count() > 1
+        };
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+        let linked = scratch.path().join("kept-by-another-user");
+        std::fs::hard_link(&db, &linked).unwrap();
+        let files = [
+            db.clone(),
+            with_suffix(&db, "-wal"),
+            with_suffix(&db, "-shm"),
+        ];
+        for file in files.iter().filter(|file| file.exists()) {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            #[cfg(target_vendor = "apple")]
+            {
+                let added = std::process::Command::new("/bin/chmod")
+                    .args(["+ai", "group:everyone allow read"])
+                    .arg(file)
+                    .status()
+                    .unwrap();
+                assert!(added.success());
+                assert!(has_entries(file));
+            }
+        }
+        // The engine refuses a hard-linked store, after making it private.
+        assert!(matches!(
+            supervisor.open(&db, 0),
+            Err(crate::RuntimeError::WorkspaceHardlinked)
+        ));
+        for file in files.iter().chain([&linked]).filter(|file| file.exists()) {
+            assert_eq!(mode(file), 0o600, "{}", file.display());
+            #[cfg(target_vendor = "apple")]
+            assert!(!has_entries(file), "{}", file.display());
+        }
+        std::fs::remove_file(&linked).unwrap();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+    }
+
+    /// A link at the store or at a journal is refused before SQLite opens
+    /// anything, and the file it names is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_store_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+        let unrelated = scratch.path().join("unrelated");
+        std::fs::write(&unrelated, b"mine").unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(with_suffix(&db, suffix));
+        }
+        let wal = with_suffix(&db, "-wal");
+        std::os::unix::fs::symlink(&unrelated, &wal).unwrap();
+        assert!(supervisor.open(&db, 0).is_err());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"mine");
+        assert_eq!(mode(&unrelated), 0o644);
+
+        std::fs::remove_file(&wal).unwrap();
+        let real = scratch.path().join("real.db");
+        std::fs::rename(&db, &real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&real, &db).unwrap();
+        assert!(supervisor.open(&db, 0).is_err());
+        assert_eq!(mode(&real), 0o644);
     }
 
     #[test]
