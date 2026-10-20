@@ -511,3 +511,38 @@ fn conversation_links_identity_hydration_seeks_without_sorting_many_aliases() {
     );
     assert!(plans.iter().all(|s| !s.contains("TEMP B-TREE")));
 }
+
+#[test]
+fn conversation_links_restored_path_only_mentions_keep_coverage_incomplete() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    drain(&mut s);
+    attach(&mut s, "legacy", None, 1, "t", "late");
+    assert_eq!(page(&s, "a", None).unwrap()["complete"], true);
+    exec(
+        &mut s,
+        "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws','t',1,'late','human','Ada','',1);",
+    );
+    drain(&mut s);
+    assert_eq!(
+        page(&s, "a", None).unwrap()["complete"],
+        false,
+        "restoring the parent must restore incomplete coverage"
+    );
+    exec(
+        &mut s,
+        "UPDATE chat_threads SET channel_id='b' WHERE thread_id='t';",
+    );
+    drain(&mut s);
+    assert_eq!(page(&s, "a", None).unwrap()["complete"], true);
+    assert_eq!(
+        page(&s, "b", None).unwrap()["complete"],
+        false,
+        "moving a legacy mention must carry incomplete coverage"
+    );
+    exec(&mut s, "DELETE FROM chat_messages WHERE message_id='late';");
+    drain(&mut s);
+    assert_eq!(page(&s, "b", None).unwrap()["complete"], true);
+    assert!(entries(&s, "a").is_empty() && entries(&s, "b").is_empty());
+}
