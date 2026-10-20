@@ -104,7 +104,7 @@ export function createLinkReadRoutes(
       if(replica) {
         const body=replica.inventory({grantId:capability.grantId,generation:capability.generation,principal:{kind:"link"}},
           ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
-        if(body.files.length>linkCurrentFileLimit)throw relayError("link_read_rate_limited");
+        if(body.files.length>linkCurrentFileLimit)throw notFound();
         return linkJsonResponse(capability.shareId,capability.grantId,body);
       }
       const snapshot = storage.readCurrentFileState({

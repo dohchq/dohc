@@ -158,7 +158,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of current file content using a current hash from dohc_list_files. Development replica reads can include live text." +
+    description: "Read up to 256 KiB of current file content using a current hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded." +
       (metadata.access === "edit" ? " Edit links can also read an afterBlobSha256 from dohc_list_changes for an earlier revision still in the share. Earlier revisions use UTF-8 when their bytes decode, otherwise base64." : " History is unavailable with view or comment access."),
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
