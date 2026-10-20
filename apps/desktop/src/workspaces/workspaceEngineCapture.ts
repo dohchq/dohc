@@ -90,6 +90,7 @@ import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { createFile } from "./workspaceFiles";
 import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
@@ -592,6 +593,15 @@ export interface WorkspaceEngineCapture {
     // error a failed settle met; capture sends no read-only cause.
     onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: undefined, failure?: unknown) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
+  // Save it again: the person chose to write a document back to its file
+  // after the file was deleted outside dohc. The engine refuses every other
+  // save over a deleted file, so this is the one thing that brings it back.
+  // Puts back the file the engine last recorded at the path, empty when it
+  // recorded none as New File leaves it, then saves the document over it.
+  // A file that is there again is left as it is, and the save decides. A
+  // session whose tab closed still holds the document when its close was
+  // refused. Answers false, writing nothing, when no session holds it.
+  saveDeletedFileAgain(path: string): Promise<boolean>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -974,8 +984,9 @@ function settleFailureSaveState(error: unknown): EngineYDocSaveState {
 // The engine refuses a pending write whose preimage no longer matches the
 // file: the external program edited it before releasing its lock. No amount
 // of waiting changes that, so a retry ladder aimed at the lock has nothing
-// left to wait for.
-function isConflictStaleTargetCause(error: unknown): boolean {
+// left to wait for. A settle over a file deleted outside dohc gets the same
+// refusal.
+export function isConflictStaleTargetCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
 }
 
@@ -5393,6 +5404,16 @@ export function createWorkspaceEngineCapture(
             if (shuttingDown ||
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
               try {
+                // Text its file never got, and the file was deleted outside
+                // dohc: after the release, nothing would lead back to it.
+                // Notices keeps it, after a restart too.
+                const unsavedOverDeletedFile = !liveEntry.orphaned && fileFact.existed && updatesSeen !== updatesSettled &&
+                  (await absentHeadDiskState(rootPath, input.path)) === "missing";
+                if (unsavedOverDeletedFile && options.preserveUnsentState && session.objectId) {
+                  await options.preserveUnsentState({
+                    path: input.path, objectId: session.objectId, contentKind: session.contentKind, doc: session.doc,
+                  });
+                }
                 await session.evict();
                 quitEvictionFailure = null;
                 dischargedByEvict = true;
@@ -5801,6 +5822,24 @@ export function createWorkspaceEngineCapture(
     },
 
     observationDrainFailed() { observationDrainUnavailable = true; },
+
+    async saveDeletedFileAgain(path) {
+      // On the chain, so no version operation moves the session between the
+      // check and the write.
+      const entry = await enqueueResult(`save ${path} again`, async () => {
+        const live = liveYDocSessions.get(path);
+        if (!live || live.orphaned) return null;
+        const engine = await engineStore();
+        const head = await engine.readTextFile({ workspaceId, versionId: live.versionId, path });
+        await createFile(rootPath, path, head?.text ?? "", { exclusive: true }).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        });
+        return live;
+      });
+      if (!entry) return false;
+      await entry.session.settleNow();
+      return true;
+    },
 
     setActiveAgentRun(submitted) {
       // The run as submitted; a caller changing its object later changes nothing here.

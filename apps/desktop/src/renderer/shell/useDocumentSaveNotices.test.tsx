@@ -12,6 +12,7 @@ import { resetOrphanedDrafts } from "../orphanedDrafts";
 import { loadStoredDrafts } from "../orphanedDraftStorage";
 import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "../sharedLocalDocument";
 import { AUTOSAVE_DEBOUNCE_MS, useAutosavedTextDraft, type DraftFlush } from "../useAutosavedTextDraft";
+import { NoticeCenter } from "../workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { ConnectionNotices } from "./connectionNotices";
 import { errorDetails } from "./copyDetails";
@@ -20,7 +21,7 @@ import { useShellError } from "./useShellError";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
 const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
-const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string }) => Promise<RetryEngineYDocSaveResult>>();
+const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string; recreateFile?: true }) => Promise<RetryEngineYDocSaveResult>>();
 const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const open = vi.fn<(path: string) => void>();
 const openSystemPrivacySettings = vi.fn(async () => undefined);
@@ -221,6 +222,69 @@ describe("document save notices", () => {
     expect(toast.textContent).toContain(VOLUME_SHARES_NEW_FILES_WORDS);
     expect(toast.textContent).not.toContain("dohc couldn't write the file.");
     await closeEditor(editor, document);
+  });
+
+  it("says a file was deleted outside dohc and offers Save it again in place of Try again", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    function Notices() {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return (
+        <NoticeCenter
+          workspaceId="ws-1" host="corner" syncStatus={null} agentActive={false} conflictSummaries={[]}
+          onOpenHistory={() => {}} onOpenConflicts={() => {}} onRefreshShareView={() => {}} onOpenSettings={() => {}} onRebuildEngineStore={() => {}}
+          workspaceErrors={shell.shellErrors.map((error) => ({
+            id: error.id,
+            ...(error.title ? { title: error.title } : {}),
+            message: error.message,
+            // What the shell copies: the words, then the facts.
+            details: errorDetails([["Error", error.message], ["Title", error.title], ...(error.details ?? [])]),
+            atMs: error.atMs,
+            canRetry: error.retry !== null,
+            ...(error.action ? { actionLabel: error.action.label } : {}),
+            seen: error.seen,
+          }))}
+          onRetryWorkspaceError={shell.retryShellError}
+          onWorkspaceErrorAction={shell.runShellErrorAction}
+          onHideWorkspaceError={shell.hideShellError}
+          onDismissWorkspaceError={shell.dismissShellError}
+        />
+      );
+    }
+    render(<Notices />);
+
+    emit(failed("deleted"));
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Couldn't save notes/a.md");
+    expect(toast.textContent).toContain("The file was deleted outside dohc.");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(copied.mock.calls[0]![0]).toBe("Error: The file was deleted outside dohc.\nTitle: Couldn't save notes/a.md\nFile: notes/a.md");
+
+    await user.click(within(toast).getByRole("button", { name: "Save it again" }));
+    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "notes/a.md", recreateFile: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // A save it starts that fails again files the row again, and a save
+    // clears it.
+    emit({ state: { kind: "saving" } });
+    emit(failed("deleted"));
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("The file was deleted outside dohc.");
+    emit({ state: { kind: "saved-here" } });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("puts a deleted file back only from Save it again, never from Try again", async () => {
+    const user = userEvent.setup();
+    render(<Shell />);
+    emit(failed("read-only"));
+    // The file is deleted while that row stands. The row keeps its words and
+    // its Try again, which only repeats the save.
+    emit({ state: { kind: "saving" } });
+    emit(failed("deleted"));
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retryEngineYDocSave).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", path: "notes/a.md" });
   });
 
   it("says only what it knows when the file is not read-only", () => {

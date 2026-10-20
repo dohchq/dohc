@@ -9,7 +9,7 @@ import {
 } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import type { ErrorDetailField } from "./copyDetails";
-import type { ShellErrorKind } from "./useShellError";
+import type { ShellError, ShellErrorKind } from "./useShellError";
 
 export interface DocumentSaveFailure {
   tone?: "success";
@@ -18,6 +18,7 @@ export interface DocumentSaveFailure {
   cause?: unknown;
   details?: ReadonlyArray<ErrorDetailField>;
   retry?: (() => void) | null;
+  action?: ShellError["action"];
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   identity?: string;
@@ -30,11 +31,13 @@ const REPLACES_FAILURE = new Set<EngineYDocSaveStateEvent["state"]["kind"]>([
 ]);
 
 // The reason that tells a person the most, when writers give different ones.
-const REASON_ORDER: readonly SaveFailureReason[] = ["privacy-denied", "volume-shares-new-files", "read-only"];
+const REASON_ORDER: readonly SaveFailureReason[] = ["deleted", "privacy-denied", "volume-shares-new-files", "read-only"];
 
 // What a person reads for each reason, and the cause Copy details carries.
 function reasonWords(reason: SaveFailureReason): { message: string; cause: string | null } {
   switch (reason) {
+    case "deleted":
+      return { message: "The file was deleted outside dohc.", cause: null };
     case "privacy-denied":
       return { message: PRIVACY_DENIED_WORDS, cause: "macOS blocked dohc from this folder." };
     case "volume-shares-new-files":
@@ -107,10 +110,10 @@ export function reportDocumentReplacement(
 type Writer = "engine" | "text";
 
 // One writer's failed save: why, when a check could tell, and the newest
-// way to try that writer again.
+// way to try that writer again. `recreateFile` is true only for Save it again.
 interface WriterFailure {
   reason: SaveFailureReason;
-  retry: (failure: WriterFailure) => void;
+  retry: (failure: WriterFailure, recreateFile: boolean) => void;
 }
 
 // A file whose save failed, with a failure for each writer that still has
@@ -126,7 +129,8 @@ interface FailedFile {
 // later failures keep that row. Each writer's failure is its own record, so
 // a plain save never clears what the engine has not settled, nor the
 // reverse: the row goes once no writer for the file still fails, and its Try
-// again retries every writer that does. Dismissing the row keeps the
+// again retries every writer that does. For a file deleted outside dohc, Save
+// it again takes the place of Try again. Dismissing the row keeps the
 // failures, so the next one files a row again. An edit refusal gets its own
 // notice. Returns how many files have a failed save, from the same records,
 // for the title bar.
@@ -155,17 +159,23 @@ export function useDocumentSaveNotices(input: {
     const sessions = new Map<string, { sessionId: string; closing: boolean }>();
     const fileNotice = (path: string, failed: FailedFile, cause?: unknown): void => {
       failed.reported = true;
+      const reason = REASON_ORDER.find((candidate) =>
+        [...failed.writers.values()].some((failure) => failure.reason === candidate)) ?? null;
+      // Try again, or Save it again, removes the row. The failure of a save
+      // it starts files the row again.
+      const retry = (recreateFile: boolean) => () => {
+        failed.reported = false;
+        for (const failure of [...failed.writers.values()]) failure.retry(failure, recreateFile);
+      };
       latest.current.report({
-        ...saveFailureNotice(path, REASON_ORDER.find((reason) =>
-          [...failed.writers.values()].some((failure) => failure.reason === reason)) ?? null),
+        ...saveFailureNotice(path, reason),
         ...(cause === undefined ? {} : { cause }),
         identity: identity(path),
-        retry: () => {
-          // Try again removes the row. The failure of a save it starts
-          // files the row again.
-          failed.reported = false;
-          for (const failure of [...failed.writers.values()]) failure.retry(failure);
-        },
+        // The engine refuses every save over a deleted file until the file is
+        // back, and only the person chooses to bring it back.
+        ...(reason === "deleted"
+          ? { retry: null, action: { label: "Save it again", run: retry(true), ends: true } }
+          : { retry: retry(false) }),
         onDismiss: () => {
           failed.reported = false;
         },
@@ -197,9 +207,10 @@ export function useDocumentSaveNotices(input: {
       latest.current.open(path);
     };
     // Main settles whichever session is open for the document when Try
-    // again is clicked. A settle that could not start files the row again.
-    const retryDocument = (path: string) => (failure: WriterFailure) => {
-      void bridge().retryEngineYDocSave({ workspaceId: owner, path }).then(
+    // again is clicked, and puts a deleted file back first for Save it
+    // again. A settle that could not start files the row again.
+    const retryDocument = (path: string) => (failure: WriterFailure, recreateFile: boolean) => {
+      void bridge().retryEngineYDocSave({ workspaceId: owner, path, ...(recreateFile ? { recreateFile } : {}) }).then(
         (outcome) => {
           if (outcome === "closed") reopen(path, "engine", failure);
         },

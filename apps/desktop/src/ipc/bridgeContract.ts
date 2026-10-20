@@ -6595,6 +6595,9 @@ export const engineYDocAdmissionOperations = {
 export const RetryEngineYDocSavePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
+  // Save it again, on a document whose file was deleted outside dohc: main
+  // first puts the file back. Only that action sends it.
+  recreateFile: z.literal(true).optional(),
 });
 export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePayload>;
 
@@ -6602,7 +6605,8 @@ export type RetryEngineYDocSavePayload = z.infer<typeof RetryEngineYDocSavePaylo
 // for that document when asked. "settled" means the settle ran; its outcome
 // arrives as the session's next save state. "closed" means no session is
 // open, so nothing settled. A settle that could not
-// start or that failed rejects.
+// start or that failed rejects. With `recreateFile`, the session can be one
+// whose tab has closed: its close was refused, so it still holds the text.
 export const RetryEngineYDocSaveResult = z.enum(["settled", "closed"]);
 export type RetryEngineYDocSaveResult = z.infer<typeof RetryEngineYDocSaveResult>;
 export const engineYDocSaveOperations = {
@@ -6778,7 +6782,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
+export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({

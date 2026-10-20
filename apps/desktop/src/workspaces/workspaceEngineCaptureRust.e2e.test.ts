@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1268,3 +1269,118 @@ it.skipIf(engine.missing)(
   },
   60_000,
 );
+
+// dohc#2308. An open document whose file was deleted outside dohc. The engine
+// refuses every save over the missing file, so nothing writes it back until
+// the person chooses Save it again. `shape` is a file capture recorded and
+// saved over, or one New File left empty and deleted before its first save.
+async function openDeletedDocument(shape: "recorded" | "new", options: Pick<WorkspaceEngineCaptureOptions, "preserveUnsentState"> = {}) {
+  const root = await createTestScratch("dohc-deleted-file-");
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  await lifecycle.start();
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: `deleted-file-${shape}`, rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000,
+    onError: () => undefined, ...options,
+  });
+  const absolute = join(root, "note.md");
+  const states: string[] = [];
+  const stop = async () => {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  };
+  try {
+    if (shape === "recorded") {
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+    } else {
+      await writeFile(absolute, "", { flag: "wx" });
+    }
+    const session = await capture.openYDocSession({
+      path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined, onSaveState: (state) => states.push(state),
+    });
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, session.initialUpdate);
+    const type = (text: string) => {
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, text);
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+    };
+    if (shape === "recorded") {
+      type("saved\n");
+      await session.settleNow();
+    }
+    await rm(absolute);
+    capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+    type("unsaved\n");
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    expect(states.at(-1)).toBe("error");
+    return { capture, session, absolute, states, type, text: () => editor.getText("plainText").toString(), stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
+it.skipIf(engine.missing).each(["recorded", "new"] as const)(
+  "saves a %s file deleted outside dohc again only when the person asks",
+  async (shape) => {
+    const deleted = await openDeletedDocument(shape);
+    try {
+      // Try again repeats the save, and the engine refuses it the same way.
+      await expect(deleted.session.settleNow()).rejects.toThrow("conflict-stale-target");
+      expect(existsSync(deleted.absolute)).toBe(false);
+
+      await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(true);
+      expect(await readFile(deleted.absolute, "utf8")).toBe(deleted.text());
+      expect(deleted.states.at(-1)).toBe("saved");
+
+      deleted.type("later\n");
+      await deleted.session.settleNow();
+      expect(await readFile(deleted.absolute, "utf8")).toBe(deleted.text());
+      await expect(deleted.session.close()).resolves.toBeUndefined();
+    } finally {
+      await deleted.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)("saves a deleted file again after its tab closed, and the close finishes", async () => {
+  const deleted = await openDeletedDocument("recorded");
+  try {
+    // The close is refused, so the session keeps the text and nothing is
+    // written.
+    await expect(deleted.session.close()).rejects.toThrow("conflict-stale-target");
+    expect(existsSync(deleted.absolute)).toBe(false);
+
+    await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(true);
+    expect(await readFile(deleted.absolute, "utf8")).toBe("unsaved\nsaved\nbase\n");
+    await expect(deleted.session.close()).resolves.toBeUndefined();
+
+    // Nothing holds the document now, so nothing more is written.
+    await rm(deleted.absolute);
+    await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(false);
+    expect(existsSync(deleted.absolute)).toBe(false);
+  } finally {
+    await deleted.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing)("sets the text of a deleted file aside at quit, and does not write the file", async () => {
+  const preserved: string[] = [];
+  const deleted = await openDeletedDocument("recorded", {
+    preserveUnsentState: async ({ path, doc }) => {
+      preserved.push(`${path}: ${doc.getText("plainText").toString()}`);
+    },
+  });
+  try {
+    deleted.capture.beginShutdown();
+    await expect(deleted.session.close({ shuttingDown: true })).resolves.toBeUndefined();
+    expect(preserved).toEqual(["note.md: unsaved\nsaved\nbase\n"]);
+    expect(existsSync(deleted.absolute)).toBe(false);
+  } finally {
+    await deleted.stop();
+  }
+}, 60_000);
