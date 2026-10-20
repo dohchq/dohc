@@ -1,7 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 
-type WatchDirectory = (
+type WatchSettings = (
   directory: string,
   fileName: string,
   listener: (fileName: string | null) => void,
@@ -10,7 +10,7 @@ type WatchDirectory = (
 
 // macOS starts a directory's FSEvents stream asynchronously. A file watch
 // covers an in-place save during startup; the folder watch survives replacement.
-const watchDirectory: WatchDirectory = (directory, fileName, listener, onError) => {
+const watchSettings: WatchSettings = (directory, fileName, listener, onError) => {
   let fileWatcher: FSWatcher | undefined;
   const closeFile = () => {
     fileWatcher?.close();
@@ -68,9 +68,9 @@ export function watchSettingsFile(options: {
   retryMs?: number;
   onChange: () => void;
   onError: (error: Error) => void;
-  watchDirectory?: WatchDirectory;
+  watchSettings?: WatchSettings;
 }): () => void {
-  const start = options.watchDirectory ?? watchDirectory;
+  const start = options.watchSettings ?? watchSettings;
   const retryMs = options.retryMs ?? 2000;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
@@ -110,7 +110,8 @@ export function watchSettingsFile(options: {
     }
   };
 
-  open();
+  // A save may have landed after settings were read but before the watch opened.
+  if (open()) changed();
   return () => {
     stopped = true;
     clearTimeout(debounce);

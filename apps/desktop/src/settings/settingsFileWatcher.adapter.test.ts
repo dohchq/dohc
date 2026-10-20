@@ -6,14 +6,14 @@ import { watchSettingsFile } from "./settingsFileWatcher";
 
 vi.mock("node:fs", { spy: true });
 
-class NativeWatch extends EventEmitter {
+class FsWatch extends EventEmitter {
   close = vi.fn();
   ref = vi.fn(() => this);
   unref = vi.fn(() => this);
 }
 
-function nativeWatches() {
-  const watches = new Map<string, NativeWatch[]>();
+function fsWatches() {
+  const watches = new Map<string, FsWatch[]>();
   const absent = new Set<string>();
   const failures = new Map<string, Error>();
   vi.mocked(watch).mockImplementation((path, optionsOrListener) => {
@@ -23,7 +23,7 @@ function nativeWatches() {
     if (absent.has(name)) {
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     }
-    const watcher = new NativeWatch();
+    const watcher = new FsWatch();
     if (typeof optionsOrListener === "function") {
       watcher.on("change", optionsOrListener);
     }
@@ -35,14 +35,13 @@ function nativeWatches() {
 }
 
 afterEach(() => {
-  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
-describe("native settings watches", () => {
+describe("settings fs.watch adapter", () => {
   it("hears an in-place write when the directory delivers no event", () => {
     vi.useFakeTimers();
-    const { watches } = nativeWatches();
+    const { watches } = fsWatches();
     const onChange = vi.fn();
     const stop = watchSettingsFile({
       directory: "/state",
@@ -52,6 +51,8 @@ describe("native settings watches", () => {
       onError: vi.fn(),
     });
     try {
+      vi.advanceTimersByTime(150);
+      onChange.mockClear();
       const file = watches.get(join("/state", "dohc-settings.json"))?.[0];
       file?.emit("change", "change", "dohc-settings.json");
       vi.advanceTimersByTime(150);
@@ -67,7 +68,7 @@ describe("native settings watches", () => {
 
   it("reattaches after replacement and after the file is deleted and recreated", () => {
     vi.useFakeTimers();
-    const { watches, absent } = nativeWatches();
+    const { watches, absent } = fsWatches();
     const path = join("/state", "dohc-settings.json");
     const onChange = vi.fn();
     const onError = vi.fn();
@@ -79,6 +80,8 @@ describe("native settings watches", () => {
       onError,
     });
     try {
+      vi.advanceTimersByTime(150);
+      onChange.mockClear();
       const directory = watches.get("/state")?.[0];
       const first = watches.get(path)?.[0];
       directory?.emit("change", "rename", "Local State");
@@ -109,9 +112,38 @@ describe("native settings watches", () => {
     }
   });
 
+  it("reports a file watch failure during replacement without announcing a change", () => {
+    vi.useFakeTimers();
+    const { watches, failures } = fsWatches();
+    const path = join("/state", "dohc-settings.json");
+    const onChange = vi.fn();
+    const onError = vi.fn();
+    const stop = watchSettingsFile({
+      directory: "/state",
+      fileName: "dohc-settings.json",
+      debounceMs: 150,
+      onChange,
+      onError,
+    });
+    try {
+      vi.advanceTimersByTime(150);
+      onChange.mockClear();
+      const failure = Object.assign(new Error("EACCES"), { code: "EACCES" });
+      failures.set(path, failure);
+      watches.get("/state")?.[0]?.emit("change", "rename", "dohc-settings.json");
+      expect(onError).toHaveBeenCalledExactlyOnceWith(failure);
+      vi.advanceTimersByTime(150);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(watches.get("/state")?.[0]?.close).toHaveBeenCalledOnce();
+      expect(watches.get(path)?.[0]?.close).toHaveBeenCalledOnce();
+    } finally {
+      stop();
+    }
+  });
+
   it("attaches to a file created after the watch starts", () => {
     vi.useFakeTimers();
-    const { watches, absent } = nativeWatches();
+    const { watches, absent } = fsWatches();
     const path = join("/state", "dohc-settings.json");
     absent.add(path);
     const onChange = vi.fn();
@@ -139,7 +171,7 @@ describe("native settings watches", () => {
 
   it("closes the directory when opening the file watch fails", () => {
     vi.useFakeTimers();
-    const { watches, failures } = nativeWatches();
+    const { watches, failures } = fsWatches();
     const failure = Object.assign(new Error("EACCES"), { code: "EACCES" });
     failures.set(join("/state", "dohc-settings.json"), failure);
     const onError = vi.fn();
@@ -157,7 +189,7 @@ describe("native settings watches", () => {
 
   it("closes both watches and reopens them after a file watch error", () => {
     vi.useFakeTimers();
-    const { watches } = nativeWatches();
+    const { watches } = fsWatches();
     const path = join("/state", "dohc-settings.json");
     const onError = vi.fn();
     const stop = watchSettingsFile({
