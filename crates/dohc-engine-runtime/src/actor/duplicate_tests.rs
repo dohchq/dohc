@@ -193,6 +193,15 @@ async fn duplicate_fresh_lazy_document_has_no_source_authorship() {
         &crate::CancellationToken::new(),
     )
     .unwrap();
+    dohc_engine_collab::ensure_marker(
+        &mut store,
+        &source.key,
+        source.content_kind,
+        source.regime,
+        &NoFaults,
+        3,
+    )
+    .unwrap();
     store.write_with(&NoFaults, |tx| tx.execute(r#"UPDATE ydoc_docs SET pending_authors_json='[{"kind":"human","humanId":"source-author"}]' WHERE object_id=?1"#, [&source.key.object_id]).map_err(StorageError::persist_public)).unwrap();
     let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
         .await
@@ -223,16 +232,19 @@ async fn duplicate_fresh_lazy_document_has_no_source_authorship() {
     )
     .unwrap();
     assert_ne!(opened.key, source.key);
-    let authors: String = store
+    assert!(!opened.lineage_existing);
+    assert_eq!(opened.seed_content.as_deref(), Some("Original"));
+    let authors: Option<String> = store
         .read_with(|c| {
             c.query_row(
                 "SELECT pending_authors_json FROM ydoc_docs WHERE object_id=?1",
                 [&id],
                 |r| r.get(0),
             )
+            .optional()
         })
         .unwrap();
-    assert_eq!(authors, "[]");
+    assert_eq!(authors, None);
 }
 #[tokio::test]
 async fn duplicate_one_file_commit_timing() {

@@ -1,3 +1,4 @@
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -2201,9 +2202,12 @@ async function dispatch(
       case "fileMove":
         rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
         break;
-      case "fileDuplicate":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+      case "fileDuplicate": {
+        const path = paths.rebase(request.args.path, "materialize");
+        if (classifyEngineFilePathForRead(path, process.platform).kind === "secret") throw new CliCommandError("History cannot record secret files. Choose another file.");
+        rebased = { ...request, args: { ...request.args, path } };
         break;
+      }
       case "fileDelete":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
         break;

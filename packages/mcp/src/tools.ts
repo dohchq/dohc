@@ -856,6 +856,7 @@ export async function moveWorkspacePath(
 export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: string}, agent?: string) {
   const source = await safeResolve(ctx, args.path, "entry");
   if (!source.ok) return {ok: false as const, reason: source.reason};
+  if (isSecretResolvedPath(source)) return {ok: false as const, reason: SECRET_READ_DENIED_REASON};
   return requestCli(ctx, "fileDuplicate", {path: source.normalized, agent, requestId: randomUUID()});
 }
 
