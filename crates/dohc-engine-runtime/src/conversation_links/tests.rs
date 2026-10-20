@@ -546,3 +546,39 @@ fn conversation_links_restored_path_only_mentions_keep_coverage_incomplete() {
     assert_eq!(page(&s, "b", None).unwrap()["complete"], true);
     assert!(entries(&s, "a").is_empty() && entries(&s, "b").is_empty());
 }
+
+#[test]
+fn conversation_links_move_barrier_covers_every_file_repair_slice() {
+    let (_scratch, mut s) = fixture();
+    demand(&mut s, "a");
+    demand(&mut s, "b");
+    drain(&mut s);
+    for i in 0..4 {
+        let f = format!("f-{i}");
+        alias(&mut s, &f, &format!("{f}.md"));
+        attach(&mut s, &f, Some(&f), i, "t", "m");
+    }
+    exec(
+        &mut s,
+        "UPDATE chat_threads SET channel_id='b' WHERE thread_id='t';",
+    );
+    let mut saw_files = false;
+    for _ in 0..100 {
+        let more = tick(&mut s).unwrap();
+        let files:i64=s.read_with(|c|c.query_row("SELECT count(*) FROM chat_conversation_file_link_work WHERE channel_id='b' AND kind='file'",[],|r|r.get(0))).unwrap();
+        if files > 0 {
+            saw_files = true;
+            assert!(
+                entries(&s, "b").is_empty(),
+                "the move must stay hidden until every file repair finishes"
+            );
+        }
+        if !more {
+            assert!(saw_files);
+            assert_eq!(entries(&s, "b").len(), 4);
+            assert!(entries(&s, "a").is_empty());
+            return;
+        }
+    }
+    panic!("move repair did not finish");
+}
