@@ -575,7 +575,7 @@ impl ActorHandle {
                         value @ (Ok(_) | Err(RuntimeError::Domain(DomainError::UndoRefused {reason:"link diff budget exceeded" | "wikilink element unavailable" | "document projection unavailable",..}))) => value,
                         Err(error) => return Err(error),
                     };
-                    Ok(Prepared {inverse,disk:disk_check(&disk_root,&member)})
+                    Ok(Prepared {inverse,disk:Ok(disk_check(&disk_root,&member)?)})
                 }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
                 inputs.push_back(input);
             }

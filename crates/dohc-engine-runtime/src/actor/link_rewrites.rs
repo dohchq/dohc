@@ -402,11 +402,13 @@ impl ActorHandle {
                         return Ok((pending, sources, skipped, false));
                     }
                     let mut read_count = 0;
-                    while let Some((object, path)) = pending.pop_front() {
+                    while read_count < 16 && (read_count == 0 || started.elapsed() < Duration::from_millis(5)) {
+                        let Some((object, path)) = pending.pop_front() else { break; };
                         read_count += 1;
                         #[cfg(test)]
                         tests::source();
                         let key = DocKey::new(&ws, &p.version, &object)?;
+                        let mut irrelevant = false;
                         let usable = if open(&key) {
                             match super::link_documents::baseline(
                                 store,
@@ -416,7 +418,10 @@ impl ActorHandle {
                                 &path,
                                 &read_token,
                                 read_recorder.as_ref(),
-                                |text| rewrite::forward(text, &path, p.rename.before_path.as_deref().unwrap_or(""), &p.rename.path, &check_before, &check_after).is_some_and(|(_, links)| links > 0),
+                                |text| {
+                                    irrelevant = rewrite::forward(text, &path, p.rename.before_path.as_deref().unwrap_or(""), &p.rename.path, &check_before, &check_after).is_some_and(|(_, links)| links == 0);
+                                    !irrelevant
+                                },
                             ) {
                                 Ok(value) => value,
                                 Err(
@@ -430,6 +435,7 @@ impl ActorHandle {
                         } else {
                             true
                         };
+                        if irrelevant { continue; }
                         if usable {
                             let source = store.read_with(|conn| {
                                 let source = incoming::read_source(conn, &ws, &p.version, &object)?;
@@ -454,9 +460,6 @@ impl ActorHandle {
                             }
                         } else {
                             skipped.push(path.clone());
-                        }
-                        if read_count == 16 || started.elapsed() >= Duration::from_millis(5) {
-                            break;
                         }
                     }
                     Ok((pending, sources, skipped, true))
