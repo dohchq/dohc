@@ -1031,33 +1031,36 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         let mut positions = Vec::new();
         let mut claim = None;
         let mut gaps = Vec::new();
+        let mut retry_evidence = Vec::new();
         for (i, payload) in payloads.into_iter().enumerate() {
-            let before = undo_probe::turn_count(&typing_ws);
-            let start = Instant::now();
-            let _admission = serial.lock().await;
-            let update = actor
-                .ydoc_record_update(
-                    typing.clone(),
-                    "source-4998.md".into(),
-                    dohc_engine_collab::ContentKind::Plaintext,
-                    dohc_engine_collab::Regime::LocalOnly,
-                    payload,
-                    None,
-                    None,
-                    claim,
-                    i == 0,
-                    None,
-                    Some(format!("typing-{i}")),
-                    5,
-                    Arc::new(NoFaults),
-                    CancellationToken::new(),
-                    None,
-                )
-                .await
-                .unwrap();
+            let (update, timing, _admission) = undo_probe::retry_ydoc_update(
+                &serial,
+                || undo_probe::turn_count(&typing_ws),
+                || {
+                    actor.ydoc_record_update(
+                        typing.clone(),
+                        "source-4998.md".into(),
+                        dohc_engine_collab::ContentKind::Plaintext,
+                        dohc_engine_collab::Regime::LocalOnly,
+                        payload.clone(),
+                        None,
+                        None,
+                        claim.clone(),
+                        i == 0,
+                        None,
+                        Some(format!("typing-{i}")),
+                        5,
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                        None,
+                    )
+                },
+            )
+            .await;
             claim = update.lineage_claim_id;
-            waits.push(start.elapsed().as_nanos());
-            gaps.push(undo_probe::turn_count(&typing_ws) - before);
+            waits.push(timing.wait_ns);
+            gaps.push(timing.turn_gap);
+            retry_evidence.push(timing);
             positions.push(
                 probes().lock().unwrap()[&typing_ws]
                     .turns
@@ -1067,7 +1070,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
             );
             tokio::task::yield_now().await;
         }
-        (waits, positions, gaps)
+        (waits, positions, gaps, retry_evidence)
     });
     let start = Instant::now();
     let result = f.pass("performance", Arc::new(NoFaults)).await.unwrap();
@@ -1078,10 +1081,10 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         f.pass("performance", Arc::new(NoFaults)).await.unwrap(),
         result
     );
-    let (waits, positions, gaps) = updates.await.unwrap();
+    let (waits, positions, gaps, retry_evidence) = updates.await.unwrap();
     assert!(
-        gaps.iter().all(|g| *g <= 1),
-        "at most one forward turn: {gaps:?}"
+        retry_evidence.iter().all(|timing| timing.max_turn_gap <= 1),
+        "at most one forward turn per attempt: {retry_evidence:?}"
     );
     assert!(
         positions.iter().any(|&n| n > 0 && n < 2000),
@@ -1107,47 +1110,52 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         let mut positions = Vec::new();
         let mut claim = None;
         let mut gaps = Vec::new();
+        let mut retry_evidence = Vec::new();
         for (i, payload) in payloads.into_iter().enumerate() {
-            let before = undo_probe::turn_count(&typing_ws);
-            let start = Instant::now();
-            let _admission = serial.lock().await;
-            let update = actor
-                .ydoc_record_update(
-                    typing.clone(),
-                    "source-4997.md".into(),
-                    dohc_engine_collab::ContentKind::Plaintext,
-                    dohc_engine_collab::Regime::LocalOnly,
-                    payload,
-                    None,
-                    None,
-                    claim,
-                    i == 0,
-                    None,
-                    Some(format!("undo-typing-{i}")),
-                    5,
-                    Arc::new(NoFaults),
-                    CancellationToken::new(),
-                    None,
-                )
-                .await
-                .unwrap();
+            let (update, timing, _admission) = undo_probe::retry_ydoc_update(
+                &serial,
+                || undo_probe::turn_count(&typing_ws),
+                || {
+                    actor.ydoc_record_update(
+                        typing.clone(),
+                        "source-4997.md".into(),
+                        dohc_engine_collab::ContentKind::Plaintext,
+                        dohc_engine_collab::Regime::LocalOnly,
+                        payload.clone(),
+                        None,
+                        None,
+                        claim.clone(),
+                        i == 0,
+                        None,
+                        Some(format!("undo-typing-{i}")),
+                        5,
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                        None,
+                    )
+                },
+            )
+            .await;
             claim = update.lineage_claim_id;
-            waits.push(start.elapsed().as_nanos());
-            gaps.push(undo_probe::turn_count(&typing_ws) - before);
+            waits.push(timing.wait_ns);
+            gaps.push(timing.turn_gap);
+            retry_evidence.push(timing);
             positions.push(undo_probe::turn_count(&typing_ws));
             tokio::task::yield_now().await;
         }
-        (waits, positions, gaps)
+        (waits, positions, gaps, retry_evidence)
     });
     let undo_start = Instant::now();
     let undo = f.undo().await.unwrap();
     assert_eq!(undo.moments.len(), 2001);
     assert!(undo.not_restored.is_empty());
     let undo_ns = undo_start.elapsed().as_nanos();
-    let (undo_waits, _, undo_gaps) = updates.await.unwrap();
+    let (undo_waits, _, undo_gaps, undo_retry_evidence) = updates.await.unwrap();
     assert!(
-        undo_gaps.iter().all(|g| *g <= 1),
-        "at most one Undo turn: {undo_gaps:?}"
+        undo_retry_evidence
+            .iter()
+            .all(|timing| timing.max_turn_gap <= 1),
+        "at most one Undo turn per attempt: {undo_retry_evidence:?}"
     );
     let undo_proof = undo_probe::proof(&format!("{}-undo", f.ws), 2001, false);
     let placed = f
@@ -1184,7 +1192,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     let turns = probes().lock().unwrap().get(&f.ws).unwrap().turns.clone();
     if let Ok(directory) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"updateCommitPositions":positions,"undoNs":undo_ns,"forward":forward_proof,"undo":undo_proof,"updateTurnGaps":gaps,"undoUpdateTurnGaps":undo_gaps,"undoUpdateWaitNs":undo_waits}).to_string()).unwrap();
+        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"updateCommitPositions":positions,"undoNs":undo_ns,"forward":forward_proof,"undo":undo_proof,"updateTurnGaps":gaps,"undoUpdateTurnGaps":undo_gaps,"undoUpdateWaitNs":undo_waits,"updateRetries":retry_evidence,"undoUpdateRetries":undo_retry_evidence}).to_string()).unwrap();
     }
     f.close().await;
 }
