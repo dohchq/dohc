@@ -90,7 +90,11 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
             if small_us == 0 && page(&s, "z-small", None).unwrap()["indexBuilding"] == false {
                 small_us = start.elapsed().as_micros();
                 assert_eq!(page(&s, "z-small", None).unwrap()["indexBuilding"], false);
-                assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true, "small request must finish first");
+                assert_eq!(
+                    page(&s, "a", None).unwrap()["indexBuilding"],
+                    true,
+                    "small request must finish first"
+                );
             }
             if slices == 5 && history >= 10_000 {
                 drop(s);
@@ -191,7 +195,11 @@ async fn conversation_links_measure_same_fixture_aggregate_and_actual_mention_pa
     );
 }
 
-fn seed_measurement_fixture(history: i64, unrelated: i64, distinct: i64) -> (ScratchDir, EngineStore) {
+fn seed_measurement_fixture(
+    history: i64,
+    unrelated: i64,
+    distinct: i64,
+) -> (ScratchDir, EngineStore) {
     let (scratch, mut s) = fixture();
     s.write_with(&NoFaults,|c| {
         for i in 0..distinct {
@@ -229,21 +237,35 @@ fn seed_measurement_fixture(history: i64, unrelated: i64, distinct: i64) -> (Scr
 #[test]
 #[ignore = "scheduled conversation Links seed measurement"]
 fn conversation_links_measure_seed_only() {
-    assert!(!std::hint::black_box(cfg!(debug_assertions)), "run with --release");
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "run with --release"
+    );
     let mut results = Vec::new();
     for (history, unrelated, distinct, empty_threads) in [
-        (1000, 0, 256, 0), (10000, 0, 256, 0),
-        (10000, 10000, 256, 0), (10000, 0, 2048, 0),
+        (1000, 0, 256, 0),
+        (10000, 0, 256, 0),
+        (10000, 10000, 256, 0),
+        (10000, 0, 2048, 0),
         (0, 0, 256, 20000),
     ] {
         for small_first in [true, false] {
             let (scratch, mut s) = seed_measurement_fixture(history, unrelated, distinct);
             if empty_threads != 0 {
-                exec(&mut s, "DELETE FROM chat_attachments WHERE attachment_id LIKE 'orphan-%' OR attachment_id='unresolved';");
+                exec(
+                    &mut s,
+                    "DELETE FROM chat_attachments WHERE attachment_id LIKE 'orphan-%' OR attachment_id='unresolved';",
+                );
                 posts_seed_fixture(&mut s, empty_threads, 50);
             }
-            let order = if small_first { ["z-small", "a"] } else { ["a", "z-small"] };
-            for channel in order { demand(&mut s, channel); }
+            let order = if small_first {
+                ["z-small", "a"]
+            } else {
+                ["a", "z-small"]
+            };
+            for channel in order {
+                demand(&mut s, channel);
+            }
             let start = Instant::now();
             let mut slices = 0;
             let mut small_slices = 0;
@@ -262,9 +284,12 @@ fn conversation_links_measure_seed_only() {
                     max_slice_us = elapsed;
                     max_slice_channel = channel.unwrap_or_else(|| "idle".into());
                 }
-                if !pending { break; }
+                if !pending {
+                    break;
+                }
                 slices += 1;
-                if small_slices == 0 && page(&s, "z-small", None).unwrap()["indexBuilding"] == false {
+                if small_slices == 0 && page(&s, "z-small", None).unwrap()["indexBuilding"] == false
+                {
                     small_slices = slices;
                     small_us = start.elapsed().as_micros();
                     assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], true);
@@ -277,12 +302,17 @@ fn conversation_links_measure_seed_only() {
                 }
             }
             assert_eq!(small_slices, if small_first { 3 } else { 4 });
-            if empty_threads != 0 { assert_eq!(slices, 53); }
+            if empty_threads != 0 {
+                assert_eq!(slices, 53);
+            }
             results.push(json!({"history":history,"unrelated":unrelated,"distinct":distinct,
                 "emptyThreadFixture":empty_threads,"requestOrder":order,"slices":slices,
                 "smallReadyAtSlice":small_slices,"smallUs":small_us,"totalUs":start.elapsed().as_micros(),
                 "maxSliceUs":max_slice_us,"maxSliceKind":"seed","maxSliceChannel":max_slice_channel,"reopenUs":reopen_us}));
         }
     }
-    println!("CONVERSATION_LINKS_SEED_MEASUREMENT {}", serde_json::to_string(&results).unwrap());
+    println!(
+        "CONVERSATION_LINKS_SEED_MEASUREMENT {}",
+        serde_json::to_string(&results).unwrap()
+    );
 }
