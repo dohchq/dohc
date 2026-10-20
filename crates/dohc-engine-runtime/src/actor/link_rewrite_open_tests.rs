@@ -850,7 +850,9 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
     let queued_key = key.clone();
     f.actor
         .run(move |store, cache| {
-            dohc_engine_sync::create_claim_identity(store, &ws, "local", "epoch", "stream", 8, &NoFaults)?;
+            dohc_engine_sync::create_claim_identity(
+                store, &ws, "local", "epoch", "stream", 8, &NoFaults,
+            )?;
             dohc_engine_collab::claim_base(
                 store,
                 &queued_key,
