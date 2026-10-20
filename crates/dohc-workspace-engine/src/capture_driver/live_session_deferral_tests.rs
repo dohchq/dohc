@@ -767,6 +767,175 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
     harness.close();
 }
 
+// dohc#2342. A file capture recorded is deleted outside dohc while its
+// document is open. The session still holds the head and refuses every save
+// over the missing file, so capture leaves the head alone. Capture is waiting,
+// not failing, so it stays clean. The release alone brings the delete back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+
+    std::fs::remove_file(harness.root.join(path)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the held delete is not a failed capture"
+    );
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert!(
+        !stats.dirty,
+        "the layer is quiescent while the session lasts"
+    );
+    assert_eq!(
+        head_count(&harness.db, path),
+        1,
+        "the session still holds it"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+
+    files.close().await;
+    harness.close();
+}
+
+// The same wait when the delete lands between the scan and the apply: capture
+// planned to record a change to the held file and finds it gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+
+    std::fs::write(harness.root.join(path), "Changed outside.\n").expect("outside write");
+    files.handle().request_rescan();
+    let run = reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+        .await
+        .expect("scan");
+    assert!(
+        matches!(&run.run, ReconcileRun::Completed(plan)
+            if matches!(plan.ops.as_slice(), [CaptureOp::Ingest { .. }])),
+        "the scan plans to record the change"
+    );
+    std::fs::remove_file(harness.root.join(path)).expect("deleted before the apply");
+    let clean = apply_bound_run_with_handle(
+        apply_context(
+            &harness.root,
+            &harness.actor,
+            &harness.leases,
+            &harness.status,
+            &harness.self_writes,
+        ),
+        &files.handle(),
+        run,
+        &CancellationToken::new(),
+    )
+    .await
+    .clean;
+    assert!(clean, "the held delete is not a failed capture");
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert_eq!(
+        head_count(&harness.db, path),
+        1,
+        "the session still holds it"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+
+    files.close().await;
+    harness.close();
+}
+
+// An engine-internal attempt's lease wakes nothing when it ends, so a retire
+// it blocks stays an ordinary failure that capture retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_file_an_internal_attempt_holds_fails_and_is_retried() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let internal = harness
+        .leases
+        .acquire_internal(&harness.key(&object_id))
+        .expect("an internal attempt holds the file");
+
+    std::fs::remove_file(harness.root.join(path)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!(stats.deferred, 0);
+    assert!(stats.dirty, "capture retries the retire");
+    assert_eq!(head_count(&harness.db, path), 1);
+
+    drop(internal);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "the retry retires it");
+
+    files.close().await;
+    harness.close();
+}
+
 // The held file carried typing the engine admitted but never settled. Once
 // the session lets go, the same capture pass records the outside edit as the
 // file, keeps the typing as an ordinary sibling, and writes that sibling to

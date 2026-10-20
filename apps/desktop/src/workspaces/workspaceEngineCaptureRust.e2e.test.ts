@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -16,6 +16,7 @@ import type {
 import {
   VersionedLiveAdapter,
   YdocReleasedWithSettleFailureError,
+  isWorkspaceUpdatingRefusal,
   openEngineYdocProviderSession,
   type EngineTransport,
 } from "@dohc/workspace-engine-client";
@@ -23,6 +24,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  type WorkspaceEngineCaptureFailure,
   type WorkspaceEngineCaptureOptions,
   YDocUncapturedArtifactError,
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -1274,6 +1276,43 @@ it.skipIf(engine.missing)(
 // No window shows these workspaces.
 const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 
+// A capture on its own real engine, with the reads desktop main bases two
+// workspace notices on (dohc#2342). `health` first has the engine scan the
+// folder, so it counts a change whether or not the watcher has reported it.
+// Then it reads the newest moment as the shell does, which waits for capture
+// to settle and fails as "dohc could not check whether open files changed"
+// while History is still updating. Last, it answers the outcome of the first
+// health poll, which raises History paused unless it is null.
+async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}) {
+  const root = await createTestScratch(`dohc-${workspaceId}-`);
+  const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  await lifecycle.start();
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const outcomes: WorkspaceEngineCaptureFailure[] = [];
+  const capture = createAttachedWorkspaceEngineCapture({
+    ...workspace, rustEngineSessions: sessions, onError: () => undefined, ...options,
+    onCaptureOutcome: (failure) => outcomes.push(failure),
+  });
+  const health = async () => {
+    await sessions.run(workspace, ({ client, workspace: handle }) =>
+      new VersionedLiveAdapter(client, handle, { workspaceId }).reconcileCapture());
+    const newestMoment = await capture.listMoments({ limit: 1 }).then(() => "read", (error: unknown) => {
+      if (isWorkspaceUpdatingRefusal(error)) return "still updating";
+      throw error;
+    });
+    capture.start();
+    await vi.waitFor(() => expect(outcomes).not.toEqual([]), { timeout: REAL_DAEMON_DEADLINE_MS });
+    return { newestMoment, health: outcomes[0] };
+  };
+  const stop = async () => {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  };
+  return { root, sessions, capture, health, stop };
+}
+
 // dohc#2308. An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until
 // the person chooses Save it again. `shape` is a file capture recorded and
@@ -1281,15 +1320,11 @@ const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 // Drafts go to a real draft store, as the app keeps them. The store refuses
 // the first `failedDiscards` removals.
 async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0) {
-  const root = await createTestScratch("dohc-deleted-file-");
   const draftStore = await createTestScratch("dohc-deleted-file-drafts-");
   const workspaceId = `deleted-file-${shape}`;
   const store = workspaceDraftStore(draftStore, workspaceId, NO_WINDOWS);
-  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
-  await lifecycle.start();
-  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const capture = createWorkspaceEngineCapture({
-    workspaceId, rootPath: root, rustEngineSessions: sessions, settleDebounceMs: 60_000, onError: () => undefined,
+  const { root, sessions, capture, health, stop } = await openRealCapture(workspaceId, {
+    settleDebounceMs: 60_000,
     preserveUnsentState: store.preserveUnsentState,
     discardUnsentState: async (draftId) => {
       if (failedDiscards-- > 0) throw new Error("The draft store is busy.");
@@ -1299,11 +1334,6 @@ async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0
   const absolute = join(root, "note.md");
   const states: string[] = [];
   const drafts = async () => (await listLiveDraftRecovery(draftStore, workspaceId)).map(({ path, text }) => `${path}: ${text}`);
-  const stop = async () => {
-    await capture.stop().catch(() => undefined);
-    await sessions.closeAll().catch(() => undefined);
-    await lifecycle.stop().catch(() => undefined);
-  };
   try {
     if (shape === "recorded") {
       await writeFile(absolute, "base\n", "utf8");
@@ -1334,12 +1364,104 @@ async function openDeletedDocument(shape: "recorded" | "new", failedDiscards = 0
     const text = () => editor.getText("plainText").toString();
     // A crash from here on keeps the text: the first refused save set it aside.
     await vi.waitFor(async () => expect(await drafts()).toEqual([`note.md: ${text()}`]));
-    return { capture, session, sessions, absolute, states, type, text, drafts, stop };
+    return { root, capture, session, sessions, absolute, states, type, text, drafts, health, stop };
   } catch (error) {
     await stop();
     throw error;
   }
 }
+
+// dohc#2342. Capture leaves a deleted file's head alone while its document
+// is open, because that document still holds it. Capture is waiting, not
+// failing: the person already has the save notice with Save it again, so
+// History stays readable and capture reads as healthy.
+it.skipIf(engine.missing).each(["recorded", "new"] as const)(
+  "reports no capture or History failure while a %s file deleted outside dohc is open",
+  async (shape) => {
+    const deleted = await openDeletedDocument(shape);
+    try {
+      expect(await deleted.health()).toEqual({ newestMoment: "read", health: null });
+      // The save notice stays: the next save is refused the same way.
+      deleted.type("more\n");
+      await expect(deleted.session.settleNow()).rejects.toThrow("conflict-stale-target");
+      expect(existsSync(deleted.absolute)).toBe(false);
+    } finally {
+      await deleted.stop();
+    }
+  },
+  60_000,
+);
+
+// The wait ends with the document: once it closes, History records the delete.
+// History already holds all of the document, so the close is no failed save
+// and sets nothing aside (dohc#2366).
+it.skipIf(engine.missing).each(["no edit", "an edit saved before the delete"] as const)(
+  "records a file deleted outside dohc once its document closes, with %s and no failed save",
+  async (edit) => {
+    const workspaceId = `deleted-file-closed-${edit === "no edit" ? "unedited" : "saved"}`;
+    const draftStore = await createTestScratch("dohc-deleted-file-closed-drafts-");
+    const store = workspaceDraftStore(draftStore, workspaceId, NO_WINDOWS);
+    const opened = await openRealCapture(workspaceId, {
+      settleDebounceMs: 60_000, preserveUnsentState: store.preserveUnsentState, discardUnsentState: store.discardUnsentState,
+    });
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const states: string[] = [];
+      const session = await opened.capture.openYDocSession({
+        path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined, onSaveState: (state) => states.push(state),
+      });
+      const writes = edit === "no edit" ? ["write"] : ["write", "write"];
+      if (edit !== "no edit") {
+        const editor = new Y.Doc();
+        Y.applyUpdate(editor, session.initialUpdate);
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, "saved\n");
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+        await session.settleNow();
+        await waitForPathMoments(opened.capture, "note.md", 2);
+      }
+      await rm(absolute);
+      opened.capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      const before = await waitForPathMoments(opened.capture, "note.md", writes.length);
+      expect(before.map((moment) => moment.operation)).toEqual(writes);
+
+      await expect(session.close()).resolves.toBeUndefined();
+      const after = await waitForPathMoments(opened.capture, "note.md", writes.length + 1);
+      expect(after.map((moment) => moment.operation)).toEqual(["delete", ...writes]);
+      expect(existsSync(absolute)).toBe(false);
+      expect(states).not.toContain("error");
+      expect(await listLiveDraftRecovery(draftStore, workspaceId)).toEqual([]);
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
+
+// A folder capture cannot read is a real failure, so both workspace notices
+// still come, also while a deleted file's document is open.
+it.skipIf(engine.missing).each(["no document", "a deleted file's document"] as const)(
+  "still reports a folder capture cannot read, with %s open",
+  async (open) => {
+    const opened = open === "no document" ? await openRealCapture("unreadable-folder") : await openDeletedDocument("recorded");
+    const locked = join(opened.root, "locked");
+    try {
+      await mkdir(locked);
+      await writeFile(join(locked, "note.md"), "Out of reach.\n");
+      await chmod(locked, 0o000);
+      // Root reads any folder, so there this fixture cannot fail capture.
+      if (await readdir(locked).then(() => true, () => false)) return;
+      expect(await opened.health()).toEqual({ newestMoment: "still updating", health: "other" });
+    } finally {
+      await chmod(locked, 0o755).catch(() => undefined);
+      await opened.stop();
+    }
+  },
+  60_000,
+);
 
 it.skipIf(engine.missing).each(["recorded", "new"] as const)(
   "saves a %s file deleted outside dohc again only when the person asks",

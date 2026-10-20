@@ -5971,7 +5971,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
       },
     },
   );
-  const { session } = await openWithOneEdit(capture, "first version");
+  const { session, mirror } = await openWithOneEdit(capture, "first version");
 
   // The settle starts and its write lands, but its own completion
   // callback is held open — modelling a chain occupied by other work.
@@ -5989,6 +5989,10 @@ it("a delete landing after a settle's write but before its late onSettled callba
   // The stale callback finally fires and reaches its own clear.
   releaseSettled();
   await settling;
+  // An edit after the delete leaves the close something to save.
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "after the delete ");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
 
   // A later close-retry ladder must still find the tombstone. RED before
   // the fix: the stale callback already erased it, so this retry

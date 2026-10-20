@@ -54,6 +54,7 @@ pub struct LeaseRegistry {
 struct LeaseBinding {
     version_id: String,
     claim_id: Option<String>,
+    notify_release: bool,
 }
 
 impl LeaseRegistry {
@@ -113,6 +114,7 @@ impl LeaseRegistry {
             LeaseBinding {
                 version_id: key.version_id.clone(),
                 claim_id: None,
+                notify_release,
             },
         );
         Ok(Lease {
@@ -129,6 +131,19 @@ impl LeaseRegistry {
         self.held
             .lock()
             .map(|held| held.contains_key(&self.object_scope(key)))
+            .unwrap_or(false)
+    }
+
+    /// Whether a session lease holds `key`'s object (any version): one whose
+    /// release moves [`Self::release_generation`]. An internal attempt's
+    /// lease does not count.
+    pub fn is_held_by_session(&self, key: &DocKey) -> bool {
+        self.held
+            .lock()
+            .map(|held| {
+                held.get(&self.object_scope(key))
+                    .is_some_and(|binding| binding.notify_release)
+            })
             .unwrap_or(false)
     }
 
@@ -222,6 +237,25 @@ impl std::fmt::Debug for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_session_lease_counts_as_held_by_a_session() {
+        let registry = LeaseRegistry::new();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let fork = DocKey::new("ws", "fork", "object").unwrap();
+        assert!(!registry.is_held_by_session(&key));
+        let internal = registry.acquire_internal(&key).unwrap();
+        assert!(registry.is_held(&key));
+        assert!(!registry.is_held_by_session(&key));
+        drop(internal);
+        let session = registry.acquire(&key).unwrap();
+        assert!(
+            registry.is_held_by_session(&fork),
+            "any version of the object"
+        );
+        drop(session);
+        assert!(!registry.is_held_by_session(&key));
+    }
 
     #[test]
     fn internal_attempts_preserve_a_sessions_bound_claim_and_release_generation() {

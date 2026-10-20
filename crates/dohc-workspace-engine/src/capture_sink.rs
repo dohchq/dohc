@@ -7,7 +7,7 @@ use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
-    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, RespelledRetire, Respelling,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, RespelledRetire, Respelling, RetireOutcome,
     stored_under_other_spelling,
 };
 use dohc_engine_runtime::actor::CapturePlacementPath;
@@ -46,6 +46,10 @@ const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
 };
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
+};
+/// A deleted file's retire that waits for the document session holding it.
+const RETIRE_HELD: CaptureError = CaptureError {
+    reason: "retire-held-by-live-session",
 };
 const ESCAPES_ROOT: CaptureError = CaptureError {
     reason: "capture path did not resolve through real ancestors inside the workspace root",
@@ -913,6 +917,17 @@ impl StoreCaptureSink {
         self.retire_head_with(path, false, summary, true, true, None)
     }
 
+    /// A deleted file's head waits while its document is open: the session
+    /// still holds it, refuses every save over the missing file, and the
+    /// person decides whether to save the file again.
+    fn retire_deleted(&self, path: &str) -> Result<RetireOutcome, CaptureError> {
+        match self.retire_absent_head(path, self.provenance.summary.clone()) {
+            Ok(()) => Ok(RetireOutcome::Retired),
+            Err(RETIRE_HELD) => Ok(RetireOutcome::Deferred),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Retire the head at a spelling the disk proves respelled to `to`. The
     /// file is still there under the new spelling, so this is not a deletion;
     /// the actor lets it retire a head capture does not own, such as one a
@@ -998,6 +1013,12 @@ impl StoreCaptureSink {
                 if respelled_to.is_some() =>
             {
                 Err(RESPELLED_RETIRE_WAITS)
+            }
+            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason }))
+                if confirm_absent
+                    && reason == dohc_engine_runtime::actor::CAPTURE_RETIRE_WAITS_FOR_SESSION =>
+            {
+                Err(RETIRE_HELD)
             }
             Err(_) => Err(RETIRE_FAILED),
         }
@@ -1555,13 +1576,17 @@ impl CaptureSink for StoreCaptureSink {
                 // Raced a delete between scan and re-read: retire like an
                 // ordinary delete (pass provenance; no ownership label), and
                 // report NotOwned so the manifest forgets the path. A refused
-                // retire keeps the self-write identity: the file is back, and
-                // the rescan may find dohc's own bytes.
-                self.retire_absent_head(path, self.provenance.summary.clone())?;
-                if changed {
-                    self.self_writes.clear_path(&self.workspace_id, path);
+                // or deferred retire keeps the self-write identity: the file
+                // can come back, and the rescan may find dohc's own bytes.
+                match self.retire_deleted(path)? {
+                    RetireOutcome::Retired => {
+                        if changed {
+                            self.self_writes.clear_path(&self.workspace_id, path);
+                        }
+                        Ok(IngestOutcome::NotOwned)
+                    }
+                    RetireOutcome::Deferred => Ok(IngestOutcome::RetireDeferred),
                 }
-                Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::NonOwnable => {
                 if changed {
@@ -1621,13 +1646,13 @@ impl CaptureSink for StoreCaptureSink {
         }
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         match classify_engine_file_path_normalized(path) {
-            (PathClassification::Ignored, _) => Ok(()),
+            (PathClassification::Ignored, _) => Ok(RetireOutcome::Retired),
             (PathClassification::Secret, normalized) => {
                 // Nothing was ever stored under a non-canonical literal name.
                 if normalized.as_deref() != Some(path) {
-                    return Ok(());
+                    return Ok(RetireOutcome::Retired);
                 }
                 // Apply-time absence confirmation, then the KEYLESS secret
                 // retire (a delete never decrypts). Mirrors the text arm's
@@ -1635,7 +1660,9 @@ impl CaptureSink for StoreCaptureSink {
                 let absolute = self.shadow_root.join(path);
                 match self.path_containment(path) {
                     Containment::Contained => {}
-                    Containment::Absent => return self.retire_secret(path),
+                    Containment::Absent => {
+                        return self.retire_secret(path).map(|()| RetireOutcome::Retired);
+                    }
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
                 match std::fs::symlink_metadata(&absolute) {
@@ -1644,6 +1671,7 @@ impl CaptureSink for StoreCaptureSink {
                     Err(err) if absent_error(&err) => self.retire_secret(path),
                     Err(_) => Err(SECRET_RETIRE_FAILED),
                 }
+                .map(|()| RetireOutcome::Retired)
             }
             (PathClassification::Tracked, Some(normalized)) if normalized == path => {
                 // Apply-time absence confirmation, mirroring both the TS
@@ -1659,26 +1687,24 @@ impl CaptureSink for StoreCaptureSink {
                 // tracked file gone; an escape retains last-known-good.
                 match self.path_containment(path) {
                     Containment::Contained => {}
-                    Containment::Absent => {
-                        return self.retire_absent_head(path, self.provenance.summary.clone());
-                    }
+                    Containment::Absent => return self.retire_deleted(path),
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
                 match std::fs::symlink_metadata(&absolute) {
                     Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
                     // A non-regular replacement confirms the tracked regular
                     // file gone; absence confirms it outright.
-                    Ok(_) => self.retire_head(path, false, self.provenance.summary.clone()),
-                    Err(err) if absent_error(&err) => {
-                        self.retire_absent_head(path, self.provenance.summary.clone())
-                    }
+                    Ok(_) => self
+                        .retire_head(path, false, self.provenance.summary.clone())
+                        .map(|()| RetireOutcome::Retired),
+                    Err(err) if absent_error(&err) => self.retire_deleted(path),
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.
                     Err(_) => Err(RETIRE_FAILED),
                 }
             }
             // Nothing was ever stored under a non-canonical literal name.
-            (PathClassification::Tracked, _) => Ok(()),
+            (PathClassification::Tracked, _) => Ok(RetireOutcome::Retired),
         }
     }
 
@@ -1697,7 +1723,7 @@ impl CaptureSink for StoreCaptureSink {
         if respelled {
             self.retire_respelled_head(path, to)
         } else {
-            self.retire(path).map(|()| RespelledRetire::Retired)
+            self.retire(path).map(RespelledRetire::from)
         }
     }
 }

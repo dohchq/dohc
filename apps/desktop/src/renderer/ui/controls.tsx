@@ -145,6 +145,8 @@ export function SectionLabel({
 const emptyGlyphToneClass = {
   ghost: { glyph: "text-subtle", mark: "text-line" },
   danger: { glyph: "text-danger", mark: "text-danger" },
+  // A state that holds something back on purpose, such as Restricted Mode.
+  warning: { glyph: "text-warning", mark: "text-warning" },
 } as const;
 
 /** Centered empty state: a ghost glyph, one muted line that says what is

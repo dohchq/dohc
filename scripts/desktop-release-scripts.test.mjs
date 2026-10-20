@@ -1534,9 +1534,17 @@ test("a real Mac release opens the release keychain only to check signing and to
   assert.equal(existsSync(join(workRoot, "v0.1.0")), false, "a finished upload keeps no files");
 });
 
-test("release-desktop-macos refuses incomplete arguments when run as a command", async () => {
+// HOME moves the command's lock into a temporary directory, so the test never takes this Mac's real one.
+test("release-desktop-macos refuses incomplete arguments when run as a command, even while a release holds the lock", async t => {
+  const home = await mkdtemp(join(tmpdir(), "dohc-release-home-"));
+  if (process.platform === "darwin") {
+    await mkdir(join(home, "dohc-release"));
+    const holder = spawn("/usr/bin/perl", ["-e", '$| = 1; open(my $lock, ">>", shift) or die; flock($lock, 2) or die; print "held\\n"; sleep 60', join(home, "dohc-release/release.lock")], { stdio: ["ignore", "pipe", "inherit"] });
+    t.after(() => holder.kill("SIGKILL"));
+    await new Promise(resolve => holder.stdout.once("data", resolve));
+  }
   await assert.rejects(
-    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
+    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"], { HOME: home }),
     (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
   );
 });
@@ -1568,6 +1576,31 @@ test("every release job lets checkout remove an earlier build's read-only reader
   assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
   // A fresh runner has no workspace yet.
   await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
+});
+
+// Deleting node_modules takes the Windows runner over 15 minutes, so a job
+// there keeps it and the Rust target folder between jobs.
+test("every release job on Windows keeps node_modules and target, and removes every other untracked file", async () => {
+  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
+    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
+    assert.equal(job.steps[checkout].with.clean, "${{ runner.os != 'Windows' }}", `${name} lets checkout clean everywhere but Windows`);
+    const clean = job.steps[checkout + 1];
+    assert.equal(clean.if, "runner.os == 'Windows'", `${name} cleans its Windows workspace after checkout`);
+    assert.equal(clean.run, "git clean -ffdx --exclude=node_modules --exclude=target");
+  }
+  // Run the command against a workspace an earlier job left behind.
+  const workspace = await mkdtemp(join(tmpdir(), "dohc-release-workspace-"));
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: workspace });
+  const kept = ["node_modules/electron/index.js", "apps/desktop/node_modules/.bin/vite", "target/release/engine"];
+  const removed = ["apps/desktop/release/dohc-setup.exe", "release-history.jsonl"];
+  for (const file of [...kept, ...removed]) {
+    await mkdir(join(workspace, file, ".."), { recursive: true });
+    await writeFile(join(workspace, file), "");
+  }
+  const [command, ...args] = releaseWorkflow.jobs.build.steps.find(step => step.name === "Remove leftover files but keep node_modules and target").run.split(" ");
+  await promisify(execFile)(command, args, { cwd: workspace });
+  for (const file of kept) assert.equal(existsSync(join(workspace, file)), true, `${file} stays`);
+  for (const file of removed) assert.equal(existsSync(join(workspace, file)), false, `${file} is removed`);
 });
 
 const NIGHTLY_HEAD = "a".repeat(40);

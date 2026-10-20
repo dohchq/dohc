@@ -50,8 +50,9 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    CAPTURE_NEW_FILE_LIVE, CapturePassSettlement, CapturePlacementPath,
-    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
+    CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CapturePassSettlement,
+    CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
+    WorkspaceRootGuard,
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
@@ -521,6 +522,36 @@ impl Drop for LinkDrainHold {
     }
 }
 
+fn wait_for_reader<R>(
+    result: &Result<R, RuntimeError>,
+    attempt: usize,
+) -> impl std::future::Future<Output = bool> + Send + 'static {
+    let pending = match result {
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(pending)))
+        | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownReaderPending(
+            pending,
+        )))
+        | Err(RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Collab(
+                dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
+            ),
+        )) => Some(pending.clone()),
+        _ => None,
+    };
+    async move {
+        let Some(pending) = pending else {
+            return false;
+        };
+        if attempt < 2 {
+            pending.resolve().await;
+            true
+        } else {
+            tokio::spawn(async move { pending.resolve().await });
+            false
+        }
+    }
+}
+
 impl ActorHandle {
     pub async fn configure_reader_resolver(
         &self,
@@ -536,29 +567,15 @@ impl ActorHandle {
     async fn run_with_reader_retry<R: Send + 'static>(
         &self,
         work: impl Fn(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
-        + Clone
         + Send
+        + Sync
         + 'static,
     ) -> Result<R, RuntimeError> {
+        let work = Arc::new(work);
         for attempt in 0..=2 {
-            let result = self.run(work.clone()).await;
-            let pending = match &result {
-                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(
-                    pending,
-                )))
-                | Err(RuntimeError::Collab(
-                    dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
-                )) => Some(pending.clone()),
-                _ => None,
-            };
-            if let Some(pending) = pending {
-                if attempt < 2 {
-                    pending.resolve().await;
-                } else {
-                    tokio::spawn(async move { pending.resolve().await });
-                    return result;
-                }
-            } else {
+            let work = work.clone();
+            let result = self.run(move |store, cache| work(store, cache)).await;
+            if !wait_for_reader(&result, attempt).await {
                 return result;
             }
         }

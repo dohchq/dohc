@@ -5,7 +5,8 @@ use common::FatVolume;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
-    IngestReason, NativeWatcher, ReconcileRun, ScanBounds, WATCH_SETTLE, apply_reconcile_plan,
+    IngestReason, NativeWatcher, ReconcileRun, RetireOutcome, ScanBounds, WATCH_SETTLE,
+    apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
 use std::sync::Arc;
@@ -29,8 +30,8 @@ impl CaptureSink for AcceptAll {
         })
     }
 
-    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
-        Ok(())
+    fn retire(&mut self, _path: &str) -> Result<RetireOutcome, CaptureError> {
+        Ok(RetireOutcome::Retired)
     }
 }
 

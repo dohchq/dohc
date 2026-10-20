@@ -328,6 +328,11 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
 }
 
+/** Main refused to run an app's code because the workspace is in Restricted Mode. */
+export function isWorkspaceRestricted(error: unknown): boolean {
+  return parse(error).name === "WorkspaceRestrictedError";
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);

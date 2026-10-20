@@ -130,6 +130,8 @@ async fn open_undo_fixture_with_operations(
 async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
     let (scratch, service, handle, open) = open_undo_fixture().await;
     let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
+    // Crash after the rename's inverse commits. The five deletes can share one
+    // turn on a fast host, so a later crash could find the Undo complete.
     assert!(matches!(
         open.actor
             .history_undo_in_turns(
@@ -138,7 +140,7 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
                 "resume-request".into(),
                 None,
                 open.root.clone(),
-                Arc::new(CrashAfter(AtomicUsize::new(3))),
+                Arc::new(CrashAfter(AtomicUsize::new(2))),
                 10,
                 [open.capture_apply_gate.clone(), open.session_ops.clone()],
                 Arc::new(()),
