@@ -8,18 +8,18 @@ type Shell = ReturnType<typeof useShellError>;
 /** The Notices row for where a workspace that never synced runs its schedules, or null for none. */
 export function scheduleHostNoticeText(state: ScheduleHostResult): { message: string; failed: boolean; cause?: string } | null {
   if (state.kind === "no-computer") return { message: state.message, failed: true, ...(state.cause ? { cause: state.cause } : {}) };
-  if (state.kind !== "another-computer" || !state.hasSchedules) return null;
+  if (state.kind !== "another-computer" || !state.waits) return null;
   const where = state.sameName
-    ? `This workspace's schedules run on ${state.label}, which has this computer's name. It may be an earlier installation of dohc here.`
-    : `This workspace's schedules run on ${state.label}, not this computer.`;
+    ? `This workspace's schedules and Group messages run on ${state.label}, which has this computer's name. It may be an earlier installation of dohc here.`
+    : `This workspace's schedules and Group messages run on ${state.label}, not this computer.`;
   return { message: `${where} If you take over while ${state.label} is on, a run can repeat.`, failed: false };
 }
 
 /**
- * Tells the person when this computer has schedules that another computer
- * runs, or that no computer runs, with Take over now. Reads when the
+ * Tells the person when this computer has schedules or Group triggers that
+ * another computer runs, or that no computer runs, with Take over now. Reads when the
  * workspace opens and whenever main says where schedules run may have
- * changed, as when a step here first finds schedules. It never asks a
+ * changed, as when this computer first finds such automations. It never asks a
  * synced workspace's relay. A failed read says nothing here: Settings shows it.
  */
 export function useScheduleHostNotice(input: {

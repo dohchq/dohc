@@ -6401,14 +6401,14 @@ export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
 export const ScheduleHostResult = z.discriminatedUnion("kind", [
   // A workspace that never synced runs its schedules on one computer: this
   // one, or the one named. `sameName` says it has this computer's name, so
-  // it may be an earlier installation here. `hasSchedules` says this
-  // computer found schedules that the other one runs.
+  // it may be an earlier installation here. `waits` says this computer has
+  // schedules or Group triggers that the other one runs.
   z.object({ kind: z.literal("this-computer") }),
   z.object({
     kind: z.literal("another-computer"),
     label: z.string().min(1).max(64),
     sameName: z.boolean(),
-    hasSchedules: z.boolean(),
+    waits: z.boolean(),
   }),
   // dohc cannot read which computer runs a workspace that never synced, so
   // none does until one takes over. `cause` is the error, for Copy.

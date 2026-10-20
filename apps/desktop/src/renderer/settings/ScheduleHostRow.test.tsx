@@ -106,7 +106,7 @@ describe("Schedules run on", () => {
   it("names the other computer that runs a workspace that never synced, and asks before this computer takes over", async () => {
     const takeOverScheduleHost = vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" }));
     install({
-      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's laptop", sameName: false, hasSchedules: true })),
+      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's laptop", sameName: false, waits: true })),
       takeOverScheduleHost,
     });
     render(<ScheduleHostRow workspaceId="ws" />);
@@ -133,7 +133,7 @@ describe("Schedules run on", () => {
 
   it("says when the computer that runs them has this computer's name", async () => {
     install({
-      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's desktop", sameName: true, hasSchedules: true })),
+      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's desktop", sameName: true, waits: true })),
     });
     render(<ScheduleHostRow workspaceId="ws" />);
     const elsewhere = await screen.findByTestId("schedule-host-elsewhere");

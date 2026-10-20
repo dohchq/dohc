@@ -1,6 +1,6 @@
 import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, AUTOMATION_INSTALL_ID_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
-import { DOHC_SYNC_HISTORY_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
-import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { DOHC_SYNC_HISTORY_GUARD, notAFileRefusal, notARealFolderRefusal } from "@dohc/workspace-core";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import type { RegistryEntry } from "./registryStore";
@@ -90,8 +90,13 @@ export function recordReceivedShare(rootPath: string): Promise<void> {
   return mark(rootPath, "received-share");
 }
 
+// A mark that a link or folder stands in for counts as there, so it can
+// never make a workspace look never synced. Writing one refuses it.
 async function mark(rootPath: string, name: Mark): Promise<void> {
-  await createOnce(join(await marksFolder(rootPath), name), "");
+  const path = join(await marksFolder(rootPath), name);
+  await createOnce(path, "");
+  const stats = await lstat(path);
+  if (!stats.isFile()) throw new Error(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: `${DOHC_SYNC_HISTORY_GUARD.path}/${name}` }, stats));
 }
 
 // .dohc/sync-history, made when it is missing. A workspace folder that is
@@ -126,11 +131,12 @@ async function readAt(path: string): Promise<FileRead> {
   }
 }
 
-// True when the mark is there, false when it is not, and null when dohc
-// cannot tell. Only a missing file is no mark: any other error may hide one.
+// True when anything is at the mark's name, false when nothing is, and null
+// when dohc cannot tell. Only a missing entry is no mark: any other error
+// may hide one. lstat, so a link that leads nowhere still counts.
 async function marked(marks: string, name: Mark): Promise<boolean | null> {
   try {
-    await stat(join(marks, name));
+    await lstat(join(marks, name));
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? false : null;

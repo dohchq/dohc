@@ -4,6 +4,7 @@ import {
   DOHC_METADATA_GUARD,
   DOHC_SYNC_HISTORY_GUARD,
   DOHC_TRASH_GUARD,
+  notAFileRefusal,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
 } from "./dohcGuardRefusals";
@@ -32,6 +33,9 @@ describe("dohc guard refusals", () => {
     );
     expect(notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile)).toBe(
       "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
+    );
+    expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
+      "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
     );
     expect(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.",

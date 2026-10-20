@@ -1753,7 +1753,7 @@ function createDesktopWorkspaceAuthorityState(
 ): DesktopWorkspaceAuthorityState {
   const datasetHost: DatasetHostSlot = { pending: null };
   const collectionAutomations = createCollectionAutomationsFor(binding, datasetHost);
-  automationScheduler.add(binding.workspaceId, collectionAutomations, workspaceHosts.scheduleHost(binding.workspaceId));
+  automationScheduler.add(binding.workspaceId, collectionAutomations, workspaceHosts.open(binding.workspaceId));
   return {
     activity: new WorkspaceActivityState(),
     collectionAutomations,
@@ -1843,6 +1843,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     rosterContexts.delete(binding.workspaceId);
     automationScheduler.remove(binding.workspaceId);
     automationHosts.close(binding.workspaceId);
+    workspaceHosts.close(binding.workspaceId);
     pressWindows.forget(binding.workspaceId);
     state.relayedPresses.stop();
     const results = await Promise.allSettled([
@@ -4264,7 +4265,7 @@ async function scheduleHostState(
       label: computer.label,
       // An installation by this computer's name may be an earlier one here.
       sameName: computer.label === here.label,
-      hasSchedules: workspaceHosts.schedulesElsewhere(workspaceId),
+      waits: workspaceHosts.waitsElsewhere(workspaceId),
     };
   }
   let credentials: CloudSessionCredentials;
@@ -4329,10 +4330,13 @@ const workspaceHosts = createWorkspaceHosts({
   here: thisComputer,
   workspace: findWorkspace,
   relay: automationHosts,
-  changed: (workspaceId) => {
+  hasHostTriggers: (workspaceId) => collectionAutomationsOf(workspaceId)?.hasHostTriggers() ?? false,
+  hostChanged: (workspaceId) => {
     collectionAutomationsOf(workspaceId)?.hostChanged();
     announceScheduleHost(workspaceId);
   },
+  elsewhereChanged: announceScheduleHost,
+  logError: (workspaceId, error) => console.warn(`[desktop] could not read where workspace ${workspaceId} runs its automations:`, error),
 });
 
 // The relay's last release or take over, read at this host generation, as
@@ -4567,7 +4571,10 @@ function createCollectionAutomationsFor(
     groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
-    onSchedulesChanged: () => automationScheduler.wake(),
+    onSchedulesChanged: () => {
+      automationScheduler.wake();
+      workspaceHosts.automationsChanged(workspaceId);
+    },
     hostCanRun: () => hostCanRun(workspaceId),
     // The builder's Group pickers name this computer's Groups; direct messages are not Groups.
     groupList: () => withWorkspaceAttachmentAsync(workspace, async (lease) =>

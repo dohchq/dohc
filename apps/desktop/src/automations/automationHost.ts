@@ -7,7 +7,7 @@ import {
   type RelayAutomationComputer,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
-import type { ScheduleHost } from "@dohc/automation-executor/automation-scheduler";
+import { MAX_TIMER_MS, type ScheduleHost } from "@dohc/automation-executor/automation-scheduler";
 import { scheduleComputer, type Computer } from "../workspaces/syncHistory";
 
 // Which of the owner's computers runs a synced workspace's schedules
@@ -226,24 +226,36 @@ export interface WorkspaceHostsDependencies {
   here(): Computer;
   workspace(workspaceId: string): HostedWorkspace;
   relay: Pick<AutomationHosts, "runsHere" | "stillRuns" | "runsAt">;
+  /** Whether an enabled automation in the workspace starts on a schedule or a Group message. */
+  hasHostTriggers(workspaceId: string): boolean;
   /**
    * Whether this computer runs a workspace that does not sync changed, as
-   * when another computer took over, or a step found schedules here that
-   * another computer runs, or stopped finding them.
+   * when another computer took over: its Group subscriptions follow.
    */
-  changed(workspaceId: string): void;
+  hostChanged(workspaceId: string): void;
+  /** Whether this computer has schedules or Group triggers that another computer runs changed. */
+  elsewhereChanged(workspaceId: string): void;
+  logError(workspaceId: string, error: unknown): void;
+  /** The timer that reads the folders again; a test drives it and awaits the reads. */
+  setTimer?(wake: () => Promise<void>, delayMs: number): unknown;
+  clearTimer?(timer: unknown): void;
 }
 
 /**
- * Where each workspace's automations run, as the scheduler and Collection
- * automations ask. A workspace that does not sync is read from its folder at
- * every ask, and every 15 minutes while another computer runs its
- * schedules, so this computer learns that it was chosen or that another
- * one took over without waiting for anything else to happen here.
+ * Where each open workspace's automations run, as the scheduler and
+ * Collection automations ask. A workspace that does not sync is read from
+ * its folder at every ask, and again every 15 minutes whatever it has, so
+ * this computer learns that it was chosen, that another computer took
+ * over, or that a read that failed works again, without waiting for
+ * anything else to happen here. Those reads ask no relay.
  */
 export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
+  const setTimer = dependencies.setTimer ?? ((wake: () => Promise<void>, delayMs: number) => setTimeout(() => void wake(), delayMs));
+  const clearTimer = dependencies.clearTimer ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const open = new Set<string>();
   const runs = new Map<string, boolean>();
   const elsewhere = new Set<string>();
+  let timer: unknown = null;
   const local = (workspace: HostedWorkspace) => workspace !== null && workspace.remote === undefined && workspace.shareView === undefined;
 
   async function generation(
@@ -252,30 +264,43 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
   ): Promise<number | null> {
     const workspace = dependencies.workspace(workspaceId);
     const answer = await automationHostGeneration(workspace, dependencies.here(), relayGeneration);
-    if (local(workspace)) {
+    if (local(workspace) && open.has(workspaceId)) {
       const before = runs.get(workspaceId);
       runs.set(workspaceId, answer !== null);
-      if (before !== undefined && before !== (answer !== null)) dependencies.changed(workspaceId);
+      if (before !== undefined && before !== (answer !== null)) dependencies.hostChanged(workspaceId);
+      noteElsewhere(workspaceId);
     }
     return answer;
   }
 
-  return {
-    /** The host generation this computer runs Group triggers at, or null. */
-    groupHost: (workspaceId: string) => generation(workspaceId, () => dependencies.relay.runsAt(workspaceId)),
+  function noteElsewhere(workspaceId: string): void {
+    const waits = runs.get(workspaceId) === false && local(dependencies.workspace(workspaceId)) &&
+      dependencies.hasHostTriggers(workspaceId);
+    if (waits === elsewhere.has(workspaceId)) return;
+    if (waits) elsewhere.add(workspaceId);
+    else elsewhere.delete(workspaceId);
+    dependencies.elsewhereChanged(workspaceId);
+  }
 
-    scheduleHost(workspaceId: string): ScheduleHost {
+  function arm(): void {
+    if (timer !== null || open.size === 0) return;
+    timer = setTimer(async () => {
+      timer = null;
+      // A workspace that does not sync never asks its relay here.
+      await Promise.all([...open].filter((workspaceId) => local(dependencies.workspace(workspaceId))).map((workspaceId) =>
+        generation(workspaceId, () => null).catch((error: unknown) => dependencies.logError(workspaceId, error))));
+      arm();
+    }, MAX_TIMER_MS);
+  }
+
+  return {
+    /** A workspace opened: its schedules ask through what this returns. */
+    open(workspaceId: string): ScheduleHost {
+      open.add(workspaceId);
+      arm();
       return {
-        runsHere: async () => {
-          const here = (await generation(workspaceId, async () => ((await dependencies.relay.runsHere(workspaceId)) ? 0 : null))) !== null;
-          const waits = !here && local(dependencies.workspace(workspaceId));
-          if (waits !== elsewhere.has(workspaceId)) {
-            if (waits) elsewhere.add(workspaceId);
-            else elsewhere.delete(workspaceId);
-            dependencies.changed(workspaceId);
-          }
-          return here;
-        },
+        runsHere: async () =>
+          (await generation(workspaceId, async () => ((await dependencies.relay.runsHere(workspaceId)) ? 0 : null))) !== null,
         // Turning sync on or opening a share records it in the registry in
         // one synchronous call, and runsHere just read the folder or the
         // relay. So this check, with nothing awaited before a claim, stops
@@ -293,8 +318,24 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
       };
     },
 
-    /** Whether the last step found schedules here that another computer runs. */
-    schedulesElsewhere: (workspaceId: string) => elsewhere.has(workspaceId),
+    close(workspaceId: string): void {
+      open.delete(workspaceId);
+      runs.delete(workspaceId);
+      elsewhere.delete(workspaceId);
+      if (open.size === 0 && timer !== null) {
+        clearTimer(timer);
+        timer = null;
+      }
+    },
+
+    /** The host generation this computer runs Group triggers at, or null. */
+    groupHost: (workspaceId: string) => generation(workspaceId, () => dependencies.relay.runsAt(workspaceId)),
+
+    /** The workspace's automations were read again, so what waits on another computer may differ. */
+    automationsChanged: (workspaceId: string) => noteElsewhere(workspaceId),
+
+    /** Whether this computer has schedules or Group triggers that another computer runs. */
+    waitsElsewhere: (workspaceId: string) => elsewhere.has(workspaceId),
   };
 }
 

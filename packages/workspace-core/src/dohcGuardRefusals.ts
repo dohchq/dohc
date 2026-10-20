@@ -74,6 +74,16 @@ export function notARealFolderRefusal(
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a real folder. Remove or rename that ${noun}. Then retry.`;
 }
 
+// Something that is not a plain file sits at a path dohc writes as a file.
+export function notAFileRefusal(
+  guard: DohcPathGuard,
+  stats: SquattedPathStats,
+): string {
+  const noun = squatterNoun(stats);
+  const article = noun === "item" ? "An" : "A";
+  return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a file. Remove or rename that ${noun}. Then retry.`;
+}
+
 // The path is a real folder, but it leads out of the workspace. With the root
 // already resolved and the path proven a real directory, a bind mount is the
 // only way left to reach this, and "remove or rename it" does not undo a

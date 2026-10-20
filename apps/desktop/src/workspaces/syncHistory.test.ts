@@ -241,6 +241,24 @@ describe("a workspace's history stays inside it", () => {
   });
 });
 
+describe("a mark that a link stands in for", () => {
+  it.each(["synced", "received-share"] as const)("counts a link that leads nowhere at %s as there, and refuses to write over it", async (name) => {
+    await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    await symlink(join(root, "nowhere"), join(root, ".dohc", "sync-history", name));
+    const write = name === "synced" ? recordSynced : recordReceivedShare;
+    await expect(write(root)).rejects.toThrow(
+      `dohc could not record this workspace's sync history. A link is at .dohc/sync-history/${name}, which must be a file. Remove or rename that link. Then retry.`,
+    );
+    expect(await provedNeverShared(entry, none), "never proved never shared").toBe(false);
+    if (name === "synced") {
+      expect(await readSyncHistory(root), "a stale never-synced record cannot undo it").toBe("synced");
+      expect(await scheduleComputer(root, laptop), "so no schedules run here").toBeNull();
+    }
+    await expect(readdir(join(root, "nowhere"))).rejects.toThrow();
+  });
+});
+
 describe("a record from before the marks", () => {
   it("keeps a sync it says, whatever a stale copy says after", async () => {
     await writeFile(recordPath(), "{\"version\": 1, \"synced\": true}");
