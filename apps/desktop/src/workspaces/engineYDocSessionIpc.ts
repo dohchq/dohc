@@ -68,6 +68,7 @@ import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  isConflictStaleTargetCause,
   isVolumeSharesNewFilesCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
@@ -96,6 +97,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
+  saveDeletedFileAgain?(path: string): Promise<boolean>;
   openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause, failure?: unknown) => void}): Promise<EngineYDocSessionProvider>;
 }
 
@@ -138,9 +140,11 @@ interface EngineYDocSessionIpcOptions {
 }
 
 // Why the file refuses writes. The engine names a volume that adds sharing
-// permissions to new files; otherwise the file is checked. A missing file, or
-// one that cannot be checked, names no reason.
-function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureReason {
+// permissions to new files; otherwise the file is checked. The engine refuses
+// a save over a file that is gone, so a missing file with that refusal was
+// deleted outside dohc. A shared view's file is its host's, so only a local
+// file says so. A file that cannot be checked names no reason.
+function saveFailureReason(absolutePath: string, failure: unknown, shared: boolean): SaveFailureReason {
   if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
@@ -148,6 +152,7 @@ function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureR
   } catch (error) {
     if (isPrivacyDenial(error)) return "privacy-denied";
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return !shared && isConflictStaleTargetCause(failure) ? "deleted" : null;
     return code === "EACCES" || code === "EPERM" ? "read-only" : null;
   }
 }
@@ -716,7 +721,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               // one or two access calls, made only on a failure, so the notice
               // can name it.
               const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure) }
+                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure, shared) }
                 : undefined;
               publish(() => emit({
                 state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),
@@ -883,12 +888,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       throw new Error("This document belongs to another workspace.");
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
+    const of = { sender, generation: renderer.generation };
+    if (input.recreateFile) {
+      try {
+        authority.assertCurrent();
+        return await this.#saveDeletedFileAgain(authority.workspace, input.path, of);
+      } finally {
+        authority.release();
+      }
+    }
     let settle: Promise<unknown>;
     try {
       authority.assertCurrent();
-      const held = this.#owner.documentSession(
-        authority.workspace.attachmentId, input.path, { sender, generation: renderer.generation },
-      );
+      const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
       settle = held.session.provider.settleNow();
@@ -896,6 +908,24 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       authority.release();
     }
     await settle;
+    return "settled";
+  }
+
+  // Save it again, on a document whose file was deleted outside dohc. Its
+  // session can outlive its tab: the close was refused, so the session still
+  // holds the text, and saving lets that close finish.
+  async #saveDeletedFileAgain(
+    workspace: EngineYDocWorkspace,
+    path: string,
+    of: { sender: EngineYDocIpcSender; generation: number },
+  ): Promise<RetrySaveResult> {
+    const held = this.#owner.documentSession(workspace.attachmentId, path, of);
+    const closed = held ? undefined : this.#owner.failedRelease(workspace.attachmentId, path, of);
+    if (held?.session.deleted || !(held || closed)) return "closed";
+    const capture = this.#isSharedView(workspace) ? null : this.#captureFor(workspace);
+    if (!(await capture?.saveDeletedFileAgain?.(path))) return "closed";
+    const release = await closed?.retry();
+    if (release?.kind === "failed") throw release.error;
     return "settled";
   }
 

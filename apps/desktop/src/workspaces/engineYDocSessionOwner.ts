@@ -414,6 +414,14 @@ export class EngineYDocSessionOwner<
     }
   }
 
+  // The session one window closed for this document whose release failed,
+  // with the way to retry that release, as the next open of its path would.
+  failedRelease(authorityId: symbol, path: string, of: { sender: TSender; generation: number }) {
+    const record = [...this.#records].find((row) => row.authorityId === authorityId && row.path === path &&
+      row.state === "releasing" && row.releaseFailure !== null && row.sender === of.sender && row.generation === of.generation);
+    return record ? { retry: () => this.#close(record) } : undefined;
+  }
+
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {

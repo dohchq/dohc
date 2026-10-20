@@ -753,6 +753,7 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     // tests the read boundary with collisions that normal writes cannot create.
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch("CREATE TABLE path_aliases(workspace_id,version_id,object_id,path);
+        CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id,object_id);
         CREATE TABLE link_sources(workspace_id,version_id,object_id,index_key,status,parser_generation);
         CREATE TABLE link_pending(workspace_id,version_id,object_id);
         CREATE TABLE link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key);
@@ -838,4 +839,126 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     let other = incoming::candidates(&c, "other", "main", "target.md", &["wikilink"]).unwrap();
     assert!(other.sources.is_empty());
     assert_eq!(other.unchecked, vec!["source.md"]);
+}
+
+#[test]
+fn incoming_pending_candidates_do_not_rescan_the_workspace_per_source() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "target", "target.md", "", 1);
+    drain(&mut s);
+    const SOURCES: u64 = 1024;
+    s.write_with(&NoFaults, |tx| {
+        for n in 0..SOURCES {
+            let object = format!("pending-{n:04}");
+            tx.execute(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,1)",
+                [&object],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main',?1,?2)",
+                params![object, format!("pending-{n:04}.md")],
+            ).map_err(sql)?;
+        }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(count(&s, "link_pending"), SOURCES as i64);
+    let work = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&work))).unwrap();
+    let result = lookup(&s, "target.md");
+    s.count_work(None).unwrap();
+    assert!(result.unchecked.is_empty());
+    let expected: Vec<_> = (0..SOURCES)
+        .map(|n| (format!("pending-{n:04}"), format!("pending-{n:04}.md")))
+        .collect();
+    assert_eq!(result.sources, expected);
+    let steps = work.load(Ordering::Relaxed) * 1000;
+    assert!(
+        steps < SOURCES * 256,
+        "incoming candidates used {steps} SQLite VM steps for {SOURCES} pending sources"
+    );
+}
+
+#[test]
+fn incoming_indexed_probes_do_not_scan_unrelated_occurrence_keys() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "match", "match.md", "[[target]] [[target#part]]", 1);
+    write(&mut s, "markdown", "markdown.md", "[target](target.md)", 2);
+    drain(&mut s);
+    const SOURCES: i64 = 1024;
+    const LINKS: i64 = 20;
+    // Populate only the derived read model after creating authoritative aliases.
+    s.write_with(&NoFaults, |tx| {
+        for n in 0..SOURCES {
+            let object = format!("indexed-{n:04}");
+            let path = format!("indexed-{n:04}.md");
+            tx.execute(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,1)",
+                [&object],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main',?1,?2)",
+                params![object, path],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO link_sources(workspace_id,version_id,object_id,source_hash,path,title,parser_generation,status,index_key)
+                 VALUES('ws','main',?1,'fixture',?2,'',?3,'indexed','fixture')",
+                params![object, path, PARSER_GENERATION],
+            ).map_err(sql)?;
+        }
+        tx.execute(
+            "WITH RECURSIVE ordinals(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM ordinals WHERE n+1<?1)
+             INSERT INTO links(workspace_id,version_id,object_id,index_key,ordinal,literal,kind,start_utf16,end_utf16,line,snippet)
+             SELECT workspace_id,version_id,object_id,index_key,n,'elsewhere','wikilink',n*14,n*14+13,n+1,'[[elsewhere]]'
+             FROM link_sources CROSS JOIN ordinals WHERE index_key='fixture'",
+            [LINKS],
+        ).map_err(sql)?;
+        for (kind, key) in occurrence_keys("indexed.md", "elsewhere", "wikilink") {
+            tx.execute(
+                "INSERT INTO link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key)
+                 SELECT workspace_id,version_id,object_id,index_key,ordinal,?1,?2 FROM links WHERE index_key='fixture'",
+                params![kind, key],
+            ).map_err(sql)?;
+        }
+        tx.execute("DELETE FROM link_pending WHERE object_id LIKE 'indexed-%'", []).map_err(sql)?;
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(count(&s, "link_pending"), 0);
+    assert_eq!(count(&s, "links"), SOURCES * LINKS + 3);
+    assert!(count(&s, "link_occurrence_keys") >= SOURCES * LINKS * 3);
+    let work = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&work))).unwrap();
+    let result = lookup(&s, "target.md");
+    s.count_work(None).unwrap();
+    assert_eq!(
+        result,
+        incoming::Candidates {
+            sources: vec![("match".into(), "match.md".into())],
+            unchecked: vec![],
+        }
+    );
+    let steps = work.load(Ordering::Relaxed) * 1000;
+    assert!(
+        steps < SOURCES as u64 * 64,
+        "incoming candidates used {steps} SQLite VM steps for {SOURCES} indexed sources with {LINKS} unrelated links each"
+    );
+    s.read_with(|c| {
+        let keys = serde_json::to_string(&path_keys("target.md")).unwrap();
+        let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {}", incoming::CANDIDATES_SQL)).map_err(sql)?;
+        let plan = stmt.query_map(params!["ws", "main", keys, PARSER_GENERATION, "[\"wikilink\"]"], |r| r.get::<_, String>(3))
+            .map_err(sql)?.collect::<Result<Vec<_>, _>>().map_err(sql)?;
+        assert!(plan.iter().any(|row| row.contains("SEARCH k USING INDEX link_occurrence_probe (workspace_id=? AND version_id=? AND key_kind=? AND key=?)")), "{plan:#?}");
+        Ok::<_, StorageError>(())
+    }).unwrap();
 }

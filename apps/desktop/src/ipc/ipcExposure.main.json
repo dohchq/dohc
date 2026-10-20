@@ -168,6 +168,7 @@
     "desktop:list-workspace-headings",
     "desktop:list-workspace-version-conflicts",
     "desktop:list-workspace-versions",
+    "desktop:live-draft-recovery-changed",
     "desktop:locate-record-history-run",
     "desktop:mark-chat-thread-read",
     "desktop:mark-notices",
