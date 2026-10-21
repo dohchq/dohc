@@ -566,6 +566,7 @@ struct CrashAfterDocuments {
     store: Mutex<EngineStore>,
     request: String,
     documents: i64,
+    done: bool,
     point: FaultPoint,
 }
 impl FaultInjector for CrashAfterDocuments {
@@ -578,14 +579,14 @@ impl FaultInjector for CrashAfterDocuments {
         if point == FaultPoint::StorageBeforePersist && undo_probe::sources_in_turn() == 0 {
             return FaultAction::Continue;
         }
-        let documents: Option<i64> = self.store.lock().unwrap().read_with(|conn| {
+        let progress: Option<(bool, i64)> = self.store.lock().unwrap().read_with(|conn| {
             conn.query_row(
-                "SELECT json_extract(payload_hash,'$[2].documents') FROM engine_requests WHERE request_id=?1 AND kind='history-link-rewrites'",
+                "SELECT json_extract(payload_hash,'$[1]'),json_extract(payload_hash,'$[2].documents') FROM engine_requests WHERE request_id=?1 AND kind='history-link-rewrites'",
                 [&self.request],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()
         }).unwrap();
-        if documents == Some(self.documents) {
+        if progress == Some((self.done, self.documents)) {
             FaultAction::Crash
         } else {
             FaultAction::Continue
@@ -797,6 +798,7 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
                 EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap(),
             ),
             request: "crash-rewrite".into(),
+            done: false,
             documents: if point == FaultPoint::StorageBeforePersist {
                 1
             } else {
@@ -854,10 +856,12 @@ async fn crash_after_one_write_inverse_resumes_the_remaining_write_members() {
 }
 async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
     let mut f = Fixture::new(3, 3);
-    let fault = Arc::new(CrashNth {
+    let fault = Arc::new(CrashAfterDocuments {
+        store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
+        request: "partial".into(),
+        documents: 2,
+        done: false,
         point: FaultPoint::StorageAfterCommitBeforeAck,
-        nth: 3,
-        seen: AtomicUsize::new(0),
     });
     assert!(matches!(
         f.pass("partial", fault).await,
@@ -932,11 +936,13 @@ async fn a_lost_completed_reply_replays_the_exact_result_without_more_writes() {
     let mut f = Fixture::new(3, 3);
     let key = DocKey::new(&f.ws, "main", "source-0002").unwrap();
     let lease = f.leases.acquire(&key).unwrap();
-    // Reservation, two document commits, then the final bounded reply.
-    let faults = Arc::new(CrashNth {
+    // Only the completed receipt identifies the lost reply across retries.
+    let faults = Arc::new(CrashAfterDocuments {
+        store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
+        request: "lost-reply".into(),
+        documents: 2,
+        done: true,
         point: FaultPoint::StorageAfterCommitBeforeAck,
-        nth: 4,
-        seen: AtomicUsize::new(0),
     });
     assert!(matches!(
         f.pass("lost-reply", faults).await,
@@ -1047,6 +1053,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
         request: "performance".into(),
         documents: 1000,
+        done: false,
         point: FaultPoint::StorageAfterCommitBeforeAck,
     });
     let result = f.pass("performance", crash).await;
