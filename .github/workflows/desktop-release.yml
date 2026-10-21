@@ -141,6 +141,15 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        if: inputs.runners == 'github' && runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -347,6 +356,15 @@ jobs:
           set -euo pipefail
           rustup show active-toolchain || rustup toolchain install
           cargo --version
+
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        if: inputs.runners == 'github' && runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install
         run: pnpm install --frozen-lockfile
