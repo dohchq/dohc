@@ -73,9 +73,16 @@ function pathTag(path: string): string {
   return hash.toString(16).padStart(8, "0");
 }
 
-// A stable, readable, collision-free op-log location for a visible database.
-// Kept under .dohc (internal metadata governing a visible db), inspectable JSONL.
-export function databaseOpLogPath(databasePath: string): string {
+// A stable, readable, collision-free folder name for a visible database. The
+// shared op log lives in `.dohc/databases/<name>`, and each computer keeps its
+// own operation counter in `.dohc/local/databases/<name>`.
+export function databaseFolderName(databasePath: string): string {
   const slug = databasePath.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `.dohc/databases/${slug}-${pathTag(databasePath)}/operations.jsonl`;
+  return `${slug}-${pathTag(databasePath)}`;
+}
+
+// The op-log location for a visible database. Kept under .dohc (internal
+// metadata governing a visible db), inspectable JSONL.
+export function databaseOpLogPath(databasePath: string): string {
+  return `.dohc/databases/${databaseFolderName(databasePath)}/operations.jsonl`;
 }
