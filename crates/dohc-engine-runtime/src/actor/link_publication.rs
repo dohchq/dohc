@@ -12,6 +12,9 @@ pub(super) struct Publication {
 
 impl ActorHandle {
     pub(super) fn publish_link_rewrites(&self, publication: Arc<Publication>) {
+        if self.lifecycle() == super::super::LifecycleState::Ready {
+            return;
+        }
         let key = (publication.workspace.clone(), publication.operation.clone());
         if !self
             .link_rewrites
