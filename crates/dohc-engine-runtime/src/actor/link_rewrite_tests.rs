@@ -77,6 +77,7 @@ struct Fixture {
     ws: String,
     leases: LeaseRegistry,
     serial: Arc<tokio::sync::Mutex<()>>,
+    capture: Arc<tokio::sync::Mutex<()>>,
 }
 const OP: &str = "dohc-operation:rename";
 const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
@@ -166,6 +167,7 @@ impl Fixture {
             ws,
             leases,
             serial: Arc::default(),
+            capture: Arc::default(),
         }
     }
     async fn pass(
@@ -181,7 +183,7 @@ impl Fixture {
                 None,
                 self.root.to_path_buf(),
                 self.leases.clone(),
-                self.serial.clone(),
+                [self.capture.clone(), self.serial.clone()],
                 faults,
                 (
                     {
@@ -275,6 +277,7 @@ impl Fixture {
             .unwrap()
             .unwrap();
         probes().lock().unwrap().remove(&self.ws);
+        publication::remove(&self.ws);
     }
 }
 
@@ -307,7 +310,7 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
             Some("{\"kind\":\"human\",\"humanId\":\"other\"}".into()),
             f.root.to_path_buf(),
             f.leases.clone(),
-            f.serial.clone(),
+            [f.capture.clone(), f.serial.clone()],
             Arc::new(NoFaults),
             (
                 {
@@ -422,7 +425,7 @@ async fn a_passive_handle_cannot_originate_link_rewrites() {
             None,
             root.to_path_buf(),
             LeaseRegistry::new().scoped(&root),
-            Arc::default(),
+            [Arc::default(), Arc::default()],
             Arc::new(NoFaults),
             (Arc::new(|_| false), Arc::new(|_| {})),
             Arc::new(()),
@@ -738,7 +741,7 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     None,
                     f.root.to_path_buf(),
                     f.leases.clone(),
-                    f.serial.clone(),
+                    [f.capture.clone(), f.serial.clone()],
                     Arc::new(NoFaults),
                     (
                         {
@@ -969,7 +972,7 @@ async fn case_only_and_delete_only_operations_refuse() {
                     None,
                     f.root.to_path_buf(),
                     f.leases.clone(),
-                    f.serial.clone(),
+                    [f.capture.clone(), f.serial.clone()],
                     Arc::new(NoFaults),
                     (
                         {
@@ -1405,6 +1408,7 @@ async fn a_peer_head_edit_after_read_is_unchecked_and_preserved() {
 async fn pending_rewrites_cancel_in_the_inverse_transaction_and_external_edits_still_refuse() {
     for external in [false, true] {
         let f = Fixture::new(2, 2);
+        let _capture = f.capture.clone().lock_owned().await;
         f.pass("pending", Arc::new(NoFaults)).await.unwrap();
         assert_eq!(
             std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
@@ -1531,6 +1535,7 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
 #[tokio::test(flavor = "multi_thread")]
 async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
     let f = Fixture::new(1, 1);
+    let _capture = f.capture.clone().lock_owned().await;
     f.pass("chain-forward", Arc::new(NoFaults)).await.unwrap();
     let edited = format!("{} typed after rename", f.text("source-0000.md").await);
     let (ws, body) = (f.ws.clone(), edited.clone());
@@ -1627,3 +1632,6 @@ async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
 
 #[path = "link_rewrite_open_tests.rs"]
 mod open_documents;
+
+#[path = "link_publication_tests.rs"]
+pub(super) mod publication;

@@ -24,11 +24,16 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "link_publication.rs"]
+mod publication;
+use publication::Publication;
+
 #[derive(Default)]
 pub(super) struct RewriteState {
     pub gate: Arc<tokio::sync::Mutex<()>>,
     pub undo_gate: Arc<tokio::sync::Mutex<()>>,
     stops: Mutex<HashMap<String, usize>>,
+    publishers: Mutex<HashSet<(String, String)>>,
 }
 pub(super) struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {
@@ -220,7 +225,7 @@ impl ActorHandle {
         author: Option<String>,
         root: PathBuf,
         leases: LeaseRegistry,
-        session_ops: Arc<tokio::sync::Mutex<()>>,
+        gates: [Arc<tokio::sync::Mutex<()>>; 2],
         faults: Arc<dyn FaultInjector>,
         documents: (
             super::link_documents::DocumentIsOpen,
@@ -229,6 +234,7 @@ impl ActorHandle {
         recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
+        let session_ops = gates[1].clone();
         let (is_open, resync) = documents;
         let _pass = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
@@ -344,6 +350,14 @@ impl ActorHandle {
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let publication = Arc::new(Publication {
+            workspace: workspace.clone(),
+            operation: operation.clone(),
+            root: root.clone(),
+            gates,
+            recorder: recorder.clone(),
+        });
+        self.publish_link_rewrites(publication.clone());
         let Some(plan) = plan else {
             return Ok(result);
         };
@@ -732,7 +746,9 @@ impl ActorHandle {
                     if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
                     Ok((prepared, next_result, skipped, stopped, refresh, locked))
-                }).await?;
+                }).await;
+                self.publish_link_rewrites(publication.clone());
+                let committed = committed?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
                 stopped = committed.3;
