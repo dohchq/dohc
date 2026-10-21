@@ -12,15 +12,14 @@ import {
   createLiveMarkdownRegistrationValidator,
 } from "@dohc/ydoc-projection/live-journal-validation";
 import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
-import { encodeRichdocSeed, seedClientId } from "@dohc/ydoc-projection/richdoc-seed";
+import { encodeRichdocSeed, richdocSeedFile, seedClientId } from "@dohc/ydoc-projection/richdoc-seed";
 import * as projectionImport from "../../../packages/ydoc-projection/src/import-export.js";
 import type { NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import {
   MAX_YDOC_UPDATE_BYTES,
-  NATIVE_NUMBER_GROWTH_BYTES,
   buildFirstOpenBase,
   firstOpenBaseExceeds,
-  nativeFullStateGrowth,
+  firstOpenEncodingCap,
   type FirstOpenBaseInput,
 } from "./firstOpenBase.js";
 import { createLiveValidationExecutor } from "./liveValidation.js";
@@ -55,71 +54,47 @@ const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
 afterEach(async () => { await Promise.all(pools.splice(0).map(pool => pool.close())); });
 
 describe("first-open preflight", () => {
-  const sizes = { baseBytes: 1_000, stateUpdateBytes: 1_000, nativeGrowthBytes: 40 };
+  const sizes = { baseBytes: 1_000, fullStateBytes: 1_040 };
   const bounds = { maxCaptureBytes: 10_000_000, maxBytesPerDrain: 10_000_000, descriptorBytes: 500, logEntryBytes: 300 };
   const unbounded = { ...bounds, maxCaptureBytes: 1e9, maxBytesPerDrain: 1e9 };
   it("bounds the base and native's full state by the engine's update limit", () => {
-    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES, stateUpdateBytes: 0, nativeGrowthBytes: 0 }, unbounded)).toBeUndefined();
-    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES + 1, stateUpdateBytes: 0, nativeGrowthBytes: 0 }, unbounded)).toBe("update-limit");
-    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES - 40, stateUpdateBytes: 0, nativeGrowthBytes: 40 }, unbounded)).toBeUndefined();
-    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES - 40, stateUpdateBytes: 0, nativeGrowthBytes: 41 }, unbounded)).toBe("update-limit");
+    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES, fullStateBytes: MAX_YDOC_UPDATE_BYTES }, unbounded)).toBeUndefined();
+    expect(firstOpenBaseExceeds({ baseBytes: MAX_YDOC_UPDATE_BYTES + 1, fullStateBytes: 2 }, unbounded)).toBe("update-limit");
+    expect(firstOpenBaseExceeds({ baseBytes: 2, fullStateBytes: MAX_YDOC_UPDATE_BYTES + 1 }, unbounded)).toBe("update-limit");
   });
   it("needs no separate drain bound: the reads always exceed the base first", () => {
     // A base the size of a whole drain is still read at least three times.
     expect(firstOpenBaseExceeds(sizes, { ...bounds, maxBytesPerDrain: 1_000 })).toBe("read-budget");
   });
-  it("bounds two full states, native's growth, and the descriptor by the capture budget", () => {
-    // 1000 + (1000 + 40) + 500
+  it("bounds the base, native's measured full state, and the descriptor by the capture budget", () => {
+    // 1000 + 1040 + 500
     expect(firstOpenBaseExceeds(sizes, { ...bounds, maxCaptureBytes: 2_540 })).toBeUndefined();
     expect(firstOpenBaseExceeds(sizes, { ...bounds, maxCaptureBytes: 2_539 })).toBe("capture-budget");
-    // 1500 + (1500 + 40) + 500
-    const larger = { ...sizes, stateUpdateBytes: 1_500 };
-    expect(firstOpenBaseExceeds(larger, { ...bounds, maxCaptureBytes: 3_540 })).toBeUndefined();
-    expect(firstOpenBaseExceeds(larger, { ...bounds, maxCaptureBytes: 3_539 })).toBe("capture-budget");
   });
   it("bounds the verifier's cumulative reads", () => {
-    // 3 * 1000 + 300 + (1000 + 40) + 2
+    // 3 * 1000 + 300 + 1040 + 2
     expect(firstOpenBaseExceeds(sizes, { ...bounds, maxBytesPerDrain: 4_342 })).toBeUndefined();
     expect(firstOpenBaseExceeds(sizes, { ...bounds, maxBytesPerDrain: 4_341 })).toBe("read-budget");
-    // 3 * 1000 + 300 + (1500 + 40) + 2
-    const larger = { ...sizes, stateUpdateBytes: 1_500 };
-    expect(firstOpenBaseExceeds(larger, { ...bounds, maxBytesPerDrain: 4_842 })).toBeUndefined();
-    expect(firstOpenBaseExceeds(larger, { ...bounds, maxBytesPerDrain: 4_841 })).toBe("read-budget");
   });
-});
-
-describe("native full-state growth", () => {
-  it("bounds how much yrs grows every Rust fixture", () => {
-    expect(tsBases.size).toBeGreaterThan(0);
-    for (const [name, base] of tsBases) {
-      const native = yrsBases.get(name)!.bytes;
-      expect(native.length, name).toBeLessThanOrEqual(base.bytes.length + nativeFullStateGrowth(base.bytes)!);
+  it("caps native's encoding at what the least of the update, capture and read allowances leaves", () => {
+    const at = (change: Partial<typeof bounds>) => firstOpenEncodingCap(1_000, { ...unbounded, ...change });
+    expect(at({})).toEqual({ cap: MAX_YDOC_UPDATE_BYTES, bound: "update-limit" });
+    expect(at({ maxCaptureBytes: 2_540 })).toEqual({ cap: 1_040, bound: "capture-budget" });
+    expect(at({ maxBytesPerDrain: 4_342 })).toEqual({ cap: 1_040, bound: "read-budget" });
+    expect(at({ maxCaptureBytes: 2_541, maxBytesPerDrain: 4_342 })).toEqual({ cap: 1_040, bound: "read-budget" });
+    // Each cap is the largest full state the shared arithmetic admits.
+    for (const change of [{ maxCaptureBytes: 2_540 }, { maxBytesPerDrain: 4_342 }, {}]) {
+      const room = at(change);
+      if (!("cap" in room)) throw new Error(JSON.stringify(room));
+      expect(firstOpenBaseExceeds({ baseBytes: 1_000, fullStateBytes: room.cap }, { ...unbounded, ...change })).toBeUndefined();
+      expect(firstOpenBaseExceeds({ baseBytes: 1_000, fullStateBytes: room.cap + 1 }, { ...unbounded, ...change })).toBe(room.bound);
     }
   });
-  it("reserves exactly what yrs adds to wide integers, beyond any fixed slack", () => {
-    const base = tsBases.get("float32-integers")!.bytes, native = yrsBases.get("float32-integers")!.bytes;
-    expect(native.length - base.length).toBeGreaterThan(1_024);
-    expect(nativeFullStateGrowth(base)).toBe(native.length - base.length);
-    expect(nativeFullStateGrowth(tsBases.get("integer-2147483648")!.bytes)).toBe(NATIVE_NUMBER_GROWTH_BYTES);
-  });
-  it("counts numbers inside arrays and objects, and only those yrs writes wider", () => {
-    const doc = new Y.Doc();
-    try {
-      doc.getMap("m").set("values", [2 ** 31 - 1, 2 ** 31, -(2 ** 52), 2 ** 53 + 2, 0.5, { nested: [2 ** 40] }]);
-      expect(nativeFullStateGrowth(Y.encodeStateAsUpdate(doc))).toBe(3 * NATIVE_NUMBER_GROWTH_BYTES);
-    } finally { doc.destroy(); }
-  });
-  it("refuses to bound a number yrs may print differently in format JSON", () => {
-    const growth = (value: unknown) => {
-      const doc = new Y.Doc();
-      try {
-        doc.getText("t").insert(0, "x", { mark: value });
-        return nativeFullStateGrowth(Y.encodeStateAsUpdate(doc));
-      } finally { doc.destroy(); }
-    };
-    expect(growth({ href: "https://example.com", level: 2 ** 53 - 1 })).toBe(0);
-    expect(growth({ width: 0.5 })).toBeUndefined();
-    expect(growth([1e21])).toBeUndefined();
+  it("refuses a base that leaves no room for even an empty full state", () => {
+    expect(firstOpenEncodingCap(1_000, { ...unbounded, maxCaptureBytes: 1_502 })).toEqual({ cap: 2, bound: "capture-budget" });
+    expect(firstOpenEncodingCap(1_000, { ...unbounded, maxCaptureBytes: 1_501 })).toEqual({ exceeded: "capture-budget" });
+    expect(firstOpenEncodingCap(1_000, { ...unbounded, maxBytesPerDrain: 100 })).toEqual({ exceeded: "read-budget" });
+    expect(firstOpenEncodingCap(MAX_YDOC_UPDATE_BYTES + 1, unbounded)).toEqual({ exceeded: "update-limit" });
   });
 });
 
@@ -151,7 +126,7 @@ describe("the verifier's byte counts", () => {
       source, document: live, baselineBytes: base, fullState, baseline: baseline.evidence,
       validateJournal: createLiveMarkdownJournalValidator(policy), validateRegistration: createLiveMarkdownRegistrationValidator(policy),
       bounds: { maxEntriesPerDrain: 10, ...bounds } });
-    return { base, source, logEntryBytes, stateUpdateBytes: baseline.evidence.stateUpdateByteLength, verify,
+    return { base, source, logEntryBytes, verify,
       close() { raw.close(); storage.close(); rmSync(root, { recursive: true, force: true }); } };
   }
 
@@ -166,13 +141,15 @@ describe("the verifier's byte counts", () => {
       const capture = activationCaptureBytes(B, B, descriptorBytes);
       expect(history.verify({ maxCaptureBytes: capture, maxBytesPerDrain: 1_000_000 })).toEqual({ verified: true });
       expect(() => history.verify({ maxCaptureBytes: capture - 1, maxBytesPerDrain: 1_000_000 })).toThrow("capture exceeds");
-      // The preflight draws the same lines.
-      const sizes = { baseBytes: B, stateUpdateBytes: history.stateUpdateBytes, nativeGrowthBytes: nativeFullStateGrowth(history.base)! };
-      const exceeds = (maxBytesPerDrain: number, maxCaptureBytes: number) =>
-        firstOpenBaseExceeds(sizes, { descriptorBytes, logEntryBytes: history.logEntryBytes, maxBytesPerDrain, maxCaptureBytes });
-      expect(exceeds(reads, capture)).toBeUndefined();
-      expect(exceeds(reads - 1, capture)).toBe("read-budget");
-      expect(exceeds(reads, capture - 1)).toBe("capture-budget");
+      // The preflight and the encoding cap draw the same lines.
+      const sizes = { baseBytes: B, fullStateBytes: B };
+      const bounds = (maxBytesPerDrain: number, maxCaptureBytes: number) =>
+        ({ descriptorBytes, logEntryBytes: history.logEntryBytes, maxBytesPerDrain, maxCaptureBytes });
+      expect(firstOpenBaseExceeds(sizes, bounds(reads, capture))).toBeUndefined();
+      expect(firstOpenBaseExceeds(sizes, bounds(reads - 1, capture))).toBe("read-budget");
+      expect(firstOpenBaseExceeds(sizes, bounds(reads, capture - 1))).toBe("capture-budget");
+      expect(firstOpenEncodingCap(B, bounds(reads, 1_000_000))).toEqual({ cap: B, bound: "read-budget" });
+      expect(firstOpenEncodingCap(B, bounds(1_000_000, capture))).toEqual({ cap: B, bound: "capture-budget" });
     } finally { history.close(); }
   });
 
@@ -182,24 +159,22 @@ describe("the verifier's byte counts", () => {
       const { source } = history, B = history.base.length;
       const descriptorBytes = activationDescriptorReserve(source);
       expect(descriptorBytes).toBeGreaterThan(activationDescriptorBytes(source));
-      const nativeGrowthBytes = nativeFullStateGrowth(history.base)!;
-      const fullStateBytes = Math.max(B, history.stateUpdateBytes) + nativeGrowthBytes;
       const bounds = { descriptorBytes, logEntryBytes: history.logEntryBytes,
-        maxCaptureBytes: activationCaptureBytes(Math.max(B, history.stateUpdateBytes), fullStateBytes, descriptorBytes),
-        maxBytesPerDrain: ordinaryActivationReadBytes({ baselineBytes: B, entryBytes: [history.logEntryBytes], updateBytes: [B], fullStateBytes }) };
-      expect(firstOpenBaseExceeds({ baseBytes: B, stateUpdateBytes: history.stateUpdateBytes, nativeGrowthBytes }, bounds)).toBeUndefined();
+        maxCaptureBytes: activationCaptureBytes(B, B, descriptorBytes),
+        maxBytesPerDrain: ordinaryActivationReadBytes({ baselineBytes: B, entryBytes: [history.logEntryBytes], updateBytes: [B], fullStateBytes: B }) };
+      expect(firstOpenBaseExceeds({ baseBytes: B, fullStateBytes: B }, bounds)).toBeUndefined();
       expect(history.verify(bounds)).toEqual({ verified: true });
     } finally { history.close(); }
   });
 
-  it("verifies native's wider full state at exactly the bounds the preflight reserves for it", () => {
+  it("verifies native's wider full state at exactly the bounds its measured length sets", () => {
     const { markdown, bytes: base } = tsBases.get("float32-integers")!;
     const history = baseOnlyHistory(markdown, { base, fullState: yrsBases.get("float32-integers")!.bytes });
     try {
       const B = base.length, descriptorBytes = activationDescriptorBytes(history.source);
-      const sizes = { baseBytes: B, stateUpdateBytes: history.stateUpdateBytes, nativeGrowthBytes: nativeFullStateGrowth(base)! };
-      const fullStateBytes = Math.max(B, sizes.stateUpdateBytes) + sizes.nativeGrowthBytes;
-      expect(fullStateBytes).toBe(history.source.fullStateByteLength);
+      const fullStateBytes = history.source.fullStateByteLength, sizes = { baseBytes: B, fullStateBytes };
+      // A base that encodes as itself would understate this one.
+      expect(fullStateBytes - B).toBeGreaterThan(1_024);
       const capture = activationCaptureBytes(B, fullStateBytes, descriptorBytes);
       const reads = ordinaryActivationReadBytes({ baselineBytes: B, entryBytes: [history.logEntryBytes], updateBytes: [B], fullStateBytes });
       const bounds = { descriptorBytes, logEntryBytes: history.logEntryBytes, maxCaptureBytes: capture, maxBytesPerDrain: reads };
@@ -252,17 +227,17 @@ describe("first-open base", () => {
       .toEqual({ kind: "refused", reason: "source-mismatch" });
   });
 
-  it("refuses a current head whose witness the engine would not settle to as unsupported", () => {
-    const markdown = "See <https://example.com/b>.\n";
-    const built = buildFirstOpenBase(policy, input(markdown, { bounds: roomy }));
-    expect(built).toEqual({ kind: "refused", reason: "unsupported-source" });
-    // The live validator alone verifies this witness.
-    const clientId = seedClientId({ workspaceId: "workspace", versionId: "main", objectId: "object", contentKind: "richdoc",
-      headMomentId: "head-moment", headBlobSha256: sha256(markdown) });
-    const base = encodeRichdocSeed(markdown, clientId);
-    const validated = createLiveMarkdownRegistrationValidator(policy)({ document: { ...document, lineageClaimId: sha256(base) },
-      currentPath: "docs/a.md", checkpoint: base });
-    expect(validated.kind === "accepted" && validated.evidence.projectedMarkdownSha256).toBe(sha256(markdown));
+  it("builds a candidate whose witness only the engine can judge, without the blanket guard", () => {
+    // The engine settles this autolink canonically and refuses it; `&`, `<` and `]:` no longer refuse here.
+    for (const markdown of ["See <https://example.com/b>.\n", "Title\n=====\n\nUse `a && b` here.\n", "Title\n=====\n\n```\n[docs]: https://example.com\n```\n"]) {
+      const built = buildFirstOpenBase(policy, input(markdown, { bounds: roomy }));
+      if (built.kind !== "built") throw new Error(`${markdown}: ${JSON.stringify(built)}`);
+      const clientId = seedClientId({ workspaceId: "workspace", versionId: "main", objectId: "object", contentKind: "richdoc",
+        headMomentId: "head-moment", headBlobSha256: sha256(markdown) });
+      expect(Buffer.from(built.base).equals(Buffer.from(encodeRichdocSeed(markdown, clientId)))).toBe(true);
+      // TypeScript's own settlement keeps the conservative guard; only the engine's check decides.
+      expect(richdocSeedFile(built.base)).not.toBe(markdown);
+    }
   });
 
   it("refuses a projection mismatch without a valid witness", () => {
@@ -362,7 +337,9 @@ describe("first-open candidates", () => {
     const candidate = encodeRichdocSeed(markdown, seedClientId({ ...identity, headBlobSha256: sha256(markdown) }));
     const built = buildFirstOpenBase(policy, input(markdown));
     if (built.kind === "built") expect(Buffer.from(built.base).equals(Buffer.from(candidate)), name).toBe(true);
-    return { name, corpus, markdown, oldGuard: built.kind === "built" ? "built" : built.reason, candidate: Buffer.from(candidate).toString("base64") };
+    // What the blanket guard the engine's check replaced answered: it also required TypeScript to settle the candidate to the file.
+    const oldGuard = built.kind !== "built" ? built.reason : richdocSeedFile(built.base) === markdown ? "built" : "unsupported-source";
+    return { name, corpus, markdown, oldGuard, candidate: Buffer.from(candidate).toString("base64") };
   };
 
   it("keeps the committed candidates the relay builds today", () => {

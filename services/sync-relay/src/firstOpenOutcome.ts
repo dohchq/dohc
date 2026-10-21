@@ -1,3 +1,4 @@
+import type {FirstOpenCandidateRefusal} from "@dohc/workspace-engine-client/daemon";
 import type {FirstOpenBaseBound} from "./firstOpenBase";
 import type {FirstOpenReceipt} from "./storage/firstOpenEligibility";
 
@@ -12,6 +13,22 @@ export interface FirstOpenSourceIdentity {
 
 /** A step that failed for a reason a later request can outlast. */
 export type FirstOpenFailure = "history-unavailable" | "worker-failed" | "storage-failed";
+
+/**
+ * Why the service host's engine gave no verdict. `host-absent`: no host runs,
+ * or it retired, exited or detached the workspace. `host-unreachable`: the
+ * connection to it failed. `check-failed`: the check itself failed.
+ * `check-deadline`: it did not answer in time.
+ */
+export type FirstOpenHostFailure = "host-absent" | "host-unreachable" | "check-failed" | "check-deadline";
+
+/**
+ * Why a current file cannot start live. The engine's own causes name how it
+ * refused the candidate. `not-utf8`: the file is not UTF-8 text.
+ * `relay-projection`: the relay's validator does not read the candidate back
+ * as the file.
+ */
+export type FirstOpenUnsupportedCause = FirstOpenCandidateRefusal | "not-utf8" | "relay-projection";
 
 /**
  * What the caller does next. `pull`: pull the workspace normally, then capture
@@ -30,25 +47,31 @@ export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" |
  * - `published` and `replayed` carry the base's real coordinates.
  * - `existing-history`: the document had live authority before; nothing was appended.
  * - `refused`: nothing was appended. `deletion` excludes the document for good,
- *   whatever was restored since. `too-large` names the bound in `code`.
- *   The service host reports `ordinary-activation-refused` after capture; the route never does.
+ *   whatever was restored since. `unsupported-source` names its `cause`.
+ *   `too-large` names the bound in `code`. The service host reports
+ *   `ordinary-activation-refused` after capture; the route never does.
  * - `unavailable`: the document's history says nothing yet. `contention`: the
- *   workspace kept moving through every attempt. `busy`: no worker slot was
- *   free. `history-unavailable`: its history could not be read. `worker-failed`:
- *   the worker building the base failed. Nothing was appended or retained for
- *   any of these. `storage-failed`: the relay database failed in a way that can
- *   pass, possibly while committing the base; asking again replays any base
- *   that was appended. The relay logs the failures.
- * - `integrity`: the relay's own records disagree. Nothing was overwritten.
+ *   workspace kept moving through every attempt. `busy`: no worker slot or
+ *   engine capacity was free. `history-unavailable`: its history could not be
+ *   read. `worker-failed`: the worker building the base failed. The host
+ *   failures say why the engine gave no verdict. Nothing was appended or
+ *   retained for any of these. `storage-failed`: the relay database failed in
+ *   a way that can pass, possibly while committing the base; asking again
+ *   replays any base that was appended. `host-limits`: the service host's
+ *   configuration can never fit this check, so asking again cannot help until
+ *   its operator raises it. The relay logs the failures.
+ * - `integrity`: the relay's own records, or what it told the engine, disagree.
+ *   Nothing was overwritten.
  */
 export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readonly recovery: FirstOpenRecovery} & (
   | {readonly kind: "published" | "replayed"; readonly receipt: FirstOpenReceipt}
   | {readonly kind: "existing-history"; readonly reason: "prior-authority"}
-  | {readonly kind: "refused"; readonly reason: "deletion" | "stale-source" | "unsupported-source"}
+  | {readonly kind: "refused"; readonly reason: "deletion" | "stale-source"}
+  | {readonly kind: "refused"; readonly reason: "unsupported-source"; readonly cause: FirstOpenUnsupportedCause}
   | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound}
   | {readonly kind: "refused"; readonly reason: "ordinary-activation-refused"; readonly code?: string}
-  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | FirstOpenFailure}
-  | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate"}
+  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "host-limits" | FirstOpenFailure | FirstOpenHostFailure}
+  | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate" | "check-evidence"}
 );
 
 type Answer = FirstOpenOutcome extends infer O ? O extends unknown ? Omit<O, "source" | "recovery"> : never : never;
@@ -57,7 +80,7 @@ type Answer = FirstOpenOutcome extends infer O ? O extends unknown ? Omit<O, "so
 export function firstOpenRecovery(answer: Answer): FirstOpenRecovery {
   switch (answer.kind) {
     case "published": case "replayed": case "existing-history": return "pull";
-    case "unavailable": return "retry-later";
+    case "unavailable": return answer.reason === "host-limits" ? "report" : "retry-later";
     case "integrity": return "report";
     case "refused":
       switch (answer.reason) {

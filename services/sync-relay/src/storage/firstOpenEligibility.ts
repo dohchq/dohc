@@ -36,12 +36,16 @@ export type FirstOpenWrite =
   | {kind: "retry"}
   | {kind: "refused"; reason: "prior-authority" | "stale-source"}
   /** The source's reserved origin already holds rows. */
-  | {kind: "occupied"};
+  | {kind: "occupied"}
+  /** The bytes are not the ones the engine checked. Nothing was appended. */
+  | {kind: "unchecked"};
 /** The bytes a publication commits, and the trusted coordinates they are bound to. */
 export interface FirstOpenBase {
   /** The relay database namespace. */
   readonly namespace: string;
   readonly bytes: Uint8Array;
+  /** The digest of the bytes the engine checked. */
+  readonly sha256: string;
   /** The source moment's timestamp. */
   readonly recordedAtMs: number;
 }
@@ -200,6 +204,7 @@ export function writeFirstOpen(storage: StorageContext, proof: FirstOpenProof, b
       throw new Error("A first-open base takes its source moment's timestamp.");
     }
     const content = new Uint8Array(base.bytes), digest = sha256(content);
+    if (digest !== base.sha256) return {kind: "unchecked"};
     const result: unknown = publish(Object.freeze({source, originId,
       op: Object.freeze({originSeq: 0, opKind: "ydoc.update", payloadJson: firstOpenBasePayload(source, digest), recordedAtMs: base.recordedAtMs}),
       blob: Object.freeze({sha256: digest, content})}));

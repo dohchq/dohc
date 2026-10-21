@@ -261,6 +261,10 @@ pub(crate) struct SettlementAdmission {
 }
 
 impl SettlementAdmission {
+    /// The bytes one reservation charges.
+    pub(crate) fn bytes(&self) -> u32 {
+        self.bytes
+    }
     pub(crate) fn reserve_reconstruction(
         &self,
     ) -> Result<AdmittedNativeHistoryReconstruction, WireError> {

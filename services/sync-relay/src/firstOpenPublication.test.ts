@@ -1,18 +1,21 @@
 import {afterEach, expect, it, vi} from "vitest";
+import {join} from "node:path";
+import {DatabaseSync} from "node:sqlite";
 import * as Y from "yjs";
 import {sha256Hex} from "@dohc/workspace-core/hash";
 import {accountDeletionIdentity} from "@dohc/workspace-auth/accountDeletion";
 import {yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
 import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
-import {closeTestStorage, closeTestStorages, inspectDatabase, storagePath, testStorage} from "./testing";
+import {closeTestStorage, closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage} from "./testing";
 import {guardRelayResponses} from "./relayResponseStanding";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute, serviceHostReplicationRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {parseServiceActivationConfig, type ServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
+import {firstOpenCandidateBinding, type FirstOpenCandidateInput, type FirstOpenCandidateRefusal} from "@dohc/workspace-engine-client/daemon";
 import {buildFirstOpenBase, MAX_YDOC_UPDATE_BYTES} from "./firstOpenBase";
-import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenBuild} from "./firstOpenPublication";
+import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication";
 import {firstOpenRecovery, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {createLiveValidationExecutor} from "./liveValidation";
 import {FIRST_OPEN_ORIGIN_PREFIX} from "./relayLogInputs";
@@ -35,6 +38,24 @@ const key = new Uint8Array(32).fill(23), namespace = "first-open-test";
 const MARKDOWN = "# Plan\n\nBring snacks.\n";
 const configured = (change: Record<string, unknown> = {}) => parseServiceActivationConfig({...selfHostLiveProfile().service.activation, targets: [], ...change})!;
 const inThread: FirstOpenBuild = async (policy, input) => buildFirstOpenBase(policy, input);
+
+type Native = (input: FirstOpenCandidateInput, signal: AbortSignal) => Promise<FirstOpenNativeCheck>;
+/** How much longer than the candidate the stand-in says native's full state is, so sizing can't pass on the candidate's length. */
+const GROWTH = 7;
+/**
+ * The engine's verdict, standing in for the native binary that
+ * firstOpenPublication.native.test.ts drives: checked within the cap, with a
+ * full state a little longer than the candidate.
+ */
+const accepting: Native = async input => {
+  const binding = firstOpenCandidateBinding(input), fullStateByteLength = input.candidate.byteLength + GROWTH;
+  return {kind: "answered", current: () => true, check: fullStateByteLength > input.maxFullStateBytes
+    ? {status: "too-large", contractVersion: 1, binding, bound: "full-state-encoding", limit: input.maxFullStateBytes}
+    : {status: "checked", contractVersion: 1, binding, settledSourceSha256: input.sourceSha256, settledSourceByteLength: input.source.byteLength,
+      fullStateSha256: "f".repeat(64), fullStateByteLength}};
+};
+const refusing = (cause: FirstOpenCandidateRefusal): Native => async input =>
+  ({kind: "answered", current: () => true, check: {status: "refused", contractVersion: 1, binding: firstOpenCandidateBinding(input), cause}});
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
@@ -91,9 +112,14 @@ async function fixture(options: {markdown?: string | Uint8Array} = {}) {
   const enrollment = storage.enrollServiceHostDocument({workspaceId: WS, ownerUserId: OWNER, shareId: "share-1", path: PATH, nowMs: 10, guard() {}});
   const otherEnrollment = storage.enrollServiceHostDocument({workspaceId: OTHER_WS, ownerUserId: OWNER, shareId: "share-2", path: PATH, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace}), otherBearer = deriveServiceHostBearer(otherEnrollment, {key, namespace});
-  let activation: ServiceActivationConfig | undefined = configured(), build = inThread;
+  let activation: ServiceActivationConfig | undefined = configured(), build = inThread, native = accepting;
   const builds = vi.fn<FirstOpenBuild>((policy, input, signal) => build(policy, input, signal));
-  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, build: builds});
+  const checks = vi.fn<Native>((input, signal) => native(input, signal));
+  let host: FirstOpenCheckHost | undefined = {checkFirstOpenCandidate: (workspaceId, input, signal) => {
+    expect(workspaceId).toBe(WS);
+    return checks(input, signal);
+  }};
+  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host, build: builds});
   const writes = vi.spyOn(storage, "writeFirstOpen");
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
@@ -109,11 +135,12 @@ async function fixture(options: {markdown?: string | Uint8Array} = {}) {
   };
   const bases = () => raw.prepare("SELECT * FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%' ORDER BY relay_seq").all();
   const head = () => raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log WHERE workspace_id=?").get(WS)!.head;
-  return {storage, raw, append, writeText, share, enrollment, bearer, otherBearer, handle, post, open, bases, head, builds, writes,
+  return {storage, raw, append, writeText, share, enrollment, bearer, otherBearer, handle, post, open, bases, head, builds, writes, checks,
     get source() { return source; }, set source(value) { source = value; },
     readWith(next: FirstOpenHistoryReader) { reader = next; }, onRead(next?: (read: number) => void) { onRead = next; },
     afterRead(next?: (read: number) => void) { afterRead = next; },
     setActivation(next: ServiceActivationConfig | undefined) { activation = next; }, buildWith(next: FirstOpenBuild) { build = next; },
+    checkWith(next: Native) { native = next; }, setHost(next: FirstOpenCheckHost | undefined) { host = next; },
     get reads() { return reads; }};
 }
 
@@ -154,14 +181,18 @@ it("builds on the first-open worker unless a test injects another builder", asyn
   expect(f.builds.mock.calls[0]![0]).toEqual(selfHostLiveProfile().service.activation.validation);
 });
 
-it("replays a lost reply after a newer head, another converter and reduced bounds, without building again", async () => {
+it("replays a lost reply after a newer head, another converter, reduced bounds and with no engine, without building or checking again", async () => {
   const f = await fixture(), first = published(await f.open()), asked = f.source;
   expect(await f.open()).toMatchObject({kind: "replayed", receipt: first, recovery: "pull"});
   f.source = f.writeText("# Plan\n\nBring snacks and drinks.\n");
   f.buildWith(async () => { throw new Error("the converter changed"); });
   f.setActivation(configured({maxCaptureBytes: 1, maxBytesPerDrain: 1}));
+  f.setHost(undefined);
+  expect(await f.open(asked)).toMatchObject({kind: "replayed", receipt: first});
+  f.setHost({checkFirstOpenCandidate: async () => ({kind: "unavailable", reason: "host-unreachable"})});
   expect(await f.open(asked)).toMatchObject({kind: "replayed", receipt: first});
   expect(f.builds).toHaveBeenCalledTimes(1);
+  expect(f.checks).toHaveBeenCalledTimes(1);
   expect(f.bases()).toHaveLength(1);
   // The newer head has history now: it gets no base of its own.
   f.setActivation(configured());
@@ -352,6 +383,13 @@ it.each(lostStanding)("appends nothing when %s lands after the base is built", a
   expect((await f.post()).status).toBe(404);
   nothingAppended(f);
 });
+it.each(lostStanding)("appends nothing when %s lands after the engine checked", async (_, change) => {
+  const f = await fixture();
+  f.checkWith(async (input, signal) => { const answer = await accepting(input, signal); change(f); return answer; });
+  expect((await f.post()).status).toBe(404);
+  expect(f.checks).toHaveBeenCalledTimes(1);
+  nothingAppended(f);
+});
 
 it("refuses a stale source and a source changed before the writer, and discards the preparation", async () => {
   const f = await fixture(), asked = f.source;
@@ -417,21 +455,24 @@ it.each(priorAuthority)("appends nothing when %s commits while the base is built
   nothingAppended(f);
 });
 
-it("refuses an unsupported source and keeps its exact bytes", async () => {
+it.each([
+  "malformed-candidate", "incomplete-candidate", "invalid-public-baseline", "projection-failed", "settlement-mismatch",
+] as const)("refuses a source the engine refuses with %s, names that cause and keeps its exact bytes", async cause => {
   const markdown = "See <https://example.com/b>.\n", f = await fixture({markdown});
-  expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", recovery: "none"});
+  f.checkWith(refusing(cause));
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause, recovery: "none"});
   expect(new TextDecoder().decode(f.storage.getBlob(WS, f.source.sourceDigest)!)).toBe(markdown);
-  // Growth native could not bound.
-  const g = await fixture(), doc = new Y.Doc();
-  doc.getXmlFragment("prosemirror").insert(0, [new Y.XmlText()]);
-  (doc.getXmlFragment("prosemirror").get(0) as Y.XmlText).insert(0, "x", {mark: {width: 0.5}});
-  vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(Y.encodeStateAsUpdate(doc));
-  doc.destroy();
-  expect(await g.open()).toMatchObject({kind: "refused", reason: "unsupported-source"});
-  // Not UTF-8.
-  const h = await fixture({markdown: new Uint8Array([0x23, 0x20, 0xff, 0x0a])});
-  expect(await h.open()).toMatchObject({kind: "refused", reason: "unsupported-source"});
-  for (const fixture of [f, g, h]) nothingAppended(fixture);
+  expect(f.writes).not.toHaveBeenCalled();
+  nothingAppended(f);
+});
+
+it("refuses a source that is not UTF-8, or that the relay's validator reads differently, before asking the engine", async () => {
+  const f = await fixture({markdown: new Uint8Array([0x23, 0x20, 0xff, 0x0a])});
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "not-utf8", recovery: "none"});
+  const g = await fixture();
+  g.buildWith(async () => ({kind: "refused", reason: "unsupported-source"}));
+  expect(await g.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
+  for (const fixture of [f, g]) { expect(fixture.checks).not.toHaveBeenCalled(); nothingAppended(fixture); }
 });
 
 it.each([
@@ -439,39 +480,135 @@ it.each([
   ["Unicode", "# Café 🎉\n\nnaïve 中文 — ok\n"],
   ["frontmatter", "---\ntitle: Plan\nnested:\n  count: 3\n---\n\nBody\n"],
   ["a source witness", "* one\n* two\n"],
-])("publishes %s", async (_, markdown) => {
+  ["`&` in fenced code, which the blanket guard refused", "Title\n=====\n\n```rust\nlet x = &mut y;\n```\n"],
+])("publishes %s once the engine checks it", async (_, markdown) => {
   const f = await fixture({markdown});
   const receipt = published(await f.open()), payload = JSON.parse(String(f.bases()[0]!.payload_json));
-  const doc = new Y.Doc();
-  try { Y.applyUpdate(doc, f.storage.getBlob(WS, payload.updateBlobSha256)!); expect(yDocToArtifactMarkdown(doc)).toBe(markdown); } finally { doc.destroy(); }
+  // The checked candidate is the committed base, byte for byte.
+  const [checked] = f.checks.mock.calls[0]!;
+  const base = f.storage.getBlob(WS, payload.updateBlobSha256)!;
+  expect(Buffer.from(base).equals(Buffer.from(checked.candidate))).toBe(true);
+  expect(payload.updateBlobSha256).toBe(checked.candidateSha256);
+  expect(Buffer.from(checked.source).toString()).toBe(markdown);
   expect(receipt.originSeq).toBe(0);
 });
 
-it("refuses a base over each configured bound, at the boundary the real verifier uses", async () => {
-  // The bounds the route builds against, and the sizes of what it built.
+it("checks every new candidate, and publishes nothing the engine did not check", async () => {
+  const f = await fixture();
+  f.checkWith(async () => { throw new Error("the engine is not asked"); });
+  await expect(f.post().then(response => response.json())).resolves.toMatchObject({ok: false, code: "internal_error"});
+  // An answer about another candidate or source is no check of this one.
+  f.checkWith(async input => accepting({...input, candidateSha256: "b".repeat(64)}, new AbortController().signal));
+  expect(await f.open()).toMatchObject({kind: "integrity", reason: "check-evidence", recovery: "report"});
+  f.checkWith(async input => accepting({...input, sourceMomentId: "other"}, new AbortController().signal));
+  expect(await f.open()).toMatchObject({kind: "integrity", reason: "check-evidence"});
+  f.checkWith(async () => ({kind: "integrity"}));
+  expect(await f.open()).toMatchObject({kind: "integrity", reason: "check-evidence"});
+  expect(f.writes).not.toHaveBeenCalled();
+  nothingAppended(f);
+});
+
+it("writes only the bytes the engine checked", async () => {
+  const f = await fixture();
+  f.checkWith(async (input, signal) => {
+    const answer = await accepting(input, signal);
+    input.candidate[input.candidate.length - 1] ^= 1;
+    return answer;
+  });
+  expect(await f.open()).toMatchObject({kind: "integrity", reason: "check-evidence"});
+  expect(f.writes).toHaveBeenCalledTimes(1);
+  nothingAppended(f);
+});
+
+it("tells the engine's absence, failures and limits apart, appends nothing for any, and asks again only for those that can pass", async () => {
+  const f = await fixture();
+  f.setHost(undefined);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-absent", recovery: "retry-later"});
+  f.setHost({checkFirstOpenCandidate: (_workspaceId, input, signal) => f.checks(input, signal)});
+  for (const reason of ["host-absent", "host-unreachable", "check-failed", "check-deadline", "busy"] as const) {
+    f.checkWith(async () => ({kind: "unavailable", reason}));
+    expect(await f.open(), reason).toMatchObject({kind: "unavailable", reason, recovery: "retry-later"});
+  }
+  f.checkWith(async () => ({kind: "unavailable", reason: "host-limits"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-limits", recovery: "report"});
+  // The host that checked retired or detached the workspace before the writer.
+  f.checkWith(async (input, signal) => ({...await accepting(input, signal), current: () => false}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-absent", recovery: "retry-later"});
+  expect(f.writes).toHaveBeenCalledTimes(1);
+  nothingAppended(f);
+  // A cancelled check stays cancelled.
+  const abort = new AbortController();
+  f.checkWith(async (_input, signal) => { abort.abort(new Error("cancelled")); signal.throwIfAborted(); throw new Error("not cancelled"); });
+  const response = await f.post({}, {signal: abort.signal});
+  expect(response.status).not.toBe(200);
+  expect(await response.json()).not.toHaveProperty("outcome");
+  nothingAppended(f);
+});
+
+it("checks outside the writer, while the relay keeps writing", async () => {
+  const f = await fixture();
+  f.checkWith(async (input, signal) => {
+    expect((f.storage as StorageContext).db.isTransaction).toBe(false);
+    // Another workspace's write commits while the check runs.
+    f.writeText("elsewhere", {workspaceId: OTHER_WS, objectId: "object-elsewhere", path: "docs/elsewhere.md"});
+    return accepting(input, signal);
+  });
+  expect((await f.open()).kind).toBe("published");
+  expect(f.checks).toHaveBeenCalledTimes(1);
+});
+
+it("reuses the check when only the workspace moves, and checks again for a changed source", async () => {
+  const f = await fixture();
+  f.afterRead(read => { if (read < FIRST_OPEN_WRITER_ATTEMPTS) f.writeText(`chat ${read}`, {objectId: `object-chat-${read}`, path: `chat/${read}.md`}); });
+  expect((await f.open()).kind).toBe("published");
+  expect(f.writes).toHaveBeenCalledTimes(FIRST_OPEN_WRITER_ATTEMPTS);
+  expect(f.checks).toHaveBeenCalledTimes(1);
+  // The file changes while the engine checks: the check answers for the old bytes only.
+  const g = await fixture();
+  g.checkWith(async (input, signal) => { g.writeText("# Plan\n\nNewer.\n"); return accepting(input, signal); });
+  expect(await g.open()).toMatchObject({kind: "refused", reason: "stale-source", recovery: "pull-current-source"});
+  nothingAppended(g);
+});
+
+it("asks the engine for no more than the least remaining update, capture or read allowance, and refuses past it", async () => {
+  // The bounds the route builds against, what it asked, and native's measured full state.
   const probe = await fixture();
   let seen: Parameters<FirstOpenBuild>[1] | undefined;
   probe.buildWith(async (policy, input) => { seen = input; return buildFirstOpenBase(policy, input); });
-  probe.setActivation(configured());
-  const outcome = await probe.open();
-  expect(outcome.kind).toBe("published");
-  const base = probe.storage.getBlob(WS, JSON.parse(String(probe.bases()[0]!.payload_json)).updateBlobSha256)!;
-  const built = buildFirstOpenBase(selfHostLiveProfile().service.activation.validation, seen!);
-  if (built.kind !== "built") throw new Error(JSON.stringify(built));
-  expect(Buffer.from(built.base).equals(Buffer.from(base))).toBe(true);
-  const {sizes} = built, larger = Math.max(sizes.baseBytes, sizes.stateUpdateBytes), full = larger + sizes.nativeGrowthBytes;
-  const capture = activationCaptureBytes(larger, full, seen!.bounds.descriptorBytes);
-  const reads = ordinaryActivationReadBytes({baselineBytes: sizes.baseBytes, entryBytes: [seen!.bounds.logEntryBytes], updateBytes: [sizes.baseBytes], fullStateBytes: full});
-  const at = async (change: Record<string, unknown>) => { const f = await fixture(); f.setActivation(configured(change)); return f.open(); };
-  expect((await at({maxCaptureBytes: capture, maxBytesPerDrain: reads})).kind).toBe("published");
-  expect(await at({maxCaptureBytes: capture - 1})).toMatchObject({kind: "refused", reason: "too-large", code: "capture-budget", recovery: "none"});
-  expect(await at({maxBytesPerDrain: reads - 1})).toMatchObject({kind: "refused", reason: "too-large", code: "read-budget"});
+  expect((await probe.open()).kind).toBe("published");
+  const {candidate} = probe.checks.mock.calls[0]![0];
+  const B = candidate.byteLength, F = B + GROWTH, {descriptorBytes, logEntryBytes} = seen!.bounds;
+  const capture = activationCaptureBytes(B, F, descriptorBytes);
+  const reads = ordinaryActivationReadBytes({baselineBytes: B, entryBytes: [logEntryBytes], updateBytes: [B], fullStateBytes: F});
+  expect(reads).toBe(3 * B + logEntryBytes + F + 2);
+  const at = async (change: Record<string, unknown>) => {
+    const f = await fixture();
+    f.setActivation(configured(change));
+    const outcome = await f.open();
+    return {outcome, cap: f.checks.mock.calls[0]?.[0].maxFullStateBytes, f};
+  };
+  // At each bound the engine may encode exactly F; one byte less and it stops short.
+  for (const [change, bound] of [[{maxCaptureBytes: capture}, "capture-budget"], [{maxBytesPerDrain: reads}, "read-budget"]] as const) {
+    const fits = await at(change);
+    expect(fits.cap).toBe(F);
+    expect(fits.outcome.kind).toBe("published");
+    const short = await at(Object.fromEntries(Object.entries(change).map(([name, value]) => [name, value - 1])));
+    expect(short.cap).toBe(F - 1);
+    expect(short.outcome).toMatchObject({kind: "refused", reason: "too-large", code: bound, recovery: "none"});
+    nothingAppended(short.f);
+  }
+  // Generous bounds leave the engine's own update limit.
+  expect((await at({maxCaptureBytes: 2 * MAX_YDOC_UPDATE_BYTES, maxBytesPerDrain: 4 * MAX_YDOC_UPDATE_BYTES})).cap).toBe(MAX_YDOC_UPDATE_BYTES);
+  // A base that leaves no room is refused before the engine is asked.
+  const none = await at({maxCaptureBytes: B + descriptorBytes + 1});
+  expect(none.outcome).toMatchObject({kind: "refused", reason: "too-large", code: "capture-budget"});
+  expect(none.f.checks).not.toHaveBeenCalled();
   const oversized = await fixture();
   vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(new Uint8Array(MAX_YDOC_UPDATE_BYTES + 1).fill(0xff));
   expect(await oversized.open()).toMatchObject({kind: "refused", reason: "too-large", code: "update-limit"});
-  // Bounds reduced after the base was built still apply in the writer.
+  // Bounds reduced after the engine measured still apply in the writer, against its measurement.
   const reduced = await fixture();
-  reduced.buildWith(async (policy, input) => { const result = buildFirstOpenBase(policy, input); reduced.setActivation(configured({maxCaptureBytes: capture - 1})); return result; });
+  reduced.checkWith(async (input, signal) => { const answer = await accepting(input, signal); reduced.setActivation(configured({maxCaptureBytes: capture - 1})); return answer; });
   expect(await reduced.open()).toMatchObject({kind: "refused", reason: "too-large", code: "capture-budget"});
   for (const f of [oversized, reduced]) nothingAppended(f);
 });
@@ -586,6 +723,24 @@ it("answers only a SQLite failure that can pass as transient, in the writer and 
       expect(await fails(fault, where), `${String(fault)} in the ${where}`).toEqual({ok: false, error: "internal error", code: "internal_error"});
     }
   }
+  // PROTOCOL, READONLY_RECOVERY and READONLY_CANTINIT pass on the history reader's read-only connection only.
+  for (const errcode of [15, 264, 1288]) {
+    expect(await fails(coded(errcode), "history"), String(errcode)).toMatchObject({outcome: {kind: "unavailable", reason: "history-unavailable"}});
+    expect(await fails(coded(errcode), "writer"), String(errcode)).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  }
+  // READONLY itself and READONLY_CANTLOCK stay the relay's fault.
+  for (const errcode of [8, 520]) expect(await fails(coded(errcode), "history"), String(errcode)).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  nothingAppended(f);
+});
+
+it("answers a real history reader that finds no history tables as the relay's own fault", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(), pool = createLiveValidationExecutor(), empty = join(await tempRoot("no-history"), "empty.sqlite");
+  pools.push(pool);
+  new DatabaseSync(empty).close();
+  f.readWith((read, signal) => pool.readFirstOpenHistory({...read, database: empty}, signal));
+  expect(await f.post().then(response => response.json())).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  expect(f.checks).not.toHaveBeenCalled();
   nothingAppended(f);
 });
 

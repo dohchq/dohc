@@ -8,6 +8,7 @@ import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
+import { InvalidFirstOpenCandidateCheck } from "./firstOpenCandidateCheck";
 import {
   EngineClient,
   EngineClientError,
@@ -708,8 +709,11 @@ describe("private first-open candidate check", () => {
     ["an unknown status", { ...checked, status: "accepted" }],
   ])("refuses an answer with %s", async (_name, result) => {
     const { transport } = await answering(() => result as Record<string, JsonValue>);
-    try { await expect(transport.checkFirstOpenCandidate(call, input)).rejects.toThrow("Invalid first-open candidate check"); }
-    finally { transport.close(); }
+    try {
+      const refused = await transport.checkFirstOpenCandidate(call, input).catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(InvalidFirstOpenCandidateCheck);
+      expect(refused).toMatchObject({ message: "Invalid first-open candidate check." });
+    } finally { transport.close(); }
   });
 
   it.each([

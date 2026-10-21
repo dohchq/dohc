@@ -12,7 +12,7 @@ import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type
 import {validateUserWritePath} from "@dohc/workspace-core";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
-import { firstOpenCandidateBinding, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
+import { firstOpenCandidateBinding, firstOpenCandidateUploadBytes, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -1597,7 +1597,7 @@ export class EngineClient implements EngineTransport {
   ): Promise<FirstOpenCandidateCheck> {
     const binding = firstOpenCandidateBinding(input);
     const byteLength = binding.candidateByteLength + binding.sourceByteLength;
-    const response = await this.sendLiveUpload(request, "liveApplication.checkFirstOpenCandidate", byteLength + 3 * 1024 * 1024, () => {
+    const response = await this.sendLiveUpload(request, "liveApplication.checkFirstOpenCandidate", firstOpenCandidateUploadBytes(binding), () => {
       // Capture bytes once. Caller mutations cannot change a queued upload.
       const bundle = Buffer.concat([input.candidate, input.source], byteLength);
       const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -1744,7 +1744,9 @@ export class EngineClient implements EngineTransport {
    * A live application acknowledgement (apply, settle, restore fence, native
    * restore, owner activation capture) stopped after its work landed gets no
    * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
-   * the outcome is unknown. An upload's cancel follows its last input frame.
+   * the outcome is unknown. A first-open candidate check is the exception: it
+   * stores nothing, so a cancel that arrives after its work finished still
+   * gets its answer. An upload's cancel follows its last input frame.
    */
   async cancelRequest(callerId: number): Promise<void> {
     const pending = [...this.pending.entries()].find(

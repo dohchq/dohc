@@ -7,7 +7,8 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./servic
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {parseServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS} from "./firstOpenPublication";
+import {firstOpenCandidateBinding} from "@dohc/workspace-engine-client/daemon";
+import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenCheckHost} from "./firstOpenPublication";
 import type {FirstOpenOutcome} from "./firstOpenOutcome";
 import {createLiveValidationExecutor} from "./liveValidation";
 import {refuseOp} from "./storage/relayAdmission";
@@ -74,7 +75,11 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_LOOP_MEASURE !== "1")("measures the first-
   write(WS, OBJECT, PATH, "source-moment");
   const enrollment = storage.enrollServiceHostDocument({workspaceId: WS, ownerUserId: OWNER, shareId: `share-${WS}`, path: PATH, nowMs: 10, guard() {}});
   const activation = parseServiceActivationConfig({...selfHostLiveProfile().service.activation, targets: []})!;
-  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation,
+  // This measures the writer loop, not the engine: every candidate checks, with a full state as long as the candidate.
+  const host: FirstOpenCheckHost = {checkFirstOpenCandidate: async (_workspaceId, input) => ({kind: "answered", current: () => true,
+    check: {status: "checked", contractVersion: 1, binding: firstOpenCandidateBinding(input), settledSourceSha256: input.sourceSha256,
+      settledSourceByteLength: input.source.byteLength, fullStateSha256: input.candidateSha256, fullStateByteLength: input.candidate.byteLength}})};
+  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host,
     build: (policy, input, signal) => pool.buildFirstOpenBase(policy, input, signal)});
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});

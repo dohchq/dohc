@@ -697,6 +697,12 @@ impl EngineService {
         Ok((*max, admission.reserve_reconstruction()?))
     }
 
+    /// What one settlement reserves on the configured host, when it settles.
+    pub(crate) fn configured_settlement_admission_bytes(&self) -> Option<u32> {
+        let (_, admission) = self.configured_live_host.get()?.settlement.as_ref()?;
+        Some(admission.bytes())
+    }
+
     pub(super) fn relay_sync_admission(
         &self,
     ) -> Option<(

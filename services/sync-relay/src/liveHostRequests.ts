@@ -3,12 +3,17 @@ import {EngineRequestDeadlineError, type EngineClient} from "@dohc/workspace-eng
 type Kind = "read" | "write";
 type Pending = {kind: Kind; start(): void; cancel(reason: unknown): void};
 
+/** The queue refused a request before native saw it: its capacity was full, or the request's deadline passed while it waited. */
+export class NativeRequestQueueError extends Error {
+  constructor(readonly reason: "capacity" | "deadline", message: string) {super(message);}
+}
+
 /** Backing byte allocations plus an upper bound for JSON metadata; not a heap estimate. */
 function retainedInputCharge(values: unknown[], maximum: number) {
   let bytes = 0;
   const buffers = new Set<ArrayBufferLike>(), parents = new Set<object>();
   const add = (count: number) => {
-    if (!Number.isSafeInteger(count) || count < 0 || count > maximum - bytes) throw new Error("Native request retained input capacity is full.");
+    if (!Number.isSafeInteger(count) || count < 0 || count > maximum - bytes) throw new NativeRequestQueueError("capacity", "Native request retained input capacity is full.");
     bytes += count;
   };
   const visit = (value: unknown, depth: number): void => {
@@ -59,7 +64,7 @@ export function queueLiveHostRequests(client: EngineClient, options: {
     return new Promise((resolve, reject) => {
       if (caller?.aborted || options.signal.aborted) {reject(caller?.reason ?? options.signal.reason); return;}
       const queue = pending[kind], limit = kind === "read" ? options.maxPendingReads : options.maxPendingWrites;
-      if (queue.length >= limit) {reject(new Error("Native request queue capacity is full.")); return;}
+      if (queue.length >= limit) {reject(new NativeRequestQueueError("capacity", "Native request queue capacity is full.")); return;}
       const charge = retainedInputCharge(input, options.maxRetainedInputBytes - retainedBytes);
       retainedBytes += charge;
       // One absolute deadline from entry: queueing comes out of what native gets.
@@ -68,7 +73,7 @@ export function queueLiveHostRequests(client: EngineClient, options: {
       const releaseInput = () => {if (!released) {released = true; retainedBytes -= charge;}};
       let timer: ReturnType<typeof setTimeout>;
       const clean = () => {clearTimeout(timer); caller?.removeEventListener("abort", aborted);};
-      const expired = () => new Error("Native request queue deadline exceeded.");
+      const expired = () => new NativeRequestQueueError("deadline", "Native request queue deadline exceeded.");
       const entry: Pending = {
         kind,
         cancel(reason) {const index = queue.indexOf(entry); if (index >= 0) queue.splice(index, 1); clean(); releaseInput(); reject(reason);},

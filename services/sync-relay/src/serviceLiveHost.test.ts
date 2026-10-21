@@ -8,7 +8,8 @@ import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { EngineClientError, EngineRequestDeadlineError, EngineRequestError, InvalidFirstOpenCandidateCheck } from "@dohc/workspace-engine-client/daemon";
+import { NativeRequestQueueError } from "./liveHostRequests.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
@@ -271,6 +272,62 @@ it("preserves a replacement connection when an older host closes", async () => {
   await expect(host.drain({ workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64) })).rejects.toThrow("retired");
   await host.close();
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
+});
+
+it("asks the engine to check a first-open candidate outside any turn, and says why it gave no verdict", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  const check = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return {...captured.client, checkFirstOpenCandidate: check};});
+  f.config.client.aggregateBytes = 8 * 1024 * 1024; await f.save();
+  const host = await startServiceLiveHost(f), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const source = new TextEncoder().encode("# Notes\n"), candidate = Uint8Array.of(0, 0);
+  const input = {objectId: "object", path: "docs/a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096};
+  const wire = (code: ConstructorParameters<typeof EngineRequestError>[1]["code"]) => new EngineRequestError(7, {code, message: "refused", retry: "no"});
+  try {
+    const verdict = {status: "refused", cause: "settlement-mismatch"};
+    check.mockResolvedValueOnce(verdict);
+    const answered = await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+    expect(answered).toMatchObject({kind: "answered", check: verdict});
+    expect(check.mock.calls[0]![0]).toMatchObject({workspace: "actual-open-handle", deadlineMs: f.config.client.requestDeadlineMs});
+    expect(check.mock.calls[0]![1]).toBe(input);
+    for (const [error, reason] of [
+      [wire("OVERLOADED"), "busy"], [new NativeRequestQueueError("capacity", "full"), "busy"],
+      [wire("LIMIT_EXCEEDED"), "host-limits"],
+      [wire("DEADLINE_EXCEEDED"), "check-deadline"], [new NativeRequestQueueError("deadline", "late"), "check-deadline"],
+      [new EngineRequestDeadlineError(7, "liveApplication.checkFirstOpenCandidate", 10), "check-deadline"],
+      [wire("WORKSPACE_UNAVAILABLE"), "host-absent"], [wire("SESSION_EXPIRED"), "host-absent"],
+      [wire("INTERNAL"), "check-failed"], [new EngineClientError("closed", "closed"), "host-unreachable"],
+      [new EngineClientError("protocol-error", "Engine frame decoding failed."), "host-unreachable"],
+    ] as const) {
+      check.mockRejectedValueOnce(error);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal), String(error)).toEqual({kind: "unavailable", reason});
+    }
+    for (const error of [wire("BLOB_INVALID"), wire("INVALID_PARAMS"), new InvalidFirstOpenCandidateCheck()]) {
+      check.mockRejectedValueOnce(error);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "integrity"});
+    }
+    // A relay fault stays one, and a cancelled caller keeps its cancellation.
+    check.mockRejectedValueOnce(new TypeError("a relay bug"));
+    await expect(host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).rejects.toThrow("a relay bug");
+    const abort = new AbortController();
+    check.mockImplementationOnce(async () => { abort.abort(new Error("cancelled")); throw wire("CANCELLED"); });
+    await expect(host.checkFirstOpenCandidate("workspace", input, abort.signal)).rejects.toThrow("cancelled");
+    // Neither another workspace nor an upload the client can never hold reaches the engine.
+    const calls = check.mock.calls.length;
+    expect(await host.checkFirstOpenCandidate("other", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+    // 5 MiB plus the 3 MiB request allowance passes 8 MiB.
+    const large = new Uint8Array(5 * 1024 * 1024);
+    expect(await host.checkFirstOpenCandidate("workspace", {...input, candidate: large, candidateSha256: digest(large)}, new AbortController().signal))
+      .toEqual({kind: "unavailable", reason: "host-limits"});
+    expect(check.mock.calls.length).toBe(calls);
+    // The answer holds only while its host stands.
+    expect(answered.kind === "answered" && answered.current()).toBe(true);
+    await host.close();
+    expect(answered.kind === "answered" && answered.current()).toBe(false);
+    expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+  } finally {await host.close(); log.mockRestore();}
 });
 
 it("wakes captures after stored authority changes and releases its observer on close", async () => {

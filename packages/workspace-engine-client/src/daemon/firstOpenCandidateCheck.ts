@@ -66,9 +66,19 @@ export function firstOpenCandidateBinding(input: FirstOpenCandidateInput): First
     candidateByteLength: candidate.byteLength, replicationEpoch, streamIdentity, maxFullStateBytes });
 }
 
+/** What the client reserves for one check's upload: its bundle and the request around it. */
+export function firstOpenCandidateUploadBytes(binding: FirstOpenCandidateBinding): number {
+  return binding.candidateByteLength + binding.sourceByteLength + 3 * 1024 * 1024;
+}
+
+/** The engine answered about another candidate or source, or out of its exact shape. */
+export class InvalidFirstOpenCandidateCheck extends TypeError {
+  constructor() { super("Invalid first-open candidate check."); }
+}
+
 /** Accepts only an answer about exactly `binding`, in the engine's exact shape. */
 export function parseFirstOpenCandidateCheck(value: unknown, binding: FirstOpenCandidateBinding): FirstOpenCandidateCheck {
-  const invalid = (): never => { throw new TypeError("Invalid first-open candidate check."); };
+  const invalid = (): never => { throw new InvalidFirstOpenCandidateCheck(); };
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const row = value as Record<string, unknown>, echoed = row.binding as Record<string, unknown> | null;
   if (row.contractVersion !== 1 || !echoed || typeof echoed !== "object" || Array.isArray(echoed) ||

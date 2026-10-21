@@ -124,7 +124,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
   const cleanup = inspectDatabase(storagePath(storage));
   const guarded = async (proof: FirstOpenProof, workspaceId: string) => {
     let publishing = 0;
-    const base = {namespace: "namespace", bytes: TEXT, recordedAtMs: storage.readFirstOpenMoment(workspaceId, "target")!.recordedAtMs};
+    const base = {namespace: "namespace", bytes: TEXT, sha256: SHA, recordedAtMs: storage.readFirstOpenMoment(workspaceId, "target")!.recordedAtMs};
     const [whole, written] = await timed(() => storage.writeFirstOpen(proof, base, () => { publishing = performance.now(); }));
     if (written.kind === "published") cleanup.prepare("DELETE FROM sync_relay_log WHERE relay_seq=?").run(written.receipt.relaySeq);
     return {whole, hold: ended - began, eligibility: (written.kind === "published" ? publishing : ending) - began, kind: written.kind};
@@ -142,7 +142,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
     if (prepared.kind !== "prepared") throw new Error(`Expected a preparation, got ${JSON.stringify(prepared)}.`);
     const spy = vi.spyOn(db, "prepare");
     // Refused after the recheck, before it publishes: nothing to remove.
-    expect(() => storage.writeFirstOpen(prepared.proof, {namespace: "namespace", bytes: TEXT, recordedAtMs: -1}, () => undefined)).toThrow("timestamp");
+    expect(() => storage.writeFirstOpen(prepared.proof, {namespace: "namespace", bytes: TEXT, sha256: SHA, recordedAtMs: -1}, () => undefined)).toThrow("timestamp");
     const guard = spy.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("WITH RECURSIVE"))!;
     spy.mockRestore();
     const plan = (query: string) => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all().map(row => String(row.detail));

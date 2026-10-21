@@ -6,7 +6,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
 import {liveEditors} from "./liveEditors.js";
-import {queueLiveHostRequests} from "./liveHostRequests.js";
+import {NativeRequestQueueError, queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -17,7 +17,9 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineClientError, EngineRequestDeadlineError, EngineRequestError, firstOpenCandidateBinding, firstOpenCandidateUploadBytes,
+  InvalidFirstOpenCandidateCheck, isHostedDocumentUnready, type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
+import type {FirstOpenNativeCheck} from "./firstOpenPublication.js";
 import { VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -942,6 +944,50 @@ export async function startServiceLiveHost(options: {
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
         const document = parseLiveDocumentKey(value);
         return deliver(document, callerSignal, (consumer, joined) => consumer.settle(document, joined));
+      },
+      /**
+       * Asks the engine whether a first-open candidate settles back to its
+       * file. Takes no turn, so an activation pass can wait on it, and runs
+       * while the host still prepares. The host must stand and keep the
+       * workspace attached from before the call until its answer is used;
+       * `current()` says whether it still does.
+       */
+      async checkFirstOpenCandidate(workspaceId: string, input: FirstOpenCandidateInput, callerSignal: AbortSignal): Promise<FirstOpenNativeCheck> {
+        const handle = members.get(workspaceId)?.handle;
+        const current = () => {
+          try {checkPreparing();} catch {return false;}
+          return handle !== undefined && members.get(workspaceId)?.handle === handle;
+        };
+        const failed = (reason: Extract<FirstOpenNativeCheck, {kind: "unavailable"}>["reason"], error?: unknown): FirstOpenNativeCheck => {
+          if (error !== undefined) console.error("[service-live-host] first-open check gave no verdict", error);
+          return {kind: "unavailable", reason};
+        };
+        callerSignal.throwIfAborted();
+        if (!current()) return failed("host-absent");
+        // An upload the client can never hold is this host's configuration, not contention.
+        if (firstOpenCandidateUploadBytes(firstOpenCandidateBinding(input)) > config.client.aggregateBytes) return failed("host-limits");
+        try {
+          const check = await withLiveHostSignal(signal, callerSignal, joined => client.checkFirstOpenCandidate(
+            {id: nextRequestId(), workspace: handle!, deadlineMs: config.client.requestDeadlineMs}, input, joined));
+          return current() ? {kind: "answered", check, current} : failed("host-absent");
+        } catch (error) {
+          callerSignal.throwIfAborted();
+          // An answer lost after it was sent retires the host; the deadline is what failed.
+          if (error instanceof EngineRequestDeadlineError) return failed("check-deadline", error);
+          if (!current()) return failed("host-absent", error);
+          const code = engineCode(error);
+          if (code === "OVERLOADED" || (error instanceof NativeRequestQueueError && error.reason === "capacity")) return failed("busy");
+          if (code === "LIMIT_EXCEEDED") return failed("host-limits", error);
+          if (code === "DEADLINE_EXCEEDED" || error instanceof NativeRequestQueueError) return failed("check-deadline", error);
+          if (code === "BLOB_INVALID" || code === "INVALID_PARAMS" || error instanceof InvalidFirstOpenCandidateCheck) {
+            console.error("[service-live-host] first-open check disagreed with its candidate", error);
+            return {kind: "integrity"};
+          }
+          if (code === "WORKSPACE_UNAVAILABLE" || code === "SESSION_EXPIRED" || code === "FORBIDDEN") return failed("host-absent", error);
+          if (code !== undefined) return failed("check-failed", error);
+          if (error instanceof EngineClientError) return failed("host-unreachable", error);
+          throw error;
+        }
       },
       drain,
       close,

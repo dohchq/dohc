@@ -1,10 +1,13 @@
 import {createHash} from "node:crypto";
+import {isDeepStrictEqual} from "node:util";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
+import {firstOpenCandidateBinding, type FirstOpenCandidateCheck, type FirstOpenCandidateInput} from "@dohc/workspace-engine-client/daemon";
 import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/live-journal-validation";
 import {badRequest, notFound, RelayError} from "./errors";
-import {firstOpenBaseExceeds, type FirstOpenBaseBound, type FirstOpenBaseBounds, type FirstOpenBaseInput, type FirstOpenBaseResult} from "./firstOpenBase";
-import {firstOpenOutcome, type FirstOpenFailure, type FirstOpenOutcome} from "./firstOpenOutcome";
+import {firstOpenBaseExceeds, firstOpenEncodingCap, type FirstOpenBaseBound, type FirstOpenBaseBounds, type FirstOpenBaseInput,
+  type FirstOpenBaseResult, type FirstOpenBaseSizes} from "./firstOpenBase";
+import {firstOpenOutcome, type FirstOpenFailure, type FirstOpenHostFailure, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {liveValidation} from "./liveValidation";
 import {assertSha256, parseString} from "./requestInputs";
 import type {ServiceActivationConfig} from "./serviceActivationDriver";
@@ -38,9 +41,28 @@ export function parseFirstOpenRequest(body: Record<string, unknown>): FirstOpenR
     sourceDigest, identity: parseOptionalWorkspaceIdentity(body)});
 }
 
+/**
+ * What the service host's engine said about a candidate, or why it gave no
+ * verdict. An answer holds only while `current()` does: the host that checked
+ * still stands with the workspace attached. `integrity`: what the relay sent
+ * and what the engine read disagree.
+ */
+export type FirstOpenNativeCheck =
+  | {readonly kind: "answered"; readonly check: FirstOpenCandidateCheck; current(): boolean}
+  | {readonly kind: "unavailable"; readonly reason: FirstOpenHostFailure | "busy" | "host-limits"}
+  | {readonly kind: "integrity"};
+/** The running service host's check. Cancellation rejects with the signal's reason. */
+export interface FirstOpenCheckHost {
+  checkFirstOpenCandidate(workspaceId: string, input: FirstOpenCandidateInput, signal: AbortSignal): Promise<FirstOpenNativeCheck>;
+}
+
 /** The configured bound a base no longer fits, found inside the writer. */
 class FirstOpenBoundExceeded extends Error {
   constructor(readonly bound: FirstOpenBaseBound) {super("A first-open base exceeds its configured bounds.");}
+}
+/** The host that checked the candidate retired or detached its workspace before the writer. */
+class FirstOpenCheckLapsed extends Error {
+  constructor() {super("The engine that checked a first-open candidate no longer stands.");}
 }
 
 /** A history read or build that failed rather than answered. */
@@ -50,15 +72,29 @@ class FirstOpenStepFailed extends Error {
 
 // BUSY, LOCKED, NOMEM, IOERR, FULL and CANTOPEN can pass. Every other code, CORRUPT and NOTADB among them, is the relay's own fault.
 const TRANSIENT_SQLITE = new Set([5, 6, 7, 10, 13, 14]);
-/** Whether a SQLite failure can pass, by its primary result code; undefined for an error SQLite did not raise. */
-const sqliteTransient = (error: unknown) => {
+// The history reader's read-only connection can also meet another connection's WAL recovery or setup, which passes:
+// PROTOCOL, READONLY_RECOVERY and READONLY_CANTINIT. Every other READONLY code stays the relay's fault.
+const TRANSIENT_READ_ONLY = new Set([15, 264, 1288]);
+/** Whether a SQLite failure can pass, by its result code; undefined for an error SQLite did not raise. */
+const sqliteTransient = (error: unknown, readOnly = false) => {
   const fault = error instanceof Error ? error as {code?: unknown; errcode?: unknown} : undefined;
   if (fault?.code !== "ERR_SQLITE_ERROR") return undefined;
-  return typeof fault.errcode === "number" && TRANSIENT_SQLITE.has(fault.errcode & 255);
+  return typeof fault.errcode === "number" && (TRANSIENT_SQLITE.has(fault.errcode & 255) || (readOnly && TRANSIENT_READ_ONLY.has(fault.errcode)));
 };
 
 export type FirstOpenBuild = (policy: OrderedLiveUpdateCutPolicy, input: FirstOpenBaseInput, signal: AbortSignal) => Promise<FirstOpenBaseResult | {kind: "busy"}>;
 export type FirstOpenPublisher = ReturnType<typeof createFirstOpenPublisher>;
+
+/**
+ * The engine's verdict on one candidate, as the writer may use it: the digest
+ * of the exact bytes it checked against this request's source, the full state
+ * it measured, and whether its host still stands. It never leaves the request.
+ */
+interface FirstOpenChecked {
+  readonly candidateSha256: string;
+  readonly sizes: FirstOpenBaseSizes;
+  current(): boolean;
+}
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
@@ -66,12 +102,15 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
  * Gives a hosted document with only ordinary history its first live base, or
  * says why not. `activation` answers the configuration the service host's
  * driver runs with, so the base fits what that driver captures and verifies.
+ * `host` answers the running service host, whose engine checks each candidate
+ * against its file before anything publishes it.
  */
 export function createFirstOpenPublisher(options: {
   storage: SyncRelayStorage;
   /** The relay database namespace. */
   namespace: string;
   activation(): ServiceActivationConfig | undefined;
+  host(): FirstOpenCheckHost | undefined;
   /** The first-open worker, unless a test injects another. */
   build?: FirstOpenBuild;
 }) {
@@ -125,7 +164,7 @@ export function createFirstOpenPublisher(options: {
     if (!identity) throw notFound();
     const named = {workspaceId, objectId, path: request.path, sourceMomentId: request.sourceMomentId, sourceDigest: request.sourceDigest};
     const originId = firstOpenOrigin(namespace, {...named, sourceByteLength: 0}, identity);
-    // An exact receipt answers before freshness, conversion or current bounds, so a lost reply replays.
+    // An exact receipt answers before freshness, conversion, current bounds or the engine, so a lost reply replays.
     const replay = () => {
       const stored = storage.readFirstOpenReceipt(originId, {...named, sourceByteLength: 0});
       if (stored.kind === "receipt") return answer({kind: "replayed", receipt: stored.receipt});
@@ -140,7 +179,7 @@ export function createFirstOpenPublisher(options: {
     // A failed history read or build says nothing about the document; a cancelled one stays cancelled, and a SQLite fault that can't pass stays the relay's.
     const step = async <T>(reason: FirstOpenStepFailed["reason"], run: () => Promise<T>) => {
       try {return await run();}
-      catch (error) {throw signal.aborted || sqliteTransient(error) === false ? error : new FirstOpenStepFailed(reason, error);}
+      catch (error) {throw signal.aborted || sqliteTransient(error, reason === "history-unavailable") === false ? error : new FirstOpenStepFailed(reason, error);}
     };
     const replayed = replay();
     if (replayed) return replayed;
@@ -155,7 +194,7 @@ export function createFirstOpenPublisher(options: {
     if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
     let markdown: string;
     try {markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);}
-    catch {return answer({kind: "refused", reason: "unsupported-source"});}
+    catch {return answer({kind: "refused", reason: "unsupported-source", cause: "not-utf8"});}
     const source: FirstOpenSource = Object.freeze({...named, sourceByteLength: head.sourceByteLength});
 
     const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
@@ -170,18 +209,40 @@ export function createFirstOpenPublisher(options: {
       switch (built.reason) {
         case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});
         case "invalid-base": return answer({kind: "integrity", reason: "candidate"});
-        case "unsupported-source": return answer({kind: "refused", reason: "unsupported-source"});
+        case "unsupported-source": return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
         default: return answer({kind: "refused", reason: "too-large", code: built.reason});
       }
     }
 
-    const base = {namespace, bytes: built.base, recordedAtMs: head.recordedAtMs};
-    // The writer's own checks: authorization, standing and the bounds that apply now.
+    // The engine checks this exact candidate outside the writer, encoding no more than every later bound leaves it.
+    const room = firstOpenEncodingCap(built.base.byteLength, bounds(config, source, identity, originId));
+    if ("exceeded" in room) return answer({kind: "refused", reason: "too-large", code: room.exceeded});
+    const host = options.host();
+    if (!host) return answer({kind: "unavailable", reason: "host-absent"});
+    const asked: FirstOpenCandidateInput = {objectId, path: source.path, sourceMomentId: source.sourceMomentId,
+      replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity, source: bytes, sourceSha256: source.sourceDigest,
+      candidate: built.base, candidateSha256: built.lineageClaimId, maxFullStateBytes: room.cap};
+    const native = await host.checkFirstOpenCandidate(workspaceId, asked, signal);
+    signal.throwIfAborted();
+    if (native.kind === "unavailable") return answer({kind: "unavailable", reason: native.reason});
+    if (native.kind === "integrity" || !isDeepStrictEqual(native.check.binding, firstOpenCandidateBinding(asked))) {
+      return answer({kind: "integrity", reason: "check-evidence"});
+    }
+    const {check} = native;
+    if (check.status === "refused") return answer({kind: "refused", reason: "unsupported-source", cause: check.cause});
+    if (check.status === "too-large") return answer({kind: "refused", reason: "too-large", code: room.bound});
+    const checked: FirstOpenChecked = Object.freeze({candidateSha256: built.lineageClaimId, current: native.current,
+      sizes: Object.freeze({baseBytes: built.base.byteLength, fullStateBytes: check.fullStateByteLength})});
+
+    // The writer commits only bytes with the checked digest, over the proof's source, which it rechecks.
+    const base = {namespace, bytes: built.base, sha256: checked.candidateSha256, recordedAtMs: head.recordedAtMs};
+    // The writer's own checks: authorization, standing, the checking host and the bounds that apply now.
     const writerGuard = (context: AppendLogBatchGuardContext) => {
       if (standing(context.enforceWorkspaceIdentity) !== objectId) throw notFound();
       const current = options.activation();
       if (!current) throw notFound();
-      const exceeded = firstOpenBaseExceeds(built.sizes, bounds(current, source, identity, originId));
+      if (!checked.current()) throw new FirstOpenCheckLapsed();
+      const exceeded = firstOpenBaseExceeds(checked.sizes, bounds(current, source, identity, originId));
       if (exceeded) throw new FirstOpenBoundExceeded(exceeded);
     };
     for (let attempt = 1; ; attempt++) {
@@ -189,10 +250,12 @@ export function createFirstOpenPublisher(options: {
       try {written = storage.writeFirstOpen(proof, base, writerGuard);}
       catch (error) {
         if (error instanceof FirstOpenBoundExceeded) return answer({kind: "refused", reason: "too-large", code: error.bound});
+        if (error instanceof FirstOpenCheckLapsed) return answer({kind: "unavailable", reason: "host-absent"});
         throw error;
       }
       if (written.kind === "published") return answer({kind: "published", receipt: written.receipt});
       if (written.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
+      if (written.kind === "unchecked") return answer({kind: "integrity", reason: "check-evidence"});
       if (written.kind === "refused") return refusal(written);
       if (attempt === FIRST_OPEN_WRITER_ATTEMPTS) return replay() ?? answer({kind: "unavailable", reason: "contention"});
       const caught = await step("history-unavailable", () => storage.catchUpFirstOpen(proof, signal));

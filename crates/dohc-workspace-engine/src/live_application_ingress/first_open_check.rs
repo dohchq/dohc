@@ -64,7 +64,7 @@ impl LiveApplicationIngress {
     /// Admission accounting, not a heap limit: the upload, the decoded
     /// candidate, its projection, settlement's staged reconstructions of the
     /// source, and the bounded encoding, with the working reserve.
-    fn first_open_check_reservation(&self, binding: &FirstOpenCandidateBinding) -> Option<u32> {
+    fn first_open_check_reservation(&self, binding: &FirstOpenCandidateBinding) -> Option<usize> {
         binding
             .candidate_byte_length
             .checked_add(binding.source_byte_length)?
@@ -72,19 +72,46 @@ impl LiveApplicationIngress {
             .checked_add(binding.max_full_state_bytes)?
             .checked_add(MAX_CHUNK_BYTES * 2)?
             .checked_add(self.config.application_working_reserve_bytes)
-            .filter(|bytes| *bytes <= self.config.aggregate_bytes)
-            .and_then(|bytes| u32::try_from(bytes).ok())
     }
 
-    /// The bytes a check must leave free: a maximal live edit or the
-    /// configured restore, whichever needs more.
-    fn foreground_allowance(&self, connection: &ConnectionHandle) -> Option<u32> {
-        let edit = u32::try_from(self.config.minimum_aggregate_bytes()?).ok()?;
+    /// The bytes a check must leave free for one foreground reservation: a
+    /// maximal live edit, the configured restore, an applied sync read or a
+    /// settlement, whichever needs most. An owner adoption, which may take
+    /// the whole budget, is not protected.
+    fn foreground_allowance(&self, connection: &ConnectionHandle) -> Option<usize> {
         let restore = match self.service.restore_config(connection) {
-            Ok(config) => self.restore_reservation(&config)?,
+            Ok(config) => self.restore_reservation(&config)? as usize,
             Err(_) => 0,
         };
-        Some(edit.max(restore))
+        let sync = self
+            .service
+            .sync_admission(connection)
+            .map_or(0, |(_, admission)| admission.bytes() as usize);
+        let settlement = self
+            .service
+            .configured_settlement_admission_bytes()
+            .unwrap_or(0) as usize;
+        Some(
+            self.config
+                .minimum_aggregate_bytes()?
+                .max(restore)
+                .max(sync)
+                .max(settlement),
+        )
+    }
+
+    /// The check's reservation, when an idle host could ever admit it beside
+    /// a free upload slot and the foreground allowance.
+    fn first_open_check_fits(
+        &self,
+        binding: &FirstOpenCandidateBinding,
+        connection: &ConnectionHandle,
+    ) -> Option<(u32, usize)> {
+        let reservation = self.first_open_check_reservation(binding)?;
+        let allowance = self.foreground_allowance(connection)?;
+        (self.config.max_uploads >= 2
+            && reservation.checked_add(allowance)? <= self.config.aggregate_bytes)
+            .then_some((u32::try_from(reservation).ok()?, allowance))
     }
 }
 
@@ -115,6 +142,16 @@ pub(super) fn begin(
     }
     let mut bytes = Vec::new();
     let admission = (|| {
+        // A check this host could not admit even idle is its configuration,
+        // not contention, so asking again cannot help.
+        let (reservation, allowance) = ingress
+            .first_open_check_fits(&params.binding, connection)
+            .ok_or_else(|| {
+            WireError::new(
+                ErrorCode::LimitExceeded,
+                "first-open-check-exceeds-host-capacity",
+            )
+        })?;
         let permit = Arc::new(CheckReservation {
             _check: ingress
                 .first_open_slot
@@ -130,20 +167,13 @@ pub(super) fn begin(
                 _bytes: ingress
                     .budget
                     .clone()
-                    .try_acquire_many_owned(
-                        ingress
-                            .first_open_check_reservation(&params.binding)
-                            .ok_or_else(overloaded)?,
-                    )
+                    .try_acquire_many_owned(reservation)
                     .map_err(|_| overloaded())?,
             },
         });
-        // Live edits and restores keep a shared slot and their bytes.
-        let allowance = ingress
-            .foreground_allowance(connection)
-            .ok_or_else(overloaded)?;
-        if ingress.upload_slots.try_acquire().is_err()
-            || ingress.budget.try_acquire_many(allowance).is_err()
+        // Foreground work keeps a shared slot and its bytes.
+        if ingress.upload_slots.available_permits() < 1
+            || ingress.budget.available_permits() < allowance
         {
             return Err(overloaded());
         }
@@ -691,33 +721,57 @@ mod tests {
     }
 
     /// A check is admitted only when it leaves a shared upload slot and the
-    /// bytes of a maximal live edit or the configured restore, whichever is
-    /// larger. Otherwise it is refused as `Overloaded`, not the host.
+    /// bytes of the largest foreground reservation: a maximal live edit, the
+    /// configured restore, an applied sync read or a settlement. A check an
+    /// idle host could never admit reserves nothing and, once its upload
+    /// drains, is refused for good as `LimitExceeded`; one that only waits on
+    /// held capacity is `Overloaded`, and the host stays configured either way.
     #[tokio::test]
-    async fn a_maximal_check_leaves_room_for_a_maximal_live_edit_and_a_restore() {
-        // Without a restore a maximal live edit sets the allowance; this
-        // restore outweighs one.
-        for restore in [None, Some(json!({"maxBytes": 1_000_000, "maxEvents": 180}))] {
-            let f = Fixture::with_restore(restore).await;
+    async fn a_maximal_check_leaves_room_for_the_largest_foreground_reservation() {
+        let gib = 1024 * 1024 * 1024;
+        let ingress = json!({"aggregateBytes": gib, "applicationWorkingReserveBytes": 8 * 1024 * 1024,
+            "maxUploads": 2, "uploadDeadlineMs": 30_000});
+        // A maximal live edit sets the allowance, then each larger section in turn.
+        for extra in [
+            json!({}),
+            json!({"restore": {"maxBytes": 1_000_000, "maxEvents": 180}}),
+            json!({"ingress": ingress, "sync": {"policy": {"maxClientVectorBytes": 131_072,
+                "maxHostVectorBytes": 131_072, "maxOutputBytes": 4_194_304, "maxReadBytes": 300 * 1024 * 1024},
+                "workingReserveBytes": 8_388_608}}),
+            json!({"ingress": ingress, "settlement": {"maxApplicationsPerSettlement": 80_000}}),
+        ] {
+            let f = Fixture::with(extra.clone()).await;
+            let owner = f.owner.handle();
             let base = f.ingress.config.clone();
             let edit = base.minimum_aggregate_bytes().unwrap();
-            let restore = f
-                .service
-                .restore_config(&f.owner.handle())
-                .ok()
-                .map(|config| f.ingress.restore_reservation(&config).unwrap() as usize);
-            assert!(restore.is_none_or(|restore| restore > edit));
-            let allowance = edit.max(restore.unwrap_or(0));
+            let foreground = [
+                f.service
+                    .restore_config(&owner)
+                    .ok()
+                    .map(|config| f.ingress.restore_reservation(&config).unwrap() as usize),
+                f.service
+                    .sync_admission(&owner)
+                    .ok()
+                    .map(|(_, admission)| admission.bytes() as usize),
+                f.service
+                    .configured_settlement_admission_bytes()
+                    .map(|bytes| bytes as usize),
+            ];
+            let allowance = foreground.into_iter().flatten().fold(edit, usize::max);
+            assert_eq!(
+                allowance > edit,
+                !extra.as_object().unwrap().is_empty(),
+                "{extra}"
+            );
             let mut largest = binding(&[0, 0], b"", MAX_YDOC_UPDATE_BYTES);
             largest.candidate_byte_length = MAX_YDOC_UPDATE_BYTES;
             largest.source_byte_length = dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES;
-            let check = f.ingress.first_open_check_reservation(&largest).unwrap() as usize;
+            let check = f.ingress.first_open_check_reservation(&largest).unwrap();
             let params = json!({
                 "contractVersion": 1, "binding": largest, "streamId": 1,
                 "byteLength": largest.bundle_byte_length().unwrap(), "digest": "0".repeat(64),
             });
             for (aggregate_bytes, max_uploads, admitted) in [
-                (base.aggregate_bytes, 2, false),
                 (edit, 2, false),
                 (check + allowance - 1, 2, false),
                 (check + allowance, 2, true),
@@ -729,19 +783,38 @@ mod tests {
                     ..base.clone()
                 };
                 let mut ingress = LiveApplicationIngress::new(f.service.clone(), config).unwrap();
-                ingress
-                    .begin(request(1, &f.ordinary, params.clone()), &f.owner.handle())
-                    .unwrap();
                 let case = (aggregate_bytes, max_uploads);
+                ingress
+                    .begin(request(1, &f.ordinary, params.clone()), &owner)
+                    .unwrap();
                 match &ingress.first_open_checks[&1].admission {
                     Ok(_) => {
                         assert!(admitted, "{case:?} admitted a check");
                         assert!(ingress.upload_slots.available_permits() >= 1);
                         assert!(ingress.budget.available_permits() >= allowance);
+                        // The same check, while one byte of the allowance is held, waits on contention.
+                        assert!(ingress.cancel(1));
+                        let held = ingress.budget.clone().try_acquire_owned().unwrap();
+                        let mut params = params.clone();
+                        params["streamId"] = json!(2);
+                        ingress
+                            .begin(request(2, &f.ordinary, params), &owner)
+                            .unwrap();
+                        let refused = ingress.first_open_checks[&2]
+                            .admission
+                            .as_ref()
+                            .err()
+                            .unwrap();
+                        assert_eq!(refused.code, ErrorCode::Overloaded);
+                        drop(held);
                     }
                     Err(error) => {
                         assert!(!admitted, "{case:?} refused a check");
-                        assert_eq!(error.code, ErrorCode::Overloaded);
+                        assert_eq!(error.code, ErrorCode::LimitExceeded);
+                        assert!(ingress.first_open_checks[&1].bytes.is_empty());
+                        assert_eq!(ingress.budget.available_permits(), aggregate_bytes);
+                        assert_eq!(ingress.upload_slots.available_permits(), max_uploads);
+                        assert_eq!(ingress.first_open_slot.available_permits(), 1);
                     }
                 }
             }

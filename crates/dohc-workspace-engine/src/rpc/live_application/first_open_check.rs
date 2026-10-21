@@ -256,10 +256,12 @@ pub(crate) mod tests {
 
     impl Fixture {
         pub(crate) async fn new() -> Self {
-            Self::with_restore(None).await
+            Self::with(json!({})).await
         }
 
-        pub(crate) async fn with_restore(restore: Option<Value>) -> Self {
+        /// A host also configured with each of `extra`'s sections, such as
+        /// `restore`, `sync` or `settlement`.
+        pub(crate) async fn with(extra: Value) -> Self {
             let ordinary_root = ScratchDir::new().unwrap();
             let private_root = ScratchDir::new().unwrap();
             let mut config = json!({
@@ -273,8 +275,8 @@ pub(crate) mod tests {
                 "ingress": {"aggregateBytes": 512 * 1024 * 1024, "applicationWorkingReserveBytes": 8 * 1024 * 1024,
                     "maxUploads": 2, "uploadDeadlineMs": 30_000}
             });
-            if let Some(restore) = restore {
-                config["restore"] = restore;
+            for (section, value) in extra.as_object().unwrap() {
+                config[section.as_str()] = value.clone();
             }
             let config = serde_json::from_value(config).unwrap();
             let (service, owner, ingress) =

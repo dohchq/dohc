@@ -28,7 +28,7 @@ const LINEAGE = "a".repeat(64), OTHER_LINEAGE = "c".repeat(64);
 const TEXT = new TextEncoder().encode("ordinary text"), SHA = sha256Hex(TEXT);
 const SOURCE = {workspaceId: WS, objectId: OBJECT, path: "docs/a.md", sourceMomentId: `write-${OBJECT}-docs/a.md`, sourceDigest: SHA, sourceByteLength: TEXT.byteLength};
 // Storage commits these bytes as given; the route builds real ones.
-const BASE = {namespace: "namespace-test", bytes: new Uint8Array([1, 2, 3]), recordedAtMs: 1};
+const BASE = {namespace: "namespace-test", bytes: new Uint8Array([1, 2, 3]), sha256: sha256Hex(new Uint8Array([1, 2, 3])), recordedAtMs: 1};
 
 const write = (objectId: string, path: string, versionId = "main") => ({momentId: `write-${objectId}-${path}`, objectId, versionId,
   operation: "write", path, payloadAfterPath: path, payloadAfterBlobSha256: SHA, payloadAfterByteLength: TEXT.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1});
