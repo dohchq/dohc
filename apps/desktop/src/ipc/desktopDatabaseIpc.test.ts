@@ -18,13 +18,13 @@ import {
 } from "../workspaces/workspaceDatabase";
 import type { OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { createTestScratch } from "../workspaces/testTemp";
-import { openedLocalState } from "../testing/preparedLocalState";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { databaseImportOperations, ImportToDatabaseResult } from "./bridgeContract";
 import { deferred } from "../testing/deferred";
-import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
+import { withExclusiveWorkspaceOperation, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 
 class Sender {
   constructor(readonly id: number) {}
@@ -308,6 +308,43 @@ describe("desktop database IPC composition", () => {
       release.resolve();
       await Promise.all([rejected, drained]);
     }
+  });
+});
+
+// Right after launch the engine may still be preparing `.dohc/local`, which
+// holds an edit's operation counter.
+describe("a database edit during the engine's open", () => {
+  it("waits for the open outside the workspace lease, so other workspace operations go on", async () => {
+    const h = await harness();
+    await h.seed();
+    const opens = fakeLocalStateOpens();
+    const opening = opens.start(h.workspace);
+    const pending = h.invoke(CHANNELS.applyDatabaseEdit);
+    try {
+      await vi.waitFor(() => expect(opens.waits()).toBe(1));
+      let other = false;
+      void withExclusiveWorkspaceOperation(h.workspace.rootPath, async () => { other = true; });
+      await vi.waitFor(() => expect(other).toBe(true));
+      expect(h.edit).not.toHaveBeenCalled();
+    } finally { await opening.finish(); }
+    await expect(pending).resolves.toMatchObject({ version: 1 });
+  });
+
+  it("stops waiting when its operation is cancelled, before it takes the lease", async () => {
+    const h = await harness();
+    await h.seed();
+    const opens = fakeLocalStateOpens();
+    const opening = opens.start(h.workspace);
+    let settled = false;
+    const pending = h.invoke(CHANNELS.applyDatabaseEdit).finally(() => { settled = true; });
+    const rejected = expect(pending).rejects.toThrow();
+    try {
+      await vi.waitFor(() => expect(opens.waits()).toBe(1));
+      const drained = h.authority.invalidate("workspace-a");
+      await vi.waitFor(() => expect(settled).toBe(true));
+      await Promise.all([rejected, drained]);
+    } finally { await opening.finish(); }
+    expect(h.edit).not.toHaveBeenCalled();
   });
 });
 

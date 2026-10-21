@@ -19,6 +19,7 @@ import type {
   DatabasePageView,
   DatabaseSnapshotView,
 } from "./workspaceDatabaseTypes.ts";
+import { UNCOUNTABLE_LOG_VERSION } from "./workspaceDatabaseProtocol.ts";
 
 interface SqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -292,11 +293,14 @@ function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
 interface LoggedOperations {
   lines: number;
   highest: number;
+  /** A line has a numeric version that is not a safe integer. */
+  uncountable: boolean;
 }
 
 // Enough to tell that a log is still the file dohc last read or appended to.
 // A sync that replaces the log, or anything that writes it, changes at least
-// one of these.
+// one of these, except another writer rewriting a line in place, at the same
+// size, during dohc's own append.
 type LogVersion = readonly [dev: bigint, ino: bigint, size: bigint, mtimeNs: bigint, ctimeNs: bigint];
 
 function logVersion(stats: BigIntStats): LogVersion {
@@ -325,24 +329,30 @@ async function loggedOperations(logPath: string): Promise<LoggedOperations> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     readLogs.delete(logPath);
-    return { lines: 0, highest: 0 };
+    return { lines: 0, highest: 0, uncountable: false };
   }
   try {
     const version = logVersion(fstatSync(handle.fd, { bigint: true }));
     let lines = 0;
     let highest = 0;
+    let uncountable = false;
     for await (const line of handle.readLines({ encoding: "utf8", autoClose: false })) {
       if (line.trim().length === 0) continue;
       lines += 1;
+      let number: unknown;
       try {
-        const { version: number } = JSON.parse(line) as { version?: unknown };
-        if (Number.isSafeInteger(number) && Number(number) > highest) highest = Number(number);
+        ({ version: number } = JSON.parse(line) as { version?: unknown });
       } catch {
         // A line that does not parse names no number, but still counts as one.
       }
+      if (typeof number !== "number") continue;
+      // An earlier dohc wrote numbers past the safe range, where adding one
+      // can give the same number back.
+      if (!Number.isSafeInteger(number)) uncountable = true;
+      else if (number > highest) highest = number;
     }
-    readLogs.set(logPath, { lines, highest, version });
-    return { lines, highest };
+    readLogs.set(logPath, { lines, highest, uncountable, version });
+    return { lines, highest, uncountable };
   } finally {
     await handle.close();
   }
@@ -377,6 +387,9 @@ async function reserveOperationVersion(input: {
     // The counter covers numbers a sync dropped from the log. Without a
     // counter, every line in the log counts as a number given out.
     const logged = await loggedOperations(input.logPath);
+    if (logged.uncountable) {
+      throw Object.assign(new Error("The operations log has a version past the safe integer range."), { code: UNCOUNTABLE_LOG_VERSION });
+    }
     const currentVersion = Math.max(row ? Number(row.value) : logged.lines, logged.highest);
     const version = currentVersion + 1;
     // Past the safe range, adding one can give the same number back.
@@ -421,6 +434,7 @@ async function appendOperationDurably(
     const known = readLogs.get(logPath);
     if (known && sameLogVersion(known.version, before) && after.size === before[2] + BigInt(Buffer.byteLength(line))) {
       readLogs.set(logPath, {
+        ...known,
         lines: known.lines + 1,
         highest: Math.max(known.highest, operation.version),
         version: logVersion(after),

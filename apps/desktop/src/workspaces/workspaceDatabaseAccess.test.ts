@@ -173,27 +173,39 @@ describe("this computer's operation counter", () => {
     expect(await loggedNumbers(f.logPath)).toEqual([1, 2, 4, 7, 8, 9]);
   });
 
-  it("waits for an engine open under way, refuses at once when none is, and writes nothing before", async () => {
+  // The desktop waits for an open under way before it takes the workspace
+  // lease, so the edit itself only refuses.
+  it("refuses until the engine's open prepares .dohc/local, without waiting, and writes nothing before", async () => {
     const f = await fixture({ opened: false });
     const opens = fakeLocalStateOpens();
     const before = await readFile(f.path);
 
     await expect(f.editWorkspaceDatabaseInWorker(f.input)).rejects.toThrow("dohc has not finished opening this workspace. Try again when it opens.");
-    expect(opens.waits()).toBe(0);
     // Reads don't need the counter.
     const prepared = await prepareWorkspaceFileRead(f.rootPath, "data.sqlite");
     expect((await f.workerDatabaseReader().readPrepared("data.sqlite", prepared)).tables[0]?.rows).toHaveLength(2);
+    const opening = opens.start(f.workspace);
+    await expect(f.editWorkspaceDatabaseInWorker(f.input)).rejects.toThrow("dohc has not finished opening this workspace. Try again when it opens.");
+    expect(opens.waits()).toBe(0);
     expect(await readdir(f.rootPath)).toEqual(["data.sqlite"]);
     expect(await readFile(f.path)).toEqual(before);
     expect(f.requests).toEqual(["read-path"]);
 
-    const opening = opens.start(f.workspace);
-    const edited = f.editWorkspaceDatabaseInWorker(f.input);
-    await vi.waitFor(() => expect(opens.waits()).toBe(1));
-    expect(await readdir(f.rootPath)).toEqual(["data.sqlite"]);
     await opening.finish();
-    await expect(edited).resolves.toMatchObject({ version: 1 });
+    await expect(f.editWorkspaceDatabaseInWorker(f.input)).resolves.toMatchObject({ version: 1 });
     expect(lastNumber(f.counterFolder)).toBe(1);
+  });
+
+  it("refuses, naming the log, while it holds a version dohc can't count past", async () => {
+    const f = await fixture();
+    await mkdir(join(f.logPath, ".."), { recursive: true });
+    await writeFile(f.logPath, '{"version":1}\n{"version":9007199254740992}\n');
+    const before = await readFile(f.path);
+
+    await expect(f.editWorkspaceDatabaseInWorker(f.input)).rejects.toThrow(
+      `A line in ${databaseOpLogPath("data.sqlite")} has a version dohc can't count past. Remove that line, then try again.`);
+    expect(await readFile(f.path)).toEqual(before);
+    expect(await loggedNumbers(f.logPath)).toEqual([1, 9007199254740992]);
   });
 
   it("refuses while .dohc/local can't be kept out of iCloud Drive, and writes nothing", async () => {

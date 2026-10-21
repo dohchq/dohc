@@ -22,8 +22,6 @@ import {
 } from "./workspaceAssets";
 import {
   localStateFolder,
-  localStateOpened,
-  LocalStateUnavailableError,
   ownedLocalStateDir,
   ownedSqliteFiles,
   type LocalStateWorkspace,
@@ -40,6 +38,7 @@ import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabaseWorker";
+import { UNCOUNTABLE_LOG_VERSION } from "./workspaceDatabaseProtocol";
 
 export type {
   DatabaseColumnView,
@@ -242,19 +241,12 @@ export async function importToDatabase(
 // next edit starts after the log.
 async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
   const name = `databases/${databaseFolderName(databasePath)}`;
-  const folder = async () => {
-    // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
-    await ownedLocalStateDir(workspace.rootPath);
-    return localStateFolder(workspace, name, {
-      path: `.dohc/local/${name}`, lead: "dohc could not use this database's folder in .dohc/local.",
-    });
-  };
-  // Right after launch the engine may still be preparing `.dohc/local`, so an
-  // edit waits once for an open already under way.
-  const counterFolder = await folder().catch(async (error: unknown) => {
-    if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
-    await localStateOpened(workspace);
-    return folder();
+  // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
+  await ownedLocalStateDir(workspace.rootPath);
+  // Refuses until the engine's open has prepared `.dohc/local`. The desktop
+  // waits for an open under way before it takes the workspace lease.
+  const counterFolder = await localStateFolder(workspace, name, {
+    path: `.dohc/local/${name}`, lead: "dohc could not use this database's folder in .dohc/local.",
   });
   if (!(await ownedSqliteFiles(counterFolder, OPERATION_COUNTER))) {
     throw new Error(`dohc can't trust a file in .dohc/local/${name}. Remove that folder, then try again.`);
@@ -309,11 +301,12 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     const statePath = await operationCounterPath(input.workspace, resolved.normalized);
     if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
     const source = await prepareWorkspaceFileRead(rootPath, resolved.resolvedPath);
+    const logPath = databaseOpLogPath(resolved.normalized);
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
         absolutePath,
         path: resolved.normalized,
-        logPath: join(rootPath, databaseOpLogPath(resolved.normalized)),
+        logPath: join(rootPath, logPath),
         statePath,
         edit: input.edit,
         operation: {
@@ -328,7 +321,10 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
         },
         signal: input.signal,
       }),
-    );
+    ).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== UNCOUNTABLE_LOG_VERSION) throw error;
+      throw new Error(`A line in ${logPath} has a version dohc can't count past. Remove that line, then try again.`);
+    });
   }
 
   return { workerDatabaseReader, editWorkspaceDatabaseInWorker };

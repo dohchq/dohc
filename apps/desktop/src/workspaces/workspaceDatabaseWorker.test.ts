@@ -548,6 +548,36 @@ describe("workspace database worker", () => {
     expect(await edit("after-rewrite")).toBe(100);
   });
 
+  it("refuses while the log holds a version past the safe range, with or without a counter", async () => {
+    const root = await createTestScratch("dohc-db-worker-uncountable-");
+    const databasePath = join(root, "data.sqlite");
+    seedDatabase(databasePath);
+    const paths = editPaths(root);
+    await mkdir(dirname(paths.logPath), { recursive: true });
+    // An earlier dohc wrote 9007199254740992. A text version and a line that
+    // does not parse name no number, as before.
+    const kept = '{"version":1}\n{"version":"12"}\nnot json\n';
+    await writeFile(paths.logPath, `${kept}{"version":9007199254740992}\n`);
+    const before = await readFile(databasePath);
+    const databaseWorker = owner();
+    const edit = () => databaseWorker.editPath({
+      absolutePath: databasePath, path: "data.sqlite", ...paths, edit: UPDATE, operation: operation("op-uncountable"),
+    });
+
+    await expect(edit()).rejects.toMatchObject({ code: "uncountable-log-version" });
+    const counter = new DatabaseSync(paths.statePath);
+    try {
+      counter.exec("INSERT INTO database_operation_state VALUES ('last_version', 5);");
+    } finally { counter.close(); }
+    await expect(edit()).rejects.toMatchObject({ code: "uncountable-log-version" });
+    expect(await readFile(databasePath)).toEqual(before);
+    expect(await readFile(paths.logPath, "utf8")).toBe(`${kept}{"version":9007199254740992}\n`);
+
+    // Once the line is gone, the counter's 5 is the highest number.
+    await writeFile(paths.logPath, kept);
+    expect((await edit()).version).toBe(6);
+  });
+
   it("refuses a number past the safe range rather than give one out again", async () => {
     const root = await createTestScratch("dohc-db-worker-seed-limit-");
     const databasePath = join(root, "data.sqlite");
