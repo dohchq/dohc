@@ -7,6 +7,19 @@ import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalS
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
+// The registry's own file calls: how many are running, and which folders it removed.
+const files = vi.hoisted(() => ({ running: 0, removed: [] as string[] }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  async function counted<T>(work: Promise<T>): Promise<T> {
+    files.running++;
+    try { return await work; } finally { files.running--; }
+  }
+  return { ...actual,
+    lstat: ((...args: Parameters<typeof actual.lstat>) => counted(actual.lstat(...args))) as typeof actual.lstat,
+    realpath: ((...args: Parameters<typeof actual.realpath>) => counted(actual.realpath(...args))) as typeof actual.realpath,
+    rm: async (...args: Parameters<typeof actual.rm>) => { await counted(actual.rm(...args)); files.removed.push(String(args[0])); } };
+});
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
 async function fixture({ opened = true } = {}) {
@@ -91,17 +104,24 @@ it.skipIf(process.platform==="win32")("does not follow a link at .dohc/dataset-c
   expect((await lstat(join(f.input.rootPath,".dohc","dataset-copies"))).isSymbolicLink()).toBe(true);
 });
 it("closes a copy that opened on a retry before it removes the folder the failed attempt shared",async()=>{
-  const f=await fixture(),closing=deferred<void>();
+  const f=await fixture(),closing=deferred<void>(),closeCalled=deferred<void>();
   mocks.open.mockImplementationOnce(async()=>{throw new Error("The Collection copy is damaged. Download it again.");});
   await expect(f.registry.get(f.input)).rejects.toThrow("damaged");
   const copy=await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[1]![0];
-  vi.mocked(copy.close).mockImplementationOnce(()=>closing.promise);
+  vi.mocked(copy.close).mockImplementationOnce(()=>{closeCalled.resolve();return closing.promise;});
+  files.removed.length=0;
   const removal=f.registry.credentialsChanged(null);
-  // Time for a removal that did not wait for the close to finish; the folder must still be there.
-  await new Promise<void>(resolve=>setTimeout(resolve,50));
-  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
-  closing.resolve();await removal;
+  try {
+    await closeCalled.promise;
+    // Let what the account change queued start, then wait until no file call of
+    // it is running: all it can do before the close finishes has happened.
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    await vi.waitFor(()=>expect(files.running).toBe(0));
+    expect(await readdir(directory)).toEqual(["owned.sqlite"]);expect(files.removed).toEqual([]);
+  } finally { closing.resolve(); }
+  await removal;
   expect(await readdir(dirname(directory))).toEqual([]);
+  expect(files.removed.filter(path=>path===directory)).toHaveLength(1);
 });
 it.each([["not opened",false,"the workspace has not finished opening. Try again when it opens."],
   ["not kept out of iCloud Drive",true,"it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(
