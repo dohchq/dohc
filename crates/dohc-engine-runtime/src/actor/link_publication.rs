@@ -77,20 +77,7 @@ impl ActorHandle {
                     let faults: Arc<dyn FaultInjector> = Arc::new(dohc_engine_storage::NoFaults);
                     #[cfg(test)]
                     let faults = tests::publication::faults(&p.workspace);
-                    let selected: HashSet<String> = store.read_with(|conn| {
-                        let mut stmt = conn.prepare(
-                            "SELECT j.job_id FROM moments m JOIN materialization_jobs j
-                             ON j.job_id IN ('authored-mat_'||m.moment_id,'ydoc-mat_'||m.moment_id)
-                             WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.version_id=?3
-                             AND m.operation='write' AND j.workspace_id=?1 AND j.status='pending'
-                             ORDER BY m.moment_order LIMIT 2000"
-                        ).map_err(StorageError::corrupt_public)?;
-                        stmt.query_map(params![p.workspace,p.operation,version], |r| r.get(0))
-                            .map_err(StorageError::corrupt_public)?.collect::<Result<HashSet<_>,_>>()
-                            .map_err(StorageError::corrupt_public)
-                    })?;
-                    #[cfg(test)]
-                    { turn.jobs = selected.len(); }
+                    let selected = HashSet::from([id.clone()]);
                     let summary = store.with_materialization_status_batch(|store| {
                         replay_pending_materializations(
                             store, &p.root,
