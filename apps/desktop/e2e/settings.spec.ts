@@ -1,9 +1,9 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, editorTabTestId, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { test, expect, type Page } from "@playwright/test";
-import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { canonicalWorkspaceRoot } from "../src/workspaces/createWorkspaceFolder";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -118,16 +118,16 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
       .toBe("dark");
 
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // The launch argument keeps the workspace's native real path, JSON-escaped.
-    const encodedRootPath = JSON.stringify(realpathSync.native(temp.rootPath));
+    // The snippet renders the workspace's real path in forward-slash form.
+    const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
-      encodedRootPath,
+      canonicalRootPath,
     );
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await desktop!.page.getByRole("button", { name: "Copy" }).click({ timeout: remainingMs() });
       await expect
         .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
-        .toContain(encodedRootPath);
+        .toContain(canonicalRootPath);
     });
 
     await desktop.close();

@@ -28,10 +28,9 @@ export interface CreatedWorkspace {
   mode: ReturnType<typeof defaultWorkspaceMode>;
 }
 
-// A workspace folder's one spelling: its real path after every link. The
-// registry holds only this spelling, so the root it lists and the root a
-// workspace operation receives are the same string. Throws when the folder
-// does not exist.
+// The registry lists this spelling of the real path after every link.
+// A workspace operation receives the physical real path, which uses native
+// separators on Windows. Throws when the folder does not exist.
 export function canonicalWorkspaceRoot(rootPath: string): string {
   return rootSpelling(realpathSync.native(rootPath));
 }
