@@ -216,6 +216,7 @@ function operation(
 function editPaths(root: string) {
   const logPath = join(root, databaseOpLogPath("data.sqlite"));
   return {
+    rootPath: root,
     logPath,
     statePath: join(dirname(logPath), "state.sqlite"),
   };
@@ -261,6 +262,8 @@ describe("workspace database worker", () => {
 
     const directRoot = join(root, "direct-state");
     const workerRoot = join(root, "worker-state");
+    await mkdir(directRoot);
+    await mkdir(workerRoot);
     const directState = editPaths(directRoot);
     const workerState = editPaths(workerRoot);
     const expectedEdit = await editDatabaseAtPath({

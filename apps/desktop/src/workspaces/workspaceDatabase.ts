@@ -156,6 +156,7 @@ export async function applyDatabaseEdit(
   if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
   const logPath = join(rootPath, databaseOpLogPath(normalized));
   return (options.worker ?? workspaceDatabaseWorker).editPath({
+    rootPath,
     absolutePath: realTarget,
     path: normalized,
     logPath,
@@ -318,6 +319,7 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     );
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
+        rootPath: input.rootPath,
         absolutePath,
         path: resolved.normalized,
         logPath,

@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   open,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type {
   DatabaseColumnView,
   DatabaseEdit,
@@ -403,7 +405,57 @@ function createValidatedOperation(
   };
 }
 
+async function prepareDatabaseStorage(input: {
+  rootPath: string;
+  logPath: string;
+  statePath: string;
+}): Promise<{ logPath: string; statePath: string }> {
+  const slug = basename(dirname(input.logPath));
+  const storageRelativePath = join(".dohc", "databases", slug);
+  if (
+    resolve(input.logPath) !== join(resolve(input.rootPath), storageRelativePath, "operations.jsonl") ||
+    resolve(input.statePath) !== join(resolve(input.rootPath), storageRelativePath, "state.sqlite")
+  ) {
+    throw new Error("Database edit storage must use this workspace's .dohc/databases folder.");
+  }
+  const realRoot = await realpath(input.rootPath);
+  let directory = realRoot;
+  // Create one level at a time. Recursive mkdir could create children through
+  // a planted junction before its resolved path can be checked.
+  for (const segment of [".dohc", "databases", slug]) {
+    directory = join(directory, segment);
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const stats = await lstat(directory);
+    if (!stats.isDirectory() || await realpath(directory) !== directory) {
+      const path = relative(realRoot, directory);
+      throw new Error(
+        `dohc couldn't save the database edit because ${path} is a link or isn't a regular folder. Replace it with this workspace's folder, then try again.`,
+      );
+    }
+  }
+  const logPath = join(directory, "operations.jsonl");
+  const statePath = join(directory, "state.sqlite");
+  // SQLite can also open these files when recovering a previous transaction.
+  for (const path of [logPath, statePath, `${statePath}-journal`, `${statePath}-wal`, `${statePath}-shm`]) {
+    try {
+      if (!(await lstat(path)).isFile()) {
+        throw new Error(
+          `dohc couldn't save the database edit because ${relative(realRoot, path)} isn't a regular file. Replace it with this workspace's file, then try again.`,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return { logPath, statePath };
+}
+
 export async function editDatabaseAtPath(input: {
+  rootPath: string;
   absolutePath: string;
   resultPath: string;
   logPath: string;
@@ -413,9 +465,8 @@ export async function editDatabaseAtPath(input: {
   pageOffset: number;
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
-  await mkdir(dirname(input.logPath), { recursive: true });
-  await mkdir(dirname(input.statePath), { recursive: true });
-  const version = await reserveOperationVersion(input);
+  const storage = await prepareDatabaseStorage(input);
+  const version = await reserveOperationVersion(storage);
   const operation = createValidatedOperation(input.operation, version);
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(input.absolutePath);
@@ -424,7 +475,7 @@ export async function editDatabaseAtPath(input: {
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     runEdit(db, input.edit);
-    await appendOperationDurably(input.logPath, operation);
+    await appendOperationDurably(storage.logPath, operation);
     db.exec("COMMIT");
     transactionOpen = false;
     const page = tablePage(

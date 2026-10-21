@@ -51,6 +51,7 @@ export interface WorkspaceDatabaseWorkerOwner {
     signal?: AbortSignal;
   }): Promise<DatabasePageView>;
   editPath(input: {
+    rootPath: string;
     absolutePath: string;
     path: string;
     logPath: string;
@@ -335,6 +336,7 @@ export function createWorkspaceDatabaseWorkerOwner(
       return enqueue<DatabaseEditResult>(
         {
           kind: "edit-path",
+          rootPath: input.rootPath,
           absolutePath: input.absolutePath,
           resultPath: input.path,
           logPath: input.logPath,
