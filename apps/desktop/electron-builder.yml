@@ -137,6 +137,10 @@ win:
   signExts: ["!node.exe"]
   target: [nsis]
 linux:
+  # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
+  # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
+  # signal-desktop and github-desktop do.
+  executableName: dohc-desktop
   # Without its own icon, the Linux target falls back to mac.icon.
   icon: build/icon.png
   # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
