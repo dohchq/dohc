@@ -1286,8 +1286,8 @@ const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 // to settle and fails as "dohc could not check whether open files changed"
 // while History is still updating. Last, it answers the outcome of the first
 // health poll, which raises History paused unless it is null.
-async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}) {
-  const root = await createTestScratch(`dohc-${workspaceId}-`);
+async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}, existingRoot?: string) {
+  const root = existingRoot ?? await createTestScratch(`dohc-${workspaceId}-`);
   const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
@@ -1315,7 +1315,7 @@ async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEn
   };
   const withEngine = <T>(run: (engine: VersionedLiveAdapter) => Promise<T>) => sessions.run(workspace,
     ({ client, workspace: handle }) => run(new VersionedLiveAdapter(client, handle, { workspaceId })));
-  return { root, sessions, capture, health, stop, withEngine, workspaceId };
+  return { root, sessions, capture, health, stop, withEngine, workspaceId, stopEngine: () => lifecycle.stop() };
 }
 
 it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
@@ -1395,6 +1395,34 @@ it.skipIf(engine.missing)("keeps two open files' outside writes independent (#24
     await waitForPathMoments(opened.capture, "first.md", 2);
     expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
   } finally { await opened.stop(); }
+}, 60_000);
+
+it.skipIf(engine.missing)("records a deferred outside write after the daemon restarts (#2463)", async () => {
+  const opened = await openRealCapture("deferred-write-restart", { settleDebounceMs: 60_000 });
+  let restarted: Awaited<ReturnType<typeof openRealCapture>> | undefined;
+  try {
+    await writeFile(join(opened.root, "note.md"), "base\n");
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    await opened.capture.openYDocSession({ path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined });
+    await writeFile(join(opened.root, "note.md"), "outside before restart\n");
+    expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    // Stop the daemon without closing or settling the document session.
+    await opened.stopEngine();
+    restarted = await openRealCapture("deferred-write-restart", {}, opened.root);
+    const moments = await waitForPathMoments(restarted.capture, "note.md", 2);
+    // Startup may also retain the abandoned Y.Doc as a recovery moment.
+    // The outside bytes themselves must be captured exactly once.
+    const texts = await Promise.all(moments.filter((moment) => moment.metadata.origin === "local-file").map(async (moment) => {
+      const detail = await restarted!.capture.readMoment(moment.id);
+      return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+    }));
+    expect(texts).toEqual(["outside before restart\n", "base\n"]);
+    expect(await restarted.health()).toEqual({ newestMoment: "read", health: null });
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe("outside before restart\n");
+  } finally {
+    await restarted?.stop();
+    await opened.stop();
+  }
 }, 60_000);
 
 // Enable when #2413 lands: main does not yet publish these rewrite jobs.

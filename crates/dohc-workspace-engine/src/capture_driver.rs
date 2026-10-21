@@ -3531,10 +3531,9 @@ async fn materialize_ydoc_recoveries(
 }
 
 /// Re-offer unrecorded paths when a document session releases its lease.
-/// Empty new files and deleted files are deferred; outside writes to held new
-/// files are quarantined after repeated refusals. All need a rescan even when
-/// nothing on disk changes after the session ends. The release must wake
-/// quarantined paths itself: once the WAL is reused in place, nothing else will.
+/// New files, deleted files, and outside writes wait for sessions. All need a
+/// rescan even when nothing on disk changes after the session ends. Also wake
+/// quarantined paths: once the WAL is reused in place, nothing else will.
 async fn offer_unrecorded_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,
