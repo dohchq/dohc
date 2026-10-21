@@ -528,6 +528,7 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
             .create(parent)
             .and_then(|()| open_store_folder(parent))
     };
+    #[cfg_attr(not(unix), allow(clippy::let_unit_value))]
     let folder = folder.map_err(|err| RuntimeError::Identity {
         reason: "could not create engine.db parent directory",
         source: Some(err),
