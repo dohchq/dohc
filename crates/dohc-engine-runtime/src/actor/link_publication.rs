@@ -57,7 +57,7 @@ impl ActorHandle {
                              ON j.job_id IN ('authored-mat_'||m.moment_id,'ydoc-mat_'||m.moment_id)
                              WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.version_id=?3
                              AND m.operation='write' AND m.moment_order>?4 AND j.workspace_id=?1 AND j.status='pending'
-                             ORDER BY m.moment_order LIMIT 1").map_err(StorageError::corrupt_public)?;
+                             ORDER BY m.moment_order LIMIT 2000").map_err(StorageError::corrupt_public)?;
                             stmt.query_map(params![p.workspace,p.operation,version,cursor], |r| Ok((r.get(0)?,r.get(1)?)))
                             .map_err(StorageError::corrupt_public)?.collect::<Result<Vec<_>,_>>()
                             .map_err(StorageError::corrupt_public)
