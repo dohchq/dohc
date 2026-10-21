@@ -623,14 +623,17 @@ export function isLiveDocumentWithoutLineage(error: unknown): boolean {
 }
 
 /**
- * A request the caller deadlined ran out of time before the daemon answered.
+ * A request the caller deadlined reached the daemon and ran out of time
+ * before the daemon answered.
  *
- * Expiry can precede transmission. The code remains `transport-error` for
- * callers that recover by rebinding; this class lets them distinguish their
- * own deadline from a socket failure without matching message text.
+ * The code remains `transport-error` for callers that recover by rebinding;
+ * this class lets them distinguish their own deadline from a socket failure
+ * without matching message text.
  *
- * The outcome is unknown: the daemon may still finish the work. Only the
- * daemon's own `DEADLINE_EXCEEDED` or `CANCELLED` means the work did not happen.
+ * The outcome is unknown: the daemon may still finish the work. A request
+ * that expires before reaching the wire rejects with an ordinary
+ * `DEADLINE_EXCEEDED` request error instead. That, or the daemon's own
+ * `DEADLINE_EXCEEDED` or `CANCELLED`, means the work did not happen.
  */
 export class EngineRequestDeadlineError extends EngineClientError {
   readonly requestId: number;
@@ -648,6 +651,11 @@ export class EngineRequestDeadlineError extends EngineClientError {
     this.method = method;
     this.deadlineMs = deadlineMs;
   }
+}
+
+/** The deadline elapsed before the request reached the wire, so the daemon never saw it. */
+function unsentDeadlineError(requestId: number): EngineRequestError {
+  return new EngineRequestError(requestId, { code: "DEADLINE_EXCEEDED", message: "Request deadline elapsed before transmission.", retry: "afterBackoff" });
 }
 
 type BlobStreamErrorCode =
@@ -1228,7 +1236,7 @@ export class EngineClient implements EngineTransport {
       this.ordinaryRequests++;
       this.ordinaryRequestBytes += retainedBytes;
     }
-    const unsent = !writeInput ? new AbortController() : undefined;
+    const unsent = new AbortController();
     let transmitted = false;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
@@ -1242,10 +1250,18 @@ export class EngineClient implements EngineTransport {
       if (pending && transmitted) this.abandonedRequestIds.add(wireId);
       if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
       pending?.reject(error);
-      unsent?.abort(error);
+      unsent.abort(error);
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
-    const expire = (): void => abandon(new EngineRequestDeadlineError(wireId, request.method, deadlineMs!), false);
+    const expire = (): EngineClientError => {
+      const error = transmitted
+        ? new EngineRequestDeadlineError(wireId, request.method, deadlineMs!)
+        : unsentDeadlineError(request.id);
+      abandon(error, false);
+      // A half-written upload cannot stay on this connection.
+      if (writeInput && transmitted && !inputComplete) this.close();
+      return error;
+    };
     let cancelRequested = false;
     const sendCancel = (): void => {
       if (this.pending.has(wireId)) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
@@ -1258,27 +1274,33 @@ export class EngineClient implements EngineTransport {
       cancellationSent = true;
       abandon(cancellationError(), true);
     };
+    // A reply ends an ordinary request's timer. Input keeps it through its
+    // last drain, so an early reply cannot strand a half-written upload, and
+    // a half-written upload closes the connection at once.
+    const deadlineTimer =
+      deadlineMs !== null
+        ? setTimeout(() => {
+            if (writeInput && transmitted && !inputComplete) {
+              if (this.pending.has(wireId)) expire();
+              else this.close();
+              return;
+            }
+            // Give an inbound frame already queued by the transport one
+            // event-loop turn to settle before expiring the request.
+            setImmediate(() => {
+              if (this.pending.has(wireId)) expire();
+            });
+          }, Math.max(0, expiresAt! - performance.now()))
+        : undefined;
     const response = new Promise<Response>((resolve, reject) => {
-      const deadlineTimer =
-        deadlineMs !== null
-          ? setTimeout(() => {
-              // Give an inbound frame already queued by the transport one
-              // event-loop turn to settle before expiring the request.
-              setImmediate(() => {
-                const pending = this.pending.get(wireId);
-                if (!pending) return;
-                expire();
-              });
-            }, Math.max(0, expiresAt! - performance.now()))
-          : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
         request,
         resolve,
         reject,
         ...(restoreOutput ? { restoreOutput } : {}),
-        ...(deadlineTimer ? { deadlineTimer } : {}),
-        ...(unsent ? { cancelUnsent: () => {
+        ...(deadlineTimer && !writeInput ? { deadlineTimer } : {}),
+        ...(!writeInput ? { cancelUnsent: () => {
           if (transmitted) return false;
           abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }), false);
           return true;
@@ -1294,22 +1316,16 @@ export class EngineClient implements EngineTransport {
         let payload = serializedEnvelope;
         if (expiresAt !== null) {
           const remaining = Math.ceil(expiresAt - performance.now());
-          if (remaining <= 0) {
-            expire();
-            throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
-          }
+          if (remaining <= 0) throw expire();
           const captured = JSON.parse(serializedEnvelope) as Request;
           captured.deadlineMs = Math.min(deadlineMs!, remaining);
           payload = JSON.stringify(captured);
         }
         const frame = encodeFrame(FrameType.Control, 0, Buffer.from(payload, "utf8"), this.maxFrameBytes);
-        if (expiresAt !== null && performance.now() >= expiresAt) {
-          expire();
-          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
-        }
+        if (expiresAt !== null && performance.now() >= expiresAt) throw expire();
         transmitted = true;
         return frame;
-      }, unsent?.signal).then(async () => {
+      }, unsent.signal).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
         if (signal?.aborted) abort();
@@ -1342,6 +1358,7 @@ export class EngineClient implements EngineTransport {
       }
       throw error;
     } finally {
+      clearTimeout(deadlineTimer);
       signal?.removeEventListener("abort", abort);
       if (ordinary) {
         this.ordinaryRequests--;
@@ -1643,36 +1660,23 @@ export class EngineClient implements EngineTransport {
     this.liveUploadBytes += charge;
     this.liveUploads += 1;
     const expiresAt = performance.now() + request.deadlineMs;
-    let stopped = false;
-    let started = false;
-    let uploaded = false;
-    const abort = (): void => {
-      stopped = true;
-      if (started && !uploaded) this.close();
-    };
-    // The reply timer ends when a response arrives. Keep the upload deadline
-    // through the final drain so an early reply cannot strand retained input.
-    const uploadDeadline = setTimeout(abort, request.deadlineMs);
 
     try {
       const upload = prepare();
       // Preparation comes out of the request's one deadline.
       const deadlineMs = Math.ceil(expiresAt - performance.now());
-      if (deadlineMs < 1) throw new EngineRequestDeadlineError(request.id, method, request.deadlineMs);
+      if (deadlineMs < 1) throw unsentDeadlineError(request.id);
       const outgoing: Request = {
         id: request.id, workspace: request.workspace, method, deadlineMs,
         idempotencyKey: null, params: upload.params,
       };
       if (upload.streams.length === 0) {
         // No partial input stream exists. Cancelling this read must preserve the shared client.
-        clearTimeout(uploadDeadline);
         return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
       }
       const writeInput = async (wireId: number): Promise<void> => {
-        started = true;
         const current = (): void => {
           if (
-            stopped ||
             !this.pending.has(wireId) ||
             this.closed
           ) {
@@ -1712,8 +1716,6 @@ export class EngineClient implements EngineTransport {
             });
           }
         }
-        uploaded = true;
-        clearTimeout(uploadDeadline);
       };
 
       return await this.sendRequestWithInput(
@@ -1723,7 +1725,6 @@ export class EngineClient implements EngineTransport {
         restoreOutput,
       );
     } finally {
-      clearTimeout(uploadDeadline);
       if (restoreOutput?.wireId !== undefined) {
         for (const [streamId, stream] of this.blobStreams) {
           if (stream.start.requestId !== restoreOutput.wireId) continue;

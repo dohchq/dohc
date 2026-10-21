@@ -103,6 +103,42 @@ pub(crate) fn spawn_check(
     })
 }
 
+/// Withholds a finished check's answer once its host retires or detaches or
+/// its deadline passes, but not when its caller cancels: the relay already
+/// withholds the answer from a cancelled caller, and needs it to free its slot.
+#[derive(Debug)]
+struct AnswerGuard {
+    host: Arc<Host>,
+    deadline: Option<Instant>,
+}
+
+impl OutputGuard for AnswerGuard {
+    /// A fresh signal on every call, so a late cancel reaches nothing.
+    fn cancel_signal(&self) -> CancelSignal {
+        CancelSignal::new()
+    }
+    fn retirement_signal(&self) -> CancelSignal {
+        self.host.retired.clone()
+    }
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    fn is_current(&self) -> bool {
+        self.host.current(&self.host.connection)
+            && self
+                .deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
+    }
+    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+        let _fence = lock(&self.host.output_fence);
+        if !self.is_current() {
+            return false;
+        }
+        action();
+        true
+    }
+}
+
 fn stopped(guard: &RestoreFenceOutputGuard) -> WireError {
     if guard.cancel.is_cancelled() {
         WireError::new(ErrorCode::Cancelled, "first-open check cancelled")
@@ -188,7 +224,10 @@ impl EngineService {
                 result: answer(&binding, verdict),
             },
             blob_egress: None,
-            output_guard: Some(guard),
+            output_guard: Some(Arc::new(AnswerGuard {
+                host,
+                deadline: ctx.deadline,
+            })),
         })
     }
 }
@@ -217,9 +256,13 @@ pub(crate) mod tests {
 
     impl Fixture {
         pub(crate) async fn new() -> Self {
+            Self::with_restore(None).await
+        }
+
+        pub(crate) async fn with_restore(restore: Option<Value>) -> Self {
             let ordinary_root = ScratchDir::new().unwrap();
             let private_root = ScratchDir::new().unwrap();
-            let config = serde_json::from_value(json!({
+            let mut config = json!({
                 "version": 1, "relayNamespace": "relay",
                 "host": {"hostId": "host", "hostEpoch": 1, "instanceId": "instance", "connectionId": "connection"},
                 "workspaces": [
@@ -229,8 +272,11 @@ pub(crate) mod tests {
                 ],
                 "ingress": {"aggregateBytes": 512 * 1024 * 1024, "applicationWorkingReserveBytes": 8 * 1024 * 1024,
                     "maxUploads": 2, "uploadDeadlineMs": 30_000}
-            }))
-            .unwrap();
+            });
+            if let Some(restore) = restore {
+                config["restore"] = restore;
+            }
+            let config = serde_json::from_value(config).unwrap();
             let (service, owner, ingress) =
                 EngineService::configured_live_host(config).await.unwrap();
             let mut ctx = RequestContext::unbounded();
@@ -406,6 +452,24 @@ pub(crate) mod tests {
         let mut files = BTreeSet::new();
         walk(root, root, &mut files);
         (rows, files)
+    }
+
+    /// A finished answer is withheld once its deadline passes.
+    #[tokio::test]
+    async fn the_answer_guard_keeps_the_deadline() {
+        let f = Fixture::new().await;
+        let host = f
+            .service
+            .first_open_check_host(&f.owner.handle(), Some(&f.ordinary))
+            .unwrap();
+        let guard = AnswerGuard {
+            host,
+            deadline: Some(Instant::now()),
+        };
+        assert!(!guard.is_current());
+        assert!(!guard.with_current(&mut || ()));
+        drop(guard);
+        f.close().await;
     }
 
     /// The check stops when its caller cancels or its host loses standing

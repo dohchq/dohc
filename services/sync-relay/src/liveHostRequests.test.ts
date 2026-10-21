@@ -1,5 +1,8 @@
+import {createHash} from "node:crypto";
+import {EventEmitter} from "node:events";
 import {afterEach, expect, it, vi} from "vitest";
-import {EngineRequestDeadlineError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineClient, EngineRequestDeadlineError, FrameDecoder, encodeFrame, type EngineClientConnection} from "@dohc/workspace-engine-client/daemon";
+import type {Envelope} from "../../../packages/workspace-engine-client/src/protocol";
 import {queueLiveHostRequests} from "./liveHostRequests.js";
 
 function deferred<T>() {
@@ -141,7 +144,83 @@ it("asks native to stop a cancelled first-open check and holds its slot and inpu
   // The check finished before it saw the cancellation; its answer is still withheld.
   release.resolve({result: {status: "checked"}}); await cancelled; await next;
   await f.client.checkFirstOpenCandidate(request(3), firstOpen(10_000)); expect(f.invoke).toHaveBeenCalledTimes(3);
-  expect(f.cancelRequest).toHaveBeenCalledOnce(); f.lifetime.abort();
+  expect(f.cancelRequest).toHaveBeenCalledOnce(); expect(f.retire).not.toHaveBeenCalled(); f.lifetime.abort();
+});
+
+const wireLimits = {maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};
+/** A daemon end that answers only `answered` requests and holds back drain while backpressured. */
+class Peer implements EngineClientConnection {
+  readonly events = new EventEmitter();
+  readonly decoder = new FrameDecoder(wireLimits.maxFrameBytes);
+  readonly requests: Extract<Envelope, {type: "request"}>[] = [];
+  backpressured = false;
+  write(bytes: Buffer) {
+    for (const frame of this.decoder.push(bytes)) {
+      if (frame.kind === "blobChunk") continue;
+      const value = JSON.parse(frame.payload.toString()) as Envelope;
+      if (value.type !== "request") continue;
+      this.requests.push(value);
+      if (value.method === "answered") this.send({type: "response", id: value.id, result: {}});
+    }
+    return !this.backpressured;
+  }
+  send(value: Envelope) {this.events.emit("data", encodeFrame(1, 0, Buffer.from(JSON.stringify(value)), wireLimits.maxFrameBytes));}
+  drain() {this.backpressured = false; this.events.emit("drain");}
+  onData(fn: (bytes: Buffer | Uint8Array) => void) {this.events.on("data", fn);}
+  offData(fn: (bytes: Buffer | Uint8Array) => void) {this.events.off("data", fn);}
+  onClose(fn: () => void) {this.events.on("close", fn);}
+  offClose(fn: () => void) {this.events.off("close", fn);}
+  onError(fn: (error: unknown) => void) {this.events.on("fault", fn);}
+  offError(fn: (error: unknown) => void) {this.events.off("fault", fn);}
+  onDrain(fn: () => void) {this.events.on("drain", fn);}
+  offDrain(fn: () => void) {this.events.off("drain", fn);}
+  close() {}
+}
+async function nativeQueue() {
+  const peer = new Peer();
+  const native = new EngineClient(peer, {authToken: "parent", protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 5000,
+    privateLiveApplication: {aggregateBytes: 128 * 1024 * 1024, maxUploads: 1}});
+  peer.send({type: "helloAck", protocolVersion: 2, sessionGeneration: 7, capabilities: ["core", "blobs"], limits: wireLimits});
+  await native.ready();
+  const lifetime = new AbortController(), retire = vi.fn(() => lifetime.abort(new Error("retired")));
+  const client = queueLiveHostRequests(native, {maxPendingReads: 4, maxPendingWrites: 4, maxRetainedInputBytes: 1_000_000,
+    deadlineMs: 5000, signal: lifetime.signal, retire});
+  return {peer, native, client, retire};
+}
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const candidate = Uint8Array.of(0, 0, 7), source = Buffer.from("# Notes\n");
+const check = {objectId: "object", path: "notes/a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+  source, sourceSha256: sha256(source), candidate, candidateSha256: sha256(candidate), maxFullStateBytes: 4096};
+const checkRequest = (id: number, deadlineMs: number) => ({id, workspace: "ws-0000000000000001", deadlineMs});
+
+it.each(["preparation", "a delayed transport"])("keeps the host when a check expires during %s, before anything is sent", async when => {
+  const f = await nativeQueue(), clock = vi.spyOn(performance, "now").mockReturnValue(100);
+  const concat = Buffer.concat;
+  const preparation = vi.spyOn(Buffer, "concat").mockImplementationOnce((list, length) => {
+    if (when === "preparation") clock.mockReturnValue(2_000);
+    return concat(list, length);
+  });
+  try {
+    if (when === "a delayed transport") {f.peer.backpressured = true; void f.native.sendRequest({id: 1, method: "blocker", params: {}}).catch(() => undefined);}
+    const expired = f.client.checkFirstOpenCandidate(checkRequest(2, 1_000), check).catch((error: unknown) => error);
+    if (when === "a delayed transport") {clock.mockReturnValue(2_000); f.peer.drain();}
+    expect(await expired).toMatchObject({wireError: {code: "DEADLINE_EXCEEDED"}});
+    expect(f.peer.requests.map(sent => sent.method)).not.toContain("liveApplication.checkFirstOpenCandidate");
+    expect(f.retire).not.toHaveBeenCalled();
+    // The queue slot is back for the next request.
+    await expect(f.client.sendRequest({id: 3, method: "answered", params: {}})).resolves.toMatchObject({result: {}});
+  } finally {preparation.mockRestore(); clock.mockRestore(); f.native.close();}
+});
+
+it("retires the host and frees the slot when a sent check's header never drains past its deadline", async () => {
+  const f = await nativeQueue();
+  f.peer.backpressured = true;
+  try {
+    const stuck = f.client.checkFirstOpenCandidate(checkRequest(1, 50), check).catch((error: unknown) => error);
+    expect(await stuck).toBeInstanceOf(EngineRequestDeadlineError);
+    expect(f.peer.requests.map(sent => sent.method)).toEqual(["liveApplication.checkFirstOpenCandidate"]);
+    expect(f.retire).toHaveBeenCalledOnce();
+  } finally {f.native.close();}
 });
 
 it("gives a queued request only what remains of the deadline it entered with", async () => {

@@ -77,7 +77,7 @@ pub(super) fn is_method(method: &str) -> bool {
 }
 
 impl LiveApplicationIngress {
-    fn restore_reservation(&self, config: &RestoreConfig) -> Option<u32> {
+    pub(super) fn restore_reservation(&self, config: &RestoreConfig) -> Option<u32> {
         // Typed decode can retain geometrically grown String vectors: an empty JSON
         // string needs three wire bytes including its separator. Four further byte
         // spans cover upload, decoded strings, and serde's escaped-string scratch.
@@ -499,7 +499,9 @@ mod tests {
     }
 
     /// While one first-open check holds its slot, a second is refused and a
-    /// live edit and a restore upload still find an upload slot.
+    /// live edit and a restore upload still find an upload slot. A check
+    /// declaring the largest full-state cap leaves this budget too little
+    /// for a maximal live edit, so this one declares a small cap.
     #[tokio::test]
     async fn a_held_first_open_check_leaves_slots_for_live_edits_and_restores() {
         use crate::rpc::live_application::first_open_check::tests::{binding, candidate};
@@ -510,9 +512,12 @@ mod tests {
         let bundle = [bytes.as_slice(), markdown.as_bytes()].concat();
         let check = |f: &mut Fixture| {
             let stream = f.id + 10;
-            let mut request = f.request("liveApplication.checkFirstOpenCandidate", json!({
-                "contractVersion":1,"binding":binding(&bytes, markdown.as_bytes(), MAX_YDOC_UPDATE_BYTES),
-                "streamId":stream,"byteLength":bundle.len(),"digest":hex_sha256(&bundle)}));
+            let mut request = f.request(
+                "liveApplication.checkFirstOpenCandidate",
+                json!({
+                "contractVersion":1,"binding":binding(&bytes, markdown.as_bytes(), 4096),
+                "streamId":stream,"byteLength":bundle.len(),"digest":hex_sha256(&bundle)}),
+            );
             request.workspace = Some(neighbour.clone());
             let id = request.id;
             f.ingress.begin(request, &f.owner.handle()).unwrap();

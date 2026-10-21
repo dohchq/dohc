@@ -761,13 +761,29 @@ describe("private first-open candidate check", () => {
       const expired = transport.checkFirstOpenCandidate({ ...call, id: 906, deadlineMs: 1_000 }, input).catch((error: unknown) => error);
       const uploaded = chunks();
       clock.mockReturnValue(2_000); peer.drain();
-      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
       expect(checks).toHaveLength(1);
       expect(chunks()).toBe(uploaded);
       // Nothing reached the wire, so the connection stays usable.
       expect(await transport.checkFirstOpenCandidate({ ...call, id: 907 }, input)).toStrictEqual(checked);
       transport.close(); await Promise.all([blocker, again]);
     } finally { transport.close(); preparation.mockRestore(); clock.mockRestore(); }
+  });
+
+  it.each(["no answer", "an early refusal"])("closes the connection at the deadline when a sent check's header never drains, after %s, and returns its upload slot", async mode => {
+    const { peer, transport, chunks } = await connected();
+    peer.backpressured = true;
+    if (mode === "an early refusal") peer.onEnvelope = envelope => {
+      if (envelope.type === "request") peer.send({ type: "error", id: envelope.id, error: { code: "OVERLOADED", message: "busy", retry: "afterBackoff" } });
+    };
+    try {
+      const stuck = await transport.checkFirstOpenCandidate({ ...call, deadlineMs: 50 }, input).catch((error: unknown) => error);
+      if (mode === "no answer") expect(stuck).toBeInstanceOf(EngineRequestDeadlineError);
+      else expect(stuck).toMatchObject({ wireError: { code: "OVERLOADED" } });
+      expect(chunks()).toBe(0);
+      // The reservation is back: the next check reaches the closed connection, not a full upload slot.
+      await expect(transport.checkFirstOpenCandidate({ ...call, id: 906 }, input)).rejects.toThrow("The engine client is closed");
+    } finally { peer.drain(); transport.close(); }
   });
 
   it("asks the engine to stop a check after its last input frame and holds its upload slot until the engine answers", async () => {
@@ -1016,7 +1032,7 @@ describe("outbound backpressure", () => {
     const expired = transport.sendRequest({ ...request(3, "expired"), deadlineMs: 100 }).catch(error => error);
     try {
       clock.mockReturnValue(400); peer.drain(); await nextImmediate();
-      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
       expect(peer.received.find(envelope => envelope.type === "request" && envelope.method === "second"))
         .toMatchObject({ deadlineMs: 700 });
       expect(peer.received.some(envelope => envelope.type === "request" && envelope.method === "expired")).toBe(false);
@@ -1704,7 +1720,7 @@ describe("request progress", () => {
       const expired = transport.sendRequest({ ...request(1, "serialization.expiry"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
       await nextImmediate();
       expect(requests).toEqual([]);
-      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
       expect(vi.getTimerCount()).toBe(0);
       peer.send({ type: "progress", id: 1 });
       expect(onProgress).not.toHaveBeenCalled();
