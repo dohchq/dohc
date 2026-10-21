@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
     rolldownOptions: {
-      input: ["index.html"],
+      input: ["index.html", "privacy.html"],
     },
   },
   server: {
