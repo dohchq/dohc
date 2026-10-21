@@ -84,9 +84,9 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: |
-            package.json
-            .node-version
-            apps/site/wrangler.jsonc
+            /package.json
+            /.node-version
+            /apps/site/wrangler.jsonc
           sparse-checkout-cone-mode: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
