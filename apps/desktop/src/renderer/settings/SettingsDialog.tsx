@@ -966,7 +966,7 @@ export function SettingsDialog(props: {
             {!props.sharedView ? (
               <SettingRow
                 title="Workspace trust"
-                description="A trusted workspace runs its apps' dev and build commands on this computer."
+                description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer."
                 testId="settings-row-workspace-trust"
               >
                 <div className="shrink-0 whitespace-nowrap">

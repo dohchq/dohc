@@ -496,6 +496,9 @@ export function ChatsView(props: {
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   // The user settings the add-agent form writes, and the save that persists
   // them. Absent in embedded surfaces, which then offer no add-agent form.
   userSettings?: DesktopUserSettings | null;
@@ -2105,6 +2108,7 @@ export function ChatsView(props: {
         ticket,
       }]);
       if (token !== liveToken.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       props.onThreadStarted?.();
       setNewThreadBody("");
       setNewThreadPoll(null);
@@ -2130,7 +2134,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, newThreadPoll, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2217,6 +2221,7 @@ export function ChatsView(props: {
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
       sentMessage = result;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       let resolvedDecision: ChatDecisionRecord | null = null;
       if (resolvingMessageId) {
         const resolution = await bridge().resolveChatDecision({
@@ -2287,6 +2292,7 @@ export function ChatsView(props: {
     composer,
     nav,
     poll,
+    props.onAgentWaitsForTrust,
     props.onError,
     replyTarget,
     resolveChosenOption,
@@ -2631,6 +2637,7 @@ export function ChatsView(props: {
           : {}),
       });
       if (!requestOwnsActiveContext()) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       dmRefreshSeq.current += 1;
       setMessages((current) =>
         current.some((message) => message.id === result.message.id)
@@ -2659,7 +2666,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props.onError, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
@@ -4664,6 +4671,7 @@ export function ChatsView(props: {
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
             onSetupAgent={props.onSetupAgent}
+            onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
           />
         ) : (

@@ -161,6 +161,22 @@ describe("trust against races and failed files", () => {
     expect(await trust.isTrusted(workspace)).toBe(true);
   });
 
+  it("tells one listener of every change, whatever made it, and not of a grant a revoke beat", async () => {
+    const { file, workspace } = await setup();
+    const changes: Array<[string, boolean]> = [];
+    const trust = createWorkspaceTrust({ file, onChange: (workspaceId, trusted) => changes.push([workspaceId, trusted]) });
+    // The dialog's grant, and New workspace's, which names its folder.
+    await trust.trust(workspace);
+    await trust.trust(workspace, { folder: null });
+    // Settings' restrict, and Forget's.
+    trust.revoke("trip");
+    await trust.restrict("trip");
+    const granting = trust.trust(workspace);
+    trust.revoke("trip");
+    expect(await granting).toBe(false);
+    expect(changes).toEqual([["trip", true], ["trip", true], ["trip", false], ["trip", false], ["trip", false]]);
+  });
+
   it("keeps Restricted Mode when the person restricts while a grant waits to be written", async () => {
     const { file, workspace } = await setup();
     const trust = createWorkspaceTrust({ file });

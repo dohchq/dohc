@@ -610,7 +610,22 @@ const crashReports = createCrashReportStore({
 });
 // Whether this computer runs each workspace's app commands. Main's own
 // record, in this computer's dohc profile: nothing in a workspace sets it.
-const workspaceTrust = createWorkspaceTrust({ file: join(stateDir(), "workspace-trust.json") });
+const workspaceTrust = createWorkspaceTrust({
+  file: join(stateDir(), "workspace-trust.json"),
+  onChange: (workspaceId, trusted) => agentTrustChanged(workspaceId, trusted),
+});
+
+// Every trust change, from the dialog, Settings, Forget, or New workspace:
+// the held notice and the ask on a send come once per change, and requests
+// Restricted Mode held start once trusted, without another message.
+function agentTrustChanged(workspaceId: string, trusted: boolean): void {
+  chatDispatchService.trustChanged(workspaceId);
+  chatDispatchNotices.clear(workspaceId, "restricted");
+  if (!trusted) return;
+  void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+    console.error("[desktop] chat dispatch scan after trust:", error);
+  });
+}
 
 // The windows showing a workspace follow its trust at once.
 function notifyWorkspaceTrustChanged(workspaceId: string, trusted: boolean): void {
@@ -3482,6 +3497,9 @@ const chatDispatchNotices = createChatDispatchNotices((event) => {
 });
 
 const chatDispatchService = createChatDispatchService({
+  // An agent runs in the workspace folder, where its CLI may follow the
+  // folder's own settings, so it starts only where app commands may run.
+  assertMayStartAgent: (workspace) => workspaceTrust.assertTrusted(workspace),
   onDispatchNotice: (workspace, notice) => {
     withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
   },
@@ -6957,6 +6975,9 @@ function registerIpcHandlers(): void {
     },
     stopAppCommands: (operation) =>
       operation.state.sitePreviews.stopWorkspace(operation.workspace.workspaceId, { rejectOnFailure: true }),
+    stopAgents: (workspaceId) => chatDispatchService.stopForRestrictedMode(workspaceId),
+    onAsk: (workspaceId) => chatDispatchService.trustAsked(workspaceId),
+    wasAsked: (workspaceId) => chatDispatchService.trustWasAsked(workspaceId),
     notifyChanged: notifyWorkspaceTrustChanged,
   }));
 
@@ -7014,6 +7035,7 @@ function registerIpcHandlers(): void {
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },
+    agentWaitsForTrust: (workspaceId, messageId) => chatDispatchService.waitsForTrust(workspaceId, messageId),
   });
 
   agentRunsIpc.registerChatRunRecords();

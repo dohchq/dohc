@@ -212,6 +212,9 @@ export function createChatRunnerProcess(
     command: string;
     profile?: AgentLaunchProfile;
     prompt: string;
+    // Throws unless the runner may still start, such as when the workspace
+    // lost its trust. Nothing awaits between it and spawn.
+    assertMayStart: () => void;
   }): RunnerProcess {
     const logFd = prepareLog(input.logPath);
     try {
@@ -267,6 +270,7 @@ export function createChatRunnerProcess(
             : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
       );
     }
+    input.assertMayStart();
     const child = spawnRunner(resolved.command, resolved.args, {
       cwd: input.rootPath,
       env,

@@ -2070,6 +2070,9 @@ export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
 export const SendChatMessageResult = z.object({
   message: ChatMessageRecord,
+  // The message asks an agent, and Restricted Mode holds it until the person
+  // trusts the workspace.
+  waitsForTrust: z.literal(true).optional(),
   // The question or poll the message asked, read back after the write.
   // Absent when it asked none, or when that read failed.
   decision: ChatDecisionRecord.optional(),
@@ -2412,6 +2415,8 @@ export const StartChannelThreadResult = z.object({
   viewerAuthorId: OPAQUE_ID,
   // As on SendChatMessageResult: the opening message's question or poll.
   decision: ChatDecisionRecord.optional(),
+  // As on SendChatMessageResult.
+  waitsForTrust: z.literal(true).optional(),
 });
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 
@@ -6134,11 +6139,11 @@ export const workspaceTrustOperations = {
     inactiveMessage: "Open this workspace to see whether it is trusted.",
   },
   // Opens main's dialog. Trusted is true only when the person chose Trust
-  // workspace there.
+  // workspace there. Automatic: a send asked for it, not the person.
   requestWorkspaceTrust: {
     capabilityId: "workspace.trust.request",
     channel: "desktop:request-workspace-trust",
-    payload: WorkspaceIdPayload, result: WorkspaceTrustAnswer,
+    payload: WorkspaceIdPayload.extend({ automatic: z.literal(true).optional() }), result: WorkspaceTrustAnswer,
     guard: "active-workspace", scope: "workspace",
     inactiveMessage: "Open this workspace to trust it.",
   },
@@ -6416,7 +6421,7 @@ export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
-  reason: z.enum(["no-runner", "budget-paused"]),
+  reason: z.enum(["no-runner", "budget-paused", "restricted"]),
   threadId: z.string().min(1),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),

@@ -40,3 +40,18 @@ it("clears a forgotten workspace without clearing another workspace", () => {
   expect(publish).toHaveBeenLastCalledWith(notices.register("a"));
   expect(notices.register("b").notices).toHaveLength(1);
 });
+
+it("takes back one reason's notice and leaves the others", () => {
+  const publish = vi.fn();
+  const notices = createChatDispatchNotices(publish);
+  notices.report("a", { reason: "restricted", threadId: "t1", message: "Restricted." });
+  notices.report("a", { reason: "no-runner", threadId: "t2", message: "No runner." });
+  const before = notices.register("a");
+  notices.clear("a", "restricted");
+  expect(notices.register("a").notices.map(({ reason }) => reason)).toEqual(["no-runner"]);
+  expect(notices.register("a").revision).toBeGreaterThan(before.revision);
+  publish.mockClear();
+  notices.clear("a", "restricted");
+  notices.clear("b", "restricted");
+  expect(publish).not.toHaveBeenCalled();
+});
