@@ -2304,7 +2304,7 @@ describe("SettingsDialog", () => {
 
   it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
     updateReady = true;
-    const reason = "dohc could not ask for your password, so the update did not install. Run this command in a terminal to install it.";
+    const reason = "dohc did not get permission to install the update. Run this command in a terminal to install it.";
     const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,

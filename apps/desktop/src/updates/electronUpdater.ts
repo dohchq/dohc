@@ -115,9 +115,10 @@ type InstallFailure = { message: string; installCommand?: string };
 /**
  * Why a Linux .deb did not install, and what the person can do. electron-updater installs it as root
  * through the first of gksudo, kdesudo, pkexec, and beesu it finds, or plain sudo, and reports a
- * failure as "Command <program> exited with code <status>". pkexec exits 126 without authorization
- * and 127 when no authentication agent can ask. Plain sudo has no terminal to ask from, and its
- * failure looks like dpkg's, so its cause stays unnamed.
+ * failure as "Command <program> exited with code <status>". pkexec exits 126 when the person closes
+ * its prompt, and 127 when it gets no authorization any other way: no agent to ask, a refusal, or
+ * an error. Plain sudo has no terminal to ask from, and its failure looks like dpkg's, so its cause
+ * stays unnamed.
  */
 export function debInstallFailure(error: Error, installer: string): InstallFailure {
   const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
@@ -126,7 +127,7 @@ export function debInstallFailure(error: Error, installer: string): InstallFailu
   }
   const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
-    ? { message: "dohc could not ask for your password, so the update did not install. Run this command in a terminal to install it.", installCommand }
+    ? { message: "dohc did not get permission to install the update. Run this command in a terminal to install it.", installCommand }
     : { message: "The update did not install. Run this command in a terminal to install it.", installCommand };
 }
 // electron-updater's code when the feed has no channel file for this

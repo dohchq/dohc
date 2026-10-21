@@ -9,6 +9,7 @@ import {
 } from "./electronUpdater";
 import { initialUpdateState, transition } from "./updateMachine";
 import { deferred } from "../testing/deferred";
+import { UpdateStateEvent } from "../ipc/bridgeContract";
 
 type Listener = (...args: unknown[]) => void;
 
@@ -377,7 +378,7 @@ describe("electron updater actions", () => {
     // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
     for (const [error, message, installCommand] of [
       ["Command pkexec exited with code 126", "The update did not install without your password. Choose Restart to try again.", undefined],
-      ["Command pkexec exited with code 127", "dohc could not ask for your password, so the update did not install. Run this command in a terminal to install it.", install],
+      ["Command pkexec exited with code 127", "dohc did not get permission to install the update. Run this command in a terminal to install it.", install],
       ["Command sudo exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
       ["Command pkexec exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
     ] as const) {
@@ -410,9 +411,12 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("quotes the .deb's path for the shell in the install command", () => {
+  it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
     expect(debInstallFailure(new Error("Command sudo exited with code 1"), "/home/o'brien/dohc 1.2.4.deb").installCommand)
       .toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
+    // A Linux path is at most 4,096 bytes; quoting makes each ' four characters.
+    const longest = debInstallFailure(new Error("Command sudo exited with code 1"), `/${"'".repeat(4095)}`).installCommand;
+    expect(UpdateStateEvent.parse({ status: "ready", message: "The update did not install.", installCommand: longest }).installCommand).toBe(longest);
   });
 
   describe("awaitUpdate", () => {
