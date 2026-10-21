@@ -179,9 +179,7 @@ const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((asse
 for (const link of document.querySelectorAll('[data-download-primary], [data-download-card], [data-download-asset]')) {
   const buildFor = () => downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild ?? link.dataset.downloadAsset];
   const canResolve = () => Boolean(buildFor());
-  const prepare = () => { if (canResolve()) void resolveDownloads(); };
-  link.addEventListener('pointerenter', prepare, { once: true });
-  link.addEventListener('focus', prepare, { once: true });
+  // GitHub hears from a visitor only when they click to download.
   link.addEventListener('click', async event => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
     // "Download dohc" scrolls to the platforms below.

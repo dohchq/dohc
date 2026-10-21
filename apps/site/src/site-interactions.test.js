@@ -70,6 +70,8 @@ describe('download architecture', () => {
     // dohc ships no Intel build, so an Intel Mac gets no preferred download.
     ['x86', 'mac', 'https://github.com/dohchq/dohc/releases', false],
   ])('uses only positively reported Mac architecture (%s)', async (architecture, key, href, preferred) => {
+    const navigate = vi.fn();
+    vi.stubGlobal('location', { assign: navigate });
     vi.stubGlobal('navigator', {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
       platform: 'MacIntel', maxTouchPoints: 0,
@@ -80,8 +82,11 @@ describe('download architecture', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(card.getAttribute('href')).toBe('#downloads');
     card.dispatchEvent(new Event('pointerenter'));
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(card.href).toBe(href));
+    card.dispatchEvent(new Event('focus'));
+    expect(fetch).not.toHaveBeenCalled();
+    card.click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith(href));
+    expect(fetch).toHaveBeenCalledOnce();
     expect(card.href).toBe(href);
     expect(card.classList.contains('is-preferred')).toBe(preferred);
     expect(Boolean(card.querySelector('.download-card-match'))).toBe(preferred);
