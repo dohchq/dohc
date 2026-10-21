@@ -958,6 +958,11 @@ mod tests {
                 NotPrivateReason::NotFile,
                 "engine-folder-not-private: not-file .dohc/engine/engine.db-wal",
             ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::UncheckedVolume,
+                "engine-folder-not-private: unchecked-volume .dohc/engine",
+            ),
         ] {
             let refused = NotPrivate {
                 path: path.into(),

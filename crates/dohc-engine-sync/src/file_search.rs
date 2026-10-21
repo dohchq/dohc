@@ -109,7 +109,9 @@ mod tests {
         let scratch = ScratchDir::new().expect("scratch");
         let database = dohc_engine_testkit::engine_db_path(&scratch).expect("database path");
         let folder = std::fs::File::open(database.parent().expect("folder")).expect("open");
-        let by_id = dohc_macos_files::path_by_id(&folder).expect("path by ID");
+        let shown = std::path::Path::new(".dohc/engine");
+        let by_id = dohc_macos_files::path_by_id(&folder, shown).expect("lookup");
+        let by_id = by_id.expect("path by ID");
         let root = super::workspace_root_from_database(&by_id.join("engine.db"));
         let workspace = std::fs::canonicalize(scratch.path()).expect("workspace");
         assert_eq!(root, Some(workspace));

@@ -59,7 +59,6 @@ pub(super) type CaptureHolds = Arc<Mutex<HashMap<String, CaptureHold>>>;
 
 pub(crate) struct OpenWorkspace {
     pub(super) root: PathBuf,
-    pub(super) db_path: PathBuf,
     pub(crate) workspace_id: String,
     pub(super) actor: ActorHandle,
     pub(super) durability: super::automations::DurabilityQueue,
@@ -140,7 +139,6 @@ impl OpenWorkspace {
     fn read_only_attach(&self, owner: WorkspaceHandle) -> Self {
         Self {
             root: self.root.clone(),
-            db_path: self.db_path.clone(),
             workspace_id: self.workspace_id.clone(),
             actor: self.actor.clone(),
             durability: self.durability.clone(),
@@ -303,9 +301,10 @@ impl EngineServiceCleanup {
             workspace.shutdown_capture().await;
             let closing_workspace = Arc::clone(&workspace);
             let supervisor = self.supervisor;
-            let _ =
-                tokio::task::spawn_blocking(move || supervisor.close(&closing_workspace.db_path))
-                    .await;
+            let _ = tokio::task::spawn_blocking(move || {
+                supervisor.close_identity(closing_workspace.actor.identity())
+            })
+            .await;
             self.self_writes
                 .scoped(&workspace.root)
                 .clear_workspace(&workspace.workspace_id);
@@ -317,7 +316,7 @@ impl EngineServiceCleanup {
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
             workspace.observation.close_synchronously();
             let _ = workspace.begin_capture_shutdown();
-            let _ = self.supervisor.close(&workspace.db_path);
+            let _ = self.supervisor.close_identity(workspace.actor.identity());
             self.self_writes
                 .scoped(&workspace.root)
                 .clear_workspace(&workspace.workspace_id);
@@ -331,14 +330,15 @@ impl EngineServiceCleanup {
 /// held until either transfer or `begin_close` installs the Closing marker.
 struct OpenGuard {
     supervisor: &'static WorkspaceSupervisor,
-    db_path: Option<PathBuf>,
+    /// The actor to close, by the identity its handle carries.
+    identity: Option<dohc_engine_runtime::EngineDbIdentity>,
     observation: Option<Arc<crate::file_observation::FileObservation>>,
     _open_serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl OpenGuard {
     fn disarm(mut self) {
-        self.db_path = None;
+        self.identity = None;
         self.observation = None;
     }
 }
@@ -349,12 +349,12 @@ impl Drop for OpenGuard {
         if let Some(observation) = &observation {
             observation.request_shutdown();
         }
-        let db_path = self.db_path.take();
-        if db_path.is_none() && observation.is_none() {
+        let identity = self.identity.take();
+        if identity.is_none() && observation.is_none() {
             return;
         }
         let supervisor = self.supervisor;
-        let closing = db_path.and_then(|path| supervisor.begin_close(&path).ok().flatten());
+        let closing = identity.and_then(|identity| supervisor.begin_close_identity(&identity));
         // Detached + blocking: never run the actor join on a runtime worker
         // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
@@ -910,9 +910,8 @@ impl EngineService {
                 "workspace handle limit reached",
             ));
         }
-        let db_path = root.join(".dohc").join("engine").join("engine.db");
+        let actor_path = root.join(".dohc").join("engine").join("engine.db");
         let supervisor = self.supervisor;
-        let actor_path = db_path.clone();
         let now_ms = now_ms()?;
         let capture_apply_probe = self.capture_apply_probe.clone();
         #[cfg(test)]
@@ -962,10 +961,10 @@ impl EngineService {
             let open_guard = OpenGuard {
                 supervisor,
                 observation: None,
-                db_path: opened
+                identity: opened
                     .as_ref()
                     .ok()
-                    .and_then(|open| open.created_actor.then_some(actor_path)),
+                    .and_then(|open| open.created_actor.then(|| open.actor.identity().clone())),
                 _open_serial,
             };
             // Verify the committed binding before exposing the actor. The initial
@@ -986,7 +985,7 @@ impl EngineService {
                 };
                 (open, bound)
             });
-            if open_guard.db_path.is_some()
+            if open_guard.identity.is_some()
                 && let Some(probe) = capture_apply_probe
             {
                 probe.pause_open_install_if_armed();
@@ -1037,16 +1036,17 @@ impl EngineService {
             if actor_open.store_freshly_created {
                 // The guard's close finishes on a blocking task; the delete
                 // has to wait for it, or SQLite still holds the file.
+                let store_path = actor.database_path().to_path_buf();
+                let removed = supervisor.begin_close_identity(actor.identity());
                 drop(actor);
-                let removed = supervisor.begin_close(&db_path);
-                if let Ok(Some(closing)) = removed {
+                if let Some(closing) = removed {
                     let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
                 }
                 open_guard.disarm();
                 // A delete that fails leaves the store the next open refuses
                 // as a mismatch. The refusal stands; the path says why.
                 for suffix in ["", "-wal", "-shm"] {
-                    let mut path = db_path.clone().into_os_string();
+                    let mut path = store_path.clone().into_os_string();
                     path.push(suffix);
                     let path = std::path::PathBuf::from(path);
                     if let Err(error) = std::fs::remove_file(&path)
@@ -1098,7 +1098,7 @@ impl EngineService {
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
-            let budget_db_path = db_path.clone();
+            let budget_db_path = actor.database_path().to_path_buf();
             let budget_workspace_id = params.workspace_id.clone();
             let owner_outbox = config.owner_outbox.clone();
             let budget_probe = self.capture_apply_probe.clone();
@@ -1310,7 +1310,6 @@ impl EngineService {
             handle.clone(),
             Arc::new(OpenWorkspace {
                 root,
-                db_path,
                 workspace_id: params.workspace_id,
                 actor,
                 durability: super::automations::DurabilityQueue::default(),
@@ -1407,7 +1406,7 @@ impl EngineService {
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
-            let closing = supervisor.begin_close(&open.db_path).map_err(map_runtime)?;
+            let closing = supervisor.begin_close_identity(open.actor.identity());
             let (removed, attached_handles) = {
                 let mut handles = lock(&self.handles);
                 let removed = handles.remove(&handle);
@@ -2827,7 +2826,7 @@ mod tests {
             .unwrap();
         service.collections_changed(&ctx, &open).await;
         // A pull deletes the target while automation retains the source's session lease.
-        let observer = rusqlite::Connection::open(&open.db_path).unwrap();
+        let observer = rusqlite::Connection::open(open.actor.database_path()).unwrap();
         let count = || {
             observer
                 .query_row(
@@ -3271,6 +3270,40 @@ mod tests {
                 "engine-folder-not-private: link .dohc/engine/engine.db-wal"
             );
         }
+    }
+
+    /// A workspace whose engine folder moves after it opens, with another put
+    /// at its name, still closes: the close finds the actor by the identity
+    /// its handle carries, not by what the path names now. On a Mac the
+    /// store's own path goes by the folder's ID, so reads reach it too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_workspace_closes_after_its_engine_folder_moves() {
+        let service = EngineService::new();
+        let scratch = ScratchDir::new().expect("scratch");
+        let params = open_params(scratch.path(), "moved", json!({ "captureMode": "none" }));
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("open");
+        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+        let handle = handle.expect("handle");
+        #[cfg(target_os = "macos")]
+        {
+            let open = service.open(Some(&handle)).expect("open workspace");
+            assert!(open.actor.database_path().starts_with("/.vol"));
+        }
+        let engine = scratch.path().join(".dohc/engine");
+        let moved = scratch.path().join(".dohc/moved");
+        std::fs::rename(&engine, &moved).expect("move");
+        std::fs::create_dir(&engine).expect("replacement");
+        service.workspace_close(Some(handle)).await.expect("close");
+        // No writer holds the store any more, so another supervisor opens it.
+        let store = moved.join("engine.db");
+        let other = dohc_engine_runtime::WorkspaceSupervisor::new();
+        other.open(&store, 1).expect("the closed store opens");
+        other.close(&store).expect("close");
+        assert_eq!(std::fs::read_dir(&engine).expect("replacement").count(), 0);
     }
 
     /// Only an open that writes prepares `.dohc/local`, and its answer says

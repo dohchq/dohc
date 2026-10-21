@@ -198,27 +198,24 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
     // folder 0700 with no entries, whoever created it, and refuses a link at
     // `.dohc` or at the folder, a folder another user owns, and one a volume
     // keeps shared. The marker then goes through the folder checked here, so
-    // a folder put at its name since then never gets it.
+    // a folder put at its name since then is not reached.
     #[cfg(target_os = "macos")]
     {
-        let folder = dohc_macos_files::ensure_private_dir(root, relative)
-            .map_err(io_failure(&parent, RootBindingError::Unwritable))?;
-        let dir = dohc_macos_files::path_by_id(&folder).unwrap_or(parent);
+        let refused = io_failure(&parent, RootBindingError::Unwritable);
+        let dir = dohc_macos_files::ensure_private_dir(root, relative).and_then(|folder| {
+            let dir = dohc_macos_files::path_by_id(&folder, relative)?;
+            Ok((dir.unwrap_or_else(|| parent.clone()), folder))
+        });
+        let (dir, folder) = dir.map_err(refused)?;
         exclude_from_icloud(&dir);
         Ok(BindingDir {
             marker: dir.join(name),
             _folder: folder,
         })
     }
-    // Other Unix systems make the folder 0700 the same way, and refuse the
-    // same things at `.dohc` and the folder.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let refused = |shown| not_private(root, shown, RootBindingError::Unwritable);
-        create_folder(root, ".dohc").map_err(refused(".dohc"))?;
-        create_folder(root, ".dohc/engine")
-            .and_then(make_private)
-            .map_err(refused(".dohc/engine"))?;
+        create_engine_dir(root, rustix::process::geteuid().as_raw())?;
         Ok(BindingDir {
             marker: parent.join(name),
         })
@@ -293,9 +290,12 @@ fn prepare_local_state_with(
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
-    let shown = LOCAL_STATE_RELATIVE_PATH;
-    let refused = not_private(root, shown, RootBindingError::LocalStateUnwritable);
-    create_folder(root, shown)
+    let (shown, owner) = (
+        LOCAL_STATE_RELATIVE_PATH,
+        rustix::process::geteuid().as_raw(),
+    );
+    let refused = not_private(root, shown, RootBindingError::LocalStateUnwritable, owner);
+    create_folder(root, shown, owner)
         .and_then(make_private)
         .map_err(refused)
 }
@@ -329,20 +329,38 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
     Ok(())
 }
 
-/// Create the folder `shown` in `root` with mode 0700, or take the one there,
-/// and open it without following a link.
+/// Create `.dohc` and the engine's folder in `root`, or take the ones there,
+/// and make the engine's folder private, as a Mac does. Both must belong to
+/// `owner`. A link, anything but a folder, or another user's folder at either
+/// is refused by name before anything changes.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn create_folder(root: &Path, shown: &str) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+fn create_engine_dir(root: &Path, owner: u32) -> Result<(), RootBindingError> {
+    let refused = |shown| not_private(root, shown, RootBindingError::Unwritable, owner);
+    create_folder(root, ".dohc", owner).map_err(refused(".dohc"))?;
+    create_folder(root, ".dohc/engine", owner)
+        .and_then(make_private)
+        .map_err(refused(".dohc/engine"))
+}
+
+/// Create the folder `shown` in `root` with mode 0700, or take the one there,
+/// and open it without following a link. A folder `owner` does not own fails,
+/// whatever this process may change.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn create_folder(root: &Path, shown: &str, owner: u32) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     let dir = root.join(shown);
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
         _ => {}
     }
-    std::fs::OpenOptions::new()
+    let folder = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(&dir)
+        .open(&dir)?;
+    if folder.metadata()?.uid() != owner {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(folder)
 }
 
 /// Give `folder` mode 0700 through its descriptor, whoever created it and
@@ -355,21 +373,11 @@ fn make_private(folder: std::fs::File) -> std::io::Result<()> {
 
 /// What kept the folder `shown` in `root` from being created, opened or made
 /// private, as the Mac names it: the first part of `shown` that is a link, is
-/// not a folder, or is another user's folder. The disk tells, read without
-/// following a link. A refusal leaves what it names as it is. Any other
-/// failure is `otherwise`.
+/// not a folder, or is a folder `owner` does not own. The disk tells, read
+/// without following a link. A refusal leaves what it names as it is. Any
+/// other failure is `otherwise`.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn not_private(
-    root: &Path,
-    shown: &'static str,
-    otherwise: RootBindingError,
-) -> impl FnOnce(std::io::Error) -> RootBindingError {
-    not_private_to(root, shown, otherwise, rustix::process::geteuid().as_raw())
-}
-
-/// [`not_private`] for folders that must belong to `owner`.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn not_private_to(
     root: &Path,
     shown: &'static str,
     otherwise: RootBindingError,
@@ -666,7 +674,7 @@ mod tests {
         let ours = std::fs::metadata(scratch.path()).expect("scratch").uid();
         let denied = || std::io::Error::from_raw_os_error(libc::EACCES);
         let refusal = |root: &Path, shown, owner| {
-            not_private_to(root, shown, RootBindingError::Unwritable, owner)(denied())
+            not_private(root, shown, RootBindingError::Unwritable, owner)(denied())
         };
         assert_eq!(
             refusal(scratch.path(), ".dohc/engine", ours + 1).to_string(),
@@ -681,6 +689,37 @@ mod tests {
             refusal(scratch.path(), ".dohc/engine", ours),
             RootBindingError::Unwritable
         ));
+    }
+
+    /// Each open checks who owns `.dohc` and the engine's folder before it
+    /// changes anything, so a process that may change any folder's mode, as
+    /// root may, still refuses another user's. Making one needs root, so the
+    /// seam expects another owner instead.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn an_open_refuses_another_users_folders_before_changing_them() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let scratch = ScratchDir::new().expect("scratch");
+        let engine = scratch.join(".dohc/engine");
+        std::fs::create_dir_all(&engine).expect("engine dir");
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let ours = std::fs::metadata(scratch.path()).expect("scratch").uid();
+        let refused = create_engine_dir(scratch.path(), ours + 1).expect_err("another owner");
+        assert_eq!(
+            refused.to_string(),
+            "engine-folder-not-private: other-owner .dohc"
+        );
+        let mode = std::fs::metadata(&engine)
+            .expect("engine")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+        create_engine_dir(scratch.path(), ours).expect("our own folders");
+        let mode = std::fs::metadata(&engine)
+            .expect("engine")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     /// The engine's folder moves after the open checks it, and another takes

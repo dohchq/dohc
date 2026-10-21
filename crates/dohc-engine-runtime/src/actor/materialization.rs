@@ -850,7 +850,8 @@ pub(super) fn replay_pending_materializations(
                     continue;
                 }
                 if secret_key.is_none() {
-                    let Ok(Some(key)) = load_key_file(root_dir) else {
+                    let Ok(Some(key)) = load_key_file(super::store_folder(store.database_path()))
+                    else {
                         summary.failed += 1;
                         continue;
                     };

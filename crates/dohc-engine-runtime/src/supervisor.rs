@@ -360,6 +360,13 @@ impl WorkspaceSupervisor {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
             return Ok(None);
         };
+        Ok(self.begin_close_identity(&identity))
+    }
+
+    /// [`Self::begin_close`] for the actor keyed by `identity`, as its handle
+    /// carries it, whatever the workspace's path names now.
+    pub fn begin_close_identity(&self, identity: &EngineDbIdentity) -> Option<WorkspaceClose<'_>> {
+        let identity = identity.clone();
         let actor = {
             let mut guard = lock(&self.registry);
             while guard.get(&identity).is_some_and(Slot::is_busy) {
@@ -373,20 +380,25 @@ impl WorkspaceSupervisor {
                 _ => None,
             }
         };
-        let Some(actor) = actor else {
-            return Ok(None);
-        };
-        Ok(Some(WorkspaceClose {
+        Some(WorkspaceClose {
             supervisor: self,
             identity,
-            actor: Some(actor),
+            actor: Some(actor?),
             marker_active: true,
-        }))
+        })
     }
 
     /// Close the actor for `db_path`, if open. Returns whether one was closed.
     pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
         let Some(closing) = self.begin_close(db_path)? else {
+            return Ok(false);
+        };
+        closing.finish().map(|()| true)
+    }
+
+    /// [`Self::close`] for the actor keyed by `identity`.
+    pub fn close_identity(&self, identity: &EngineDbIdentity) -> Result<bool, RuntimeError> {
+        let Some(closing) = self.begin_close_identity(identity) else {
             return Ok(false);
         };
         closing.finish().map(|()| true)
@@ -565,12 +577,17 @@ fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
             })?;
     }
     // On a Mac, SQLite opens the store and creates its journals through the
-    // folder checked here, so a folder put at its name since then is never
-    // reached. FAT and exFAT have no path by ID, and no owners to keep the
-    // store private either. A network volume keeps the plain path.
+    // folder checked here, so a folder put at its name since then is not
+    // reached. A network volume, and one that ignores owners, keep the plain
+    // path: a mode keeps no other user out there. Any other volume that can't
+    // reach the folder by its ID is refused.
     #[cfg(target_vendor = "apple")]
     {
-        let by_id = dohc_macos_files::path_by_id(&folder);
+        let by_id =
+            dohc_macos_files::path_by_id(&folder, shown).map_err(|err| RuntimeError::Identity {
+                reason: "could not keep the engine store private",
+                source: Some(err),
+            })?;
         Ok(PreparedStore {
             path: by_id.map_or_else(|| db_path.to_owned(), |dir| dir.join(name)),
             _folder: folder,
@@ -675,7 +692,7 @@ fn restrict_store_files_with(
             }));
         }
         #[cfg(target_vendor = "apple")]
-        dohc_macos_files::remove_acl_entries_in(folder, &file)?;
+        dohc_macos_files::remove_acl_entries_in(folder, shown, &file)?;
         if stat.st_mode & 0o077 != 0 {
             before_chmod(&file);
             // A journal another process removed since the check needs nothing.

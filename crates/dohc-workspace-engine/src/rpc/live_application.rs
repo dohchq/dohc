@@ -377,7 +377,7 @@ impl EngineService {
             let _serial = serial;
             let registration = read_registration;
             let b = &registration.binding;
-            let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)
+            let store = dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())
                 .map_err(|_| workspace_unavailable())?;
             let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
                 use rusqlite::OptionalExtension;
@@ -1338,7 +1338,7 @@ mod tests {
         use dohc_engine_storage::{EngineStore, StorageError};
         let (_scratch, service, _owner, workspace, _registration, mut binding) = fixture().await;
         let open = service.open(Some(&WorkspaceHandle(workspace))).unwrap();
-        let mut store = EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store = EngineStore::open(open.actor.database_path(), 0).unwrap();
         store.write_with(&NoFaults, |tx| {
             for (id, generation, state, reason, bytes) in [
                 ("old", 0, "quarantined", Some("restore-fenced"), 64),
@@ -2684,7 +2684,8 @@ mod tests {
         );
         assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
         drop(service.leases.scoped(&open.root).acquire(&key).unwrap());
-        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
         let available: Vec<(String, i64)> = store
             .read_with(|conn| {
                 conn.prepare("SELECT object_id,available FROM live_device_application_bindings ORDER BY object_id")?
@@ -2742,7 +2743,8 @@ mod tests {
             ctx
         };
         let open = service.open(Some(&workspace)).unwrap();
-        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
         let deferred = |sql: &'static str, store: &mut dohc_engine_storage::EngineStore| {
             store
                 .write_with(&NoFaults, |tx| {
@@ -2793,7 +2795,8 @@ mod tests {
             ctx
         };
         let open = service.open(Some(&workspace)).unwrap();
-        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
         let execute = |sql: &str, store: &mut dohc_engine_storage::EngineStore| {
             store
                 .write_with(&NoFaults, |tx| {
