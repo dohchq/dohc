@@ -382,6 +382,31 @@ describe("first-open candidates", () => {
     expect(rows).toHaveLength(46);
     writeFileSync(new URL("first-open-inventory.json", target), JSON.stringify(rows));
   });
+
+  // The relay's seeds under seed client 1, its smallest encoding, of notes at
+  // the projection node limit, for the engine's `first_open_check_memory`
+  // measurement. `over` is the same note with one more line. Run with
+  // `vitest run src/firstOpenBase.test.ts --mode first-open-dense`.
+  it.runIf(process.env.MODE === "first-open-dense")("writes the dense seeds the memory measurement checks", () => {
+    // Yjs spreads a new element's children as call arguments, so a single
+    // paragraph holding every hard break overflows the stack.
+    const breaks = (count: number) => Array.from({ length: Math.ceil(count / 1_387) },
+      (_, index) => `${"a  \n".repeat(Math.min(1_387, count - index * 1_387) - 1)}a`).join("\n\n") + "\n";
+    const shapes: [string, (count: number) => string, number][] = [
+      ["paragraphs", count => "a\n\n".repeat(count).slice(0, -1), 87_381],
+      ["paragraphs-bare", count => "a\n\n".repeat(count).slice(0, -2), 87_381],
+      ["paragraphs-spaced", count => "a\n\n\n".repeat(count).slice(0, -2), 87_381],
+      ["star-bullets", count => "* a\n".repeat(count), 65_535],
+      ["tight-list", count => "- a\n".repeat(count), 65_535],
+      ["hard-breaks", breaks, 87_381],
+    ];
+    const seed = (markdown: string) => Buffer.from(encodeRichdocSeed(markdown, 1)).toString("base64");
+    const rows = shapes.map(([name, note, count]) => ({ name, markdown: note(count), candidate: seed(note(count)),
+      overMarkdown: note(count + 1), over: seed(note(count + 1)) }));
+    const target = new URL("../../../target/", import.meta.url);
+    mkdirSync(target, { recursive: true });
+    writeFileSync(new URL("first-open-dense-seeds.json", target), JSON.stringify(rows));
+  });
 });
 
 describe("first-open worker", () => {

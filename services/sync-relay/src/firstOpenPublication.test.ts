@@ -470,9 +470,12 @@ it.each([
 it("refuses a source that is not UTF-8, or that the relay's validator reads differently, before asking the engine", async () => {
   const f = await fixture({markdown: new Uint8Array([0x23, 0x20, 0xff, 0x0a])});
   expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "not-utf8", recovery: "none"});
+  // A projection regression looks the same, so it is logged.
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   const g = await fixture();
   g.buildWith(async () => ({kind: "refused", reason: "unsupported-source"}));
   expect(await g.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
+  expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", "unsupported-source", g.source.sourceDigest);
   for (const fixture of [f, g]) { expect(fixture.checks).not.toHaveBeenCalled(); nothingAppended(fixture); }
 });
 

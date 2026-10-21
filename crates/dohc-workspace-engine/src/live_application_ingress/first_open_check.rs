@@ -70,7 +70,7 @@ impl LiveApplicationIngress {
         binding
             .candidate_byte_length
             .checked_add(binding.source_byte_length)?
-            .checked_mul(128)?
+            .checked_mul(124)?
             .checked_add(binding.max_full_state_bytes)?
             .checked_add(MAX_CHUNK_BYTES * 2)?
             .checked_add(self.config.application_working_reserve_bytes)
@@ -102,18 +102,38 @@ impl LiveApplicationIngress {
         )
     }
 
-    /// The check's reservation, when an idle host could ever admit it beside
-    /// a free upload slot and the foreground allowance.
+    /// The check's reservation and the foreground allowance, when an idle
+    /// host could ever admit it beside a free upload slot and that allowance.
+    /// The refusal names the sizes, so an operator can see what to raise.
     fn first_open_check_fits(
         &self,
         binding: &FirstOpenCandidateBinding,
         connection: &ConnectionHandle,
-    ) -> Option<(u32, usize)> {
-        let reservation = self.first_open_check_reservation(binding)?;
-        let allowance = self.foreground_allowance(connection)?;
-        (self.config.max_uploads >= 2
-            && reservation.checked_add(allowance)? <= self.config.aggregate_bytes)
-            .then_some((u32::try_from(reservation).ok()?, allowance))
+    ) -> Result<(u32, usize), WireError> {
+        let reservation = self.first_open_check_reservation(binding);
+        let allowance = self.foreground_allowance(connection);
+        let fits = || {
+            let (reservation, allowance) = (reservation?, allowance?);
+            (self.config.max_uploads >= 2
+                && reservation.checked_add(allowance)? <= self.config.aggregate_bytes)
+                .then_some((u32::try_from(reservation).ok()?, allowance))
+        };
+        fits().ok_or_else(|| {
+            let bytes = |bytes: Option<usize>| {
+                bytes.map_or("more than the aggregate".into(), |b| format!("{b} bytes"))
+            };
+            WireError::new(
+                ErrorCode::LimitExceeded,
+                format!(
+                    "first-open-check-exceeds-host-capacity: reservation {}, foreground \
+                     allowance {}, aggregate {} bytes, {} upload slots",
+                    bytes(reservation),
+                    bytes(allowance),
+                    self.config.aggregate_bytes,
+                    self.config.max_uploads
+                ),
+            )
+        })
     }
 }
 
@@ -148,14 +168,8 @@ pub(super) fn begin(
             .first_open_check_host(connection, request.workspace.as_ref())?;
         // A check this host could not admit even idle is its configuration,
         // not contention, so asking again cannot help.
-        let (reservation, allowance) = ingress
-            .first_open_check_fits(&params.binding, connection)
-            .ok_or_else(|| {
-            WireError::new(
-                ErrorCode::LimitExceeded,
-                "first-open-check-exceeds-host-capacity",
-            )
-        })?;
+        let (reservation, allowance) =
+            ingress.first_open_check_fits(&params.binding, connection)?;
         let permit = Arc::new(CheckReservation {
             _check: ingress
                 .first_open_slot
@@ -852,6 +866,22 @@ mod tests {
                     Err(error) => {
                         assert!(!admitted, "{case:?} refused a check");
                         assert_eq!(error.code, ErrorCode::LimitExceeded);
+                        // A foreground reservation this host cannot hold has no allowance.
+                        let shown = match ingress.foreground_allowance(&owner) {
+                            Some(bytes) => {
+                                assert_eq!(bytes, allowance);
+                                format!("{bytes} bytes")
+                            }
+                            None => "more than the aggregate".to_owned(),
+                        };
+                        assert_eq!(
+                            error.message,
+                            format!(
+                                "first-open-check-exceeds-host-capacity: reservation {check} \
+                                 bytes, foreground allowance {shown}, aggregate \
+                                 {aggregate_bytes} bytes, {max_uploads} upload slots"
+                            )
+                        );
                         assert!(ingress.first_open_checks[&1].bytes.is_empty());
                         assert_eq!(ingress.budget.available_permits(), aggregate_bytes);
                         assert_eq!(ingress.upload_slots.available_permits(), max_uploads);
@@ -863,18 +893,30 @@ mod tests {
         }
     }
 
-    /// The most one check took above its daemon's idle commit over five fresh
-    /// daemons (`tests/first_open_check_memory.rs`), with its candidate,
-    /// source and encoding cap: the relay's seed of the dense fixture under
-    /// seed client id 1, its smallest encoding, which peaked within 1% of the
-    /// engine's seed that test uploads; and the float32 fixture. The charge
+    /// The most one check took above its daemon's idle commit, over two
+    /// debug sessions and one release session of five fresh daemons each on
+    /// Windows (`tests/first_open_check_memory.rs`), with its candidate,
+    /// source and encoding cap: the relay's seeds under seed client id 1 and
+    /// the engine's seeds of notes at the projection node limit, the bare
+    /// note decoded and then refused, and the float32 fixture. The relay's
+    /// seed of one-letter paragraphs needs the most per byte. The charge
     /// covers each by a quarter before the working reserve.
     #[test]
     fn the_charge_covers_each_measured_check_by_a_quarter() {
-        let dense = dohc_engine_collab::live_update_application::first_open_dense_small_blocks();
         let measured = [
-            (2_954_714, dense.len(), 2_954_714, 320_593_920),
-            (7_081, 5_421, 8_281, 1_372_160),
+            (2_954_714, 262_142, 2_954_714, 320_782_336), // paragraphs/relay
+            (2_692_333, 262_141, 2_692_333, 188_862_464), // paragraphs-bare/relay
+            (2_692_357, 262_141, 2_692_357, 139_194_368), // paragraphs-bare/decoded
+            (3_042_094, 349_522, 3_042_094, 320_978_944), // paragraphs-spaced/relay
+            (3_326_063, 262_140, 3_326_063, 344_121_344), // star-bullets/relay
+            (3_326_063, 262_140, 3_326_063, 344_010_752), // tight-list/relay
+            (2_954_713, 349_460, 2_954_713, 179_658_752), // hard-breaks/relay
+            (4_789_715, 262_142, 4_789_715, 322_592_768), // paragraphs/engine
+            (4_789_714, 262_141, 4_789_714, 197_251_072), // paragraphs-bare/engine
+            (4_877_095, 349_522, 4_877_095, 323_248_128), // paragraphs-spaced/engine
+            (5_161_050, 262_140, 5_161_050, 345_853_952), // star-bullets/engine
+            (5_161_050, 262_140, 5_161_050, 346_222_592), // tight-list/engine
+            (7_081, 5_421, 8_281, 1_372_160),             // float32-integers
         ];
         let ingress = LiveApplicationIngress::new(
             Arc::new(EngineService::new()),

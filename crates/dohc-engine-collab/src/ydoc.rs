@@ -1457,6 +1457,14 @@ impl Ydoc {
                 if file_fold && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
+                // A staged rebuild exists only to be projected, so a source
+                // projection would refuse is not built.
+                if !WIRE_SEED && md_block_nodes(&blocks) > MAX_PROJECTION_NODES {
+                    return Err(CollabError::ProjectionTooComplex {
+                        max_depth: MAX_PROJECTION_DEPTH,
+                        max_nodes: MAX_PROJECTION_NODES,
+                    });
+                }
                 let edit = |txn: &mut yrs::TransactionMut<'_>| {
                     if WIRE_SEED && missing_schema_version {
                         meta.insert(txn, "schemaVersion", Any::Number(1.0));
@@ -3243,6 +3251,43 @@ fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {
         MdBlock::TaskList(items) => items.iter().any(|(_, item)| !item.blocks().is_empty()),
         _ => false,
     })
+}
+
+/// The fewest projection nodes `blocks` build: an element for each block,
+/// list item, table row and cell, and a text with its run for each non-empty
+/// paragraph.
+fn md_block_nodes(blocks: &[MdBlock<'_>]) -> usize {
+    let paragraph = |text: &str| if text.is_empty() { 1 } else { 3 };
+    let item = |text: &str, blocks: &[MdBlock<'_>]| 1 + paragraph(text) + md_block_nodes(blocks);
+    blocks
+        .iter()
+        .map(|block| match block {
+            MdBlock::Paragraph(text) => paragraph(text),
+            MdBlock::Quote(inner) => 1 + md_block_nodes(inner),
+            MdBlock::BulletList(items) => {
+                1 + items
+                    .iter()
+                    .map(|(text, body)| item(text, body))
+                    .sum::<usize>()
+            }
+            MdBlock::OrderedList { items, .. } => {
+                1 + items
+                    .iter()
+                    .map(|entry| item(&entry.paragraph, entry.blocks()))
+                    .sum::<usize>()
+            }
+            MdBlock::TaskList(items) => {
+                1 + items
+                    .iter()
+                    .map(|(_, entry)| item(&entry.paragraph, entry.blocks()))
+                    .sum::<usize>()
+            }
+            MdBlock::Table { rows, .. } => {
+                1 + rows.iter().map(|cells| 1 + 2 * cells.len()).sum::<usize>()
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 fn quote_fold_overflows(blocks: &[MdBlock<'_>], depth: usize) -> bool {
@@ -9488,6 +9533,71 @@ mod projection_tests {
             Err(CollabError::ProjectionTooComplex { .. })
         ));
         PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    /// The count never exceeds what projecting the staged document charges.
+    #[test]
+    fn staged_block_nodes_are_a_lower_bound_on_projection_nodes() {
+        for markdown in [
+            "a\n\nb\n",
+            "# Title\n\n## \n",
+            "> a\n>\n> > b\n",
+            "- a\n- \n- b\n",
+            "* a\n\n  b\n\n* c\n",
+            "3. a\n4. b\n",
+            "- [ ] a\n- [x] b\n",
+            "| a | |\n| --- | --- |\n| `&#124;` | c |\n",
+            "```rs\nx\n```\n\n---\n",
+            "Text `&#60;` more\n",
+            "a  \nb\\\nc\n",
+        ] {
+            for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+                let (blocks, refused) = parse_markdown_blocks_checked(markdown, reading);
+                assert!(!refused, "{markdown:?}");
+                let nodes = md_block_nodes(&blocks);
+                let staged = Ydoc::wire();
+                staged
+                    .rewrite_content_to_markdown_checked::<false>(
+                        ContentKind::Richdoc,
+                        markdown,
+                        reading,
+                        FileFold::No,
+                    )
+                    .unwrap();
+                assert!(
+                    staged.project_richdoc_with_node_budget(nodes - 1).is_err(),
+                    "{markdown:?} {reading:?}: {nodes}"
+                );
+            }
+        }
+    }
+
+    /// A witness projection would refuse is refused before its staged
+    /// document is built, however small the document it claims to rebuild.
+    #[test]
+    fn a_staged_rebuild_over_the_node_limit_builds_nothing() {
+        let at_limit = "a\n\n".repeat((MAX_PROJECTION_NODES - 1) / 3);
+        let over = format!("{at_limit}a\n");
+        let staged = Ydoc::wire();
+        assert!(matches!(
+            staged.rewrite_content_to_markdown_checked::<false>(
+                ContentKind::Richdoc,
+                &over,
+                MarkdownReading::Source,
+                FileFold::No,
+            ),
+            Err(CollabError::ProjectionTooComplex { .. })
+        ));
+        assert_eq!(staged.encode_full_state(), [0, 0]);
+        staged
+            .rewrite_content_to_markdown_checked::<false>(
+                ContentKind::Richdoc,
+                &at_limit,
+                MarkdownReading::Source,
+                FileFold::No,
+            )
+            .unwrap();
+        staged.project_richdoc().unwrap();
     }
 
     #[test]

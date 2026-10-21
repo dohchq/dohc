@@ -303,9 +303,15 @@ it("asks the engine to check a first-open candidate outside any turn, and says w
       check.mockRejectedValueOnce(error);
       expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal), String(error)).toEqual({kind: "unavailable", reason});
     }
-    // A check an idle engine could never admit is this host's configuration.
-    check.mockRejectedValueOnce(wire("LIMIT_EXCEEDED"));
+    // A check an idle engine could never admit is this host's configuration, logged with the sizes the engine names.
+    const capacity = new EngineRequestError(7, {code: "LIMIT_EXCEEDED", retry: "no", message:
+      "first-open-check-exceeds-host-capacity: reservation 1 bytes, foreground allowance 2 bytes, aggregate 3 bytes, 2 upload slots"});
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    check.mockRejectedValueOnce(capacity);
     expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "host-capacity"});
+    expect(logged).toHaveBeenLastCalledWith("[service-live-host] first-open check exceeds this host's capacity", capacity);
+    expect(capacity.message).toContain("foreground allowance 2 bytes");
+    logged.mockRestore();
     for (const error of [wire("BLOB_INVALID"), wire("INVALID_PARAMS"), new InvalidFirstOpenCandidateCheck()]) {
       check.mockRejectedValueOnce(error);
       expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "integrity"});
