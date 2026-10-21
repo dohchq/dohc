@@ -61,6 +61,21 @@ export function wslPath(path) {
 
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
+/**
+ * Whether cargo's last error is a download it stopped retrying. cargo warns of a spurious network error, naming its cause,
+ * before each retry, and once the retries run out the last one's cause ends its error. A retry can also succeed and a later
+ * error, such as a lockfile that needs an update, end the run instead. Numbers, such as a timeout's milliseconds or the
+ * server's address, can change between tries.
+ */
+export function gaveUpDownloading(log) {
+  const lines = log.split(/\r?\n/u);
+  const last = lines.findLastIndex(line => line.startsWith("error:"));
+  if (last === -1) return false;
+  const shape = text => text.trim().replace(/\d+/gu, "#");
+  const error = shape(lines.slice(last).join("\n"));
+  return [...log.matchAll(/^warning: spurious network error \(\d+ tr(?:y|ies) remaining\): (.+)$/gmu)].some(([, cause]) => error.includes(shape(cause)));
+}
+
 /** Prints the commits the Linux checkout keeps, then `head` and `base` if it has them. Creates the checkout on first use. */
 export const tipsScript = ({ head, base }) => `set -euo pipefail
 repo="${home}/linux"
@@ -228,10 +243,8 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
     if (!scope) throw exit ?? new Error("The Linux scope recorded nothing.");
     const log = join(output, "wsl-run.log");
     const text = readLog(log);
-    // cargo warns of a spurious network error before each retry of a download, and nothing runs after a failed fetch,
-    // so such a warning means the fetch could not download. Any other failed fetch, such as one whose lockfile
-    // needs an update, fails the change.
-    if (scope.fetched === false && /^warning: spurious network error/mu.test(text)) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${log}.`), { environment: "linux network" });
+    // Any other failed fetch, such as one whose lockfile needs an update, fails the change.
+    if (scope.fetched === false && gaveUpDownloading(text)) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${log}.`), { environment: "linux network" });
     let receipt;
     if (full && scope.fetched !== false) {
       receipt = readJson(join(output, "result.json"));

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { linuxDistro, linuxRustJob, neededMemoryGb, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
+import { gaveUpDownloading, linuxDistro, linuxRustJob, neededMemoryGb, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
 
 const head = "a".repeat(40);
 const base = "b".repeat(40);
@@ -240,11 +240,31 @@ test("a failed check comes back as the receipt; anything the scope or verifier d
   }
 });
 
+// cargo's output in request 481, and for a lockfile that needs an update, with the pinned toolchain.
+const resolveHost = "[6] Could not resolve hostname (Could not resolve host: static.crates.io)";
+const offline = [3, 2, 1].map(left => `warning: spurious network error (${left} ${left === 1 ? "try" : "tries"} remaining): ${resolveHost}\n`).join("")
+  + `error: failed to download from \`https://static.crates.io/crates/rustls-webpki/0.103.16/download\`\n\nCaused by:\n  ${resolveHost}\n`;
+const stale = "    Updating crates.io index\nerror: cannot update the lock file /home/ice/.dohc-verification/linux/Cargo.lock because --locked was passed to prevent this\n"
+  + "help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.\n";
+
+test("only an error whose cause cargo retried as a spurious network error is a download cargo gave up on", () => {
+  assert.equal(gaveUpDownloading(offline), true);
+  // A cause's numbers change between tries.
+  const connect = ms => `[7] Could not connect to server (Failed to connect to index.crates.io port 443 after ${ms} ms: Could not connect to server)`;
+  assert.equal(gaveUpDownloading(`warning: spurious network error (1 try remaining): ${connect(21003)}\nerror: failed to get \`itoa\` as a dependency of package \`probe v0.1.0\`\n\nCaused by:\n  ${connect(21011)}\n`), true);
+  const unavailable = ip => `failed to get successful HTTP response from \`https://index.crates.io/config.json\` (${ip}), got 503`;
+  assert.equal(gaveUpDownloading(`warning: spurious network error (1 try remaining): ${unavailable("18.65.3.12")}\nbody:\n\nerror: ${unavailable("18.65.3.71")}\nbody:\n`), true);
+  // A retry that succeeded, then the lockfile.
+  assert.equal(gaveUpDownloading(`warning: spurious network error (3 tries remaining): ${resolveHost}\n${stale}`), false);
+  assert.equal(gaveUpDownloading(stale), false);
+  // cargo does not retry a missing crate.
+  assert.equal(gaveUpDownloading("error: failed to download from `https://static.crates.io/crates/gone/1.0.0/download`\n\nCaused by:\n  failed to get successful HTTP response from `https://static.crates.io/crates/gone/1.0.0/download` (18.65.3.12), got 404\n"), false);
+  assert.equal(gaveUpDownloading(""), false);
+});
+
 test("a fetch cargo gave up on after network errors is the host's failure in either mode; any other failed fetch fails the change", windowsOnly, async () => {
   const unfetched = { ...quiet, fetched: false };
-  const offline = "warning: spurious network error (1 try remaining): [6] Could not resolve hostname (Could not resolve host: static.crates.io)\n"
-    + "error: failed to download from `https://static.crates.io/crates/rustls-webpki/0.103.16/download`\n";
-  const stale = "    Updating crates.io index\nerror: cannot update the lock file /home/ice/.dohc-verification/linux/Cargo.lock because --locked was passed to prevent this\n";
+  const recovered = `warning: spurious network error (3 tries remaining): ${resolveHost}\n${stale}`;
   for (const full of [true, false]) {
     const network = await job({ full, verify: ends({ log: offline, scope: unfetched, exitCode: 101 }) });
     assert.equal(network.error.environment, "linux network");
@@ -252,12 +272,14 @@ test("a fetch cargo gave up on after network errors is the host's failure in eit
     assert.equal(network.written, null);
     assert.match(network.calls.at(-1).args.at(-1), /wsl-stop\.sh$/);
     assert.deepEqual(network.slotsLeft, []);
-    const change = await job({ full, verify: ends({ log: stale, scope: unfetched, exitCode: 101 }) });
-    assert.equal(change.error, undefined);
-    assert.equal(change.receipt.mode, full ? "gate" : "pr");
-    assert.equal(change.receipt.verdict, "FAIL");
-    assert.match(change.receipt.error, /^cargo fetch failed/);
-    assert.deepEqual(change.written, change.receipt);
+    for (const log of [stale, recovered]) {
+      const change = await job({ full, verify: ends({ log, scope: unfetched, exitCode: 101 }) });
+      assert.equal(change.error, undefined);
+      assert.equal(change.receipt.mode, full ? "gate" : "pr");
+      assert.equal(change.receipt.verdict, "FAIL");
+      assert.match(change.receipt.error, /^cargo fetch failed/);
+      assert.deepEqual(change.written, change.receipt);
+    }
   }
 });
 
