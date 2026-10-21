@@ -475,8 +475,8 @@ it("retries a rowless file occupied after the receipt without engine work", asyn
 it("passes the engine's deleted-member refusal through with only the requested marker", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
   await f.write("archive/tracked.txt", "replacement"); const before = await readFile(f.recordPath(), "utf8");
-  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("Undo refused: object moved or removed: archive/tracked.txt"));
-  expect(await f.undo()).toEqual({ ok: false, reason: "Undo refused: object moved or removed: archive/tracked.txt" });
+  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("domain error: Undo refused: object moved or removed: archive/tracked.txt"));
+  expect(await f.undo()).toEqual({ ok: false, reason: "domain error: Undo refused: object moved or removed: archive/tracked.txt" });
   expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toEqual({ ...JSON.parse(before), engine: { requested: true } });
 });
 it("distinguishes a missing move record from an unknown operation and refuses corrupt records", async () => {
