@@ -63,7 +63,7 @@ test("the run script downloads the crates first, then runs clippy and the compil
   assert.match(script(true), /CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 NEXTEST_TEST_THREADS=8 CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0/);
   assert.match(script(true), /--unit=dohc-verification-linux-r1 -p RuntimeMaxSec=7200 -p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue/);
   for (const full of [true, false]) {
-    assert.match(script(full), /\nif cargo fetch --locked --target "\$\(rustc --print host-tuple\)"; then\n {2}fetched=true\n/);
+    assert.match(script(full), /\nif cargo fetch --locked; then\n {2}fetched=true\n/);
     assert.match(script(full), /,"fetched":%s\}/);
   }
   assert.match(script(true), new RegExp(`\n  pnpm install --frozen-lockfile --config\\.confirm-modules-purge=false && node scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
@@ -240,14 +240,24 @@ test("a failed check comes back as the receipt; anything the scope or verifier d
   }
 });
 
-test("a failed crate download is the host's failure in either mode, before any receipt", windowsOnly, async () => {
+test("a fetch cargo gave up on after network errors is the host's failure in either mode; any other failed fetch fails the change", windowsOnly, async () => {
+  const unfetched = { ...quiet, fetched: false };
+  const offline = "warning: spurious network error (1 try remaining): [6] Could not resolve hostname (Could not resolve host: static.crates.io)\n"
+    + "error: failed to download from `https://static.crates.io/crates/rustls-webpki/0.103.16/download`\n";
+  const stale = "    Updating crates.io index\nerror: cannot update the lock file /home/ice/.dohc-verification/linux/Cargo.lock because --locked was passed to prevent this\n";
   for (const full of [true, false]) {
-    const { error, written, calls, slotsLeft } = await job({ full, verify: ends({ scope: { ...quiet, fetched: false }, exitCode: 101 }) });
-    assert.equal(error.environment, "linux network");
-    assert.match(error.message, /could not download its crates/);
-    assert.equal(written, null);
-    assert.match(calls.at(-1).args.at(-1), /wsl-stop\.sh$/);
-    assert.deepEqual(slotsLeft, []);
+    const network = await job({ full, verify: ends({ log: offline, scope: unfetched, exitCode: 101 }) });
+    assert.equal(network.error.environment, "linux network");
+    assert.match(network.error.message, /could not download its crates/);
+    assert.equal(network.written, null);
+    assert.match(network.calls.at(-1).args.at(-1), /wsl-stop\.sh$/);
+    assert.deepEqual(network.slotsLeft, []);
+    const change = await job({ full, verify: ends({ log: stale, scope: unfetched, exitCode: 101 }) });
+    assert.equal(change.error, undefined);
+    assert.equal(change.receipt.mode, full ? "gate" : "pr");
+    assert.equal(change.receipt.verdict, "FAIL");
+    assert.match(change.receipt.error, /^cargo fetch failed/);
+    assert.deepEqual(change.written, change.receipt);
   }
 });
 
