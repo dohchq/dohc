@@ -219,7 +219,8 @@ describe("application menu template", () => {
   it.each(["win32", "linux"] as const)("%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate", (platform) => {
     const { template, sendCommand } = build(false, platform);
     const file = items(template, "File");
-    expect(file.map((entry) => entry.label ?? entry.role).slice(-6)).toEqual([
+    const quit = platform === "linux" ? 2 : 0;
+    expect(file.map((entry) => entry.label ?? entry.role).slice(-6 - quit, file.length - quit)).toEqual([
       "Show next tab", "Show next tab (alternate)",
       "Show previous tab", "Show previous tab (alternate)",
       "Close tab", "Close window",
@@ -265,6 +266,17 @@ describe("application menu template", () => {
     const { template } = build();
     const closeWindow = items(template, "File").find((i) => i.role === "close");
     expect(closeWindow?.accelerator).toBe("CommandOrControl+Shift+W");
+  });
+
+  it("linux: File ends with Quit on Ctrl+Q, the way Linux apps quit; Windows keeps Close window last", () => {
+    const linuxFile = items(build(false, "linux").template, "File");
+    expect(linuxFile.slice(-3).map((i) => i.role ?? i.type)).toEqual(["close", "separator", "quit"]);
+    expect(linuxFile.at(-1)).toMatchObject({ role: "quit", label: "Quit", accelerator: "CommandOrControl+Q" });
+    const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
+      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+    expect(all(build(false, "win32").template).some((entry) => entry.role === "quit")).toBe(false);
+    const macQuit = all(build(false, "darwin").template).filter((entry) => entry.role === "quit");
+    expect(macQuit).toEqual([{ role: "quit", label: "Quit dohc", accelerator: "CommandOrControl+Q" }]);
   });
 
   it("devtools is present in dev and absent in packaged builds", () => {

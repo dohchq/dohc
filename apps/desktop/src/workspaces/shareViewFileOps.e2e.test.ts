@@ -36,6 +36,7 @@ import {
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareViewFiles,
   type ResolvedShareViewFilesTarget,
@@ -113,6 +114,8 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const workspace = {
     workspaceId,
     rootPath,

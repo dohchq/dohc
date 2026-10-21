@@ -665,11 +665,13 @@ async function realFolder(path: string): Promise<string> {
   return path;
 }
 
-// A folder that must already exist, for reads that change nothing: null when
-// it does not, and "unusable" when something other than a real folder is there.
+// A folder that must already exist, for reads that change nothing: null only
+// when it is not there, and "unusable" when something other than a real
+// folder is there or dohc can't look at it, since it may hold saved steps and
+// Undo.
 async function existingFolder(path: string): Promise<string | null | "unusable"> {
-  const stats = await lstat(path).catch(() => null);
-  if (stats === null) return null;
+  const stats = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? null : "unusable" as const));
+  if (stats === null || stats === "unusable") return stats;
   return unusableFolder(stats) ? "unusable" : path;
 }
 

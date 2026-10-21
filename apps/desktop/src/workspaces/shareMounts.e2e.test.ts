@@ -23,6 +23,7 @@ import { claimRelayWorkspace, relayJson } from "../../e2e/helpers/relayPeer";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { RelayFilePeer } from "../testing/relayFilePeer";
 import { createRealShareMountHarness } from "../testing/realShareMountHarness";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -52,6 +53,8 @@ describe("share mounts real daemon", () => {
         await lifecycle.start();
         const activeSessions = createRealDaemonWorkspaceSessions(lifecycle);
         sessions = activeSessions;
+        // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+        readLocalStateFrom(activeSessions);
         await expect(
           refreshShareMountThroughOwnerForTest({
             hostWorkspaceId: "host-workspace-1",
