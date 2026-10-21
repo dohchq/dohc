@@ -176,7 +176,7 @@ it("refuses an agent floor before every inverse and resumes with the same key an
   expect(second).toMatchObject({requestId: first!.requestId, author: agent});
   expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "updating");
   receipt.resolve(linkReceipt);
-  await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  await vi.waitFor(async () => expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: false})).toMatchObject({ok: true, links: {state: "done"}}), {timeout: 30_000});
   f.retirement.abort();
 });
 
@@ -195,7 +195,7 @@ it.each(["link changed after rename", "linking document removed"])("maps only th
     : "Cannot undo the rename. source.md is no longer in this workspace. Rename it back yourself."});
   await resumed.promise;
   expect(rewrite.mock.calls[1]![0]).toMatchObject({author: person, requestId: rewrite.mock.calls[0]![0].requestId});
-  await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, rewrite.mock.calls[0]![0].operationId)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  await vi.waitFor(async () => expect(await readWorkspaceHistoryOperation(f.operation, {operationId: rewrite.mock.calls[0]![0].operationId}, f.history, {agent: false})).toMatchObject({ok: true, links: {state: "done"}}), {timeout: 30_000});
   f.retirement.abort();
 });
 
@@ -229,7 +229,7 @@ it.each(["updating", "begun", "finished"])("resumes an open record only before U
   if (phase !== "updating") expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: true})).not.toHaveProperty("links");
   if (phase === "updating") {
     expect(rewrite.mock.calls[0]![0]).toMatchObject({requestId: "original-key", author: agent});
-    await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+    await vi.waitFor(async () => expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: false})).toMatchObject({ok: true, links: {state: "done"}}), {timeout: 30_000});
   }
   f.retirement.abort();
 });
