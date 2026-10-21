@@ -5203,9 +5203,7 @@ function createShareViewFilesForOperation(
       receivedShareEngine.storeFor({
         engineWorkspaceId: target.storeWorkspaceId,
         rootPath: target.rootPath,
-        ...(target.storeWorkspaceId === operation.workspace.workspaceId
-          ? { attachmentId: operation.workspace.attachmentId }
-          : {}),
+        ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
       }),
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
@@ -5237,9 +5235,7 @@ function createShareViewFilesForOperation(
         .relayFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
-          ...(target.storeWorkspaceId === operation.workspace.workspaceId
-            ? { attachmentId: operation.workspace.attachmentId }
-            : {}),
+          ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
           relay,
         })
         .pullShareView({

@@ -5,15 +5,14 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   realpath,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -49,6 +48,13 @@ import {
   unjournalablePathMessages,
   type UnjournalablePath,
 } from "./shareViewRecords";
+import {
+  existingLocalStateFolder,
+  localStateFolder,
+  LocalStateFolderError,
+  LocalStateUnavailableError,
+  type LocalStateWorkspace,
+} from "./workspaceLocalState";
 
 // The receive side of a relay share: a shared view is a local
 // engine store fed exclusively by the share's filtered op log — no watcher,
@@ -386,50 +392,68 @@ async function writeDiskContentToStore(input: {
   }
 }
 
+// A shared view keeps three records of its refresh in its own
+// `.dohc/local/share-refresh`, beside their temporary files and the
+// `.invalid-<time>` copies of damaged ones. They describe what this computer
+// did to its copy of the shared files, so they stay out of iCloud Drive. dohc
+// neither reads nor moves the old copies at the top of `.dohc`.
+//
+// Only this computer's engine open makes `.dohc/local`, so every write waits
+// for it, and a refused write stops the refresh or change before it touches
+// the folder. A record dohc can't trust, because another user owns it or can
+// change it, it has a second name, or its folder is not one only this user can
+// change, never lets a refresh do more than it would with the record intact:
+// - pull-in-flight.marker: anything at its name reads as a pull in flight, so
+//   capture checks every tracked path. Only a missing marker means finished.
+// - pending-materialization.json: reads as damaged. Capture sets it aside,
+//   checks every tracked path, and deletes no file on its word.
+// - share-collision-record.json: stops the refresh with nothing changed.
+//   Without it, a refresh could replace the person's own files. dohc still
+//   sets a damaged one aside and tells the person before the next capture.
+const RECORDS_FOLDER = "share-refresh";
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
-const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
 // Refresh and Send changes both run the same capture path. Either action can
 // resolve a collision and clear this record after the recipient moves its file.
 const COLLISION_RECORD_FILE = "share-collision-record.json";
+// Far above anything dohc writes: one path for each tracked file.
+const MAX_RECORD_BYTES = 64 * 1024 * 1024;
+const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
+const NOT_UPDATED = "dohc did not update these shared files.";
 
-function pendingMaterializationPath(rootDir: string): string {
-  return join(rootDir, ".dohc", PENDING_MATERIALIZATION_FILE);
+/**
+ * One shared view's records: the engine open of its store, whose
+ * `.dohc/local` holds them, and their folder as a person finds it from the
+ * workspace they opened.
+ */
+interface ShareViewRecords extends LocalStateWorkspace {
+  readonly shown: string;
 }
 
-function pullInFlightPath(rootDir: string): string {
-  return join(rootDir, ".dohc", PULL_IN_FLIGHT_FILE);
+function shareViewRecords(
+  owner: ShareViewFilesOwnerCapability,
+  rootDir: string,
+): ShareViewRecords {
+  const resource = assertActiveShareViewFilesOwner(owner, { rootPath: rootDir });
+  const view = relative(resource.schedulingRootPath, rootDir).split(sep).join("/");
+  return {
+    workspaceId: resource.storeWorkspaceId,
+    rootPath: rootDir,
+    ...(resource.attachmentId === undefined
+      ? {}
+      : { attachmentId: resource.attachmentId }),
+    shown: posix.join(view, ".dohc", "local", RECORDS_FOLDER),
+  };
 }
 
-function collisionRecordPath(rootDir: string): string {
-  return join(rootDir, ".dohc", COLLISION_RECORD_FILE);
+// Where a record lives, as a lock key and in logs. Readers and writers reach
+// it only through the folder checks below.
+function recordPath(rootDir: string, name: string): string {
+  return join(rootDir, ".dohc", "local", RECORDS_FOLDER, name);
 }
 
 function shareViewRefreshLifecycleLockKey(rootDir: string): string {
   return join(rootDir, ".dohc", REFRESH_LIFECYCLE_LOCK);
-}
-
-async function ensureRealMetadataDirectory(rootDir: string): Promise<string> {
-  const metadataDir = join(rootDir, ".dohc");
-  let stat;
-  try {
-    stat = await lstat(metadataDir);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      await mkdir(metadataDir, { recursive: true });
-      return metadataDir;
-    }
-    throw error;
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(
-      `[desktop] .dohc metadata path at ${metadataDir} is not a real directory ` +
-        `(found ${stat.isSymbolicLink() ? "a symlink" : "a non-directory"}); refusing to ` +
-        "write through it.",
-    );
-  }
-  return metadataDir;
 }
 
 // The refresh lifecycle lock is always the outermost lock for a view. Per-path
@@ -446,8 +470,8 @@ export function withShareViewRefreshLifecycleLock<T>(
   );
 }
 
-async function syncMetadataDirectory(metadataDir: string): Promise<void> {
-  const dir = await open(metadataDir, "r");
+async function syncFolder(folder: string): Promise<void> {
+  const dir = await open(folder, "r");
   try {
     await dir.sync();
   } catch (error) {
@@ -458,93 +482,145 @@ async function syncMetadataDirectory(metadataDir: string): Promise<void> {
   }
 }
 
-async function writeSidecarAtomically(
-  rootDir: string,
-  fileName: string,
-  writeContent: (handle: FileHandle) => Promise<void>,
-): Promise<void> {
-  const metadataDir = await ensureRealMetadataDirectory(rootDir);
-  const target = join(metadataDir, fileName);
-  let temp: string | undefined;
+// The records folder for a writer, made 0700 when missing.
+async function recordsFolderForWrite(records: ShareViewRecords): Promise<string> {
   try {
-    await atomicReplaceFile(target, async (temporary) => {
-      temp = temporary;
-      const handle = await open(temporary, "w");
-      try {
-        await writeContent(handle);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+    return await localStateFolder(records, RECORDS_FOLDER, {
+      path: records.shown,
+      lead: NOT_UPDATED,
     });
-    await syncMetadataDirectory(metadataDir);
-  } finally {
-    if (temp) await rm(temp, { force: true });
+  } catch (error) {
+    if (!(error instanceof LocalStateUnavailableError)) throw error;
+    throw new LocalStateUnavailableError(
+      error.refusal,
+      error.refusal === "not-opened"
+        ? "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens."
+        : `dohc did not update these shared files because it can't keep ${posix.dirname(records.shown)} out of iCloud Drive. Restart dohc to try again.`,
+    );
   }
 }
 
-async function quarantineSidecar(
-  target: string,
+async function writeRecord(
+  records: ShareViewRecords,
+  name: string,
+  content: string,
+): Promise<void> {
+  const folder = await recordsFolderForWrite(records);
+  // Flush before publish, so a crash can't lose a record that protects work.
+  await atomicReplaceFile(join(folder, name), async (temporary) => {
+    // 0600 whatever the umask: the reader refuses a record others can write.
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  });
+  await syncFolder(folder);
+}
+
+async function removeRecord(
+  records: ShareViewRecords,
+  name: string,
+): Promise<void> {
+  const folder = await recordsFolderForWrite(records);
+  await rm(join(folder, name), { force: true });
+  await syncFolder(folder);
+}
+
+async function quarantineRecord(
+  records: ShareViewRecords,
+  name: string,
   context: string,
 ): Promise<boolean> {
-  const quarantine = `${target}.invalid-${Date.now()}`;
   try {
-    await rename(target, quarantine);
+    const target = join(await recordsFolderForWrite(records), name);
+    await rename(target, `${target}.invalid-${Date.now()}`);
     return true;
   } catch (quarantineError) {
     console.error(
-      `[desktop] could not quarantine ${context} at ${target}: ${String(quarantineError)}`,
+      `[desktop] could not quarantine ${context} at ${recordPath(records.rootPath, name)}: ${String(quarantineError)}`,
     );
     return false;
   }
 }
 
-async function writePullInFlightMarker(rootDir: string): Promise<void> {
-  await writeSidecarAtomically(rootDir, PULL_IN_FLIGHT_FILE, async () => {});
+type RecordRead =
+  | { readonly status: "missing" }
+  | { readonly status: "read"; readonly content: string }
+  | {
+      readonly status: "untrusted";
+      readonly place: "file" | "folder";
+      readonly reason: string;
+      // Set when `.dohc` or `.dohc/local` itself is the problem, in words
+      // that name the way out.
+      readonly words?: string;
+    };
+
+// A record only when its folders and the file are this user's alone: read
+// folder-first, then on one handle that checks owner, mode and links.
+// Creates nothing and does not wait for the engine.
+async function readRecord(rootDir: string, name: string): Promise<RecordRead> {
+  let folder: string | null | "unusable";
+  try {
+    folder = await existingLocalStateFolder(rootDir, RECORDS_FOLDER);
+  } catch (error) {
+    return {
+      status: "untrusted",
+      place: "folder",
+      reason: String(error),
+      ...(error instanceof LocalStateFolderError ? { words: error.message } : {}),
+    };
+  }
+  if (folder === null) return { status: "missing" };
+  if (folder === "unusable") {
+    return { status: "untrusted", place: "folder", reason: "unusable folder" };
+  }
+  const path = join(folder, name);
+  const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(
+    (error: unknown) => String(error),
+  );
+  if (typeof read === "string") {
+    return { status: "untrusted", place: "file", reason: read };
+  }
+  if (read.status === "read") return read;
+  if (read.status === "missing") return { status: "missing" };
+  return { status: "untrusted", place: "file", reason: read.status };
 }
 
-async function clearPullInFlightMarker(rootDir: string): Promise<void> {
-  const metadataDir = join(rootDir, ".dohc");
-  let stat;
-  try {
-    stat = await lstat(metadataDir);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return;
-    throw error;
-  }
-  if (!stat.isDirectory()) return;
-  await rm(pullInFlightPath(rootDir), { force: true });
-  await syncMetadataDirectory(metadataDir);
+async function writePullInFlightMarker(records: ShareViewRecords): Promise<void> {
+  await writeRecord(records, PULL_IN_FLIGHT_FILE, "");
+}
+
+// With no marker there is nothing to remove, so nothing waits for the open.
+async function clearPullInFlightMarker(records: ShareViewRecords): Promise<void> {
+  const read = await readRecord(records.rootPath, PULL_IN_FLIGHT_FILE);
+  if (read.status !== "missing") await removeRecord(records, PULL_IN_FLIGHT_FILE);
 }
 
 async function pullMayBeInFlight(rootDir: string): Promise<boolean> {
-  const target = pullInFlightPath(rootDir);
-  try {
-    await lstat(target);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return false;
+  const read = await readRecord(rootDir, PULL_IN_FLIGHT_FILE);
+  if (read.status === "untrusted") {
     console.error(
-      `[desktop] pull-in-flight marker at ${target} could not be read; ` +
-        `verifying every tracked path: ${String(error)}`,
+      `[desktop] pull-in-flight marker at ${recordPath(rootDir, PULL_IN_FLIGHT_FILE)} can't be trusted ` +
+        `(${read.reason}); verifying every tracked path.`,
     );
-    return true;
   }
+  return read.status !== "missing";
 }
 
 export async function readPendingMaterializationPaths(
   rootDir: string,
 ): Promise<Set<string>> {
   return withExclusiveWorkspaceOperation(
-    pendingMaterializationPath(rootDir),
+    recordPath(rootDir, PENDING_MATERIALIZATION_FILE),
     async () => new Set(Object.keys(await readPendingFileUnlocked(rootDir))),
   );
 }
 
 async function readPendingMaterializationPathsForCapture(
-  rootDir: string,
+  records: ShareViewRecords,
   trackedPaths: readonly string[],
 ): Promise<{
   paths: Set<string>;
@@ -552,41 +628,44 @@ async function readPendingMaterializationPathsForCapture(
   canClearRecord: boolean;
   pullInFlight: boolean;
 }> {
-  const pullInFlight = await pullMayBeInFlight(rootDir);
-  const target = pendingMaterializationPath(rootDir);
-  return withExclusiveWorkspaceOperation(target, async () => {
-    try {
-      const recordedPaths = new Set(
-        Object.keys(await readPendingFileUnlocked(rootDir)),
-      );
-      const paths = new Set(recordedPaths);
-      if (pullInFlight) {
-        for (const path of trackedPaths) paths.add(path);
+  const pullInFlight = await pullMayBeInFlight(records.rootPath);
+  return withExclusiveWorkspaceOperation(
+    recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE),
+    async () => {
+      try {
+        const recordedPaths = new Set(
+          Object.keys(await readPendingFileUnlocked(records.rootPath)),
+        );
+        const paths = new Set(recordedPaths);
+        if (pullInFlight) {
+          for (const path of trackedPaths) paths.add(path);
+        }
+        return {
+          paths,
+          recordedPaths,
+          canClearRecord: true,
+          pullInFlight,
+        };
+      } catch (error) {
+        console.error(
+          `[desktop] pending materialization record at ${recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE)} ` +
+            "is unreadable; quarantining it and verifying every tracked path. Pending paths " +
+            `that are no longer tracked cannot be recovered: ${String(error)}`,
+        );
+        const quarantined = await quarantineRecord(
+          records,
+          PENDING_MATERIALIZATION_FILE,
+          "pending materialization record",
+        );
+        return {
+          paths: new Set(trackedPaths),
+          recordedPaths: new Set(),
+          canClearRecord: quarantined,
+          pullInFlight,
+        };
       }
-      return {
-        paths,
-        recordedPaths,
-        canClearRecord: true,
-        pullInFlight,
-      };
-    } catch (error) {
-      console.error(
-        `[desktop] pending materialization record at ${target} is unreadable; ` +
-          "quarantining it and verifying every tracked path. Pending paths " +
-          `that are no longer tracked cannot be recovered: ${String(error)}`,
-      );
-      const quarantined = await quarantineSidecar(
-        target,
-        "pending materialization record",
-      );
-      return {
-        paths: new Set(trackedPaths),
-        recordedPaths: new Set(),
-        canClearRecord: quarantined,
-        pullInFlight,
-      };
-    }
-  });
+    },
+  );
 }
 
 type PendingMaterializationCounts = Record<string, number>;
@@ -600,19 +679,17 @@ function emptyPendingMaterializationCounts(): PendingMaterializationCounts {
 async function readPendingFileUnlocked(
   rootDir: string,
 ): Promise<PendingMaterializationCounts> {
-  let serialized: string;
-  try {
-    serialized = await readFile(pendingMaterializationPath(rootDir), "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      return emptyPendingMaterializationCounts();
-    }
-    throw error;
+  const read = await readRecord(rootDir, PENDING_MATERIALIZATION_FILE);
+  if (read.status === "missing") return emptyPendingMaterializationCounts();
+  // Read like a damaged record, so capture checks every tracked path.
+  if (read.status === "untrusted") {
+    throw new Error(
+      `Untrusted pending-materialization record (${read.reason}).`,
+    );
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(serialized);
+    parsed = JSON.parse(read.content);
   } catch {
     throw new Error(INVALID_PENDING_MATERIALIZATION_RECORD);
   }
@@ -641,61 +718,78 @@ async function readPendingFileUnlocked(
 }
 
 async function writePendingFileUnlocked(
-  rootDir: string,
+  records: ShareViewRecords,
   counts: Readonly<PendingMaterializationCounts>,
 ): Promise<void> {
-  // Flush before publish so a host crash cannot lose the marker and make an
-  // interrupted materialization look like a user edit.
-  await writeSidecarAtomically(
-    rootDir,
-    PENDING_MATERIALIZATION_FILE,
-    async (handle) => {
-      await handle.writeFile(JSON.stringify({ counts }), "utf8");
-    },
-  );
+  if (Object.keys(counts).length === 0) {
+    await removeRecord(records, PENDING_MATERIALIZATION_FILE);
+  } else {
+    // Durable before the projection changes, so a crash can't make an
+    // interrupted materialization look like a user edit.
+    await writeRecord(
+      records,
+      PENDING_MATERIALIZATION_FILE,
+      JSON.stringify({ counts }),
+    );
+  }
 }
 
 async function writePendingMaterializationPaths(
-  rootDir: string,
+  records: ShareViewRecords,
   paths: readonly string[],
 ): Promise<void> {
   await withExclusiveWorkspaceOperation(
-    pendingMaterializationPath(rootDir),
+    recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE),
     async () => {
-      const counts = await readPendingFileUnlocked(rootDir);
+      const counts = await readPendingFileUnlocked(records.rootPath);
       for (const path of new Set(paths)) {
         counts[path] = (counts[path] ?? 0) + 1;
       }
-      await writePendingFileUnlocked(rootDir, counts);
+      await writePendingFileUnlocked(records, counts);
     },
   );
 }
 
-async function clearPendingMaterializationPaths(
-  rootDir: string,
+// Clears each path's debt by one, or entirely. Writes only when a path was
+// recorded, so a clear with nothing to clear waits for nothing.
+async function clearPendingCounts(
+  records: ShareViewRecords,
   paths: readonly string[],
+  all: boolean,
 ): Promise<void> {
+  if (paths.length === 0) return;
   await withExclusiveWorkspaceOperation(
-    pendingMaterializationPath(rootDir),
+    recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE),
     async () => {
-      await ensureRealMetadataDirectory(rootDir);
-      const counts = await readPendingFileUnlocked(rootDir);
+      const counts = await readPendingFileUnlocked(records.rootPath);
+      let changed = false;
       for (const path of new Set(paths)) {
         const count = counts[path];
         if (count === undefined) continue;
-        if (count <= 1) {
+        changed = true;
+        if (all || count <= 1) {
           delete counts[path];
         } else {
           counts[path] = count - 1;
         }
       }
-      if (Object.keys(counts).length === 0) {
-        await rm(pendingMaterializationPath(rootDir), { force: true });
-      } else {
-        await writePendingFileUnlocked(rootDir, counts);
-      }
+      if (changed) await writePendingFileUnlocked(records, counts);
     },
   );
+}
+
+function clearPendingMaterializationPaths(
+  records: ShareViewRecords,
+  paths: readonly string[],
+): Promise<void> {
+  return clearPendingCounts(records, paths, false);
+}
+
+function clearAllPendingMaterializationPaths(
+  records: ShareViewRecords,
+  paths: readonly string[],
+): Promise<void> {
+  return clearPendingCounts(records, paths, true);
 }
 
 export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
@@ -704,6 +798,7 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
     operation: () => Promise<T>,
   ): Promise<T> =>
     withActiveShareViewFilesOwnerOperation(owner, expected ?? {}, operation);
+  const records = (rootDir: string) => shareViewRecords(owner, rootDir);
   return {
     resolvedTarget: (rootDir: string, relativePath: string) =>
       active({ rootPath: rootDir }, () =>
@@ -730,64 +825,68 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
       ),
     markPending: (rootDir: string, paths: readonly string[]) =>
       active({ rootPath: rootDir }, () =>
-        writePendingMaterializationPaths(rootDir, paths),
+        writePendingMaterializationPaths(records(rootDir), paths),
       ),
     clearPending: (rootDir: string, paths: readonly string[]) =>
       active({ rootPath: rootDir }, () =>
-        clearPendingMaterializationPaths(rootDir, paths),
+        clearPendingMaterializationPaths(records(rootDir), paths),
       ),
     clearPullInFlight: (rootDir: string) =>
-      active({ rootPath: rootDir }, () => clearPullInFlightMarker(rootDir)),
+      active({ rootPath: rootDir }, () =>
+        clearPullInFlightMarker(records(rootDir)),
+      ),
     recordCollisions: (
       rootDir: string,
       shareId: string,
       paths: readonly string[],
     ) =>
       active({ rootPath: rootDir, shareId }, () =>
-        recordCollisionPaths(rootDir, shareId, paths),
+        recordCollisionPaths(records(rootDir), shareId, paths),
       ),
   };
 }
 
-async function clearAllPendingMaterializationPaths(
-  rootDir: string,
-  paths: readonly string[],
-): Promise<void> {
-  if (paths.length === 0) return;
-  await withExclusiveWorkspaceOperation(
-    pendingMaterializationPath(rootDir),
-    async () => {
-      await ensureRealMetadataDirectory(rootDir);
-      const counts = await readPendingFileUnlocked(rootDir);
-      for (const path of new Set(paths)) delete counts[path];
-      if (Object.keys(counts).length === 0) {
-        await rm(pendingMaterializationPath(rootDir), { force: true });
-      } else {
-        await writePendingFileUnlocked(rootDir, counts);
-      }
-    },
-  );
+const INVALID_COLLISION_RECORD = "Invalid share collision record.";
+
+// A collision record dohc can't trust or read. Unlike a damaged one, it is
+// not set aside: without it a refresh could replace the person's own files.
+class UntrustedCollisionRecordError extends Error {
+  constructor(readonly read: Extract<RecordRead, { status: "untrusted" }>) {
+    super(`Untrusted share collision record (${read.reason}).`);
+    this.name = "UntrustedCollisionRecordError";
+  }
 }
 
-const INVALID_COLLISION_RECORD = "Invalid share collision record.";
+function untrustedCollisionRecordRefusal(
+  records: ShareViewRecords,
+  error: UntrustedCollisionRecordError,
+): Error {
+  const { read } = error;
+  if (read.words !== undefined) {
+    return new Error(`${NOT_UPDATED} ${read.words}`, { cause: error });
+  }
+  const [what, keeps, kind] =
+    read.place === "folder"
+      ? [records.shown, "Its records keep", "folder"]
+      : [posix.join(records.shown, COLLISION_RECORD_FILE), "It keeps", "file"];
+  return new Error(
+    `dohc did not update these shared files because it can't trust ${what}. ` +
+      `${keeps} a refresh from replacing your own files. ` +
+      `Make it a ${kind} only you can change, then try again.`,
+    { cause: error },
+  );
+}
 
 async function readCollisionRecordUnlocked(
   rootDir: string,
   shareId: string,
 ): Promise<{ shareId: string; paths: Set<string> }> {
-  let serialized: string;
-  try {
-    serialized = await readFile(collisionRecordPath(rootDir), "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      return { shareId, paths: new Set() };
-    }
-    throw error;
-  }
+  const read = await readRecord(rootDir, COLLISION_RECORD_FILE);
+  if (read.status === "missing") return { shareId, paths: new Set() };
+  if (read.status === "untrusted") throw new UntrustedCollisionRecordError(read);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(serialized);
+    parsed = JSON.parse(read.content);
   } catch {
     throw new Error(INVALID_COLLISION_RECORD);
   }
@@ -815,26 +914,18 @@ async function readCollisionRecordUnlocked(
 }
 
 async function writeCollisionRecordUnlocked(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   paths: ReadonlySet<string>,
 ): Promise<void> {
-  const metadataDir = await ensureRealMetadataDirectory(rootDir);
-  const target = collisionRecordPath(rootDir);
   if (paths.size === 0) {
-    await rm(target, { force: true });
-    await syncMetadataDirectory(metadataDir);
+    await removeRecord(records, COLLISION_RECORD_FILE);
     return;
   }
-  await writeSidecarAtomically(
-    rootDir,
+  await writeRecord(
+    records,
     COLLISION_RECORD_FILE,
-    async (handle) => {
-      await handle.writeFile(
-        JSON.stringify({ shareId, paths: [...paths].sort() }),
-        "utf8",
-      );
-    },
+    JSON.stringify({ shareId, paths: [...paths].sort() }),
   );
 }
 
@@ -854,23 +945,29 @@ async function writeCollisionRecordUnlocked(
 // instead adopts a diverged tracked path as the recipient's edit. The bytes
 // stay on disk, but the next Send changes can propose content the recipient
 // did not mean to share unless they review it out first.
+//
+// A record dohc can't trust or read is not quarantined. It refuses, and
+// changes nothing, until the person makes it trustworthy again.
 async function readCollisionRecordLocked(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   onQuarantine?: () => void,
 ): Promise<Set<string>> {
-  const target = collisionRecordPath(rootDir);
+  const target = recordPath(records.rootPath, COLLISION_RECORD_FILE);
   let record: { shareId: string; paths: Set<string> };
   try {
-    record = await readCollisionRecordUnlocked(rootDir, shareId);
+    record = await readCollisionRecordUnlocked(records.rootPath, shareId);
   } catch (error) {
+    if (error instanceof UntrustedCollisionRecordError) {
+      throw untrustedCollisionRecordRefusal(records, error);
+    }
     console.error(
       `[desktop] share collision record at ${target} is unreadable; quarantining it. ` +
         "A previously-excluded path will follow this share's ordinary capture " +
         `rules on the next capture: ${String(error)}`,
     );
     onQuarantine?.();
-    await quarantineSidecar(target, "share collision record");
+    await quarantineRecord(records, COLLISION_RECORD_FILE, "share collision record");
     return new Set<string>();
   }
   if (record.shareId !== shareId) {
@@ -879,19 +976,24 @@ async function readCollisionRecordLocked(
         `${record.shareId}, not ${shareId}; quarantining the stale record.`,
     );
     onQuarantine?.();
-    await quarantineSidecar(target, "stale share collision record");
+    await quarantineRecord(
+      records,
+      COLLISION_RECORD_FILE,
+      "stale share collision record",
+    );
     return new Set<string>();
   }
   return record.paths;
 }
 
 async function readCollisionRecordPaths(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   onQuarantine?: () => void,
 ): Promise<Set<string>> {
-  return withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), () =>
-    readCollisionRecordLocked(rootDir, shareId, onQuarantine),
+  return withExclusiveWorkspaceOperation(
+    recordPath(records.rootPath, COLLISION_RECORD_FILE),
+    () => readCollisionRecordLocked(records, shareId, onQuarantine),
   );
 }
 
@@ -900,7 +1002,7 @@ async function peekCollisionRecordPaths(
   shareId: string,
 ): Promise<Set<string>> {
   return withExclusiveWorkspaceOperation(
-    collisionRecordPath(rootDir),
+    recordPath(rootDir, COLLISION_RECORD_FILE),
     async () => {
       const record = await readCollisionRecordUnlocked(rootDir, shareId);
       if (record.shareId !== shareId) {
@@ -913,41 +1015,42 @@ async function peekCollisionRecordPaths(
   );
 }
 
+// Adds or removes paths. Writes only when that changes the record, so a clear
+// with nothing to clear waits for nothing.
 async function mutateCollisionRecord(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   paths: readonly string[],
-  mutate: (current: Set<string>, path: string) => void,
+  change: "add" | "delete",
 ): Promise<void> {
   if (paths.length === 0) return;
   await withExclusiveWorkspaceOperation(
-    collisionRecordPath(rootDir),
+    recordPath(records.rootPath, COLLISION_RECORD_FILE),
     async () => {
-    const current = await readCollisionRecordLocked(rootDir, shareId);
-    for (const path of paths) mutate(current, path);
-    await writeCollisionRecordUnlocked(rootDir, shareId, current);
+      const current = await readCollisionRecordLocked(records, shareId);
+      const before = current.size;
+      for (const path of paths) current[change](path);
+      if (current.size !== before) {
+        await writeCollisionRecordUnlocked(records, shareId, current);
+      }
     },
   );
 }
 
 function recordCollisionPaths(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   paths: readonly string[],
 ): Promise<void> {
-  return mutateCollisionRecord(rootDir, shareId, paths, (set, path) =>
-    set.add(path),
-  );
+  return mutateCollisionRecord(records, shareId, paths, "add");
 }
 
 function clearCollisionRecordPaths(
-  rootDir: string,
+  records: ShareViewRecords,
   shareId: string,
   paths: readonly string[],
 ): Promise<void> {
-  return mutateCollisionRecord(rootDir, shareId, paths, (set, path) =>
-    set.delete(path),
-  );
+  return mutateCollisionRecord(records, shareId, paths, "delete");
 }
 
 export async function readSharedViewProjectionDebt(
@@ -1017,7 +1120,7 @@ async function latestMomentForPath(
 // clears — but only if it was actually recorded, not merely swept in by a
 // verify-everything pass that found nothing to clear in the first place.
 async function clearCapturePendingMarker(
-  rootDir: string,
+  records: ShareViewRecords,
   path: string,
   resultKind: "captured" | "repaired" | "unchanged" | "unjournalable",
   pendingState: {
@@ -1028,7 +1131,7 @@ async function clearCapturePendingMarker(
   if (resultKind === "unjournalable") return;
   if (!pendingState.canClearRecord) return;
   if (!pendingState.recordedPaths.has(path)) return;
-  await clearPendingMaterializationPaths(rootDir, [path]);
+  await clearPendingMaterializationPaths(records, [path]);
 }
 
 type CaptureWorkItem = {
@@ -1403,7 +1506,7 @@ async function captureSharedViewLocalDivergence(input: {
   preservedPaths?: readonly string[] | null;
   bestEffort?: boolean;
   workspaceLease?: WorkspaceOperationLease;
-}): Promise<CaptureSharedViewLocalDivergenceOutcome> {
+}, records: ShareViewRecords): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const {
     rootDir,
     workspaceId,
@@ -1442,14 +1545,14 @@ async function captureSharedViewLocalDivergence(input: {
     for (const entry of tracked) preserved.add(entry.path);
   }
   const pendingState = await readPendingMaterializationPathsForCapture(
-    rootDir,
+    records,
     tracked.map((entry) => entry.path),
   );
   const pendingPaths = new Set([...pendingState.paths].filter(pathIsInScope));
   let collisionRecordQuarantined = false;
   const collisionRecordedPaths = new Set(
     [
-      ...(await readCollisionRecordPaths(rootDir, shareId, () => {
+      ...(await readCollisionRecordPaths(records, shareId, () => {
         collisionRecordQuarantined = true;
       })),
     ].filter(pathIsInScope),
@@ -1819,7 +1922,7 @@ async function captureSharedViewLocalDivergence(input: {
     }
     if (work.pending && !work.collision) {
       await clearCapturePendingMarker(
-        rootDir,
+        records,
         work.path,
         verdict.kind,
         pendingState,
@@ -1844,11 +1947,11 @@ async function captureSharedViewLocalDivergence(input: {
       // Collision resolution discharges every retry count, then publishes the
       // collision record once for the whole pass.
       await clearAllPendingMaterializationPaths(
-        rootDir,
+        records,
         settlement.resolvedCollisionPaths,
       );
       await clearCollisionRecordPaths(
-        rootDir,
+        records,
         shareId,
         settlement.resolvedCollisionPaths,
       );
@@ -1861,8 +1964,8 @@ async function captureSharedViewLocalDivergence(input: {
       settlement.failedPaths.length === 0
     ) {
       // Only a full successful pass proves that broad crash debt is settled.
-      failurePath = join(".dohc", PULL_IN_FLIGHT_FILE);
-      await clearPullInFlightMarker(rootDir);
+      failurePath = posix.join(records.shown, PULL_IN_FLIGHT_FILE);
+      await clearPullInFlightMarker(records);
     }
   } catch (error) {
     throw new CapturePartialFailureError(
@@ -1900,7 +2003,7 @@ async function captureStandaloneShareViewDivergence(input: {
   preservedPaths?: readonly string[] | null;
   bestEffort?: boolean;
   workspaceLease?: WorkspaceOperationLease;
-}): Promise<CaptureSharedViewLocalDivergenceOutcome> {
+}, records: ShareViewRecords): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   const allowLocalJournaling = shareViewTakesLocalWrites({
@@ -1917,7 +2020,7 @@ async function captureStandaloneShareViewDivergence(input: {
     preservedPaths: input.preservedPaths,
     bestEffort: input.bestEffort,
     workspaceLease: input.workspaceLease,
-  });
+  }, records);
 }
 
 // One refresh pass: pull the share's filtered ops into the local store,
@@ -1958,11 +2061,12 @@ async function refreshSharedViewOnce(input: {
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
   preTrackedPaths?: ReadonlySet<string>;
-}): Promise<RefreshSharedViewOutcome> {
+}, records: ShareViewRecords): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   if (input.trackPendingMaterialization) {
-    await writePullInFlightMarker(input.rootDir);
+    // A pull that can't say it is in flight doesn't start.
+    await writePullInFlightMarker(records);
   }
   const recordedChangedPaths = new Set<string>();
   const recordChangedPaths = input.trackPendingMaterialization
@@ -1971,7 +2075,7 @@ async function refreshSharedViewOnce(input: {
           (path) => !recordedChangedPaths.has(path),
         );
         if (newPaths.length === 0) return;
-        await writePendingMaterializationPaths(input.rootDir, newPaths);
+        await writePendingMaterializationPaths(records, newPaths);
         for (const path of newPaths) recordedChangedPaths.add(path);
       }
     : undefined;
@@ -2003,7 +2107,7 @@ async function refreshSharedViewOnce(input: {
               }
               if (newlyColliding.length > 0) {
                 await recordCollisionPaths(
-                  input.rootDir,
+                  records,
                   input.shareId,
                   newlyColliding,
                 );
@@ -2013,7 +2117,13 @@ async function refreshSharedViewOnce(input: {
   } catch (error) {
     if (error instanceof ShareUnavailableError) {
       if (input.trackPendingMaterialization) {
-        await clearPullInFlightMarker(input.rootDir);
+        // The share ended either way. A marker dohc could not remove only
+        // makes the next capture check every tracked path.
+        await clearPullInFlightMarker(records).catch((clearError: unknown) => {
+          console.error(
+            `[desktop] share ${input.shareId} ended, and its pull-in-flight marker stays: ${String(clearError)}`,
+          );
+        });
       }
       return {
         status: "ended",
@@ -2039,7 +2149,7 @@ async function refreshSharedViewOnce(input: {
   let collisionRecordedPaths = new Set<string>();
   if (input.preTrackedPaths !== undefined) {
     collisionRecordedPaths = await readCollisionRecordPaths(
-      input.rootDir,
+      records,
       input.shareId,
     );
     const newlyCollidingPaths: string[] = [];
@@ -2071,7 +2181,7 @@ async function refreshSharedViewOnce(input: {
     }
     if (newlyCollidingPaths.length > 0) {
       await recordCollisionPaths(
-        input.rootDir,
+        records,
         input.shareId,
         newlyCollidingPaths,
       );
@@ -2092,7 +2202,7 @@ async function refreshSharedViewOnce(input: {
     // protection after a damaged collision record is quarantined, must keep
     // their pending debt until a later capture materializes them.
     await clearAllPendingMaterializationPaths(
-      input.rootDir,
+      records,
       excludedPaths.filter((path) => collisionRecordedPaths.has(path)),
     );
   }
@@ -2108,10 +2218,10 @@ async function refreshSharedViewOnce(input: {
     // increment its debt more than once, so decrementing once would leave a
     // clean projection reported as pending.
     await clearAllPendingMaterializationPaths(
-      input.rootDir,
+      records,
       pendingMaterializationPaths,
     );
-    await clearPullInFlightMarker(input.rootDir);
+    await clearPullInFlightMarker(records);
   }
   await pull.commitCursor();
   input.onCursorCommitted?.(pull.nextCursor);
@@ -2146,6 +2256,7 @@ async function refreshCapturedShareView(
   input: ShareViewRefreshCompositionInput & {
     captured: CaptureSharedViewLocalDivergenceOutcome;
   },
+  records: ShareViewRecords,
 ): Promise<RefreshSharedViewOutcome> {
   const { captured, preservedPaths = [], ...refreshInput } = input;
   const localChanges = captured.capturedPaths + captured.repairedPaths;
@@ -2171,7 +2282,7 @@ async function refreshCapturedShareView(
     unjournalablePaths: captured.unjournalablePaths,
     trackPendingMaterialization: true,
     preTrackedPaths,
-  });
+  }, records);
   return {
     ...outcome,
     ...(captured.collisionRecordQuarantined
@@ -2192,12 +2303,13 @@ async function reconcileStandaloneShareView(
   input: ShareViewRefreshCompositionInput & {
     captured: CaptureSharedViewLocalDivergenceOutcome;
   },
+  records: ShareViewRecords,
 ): Promise<StandaloneShareViewRefreshOutcome> {
   let totalLocalChanges = 0;
   try {
     const { captured } = input;
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    const outcome = await refreshCapturedShareView(input);
+    const outcome = await refreshCapturedShareView(input, records);
     return {
       ok: true,
       ...outcome,
@@ -2213,7 +2325,7 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     rootDir: string;
     workspaceId: string;
     shareId: string;
-  }, operation: () => Promise<T>): Promise<T> =>
+  }, operation: (records: ShareViewRecords) => Promise<T>): Promise<T> =>
     withActiveShareViewFilesOwnerOperation(
       owner,
       {
@@ -2221,44 +2333,52 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
         storeWorkspaceId: input.workspaceId,
         shareId: input.shareId,
       },
-      operation,
+      () => operation(shareViewRecords(owner, input.rootDir)),
     );
   return {
     captureShared: (
       input: Parameters<typeof captureSharedViewLocalDivergence>[0],
     ) => {
-      return active(input, () => captureSharedViewLocalDivergence(input));
+      return active(input, (records) =>
+        captureSharedViewLocalDivergence(input, records),
+      );
     },
     captureStandalone: (
       input: Parameters<typeof captureStandaloneShareViewDivergence>[0],
     ) => {
-      return active(input, () => captureStandaloneShareViewDivergence(input));
+      return active(input, (records) =>
+        captureStandaloneShareViewDivergence(input, records),
+      );
     },
     captureStandaloneRefresh: (
       input: Parameters<typeof captureStandaloneShareViewDivergence>[0],
     ) =>
-      active(input, async () => {
+      active(input, async (records) => {
         try {
           return {
             ok: true as const,
-            captured: await captureStandaloneShareViewDivergence(input),
+            captured: await captureStandaloneShareViewDivergence(input, records),
           };
         } catch (error) {
           return standaloneShareViewFailureOutcome(error, 0);
         }
       }),
     refreshOnce: (input: Parameters<typeof refreshSharedViewOnce>[0]) => {
-      return active(input, () => refreshSharedViewOnce(input));
+      return active(input, (records) => refreshSharedViewOnce(input, records));
     },
     refreshCaptured: (
       input: Parameters<typeof refreshCapturedShareView>[0],
     ) => {
-      return active(input, () => refreshCapturedShareView(input));
+      return active(input, (records) =>
+        refreshCapturedShareView(input, records),
+      );
     },
     reconcileStandalone: (
       input: Parameters<typeof reconcileStandaloneShareView>[0],
     ) => {
-      return active(input, () => reconcileStandaloneShareView(input));
+      return active(input, (records) =>
+        reconcileStandaloneShareView(input, records),
+      );
     },
   };
 }
