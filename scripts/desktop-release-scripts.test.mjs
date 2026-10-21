@@ -485,6 +485,11 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
     assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
     assert.equal(job.steps[toolchain].if, "inputs.runners == 'github'");
     assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
+    // GitHub's Windows TEMP is a short 8.3 path; every later step uses the runner's own temp folder.
+    const temp = job.steps.findIndex(step => step.name === "Use the runner's temp folder");
+    assert.ok(temp >= 0 && temp < job.steps.findIndex(step => step.name === "Install"), "TEMP is set before anything runs");
+    assert.equal(job.steps[temp].if, "inputs.runners == 'github' && runner.os == 'Windows'");
+    assert.match(job.steps[temp].run, /TEMP=\$RUNNER_TEMP[\s\S]*TMP=\$RUNNER_TEMP/);
   }
   const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
   const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
