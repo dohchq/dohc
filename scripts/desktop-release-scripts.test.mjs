@@ -463,9 +463,13 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
   // Windows and WSL share one PC, so a combined self-hosted dispatch packages one platform at a time.
+  const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
+  const runnerStates = [undefined, "", "self-hosted", "github"];
   const maxParallel = (platforms, runners) => releaseExpression(jobs.build.strategy["max-parallel"], {}, {}, { platforms, runners });
-  assert.deepEqual([undefined, "self-hosted", "github"].map(runners => maxParallel("windows-linux", runners)), [1, 1, 4]);
-  for (const runners of ["self-hosted", "github"]) assert.equal(maxParallel("linux", runners), 4);
+  for (const runners of runnerStates) {
+    assert.deepEqual(dispatchPlatforms.map(platforms => maxParallel(platforms, runners)),
+      dispatchPlatforms.map(platforms => (platforms === "windows-linux" && runners !== "github" ? 1 : 4)), `max-parallel on runners=${runners}`);
+  }
   const resolveMetadata = releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"');
   assert.match(resolveMetadata.run, /--runners "\$DISPATCH_RUNNERS"/);
   assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, "${{ inputs.runners || 'self-hosted' }}");
@@ -475,12 +479,22 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
   assert.deepEqual([["github", false], ["github", true], ["self-hosted", false], [undefined, false]].map(([runners, dry_run]) => refuses({ runners, dry_run })),
     [true, false, false, false]);
   assert.ok(jobs.preflight.steps.indexOf(refusePublish) < jobs.preflight.steps.findIndex(step => step.name === "Checkout"));
-  const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
+  // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
+  for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
+    const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
+    assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
+    assert.equal(job.steps[toolchain].if, "inputs.runners == 'github'");
+    assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
+  }
   const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
   const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
-  for (const [runners, expected] of [[undefined, selfHosted], ["self-hosted", selfHosted], ["github", hostedImage]]) {
-    assert.deepEqual(desktopReleaseTargets("windows-linux", runners).map(target => target.runner), ["windows", "linux"].map(expected),
-      `packages run on runners=${runners}`);
+  const resolvedRunners = runners => releaseExpression(resolveMetadata.env.DISPATCH_RUNNERS, {}, {}, { runners });
+  for (const runners of runnerStates) {
+    const expected = runners === "github" ? hostedImage : selfHosted;
+    for (const platforms of dispatchPlatforms) {
+      assert.deepEqual(desktopReleaseTargets(platforms, resolvedRunners(runners)).map(target => target.runner),
+        (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(expected), `${platforms} packages run on runners=${runners}`);
+    }
     for (const [name, job] of Object.entries(jobs)) {
       if (name === "build") continue;
       assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms, runners })), dispatchPlatforms.map(expected),

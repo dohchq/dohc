@@ -131,6 +131,16 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
 
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        if: inputs.runners == 'github'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -327,6 +337,16 @@ jobs:
         run: |
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
+
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        if: inputs.runners == 'github'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
 
       - name: Install
         run: pnpm install --frozen-lockfile
