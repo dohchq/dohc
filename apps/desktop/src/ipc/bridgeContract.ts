@@ -1302,6 +1302,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   // made at the same moment. Optional, unlike its neighbours: an omitted
   // warning reads as "no warning", which is the safe reading.
   atomicPlacementUnavailable: z.boolean().optional(),
+  // Where the workspace is kept, when that is not this computer's own disk:
+  // iCloud Drive, which can roll back or split its Collections between two
+  // Macs (#2371), or a network share, whose server decides who can read its
+  // History (#2379). Omitted otherwise.
+  workspaceLocation: z.enum(["icloud-drive", "network-share"]).optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),

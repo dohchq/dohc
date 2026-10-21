@@ -736,6 +736,44 @@ describe("workspaceActivity cloud sync nudge", () => {
     await service.stop(state);
   });
 
+  it("opens without waiting for the location check, then pushes where the workspace is kept", async () => {
+    const notify = vi.fn();
+    const check = Promise.withResolvers<"network-share" | null>();
+    const locationFor = vi.fn(() => check.promise);
+    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, locationFor });
+    const state = new WorkspaceActivityState();
+    const opened = await service.open(workspace(), state);
+    expect(locationFor).toHaveBeenCalledWith(workspace().rootPath);
+    expect(opened.workspaceLocation).toBeUndefined();
+    notify.mockClear();
+    check.resolve("network-share");
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" }));
+    expect(service.getStatus(workspace(), state).workspaceLocation).toBe("network-share");
+    await service.stop(state);
+  });
+
+  it("says nothing about a root on this computer's disk, or after the workspace closed", async () => {
+    const notify = vi.fn();
+    const late = Promise.withResolvers<"icloud-drive" | null>();
+    let answer: Promise<"icloud-drive" | null> = Promise.resolve(null);
+    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, locationFor: () => answer });
+    const state = new WorkspaceActivityState();
+    await service.open(workspace(), state);
+    await answer;
+    expect(service.getStatus(workspace(), state).workspaceLocation).toBeUndefined();
+    await service.stop(state);
+
+    answer = late.promise;
+    const reopened = new WorkspaceActivityState();
+    await service.open(workspace(), reopened);
+    await service.stop(reopened);
+    notify.mockClear();
+    late.resolve("icloud-drive");
+    await late.promise;
+    expect(notify).not.toHaveBeenCalled();
+    expect(service.getStatus(workspace(), reopened).workspaceLocation).toBeUndefined();
+  });
+
   it("never lets a slow Collections answer for one workspace change another", async () => {
     const notify = vi.fn();
     const slow = Promise.withResolvers<boolean>();

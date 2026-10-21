@@ -117,6 +117,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
+import { useLocationNotice } from "./shell/useLocationNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { errorDetails } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
@@ -840,6 +841,7 @@ export function DesktopWorkspaceShell(props: {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportWorkspaceLocation,
     reportKeptFiles,
     reportRecoveryUnavailable,
     showTabLimitError,
@@ -4997,6 +4999,11 @@ export function DesktopWorkspaceShell(props: {
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
     report: reportDriveLimit,
   });
+  const locationNotice = useLocationNotice({
+    workspaceId,
+    location: syncStatus?.workspaceLocation,
+    report: reportWorkspaceLocation,
+  });
   const revealRecoveryWorkspace = useCallback(() => {
     const askedFor = workspaceId;
     void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
@@ -5044,6 +5051,7 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "workspace-location") locationNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
         const askedFor = workspaceId;
@@ -5063,7 +5071,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, locationNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>

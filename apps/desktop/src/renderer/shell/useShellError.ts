@@ -55,6 +55,7 @@ export type ShellErrorKind =
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
+  | "workspace-location"
   | "file-recovery-unavailable"
   | "kept-files"
   | "record-history"
@@ -437,6 +438,22 @@ export function useShellError(workspaceId: string) {
       ),
     [push],
   );
+  // Where the workspace is kept: one warning row. Nothing failed, so it
+  // offers no Try again.
+  const reportWorkspaceLocation = useCallback(
+    (notice: { message: string; location: string; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          message: notice.message,
+          details: [["Detail", notice.location]],
+          retry: null,
+          kind: "workspace-location",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -746,6 +763,7 @@ export function useShellError(workspaceId: string) {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportWorkspaceLocation,
     reportKeptFiles,
     reportRecoveryUnavailable,
     showTabLimitError,

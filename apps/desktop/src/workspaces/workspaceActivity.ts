@@ -14,6 +14,7 @@ import type {
 import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import type { WorkspaceObservationCallbacks, WorkspaceObservationHandle } from "./workspaceFileObservation";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
+import type { WorkspaceLocation } from "./workspaceLocation";
 
 // The legacy.dohc/history read/write surface is
 // gone from this layer — the engine capture is a workspace's only history.
@@ -51,6 +52,9 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  // Where the root is kept, once the check finds it is not this computer's
+  // own disk.
+  location: WorkspaceLocation | null;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
@@ -105,6 +109,8 @@ export interface WorkspaceActivityOptions {
   // reads through the owner's open, so it answers only once that open, which
   // abandons a pull when sync is paused, succeeded.
   collectionsWaitingFor?: (workspace: ActivityWorkspace) => Promise<boolean>;
+  // Where the root is kept. Asked once per open, without holding up the open.
+  locationFor?: (rootPath: string) => Promise<WorkspaceLocation | null>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -279,6 +285,7 @@ export function createWorkspaceActivity(
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      ...(w?.location ? { workspaceLocation: w.location } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       heldFiles: w?.heldFiles ?? [],
@@ -374,6 +381,7 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        location: null,
         recoveryUnavailable: false,
         keptFiles: [],
         heldFiles: [],
@@ -382,6 +390,11 @@ export function createWorkspaceActivity(
         collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
+      void options.locationFor?.(workspace.rootPath).then((location) => {
+        if (!location || state.entry !== entry) return;
+        entry.location = location;
+        notify({ workspaceId: workspace.workspaceId });
+      }, (error) => console.error(`[desktop] could not check where ${workspace.rootPath} is kept:`, error));
       // Resolve the engine capture before the watcher starts, so the mode is
       // known from the first batch. A capture failure leaves the workspace
       // with no recorder, surfaced via the history-off notice, never a

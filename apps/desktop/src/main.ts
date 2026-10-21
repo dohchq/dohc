@@ -37,6 +37,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError, readError, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
+import { type WorkspaceLocation, workspaceLocation } from "./workspaces/workspaceLocation";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
@@ -2193,6 +2194,14 @@ function testSyncTimingOverrides(): {
   };
 }
 
+// Test-only location seam: every workspace reads as kept in iCloud Drive or
+// on a network share, so its notice can be seen on any computer.
+function testWorkspaceLocation(): Promise<WorkspaceLocation> | null {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
+  const location = process.env.DOHC_TEST_WORKSPACE_LOCATION;
+  return location === "icloud-drive" || location === "network-share" ? Promise.resolve(location) : null;
+}
+
 // Test-only settle seams for the crash spec. The debounce holds an edit
 // unsettled until the spec kills the app, instead of racing the kill. The
 // gate holds a reopened document's recovery settle while its file exists,
@@ -2434,6 +2443,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     if (waiting === null) throw new Error("The workspace engine is not running.");
     return waiting;
   },
+  locationFor: rootPath => testWorkspaceLocation() ?? workspaceLocation(rootPath),
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
