@@ -572,12 +572,13 @@ fn open_store_folder(_parent: &Path) -> std::io::Result<()> {
 /// so SQLite gives its journals that mode too. A mode and an ACL belong to
 /// the file, not its name, so a hard link another user made while the
 /// store's folder was open to them reads nothing afterwards. A link at any of
-/// these names, or anything but a file, is refused on every volume. The
-/// files are never opened for reading or writing: closing such a descriptor
-/// would drop the locks SQLite holds on them. On a volume that is not
-/// `local`, such as a network share, nothing is created or changed: its
-/// modes and ACLs are its server's. A refusal names the file under `shown`,
-/// the folder's path.
+/// these names, or anything but a file, is refused on every volume. On a
+/// Mac, so is a file another user owns on a local volume, before its ACL or
+/// mode changes. The files are never opened for reading or writing: closing
+/// such a descriptor would drop the locks SQLite holds on them. On a volume
+/// that is not `local`, such as a network share, nothing is created or
+/// changed: its modes, owners and ACLs are its server's. A refusal names the
+/// file under `shown`, the folder's path.
 #[cfg(unix)]
 fn restrict_store_files(
     folder: &std::os::fd::OwnedFd,
@@ -585,19 +586,30 @@ fn restrict_store_files(
     name: &std::ffi::OsStr,
     local: bool,
 ) -> std::io::Result<()> {
-    restrict_store_files_with(folder, shown, name, local, |_| {})
+    restrict_store_files_with(folder, shown, name, local, None, |_| {})
 }
 
-/// [`restrict_store_files`], with a seam just before each change of mode.
+/// [`restrict_store_files`], with seams for the user the files must belong
+/// to on a Mac, `None` for the folder's owner, which the caller has made
+/// sure is this process's user, and for the moment just before each change
+/// of mode.
 #[cfg(unix)]
 fn restrict_store_files_with(
     folder: &std::os::fd::OwnedFd,
     shown: &Path,
     name: &std::ffi::OsStr,
     local: bool,
+    owner: Option<u32>,
     before_chmod: impl Fn(&std::ffi::OsStr),
 ) -> std::io::Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    #[cfg(target_vendor = "apple")]
+    let owner = match owner {
+        Some(owner) => owner,
+        None => rustix::fs::fstat(folder)?.st_uid,
+    };
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = owner;
     if local {
         let create = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
         match rustix::fs::openat(
@@ -624,6 +636,13 @@ fn restrict_store_files_with(
         }
         if !local {
             continue;
+        }
+        #[cfg(target_vendor = "apple")]
+        if stat.st_uid != owner {
+            return Err(std::io::Error::other(dohc_macos_files::NotPrivate {
+                path: shown.join(&file),
+                reason: dohc_macos_files::NotPrivateReason::OtherOwner,
+            }));
         }
         #[cfg(target_vendor = "apple")]
         dohc_macos_files::remove_acl_entries_in(folder, &file)?;
@@ -876,6 +895,34 @@ mod tests {
         assert!(!db.exists(), "a store is created on a network volume");
     }
 
+    /// A store file another user owns on a local volume, as `sudo` can leave
+    /// one, is refused by name before its ACL or mode changes. Making one
+    /// needs root, so the seam expects another owner instead. A network
+    /// volume's owners are its server's, so there it passes unchanged.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_store_file_another_user_owns_is_refused_and_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let scratch = ScratchDir::new().unwrap();
+        let (db, folder) = old_store(&scratch);
+        let name = db.file_name().unwrap();
+        let shown = std::path::Path::new(".dohc/engine");
+        let other = Some(std::fs::metadata(&db).unwrap().uid() + 1);
+        let changed = |_: &std::ffi::OsStr| panic!("changed another user's store file");
+        let err = super::restrict_store_files_with(&folder, shown, name, true, other, changed)
+            .unwrap_err();
+        assert_eq!(
+            dohc_macos_files::not_private(&err),
+            Some(&dohc_macos_files::NotPrivate {
+                path: ".dohc/engine/engine.db".into(),
+                reason: NotPrivateReason::OtherOwner,
+            })
+        );
+        assert_eq!(mode(&db), 0o644);
+        super::restrict_store_files_with(&folder, shown, name, false, other, changed).unwrap();
+        assert_eq!(mode(&db), 0o644);
+    }
+
     /// A journal another process removes between the check and the mode
     /// change needs nothing.
     #[cfg(unix)]
@@ -890,8 +937,8 @@ mod tests {
             }
         };
         let shown = std::path::Path::new("engine");
-        super::restrict_store_files_with(&folder, shown, db.file_name().unwrap(), true, remove)
-            .unwrap();
+        let name = db.file_name().unwrap();
+        super::restrict_store_files_with(&folder, shown, name, true, None, remove).unwrap();
         assert_eq!(mode(&db), 0o600);
     }
 
@@ -919,8 +966,8 @@ mod tests {
         };
         let open = std::os::fd::OwnedFd::from(std::fs::File::open(&folder).unwrap());
         let shown = std::path::Path::new("engine");
-        super::restrict_store_files_with(&open, shown, db.file_name().unwrap(), true, swap)
-            .unwrap();
+        let name = db.file_name().unwrap();
+        super::restrict_store_files_with(&open, shown, name, true, None, swap).unwrap();
         assert_eq!(mode(&unrelated), 0o644);
         assert_eq!(mode(&db), 0o600, "the missing store is created private");
     }

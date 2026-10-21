@@ -41,23 +41,27 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, or
  * a store file in it is a link, the wrong kind of item, or another user's.
- * The message names the reason, then the path from the workspace's root.
+ * The message names the reason, then the path from the workspace's root:
+ * one of the paths below, and nothing else.
  */
-const ENGINE_FOLDER_NOT_PRIVATE = /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/[^\s/]+)*)$/;
-const NOT_PRIVATE_FACTS = new Map([
-  ["link", "is a link"],
-  ["not-folder", "is not a folder"],
-  ["not-file", "is not a file"],
-  ["other-owner", "belongs to another user"],
+const ENGINE_FOLDER_NOT_PRIVATE =
+  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?)?)$/;
+// What is there, and the fix that keeps everything in it. Only an item dohc
+// never puts there can be moved without losing anything of dohc's.
+const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>([
+  ["link", ["is a link", "Put what it links to in its place, then try again."]],
+  ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
+  ["not-file", ["is not a file", "Rename or move it, then try again."]],
+  ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
 ]);
 
 /** What keeps a workspace's History from being private, and what to do. */
 function engineFolderNotPrivateWords(message: string): string | null {
   const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
-  const fact = NOT_PRIVATE_FACTS.get(reason);
-  if (fact === undefined) return null;
-  return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ` +
-    "Rename or move it, then try again. Earlier History stays in what you moved.";
+  const words = NOT_PRIVATE_WORDS.get(reason);
+  if (words === undefined) return null;
+  const [fact, fix] = words;
+  return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ${fix}`;
 }
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
