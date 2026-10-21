@@ -677,6 +677,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
@@ -736,6 +737,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
@@ -1036,21 +1038,17 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    WriteDeferred,
     Held,
 }
 
-/// A live session holds a file the store has no head for yet. Capture defers
-/// it only while the file is still empty, as a new file is when an editor
-/// opens it: the session's first settle writes the head and the file together.
-/// Any bytes on disk before then came from outside the session, and its settle
-/// would refuse them as a stale target, so nothing would ever record them.
-/// That stays a failed ingest, so capture stays unsettled and keeps the
-/// writer's author until the lease is released and capture records it.
+/// Empty new files wait for the editor's first settle. Nonempty bytes wait
+/// as an outside write, without failing the capture pass.
 fn held_new_file_outcome(size: u64) -> Result<IngestOutcome, CaptureError> {
     if size == 0 {
         Ok(IngestOutcome::Deferred)
     } else {
-        Err(INGEST_FAILED)
+        Ok(IngestOutcome::WriteDeferred)
     }
 }
 
@@ -1066,6 +1064,11 @@ fn held_as_new_file(error: &RuntimeError) -> bool {
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
             if *reason == dohc_engine_runtime::CAPTURE_NEW_FILE_LIVE
     )
+}
+
+fn write_waits_for_session(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
+        if *reason == dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION)
 }
 
 struct PreparedTextCapture {
@@ -1356,6 +1359,9 @@ impl StoreCaptureSink {
                             Ok(IngestOutcome::NotOwned)
                         }
                         Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(error) if write_waits_for_session(&error) => {
+                            Ok(IngestOutcome::WriteDeferred)
+                        }
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
                             Ok(IngestOutcome::Held { size, sha256 })
                         }
@@ -1566,6 +1572,7 @@ impl CaptureSink for StoreCaptureSink {
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
                     DomainIngest::Held => {
                         self.self_writes.clear_path(&self.workspace_id, path);
                         Ok(IngestOutcome::Held { size, sha256 })
@@ -1640,6 +1647,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
                     DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }

@@ -863,6 +863,7 @@ impl ScanGauge {
 #[derive(Default)]
 pub(crate) struct DriverStatus {
     bits: std::sync::atomic::AtomicU8,
+    deferred_writes: std::sync::Mutex<Vec<String>>,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
 }
@@ -948,6 +949,10 @@ pub(crate) struct StatusSnapshot {
 }
 
 impl DriverStatus {
+    pub(crate) fn deferred_writes(&self) -> Vec<String> {
+        crate::lock(&self.deferred_writes).clone()
+    }
+
     /// One load; all flags decoded from the same word.
     pub(crate) fn snapshot(&self) -> StatusSnapshot {
         let bits = self.bits.load(Ordering::Acquire);
@@ -3381,13 +3386,18 @@ async fn apply_bound_run_with_handle(
             moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
         );
     }
-    if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
+    let completed = result.completed();
+    let deferred_writes = result.deferred_writes.clone();
+    if completed && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return ApplyOutcome {
             clean: false,
             collection_busy_exhausted,
             retired_unread,
         };
+    }
+    if completed {
+        *crate::lock(&status.deferred_writes) = deferred_writes;
     }
     ApplyOutcome {
         clean,
@@ -3553,6 +3563,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         failed_applies: failed,
         deferred_paths: Vec::new(),
         deferred_retires: Vec::new(),
+        deferred_writes: Vec::new(),
         held_observations: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,

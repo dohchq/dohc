@@ -23,7 +23,7 @@ const READY_WATCHER_STATUS = {
   running: true,
   degraded: false,
   terminal: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+  noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [],
   phase: "ready",
 } satisfies WatcherStatusResult;
 

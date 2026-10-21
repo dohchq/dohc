@@ -974,7 +974,17 @@ it("recovery replies only authorize retirement after a committed decision", () =
 
 it("decodes whether a recovery keeps typing for a deleted file",()=>{
  const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
- expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,deferredWrites:[],keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+});
+
+it("decodes outside writes waiting for an open document", () => {
+  const status = { running: true, degraded: false, terminal: false, phase: "ready",
+    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+    heldFiles: [], deferredWrites: ["notes/open.md"] };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
+  for (const deferredWrites of [null, [""], [1]]) {
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, deferredWrites })).toThrow(ProtocolShapeError);
+  }
 });
 
 const heldFile = {
@@ -1000,6 +1010,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
     phase: "ready",
     noAtomicPlacement: false,
     recoveryUnavailable: false,
+    deferredWrites: [],
     keptFiles: [],
     captureRecoveries: [],
   }],

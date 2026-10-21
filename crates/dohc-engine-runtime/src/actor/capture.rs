@@ -2604,13 +2604,14 @@ fn ensure_capture_target_not_leased(
     if !leases.is_held(&key) {
         return Ok(());
     }
-    // A live session on a file the store has no head for yet: its settle
-    // creates the head, so capture can wait for it. A recorded head the
-    // session holds is refused as before.
+    // Session releases wake deferred capture. Internal leases still fail
+    // and retry because their release does not wake the driver.
     let recorded = dohc_engine_domain::object_has_live_alias(conn, workspace_id, object_id)?;
     Err(RuntimeError::Sync(
         dohc_engine_sync::SyncError::RetryableState {
-            reason: if recorded {
+            reason: if recorded && leases.is_held_by_session(&key) {
+                CAPTURE_WRITE_WAITS_FOR_SESSION
+            } else if recorded || !leases.is_held_by_session(&key) {
                 CAPTURE_RECORDED_FILE_LIVE
             } else {
                 CAPTURE_NEW_FILE_LIVE
@@ -2625,6 +2626,9 @@ pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
 
 /// The capture refusal for a recorded file a lease holds.
 const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
+
+/// An outside write waits until the open document releases its lease.
+pub const CAPTURE_WRITE_WAITS_FOR_SESSION: &str = "capture-write-waits-for-session";
 
 /// The capture refusal to retire a recorded file while a document session
 /// holds it. The session's release wakes capture, which retires it then. An
