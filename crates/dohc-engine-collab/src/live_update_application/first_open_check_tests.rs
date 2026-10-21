@@ -349,6 +349,17 @@ fn a_valid_baseline_too_deep_to_project_is_refused_as_projection_failed() {
 }
 
 #[test]
+fn the_dense_fixture_is_the_most_paragraphs_projection_admits() {
+    let markdown = first_open_dense_small_blocks();
+    checked(&seeded(&markdown), &markdown);
+    let more = format!("{markdown}\na\n");
+    assert!(matches!(
+        Ydoc::wire().rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &more),
+        Err(crate::CollabError::ProjectionTooComplex { .. })
+    ));
+}
+
+#[test]
 fn malformed_and_incomplete_updates_are_refused() {
     let candidate = seeded("Body\n");
     for bytes in [

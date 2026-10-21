@@ -63,12 +63,14 @@ pub(super) fn is_method(method: &str) -> bool {
 impl LiveApplicationIngress {
     /// Admission accounting, not a heap limit: the upload, the decoded
     /// candidate, its projection, settlement's staged reconstructions of the
-    /// source, and the bounded encoding, with the working reserve.
+    /// source, and the bounded encoding, with the working reserve. Memory
+    /// follows the document's blocks, not its encoding: a note of one-letter
+    /// paragraphs took about 100 times its candidate and source.
     fn first_open_check_reservation(&self, binding: &FirstOpenCandidateBinding) -> Option<usize> {
         binding
             .candidate_byte_length
             .checked_add(binding.source_byte_length)?
-            .checked_mul(12)?
+            .checked_mul(128)?
             .checked_add(binding.max_full_state_bytes)?
             .checked_add(MAX_CHUNK_BYTES * 2)?
             .checked_add(self.config.application_working_reserve_bytes)
@@ -858,6 +860,34 @@ mod tests {
                 }
             }
             f.close().await;
+        }
+    }
+
+    /// The most one check took above its daemon's idle commit over five fresh
+    /// daemons (`tests/first_open_check_memory.rs`), with its candidate,
+    /// source and encoding cap: the relay's seed of the dense fixture under
+    /// seed client id 1, its smallest encoding, which peaked within 1% of the
+    /// engine's seed that test uploads; and the float32 fixture. The charge
+    /// covers each by a quarter before the working reserve.
+    #[test]
+    fn the_charge_covers_each_measured_check_by_a_quarter() {
+        let dense = dohc_engine_collab::live_update_application::first_open_dense_small_blocks();
+        let measured = [
+            (2_954_714, dense.len(), 2_954_714, 320_593_920),
+            (7_081, 5_421, 8_281, 1_372_160),
+        ];
+        let ingress = LiveApplicationIngress::new(
+            Arc::new(EngineService::new()),
+            crate::live_application_ingress::tests::config(),
+        )
+        .unwrap();
+        for (candidate, source, cap, peak) in measured {
+            let mut measured = binding(&[0, 0], b"", cap);
+            measured.candidate_byte_length = candidate;
+            measured.source_byte_length = source;
+            let charge = ingress.first_open_check_reservation(&measured).unwrap()
+                - ingress.config.application_working_reserve_bytes;
+            assert!(charge >= peak + peak / 4, "{charge} for {peak}");
         }
     }
 

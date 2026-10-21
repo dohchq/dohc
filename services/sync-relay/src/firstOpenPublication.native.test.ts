@@ -315,6 +315,25 @@ it.skipIf(engine.missing)("frees the engine and keeps the host when the caller c
   nothingAppended(f);
 }, 120_000);
 
+it.skipIf(engine.missing)("publishes nothing when the caller cancels while the engine's acceptance is on its way, and publishes on the next request", async () => {
+  const f = await fixture();
+  const abort = new AbortController();
+  let release!: () => void, reached!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), answered = new Promise<void>(resolve => { reached = resolve; });
+  f.holdWith(() => { reached(); return held; });
+  const response = f.post({}, {signal: abort.signal});
+  await answered;
+  checked(f.answers[0]);
+  abort.abort(new Error("cancelled"));
+  release();
+  expect((await response).status).not.toBe(200);
+  nothingAppended(f);
+  expect(f.host!.invalidated.aborted).toBe(false);
+  f.holdWith();
+  expect(await f.open()).toMatchObject({kind: "published"});
+  expect(f.bases()).toHaveLength(1);
+}, 120_000);
+
 // The notes whose candidates the relay's validator refuses before the engine: each has a link around inline code.
 const RELAY_PROJECTION = [".agents/skills/dohc-writing/SKILL.md", "AGENTS.md", "README.md", "crates/yrs-interop/README.md",
   "docs/engineering/verify-agent-work.md", "docs/how-to/self-host-recovery.md", "docs/reference/cli-mcp-sdk.md", "vendor/file-guard-0.2.0/README.md"];

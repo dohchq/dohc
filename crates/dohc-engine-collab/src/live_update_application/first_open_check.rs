@@ -175,6 +175,16 @@ pub fn first_open_candidate_too_deep_to_project() -> Vec<u8> {
     txn.encode_state_as_update_v1(&StateVector::default())
 }
 
+/// A note of as many one-letter paragraphs as rich-document projection
+/// admits: the body costs one projection node and each paragraph three. Its
+/// live document takes many times its encoding in memory.
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_open_dense_small_blocks() -> String {
+    let mut markdown = "a\n\n".repeat((crate::limits::MAX_PROJECTION_NODES - 1) / 3);
+    markdown.pop();
+    markdown
+}
+
 #[cfg(test)]
 #[path = "first_open_check_tests.rs"]
 mod tests;

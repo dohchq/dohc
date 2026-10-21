@@ -43,11 +43,13 @@ pub use activation::{
     resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
 };
 mod first_open_check;
-#[cfg(any(test, feature = "test-support"))]
-pub use first_open_check::first_open_candidate_too_deep_to_project;
 pub use first_open_check::{
     check_first_open_candidate, FirstOpenCandidate, FirstOpenCandidateEvidence,
     FirstOpenCandidateRefusal, FirstOpenCandidateVerdict, FirstOpenCheckError,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use first_open_check::{
+    first_open_candidate_too_deep_to_project, first_open_dense_small_blocks,
 };
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};

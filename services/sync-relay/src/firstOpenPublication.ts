@@ -217,10 +217,11 @@ export function createFirstOpenPublisher(options: {
     if (built.kind === "refused") {
       switch (built.reason) {
         case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});
-        // The file's own content can leave the shared schema; a malformed or mutated seed is the relay's fault.
+        // The file's own content or a fault in the relay's projection or seed can leave the shared schema, so every invalid base is logged.
+        // Any other fault is a malformed or mutated seed, the relay's fault.
         case "invalid-base":
+          console.error("[sync-relay] first-open candidate invalid", built.fault, source.sourceDigest);
           if (built.fault === "invalid-schema") return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
-          console.error("[sync-relay] first-open candidate invalid", built.fault);
           return answer({kind: "integrity", reason: "candidate"});
         case "unsupported-source": return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
         default: return answer({kind: "refused", reason: "too-large", code: built.reason});

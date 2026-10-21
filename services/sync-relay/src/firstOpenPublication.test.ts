@@ -623,18 +623,19 @@ it("refuses a valid base the validation policy cannot afford as too large, a fil
   // The same seed under the configured policy publishes.
   f.setActivation(configured());
   expect((await f.open()).kind).toBe("published");
-  // A link around inline code, as eight real notes have, stays an ordinary file.
+  // A link around inline code, as eight real notes have, stays an ordinary file. It is logged, since a relay fault looks the same.
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   const g = await fixture({markdown: "See [`lock()`](https://example.com/lock).\n"});
   expect(await g.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "relay-projection", recovery: "none"});
+  expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", "invalid-schema", g.source.sourceDigest);
   expect(g.checks).not.toHaveBeenCalled();
   nothingAppended(g);
   // A seed that is no valid update, or that the encoder failed to build, is the relay's own fault.
-  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   for (const [fault, encode] of [["invalid-update", () => Uint8Array.of(0xff, 0xff, 0xff)], ["seed-encoder", () => { throw new Error("an encoder bug"); }]] as const) {
     const h = await fixture();
     vi.spyOn(richdocSeed, "encodeRichdocSeed").mockImplementationOnce(encode);
     expect(await h.open(), fault).toMatchObject({kind: "integrity", reason: "candidate", recovery: "report"});
-    expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", fault);
+    expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", fault, h.source.sourceDigest);
     nothingAppended(h);
   }
 });
