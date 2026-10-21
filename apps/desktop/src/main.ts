@@ -542,7 +542,7 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
-import { adoptLoginShellPath, needsLoginShellPath } from "./process/loginShellPath";
+import { adoptLoginShellPath, hasControllingTerminal, needsLoginShellPath } from "./process/loginShellPath";
 import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
@@ -7257,8 +7257,7 @@ if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
 // start() takes the lock first. A second instance quits without running the profile.
-// A terminal is attached to one of the standard streams when one started dohc.
-const fromTerminal = [process.stdin, process.stdout, process.stderr].some((stream) => stream.isTTY === true);
+const fromTerminal = process.platform === "linux" && hasControllingTerminal();
 if (app.isPackaged && needsLoginShellPath(process.platform, fromTerminal) && app.hasSingleInstanceLock()) {
   loginShellPathRead = adoptLoginShellPath(process.env);
 }

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { posix } from "node:path";
 import type { Readable } from "node:stream";
@@ -106,6 +106,22 @@ export function readLoginShellPath(options: {
  */
 export function needsLoginShellPath(platform: NodeJS.Platform, fromTerminal: boolean): boolean {
   return platform === "darwin" || (platform === "linux" && !fromTerminal);
+}
+
+/**
+ * Whether this process has a controlling terminal, as one a terminal started
+ * has even with its streams redirected and in the background. A desktop's
+ * launcher starts apps without one.
+ */
+export function hasControllingTerminal(
+  open: (path: string) => void = (path) => closeSync(openSync(path, "r")),
+): boolean {
+  try {
+    open("/dev/tty");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The account's registered shell, when /etc/shells lists it, or null. */
