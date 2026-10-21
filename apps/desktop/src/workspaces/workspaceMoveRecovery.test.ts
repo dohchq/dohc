@@ -228,6 +228,23 @@ it.each(["folder", "case", "untracked", "replaced", "unsaved"])("does not dispat
   expect(await finish()).toMatchObject({ok: true});
   await nextTurn(); expect(rewrite).not.toHaveBeenCalled(); f.retirement.abort();
 });
+it("does not dispatch from a received share view", async () => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(rewrite); await f.write("old.md");
+  f.operation.workspace.shareView = {};
+  const finish = await prepareMoveWorkspacePathAs(f.operation, {fromPath: "old.md", toPath: "new.md"}, agent, f.options);
+  expect(await finish()).toMatchObject({ok: false});
+  await nextTurn(); expect(rewrite).not.toHaveBeenCalled(); f.retirement.abort();
+});
+it("names a linking document that Undo could not restore without refusing the move", async () => {
+  const f = await fixture(); await f.write("old.md"); await f.move("old.md", "new.md");
+  const original = f.history.undoHistoryOperation.getMockImplementation()!;
+  f.history.undoHistoryOperation.mockImplementation(async input => ({...await original(input), notRestored: ["source.md"]}));
+  expect(await f.undo()).toMatchObject({ok: true, remaining: [{path: "source.md", retry: false,
+    reason: "dohc could not restore links in source.md. Update those links yourself."}]});
+  expect(await readFile(join(f.rootPath, "old.md"), "utf8")).toBe("old.md");
+  f.retirement.abort();
+});
 it("keeps a skipped rename at its current path and replays the remaining result", async () => {
   const f = await fixture(); await f.write("a.txt");
   await f.move("a.txt", "b.txt");
