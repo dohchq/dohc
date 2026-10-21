@@ -361,6 +361,30 @@ export async function waitForWorkspaceFile(
   );
 }
 
+// Waits until the engine owns the file under a stable object id, which a
+// chat needs before it can link or mention it.
+export async function waitForFileObjectId(
+  page: Page,
+  workspaceId: string,
+  path: string,
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ id, filePath }) => {
+      const api = (window as unknown as {
+        dohcDesktop?: {
+          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+            fileObjectId: string | null;
+          }>;
+        };
+      }).dohcDesktop;
+      if (!api) return false;
+      const result = await api.listFileChats({ workspaceId: id, path: filePath });
+      return result.fileObjectId !== null;
+    },
+    { id: workspaceId, filePath: path },
+  );
+}
+
 function ancestorsOf(path: string): string[] {
   const segments = path.split("/");
   return segments

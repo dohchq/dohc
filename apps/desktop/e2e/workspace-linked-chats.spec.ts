@@ -9,6 +9,7 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
+  waitForFileObjectId,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -16,28 +17,6 @@ import {
 // PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
 // survive a relaunch and a rename (stable engine object id), and render
 // agent-authored messages as "their stored name".
-
-async function waitForFileObjectId(
-  page: import("@playwright/test").Page,
-  workspaceId: string,
-  path: string,
-): Promise<void> {
-  await page.waitForFunction(
-    async ({ id, filePath }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-            fileObjectId: string | null;
-          }>;
-        };
-      }).dohcDesktop;
-      if (!api) return false;
-      const result = await api.listFileChats({ workspaceId: id, path: filePath });
-      return result.fileObjectId !== null;
-    },
-    { id: workspaceId, filePath: path },
-  );
-}
 
 test("create a chat about a file, send a message, survive relaunch and rename", async () => {
   const temp = await createTempWorkspace();
