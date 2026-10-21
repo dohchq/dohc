@@ -67,11 +67,15 @@ async function trashDir(root: string): Promise<string> {
   return dir;
 }
 // Only recovery metadata expires. Fallback trash contents keep their lifetime.
-const pruned = new Set<string>();
+const prunes = new Map<string, Promise<void>>();
 export function scheduleRecoveryPrune(root: string): void {
-  if (pruned.has(root)) return;
-  pruned.add(root);
-  setImmediate(() => prune(root).catch(() => undefined));
+  if (prunes.has(root)) return;
+  prunes.set(root, new Promise<void>(resolve => setImmediate(resolve)).then(() => prune(root)).catch(() => undefined));
+}
+// Whoever removes a workspace folder, such as a test's cleanup, waits for its prune,
+// which reads the folder on its own schedule.
+export async function waitForRecoveryPrune(root: string): Promise<void> {
+  await prunes.get(root);
 }
 async function prune(root: string): Promise<void> {
   const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
