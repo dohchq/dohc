@@ -1,5 +1,5 @@
 //! Publish committed link rewrites without holding the actor for the whole pass.
-use super::super::materialization::{MaterializationReplayScope, replay_pending_materializations};
+use super::super::materialization::materialize_pending_job;
 use super::*;
 
 pub(super) struct Publication {
@@ -73,20 +73,20 @@ impl ActorHandle {
                     let count = jobs.len();
                     #[cfg(test)]
                     { turn.jobs = count; turn.ready(); }
-                    let selected = jobs.into_iter().map(|(_, id)| id).collect();
                     #[cfg(not(test))]
                     let faults: Arc<dyn FaultInjector> = Arc::new(dohc_engine_storage::NoFaults);
                     #[cfg(test)]
                     let faults = tests::publication::faults(&p.workspace);
-                    let summary = replay_pending_materializations(store, &p.root,
-                        MaterializationReplayScope {
-                            holds: None, workspace_id: &p.workspace,
-                            self_writes: Some(p.recorder.as_ref()), progress: None,
-                            file_outcomes_settled: false, released_hold_paths: None,
-                            planned_against_active_heads: false,
-                        }, crate::links::now_ms(), faults.as_ref(),
-                        Some(&selected), false)?;
-                    Ok(Some((order, summary.completed == count)))
+                    let mut completed = 0;
+                    for (_, id) in jobs {
+                        if let Some(job) = store.load_materialization_job(&id)? {
+                            completed += usize::from(materialize_pending_job(
+                                store, &p.root, &p.workspace, &job, p.recorder.as_ref(),
+                                crate::links::now_ms(), faults.as_ref(), None,
+                            ).0);
+                        }
+                    }
+                    Ok(Some((order, completed == count)))
                 }).await;
                 match outcome {
                     Ok(None) => return,

@@ -77,26 +77,48 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 }
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
-        tokio::time::timeout(Duration::from_secs(120), async {
-            let mut next = 0;
-            loop {
-                while next < sources
-                    && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
+        let result = tokio::time::timeout(
+            Duration::from_secs(if sources > 3 { 300 } else { 120 }),
+            async {
+                let mut next = 0;
+                loop {
+                    while next < sources
+                        && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
+                            .ok()
+                            .as_deref()
+                            == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+                    {
+                        next += 1;
+                    }
+                    if next == sources {
+                        break;
+                    }
+                    self.actor.run(|_, _| Ok(())).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await;
+        if result.is_err() {
+            let pending = self
+                .actor
+                .history_operation_pending_jobs(self.ws.clone(), OP.into())
+                .await
+                .unwrap();
+            let turns = placements().lock().unwrap()[&self.ws].turns.clone();
+            let remaining: Vec<_> = (0..sources)
+                .filter(|i| {
+                    std::fs::read_to_string(self.root.join(format!("source-{i:04}.md")))
                         .ok()
                         .as_deref()
-                        == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
-                {
-                    next += 1;
-                }
-                if next == sources {
-                    break;
-                }
-                self.actor.run(|_, _| Ok(())).await.unwrap();
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("committed rewrites must reach disk automatically");
+                        != Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+                })
+                .collect();
+            panic!(
+                "automatic publication stalled: pending={pending:?}, remaining={remaining:?}, turns={}",
+                turns.len()
+            );
+        }
         self.actor.run(|_, _| Ok(())).await.unwrap();
         for i in 0..sources {
             assert_eq!(
