@@ -731,6 +731,33 @@ impl Ydoc {
         Ok(false)
     }
 
+    /// What `source` projects to under each reading
+    /// [`Ydoc::source_reproduces`] tries, in its order.
+    #[cfg(test)]
+    pub(crate) fn source_readings_for_test(
+        source: &str,
+    ) -> Vec<(&'static str, Result<String, CollabError>)> {
+        [
+            ("source", MarkdownReading::Source),
+            ("projection", MarkdownReading::Projection),
+            ("successor", MarkdownReading::Successor),
+        ]
+        .into_iter()
+        .map(|(name, reading)| {
+            let staged = Ydoc::wire();
+            let projected = staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    source,
+                    reading,
+                    FileFold::No,
+                )
+                .and_then(|_| staged.project_richdoc());
+            (name, projected)
+        })
+        .collect()
+    }
+
     pub(crate) fn has_missing_updates(&self) -> bool {
         self.doc.transact().has_missing_updates()
     }

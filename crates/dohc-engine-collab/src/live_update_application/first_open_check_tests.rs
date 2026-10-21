@@ -537,7 +537,7 @@ fn verdict(row: &Candidate, verdict: &FirstOpenCandidateVerdict) -> Verdict {
 }
 
 /// The old guard refused these; the engine settles them exactly.
-const NEWLY_CHECKED: [&str; 14] = [
+const NEWLY_CHECKED: [&str; 17] = [
     "amp-fenced",
     "lt-fenced",
     "refdef-fenced",
@@ -552,11 +552,24 @@ const NEWLY_CHECKED: [&str; 14] = [
     "no-final-newline",
     "extra-final-newlines",
     "unicode",
+    "html-comment-block",
+    "html-comment-inline",
+    "html-comment-multiline",
 ];
 /// The old guard built these; the engine does not settle them to the file.
-const NEWLY_REFUSED: [&str; 2] = ["corpus:SECURITY.md", "corpus:docs/README.md"];
+const NEWLY_REFUSED: [&str; 9] = [
+    "corpus:SECURITY.md",
+    "corpus:docs/README.md",
+    "corpus:docs/reference/workspace-file-versions.md",
+    "table-inline-code",
+    "fence-tilde-setext",
+    "fence-tilde-table",
+    "emphasis-underscore",
+    "link-leading",
+    "image-leading",
+];
 /// Both refuse these.
-const STILL_REFUSED: [&str; 19] = [
+const STILL_REFUSED: [&str; 21] = [
     "corpus:docs/reference/usage-and-error-reports.md",
     "corpus:vendor/yrs-0.27.3/README.md",
     "corpus:vendor/notify-8.2.0/README.md",
@@ -576,6 +589,8 @@ const STILL_REFUSED: [&str; 19] = [
     "refdef",
     "mixed-technical",
     "trailing-whitespace",
+    "reference-link",
+    "gt-inline-code",
 ];
 
 /// TypeScript builds each candidate with the relay's construction; the engine
@@ -643,4 +658,242 @@ fn shared_candidates_match_the_engines_verdicts() {
     }
     let committed: Vec<Verdict> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(committed, actual);
+}
+
+/// Which side parts a candidate from its file. `Agrees`: the engine settles it
+/// to the file. `Serializer`: it would if TypeScript wrote its document as the
+/// engine does, so only the witness's projection digest is wrong. `Reading`:
+/// no reading of the file the engine's settlement tries rebuilds TypeScript's
+/// document, so no witness settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Parity {
+    Agrees,
+    Serializer,
+    Reading,
+}
+
+fn parity(candidate: &[u8], markdown: &str) -> Parity {
+    if matches!(
+        check(candidate, markdown, MAX_YDOC_UPDATE_BYTES),
+        FirstOpenCandidateVerdict::Checked(_)
+    ) {
+        return Parity::Agrees;
+    }
+    let doc = Ydoc::wire();
+    doc.apply(candidate).unwrap();
+    let projection = doc.project(ContentKind::Richdoc).unwrap().content;
+    let named = with_meta(candidate, |meta, txn| {
+        meta.insert(txn, "dohcMarkdownSource", markdown);
+        meta.insert(
+            txn,
+            "dohcMarkdownSourceSha256",
+            hex_sha256(markdown.as_bytes()),
+        );
+        meta.insert(
+            txn,
+            "dohcMarkdownSourceProjectionSha256",
+            hex_sha256(projection.as_bytes()),
+        );
+    });
+    match check(&named, markdown, MAX_YDOC_UPDATE_BYTES) {
+        FirstOpenCandidateVerdict::Checked(_) => Parity::Serializer,
+        _ => Parity::Reading,
+    }
+}
+
+/// The construction-parity regressions, and the real note only TypeScript's
+/// table writing refuses.
+const PARITY: [(&str, Parity); 21] = [
+    ("table-inline-code", Parity::Serializer),
+    (
+        "corpus:docs/reference/workspace-file-versions.md",
+        Parity::Serializer,
+    ),
+    ("table-plain", Parity::Agrees),
+    ("fence-tilde", Parity::Agrees),
+    ("fence-tilde-setext", Parity::Reading),
+    ("fence-tilde-table", Parity::Reading),
+    ("fence-backtick-setext", Parity::Agrees),
+    ("reference-link", Parity::Reading),
+    ("refdef", Parity::Reading),
+    ("emphasis-underscore", Parity::Reading),
+    ("emphasis-star", Parity::Agrees),
+    ("gt-text", Parity::Agrees),
+    ("gt-inline-code", Parity::Reading),
+    ("lt-inline", Parity::Reading),
+    ("amp-inline", Parity::Reading),
+    ("html-comment-block", Parity::Agrees),
+    ("html-comment-inline", Parity::Agrees),
+    ("html-comment-multiline", Parity::Agrees),
+    ("link-leading", Parity::Reading),
+    ("link-inside", Parity::Agrees),
+    ("image-leading", Parity::Reading),
+];
+
+#[test]
+fn construction_parity_regressions_name_the_side_that_disagrees() {
+    let candidates: Vec<Candidate> =
+        serde_json::from_slice(&std::fs::read(fixture("candidates.json")).unwrap()).unwrap();
+    for (name, expected) in PARITY {
+        let row = candidates.iter().find(|row| row.name == name).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&row.candidate)
+            .unwrap();
+        assert_eq!(parity(&bytes, &row.markdown), expected, "{name}");
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InventoryInput {
+    path: String,
+    revision: String,
+    sha256: String,
+    markdown: String,
+    old_guard: String,
+    candidate: String,
+    projection: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryRow {
+    path: String,
+    sha256: String,
+    old_guard: String,
+    verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<String>,
+    parity: Parity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disagreement: Option<Disagreement>,
+}
+
+/// Where a refused candidate first parts from the file. `projection`: the
+/// engine writes the candidate's document differently than TypeScript did, so
+/// the witness names another projection; `expected` is TypeScript's line.
+/// `construction`: TypeScript could not write its own document. `witness`:
+/// the witness is current, but no reading of the file the engine tries
+/// rebuilds the document; `expected` is the engine's projection and `engine`
+/// the closest reading's.
+#[derive(Serialize)]
+struct Disagreement {
+    stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reading: Option<&'static str>,
+    line: usize,
+    expected: String,
+    engine: String,
+}
+
+fn first_difference(stage: &'static str, expected: &str, engine: &str) -> Disagreement {
+    let clip = |line: Option<&str>| match line {
+        Some(line) => line.chars().take(160).collect(),
+        None => "<end>".to_owned(),
+    };
+    let (mut expected_lines, mut engine_lines) = (expected.split('\n'), engine.split('\n'));
+    let mut line = 1;
+    loop {
+        let (left, right) = (expected_lines.next(), engine_lines.next());
+        if left != right || left.is_none() {
+            return Disagreement {
+                stage,
+                reading: None,
+                line,
+                expected: clip(left),
+                engine: clip(right),
+            };
+        }
+        line += 1;
+    }
+}
+
+fn disagreement(candidate: &[u8], input: &InventoryInput) -> Disagreement {
+    let doc = Ydoc::wire();
+    doc.apply(candidate).unwrap();
+    let projection = doc.project(ContentKind::Richdoc).unwrap().content;
+    let Some(typescript) = &input.projection else {
+        return first_difference("construction", &input.markdown, &projection);
+    };
+    let witnessed = doc
+        .markdown_source_reference()
+        .map(|reference| reference.projection_sha256);
+    let current = hex_sha256(projection.as_bytes());
+    if witnessed
+        .as_ref()
+        .map_or(*typescript != projection, |sha| *sha != current)
+    {
+        return first_difference("projection", typescript, &projection);
+    }
+    Ydoc::source_readings_for_test(&input.markdown)
+        .into_iter()
+        .map(|(reading, read)| {
+            let read = read.unwrap_or_else(|error| format!("<refused: {error}>"));
+            Disagreement {
+                reading: Some(reading),
+                ..first_difference("witness", &projection, &read)
+            }
+        })
+        .reduce(|closest, next| {
+            if next.line > closest.line {
+                next
+            } else {
+                closest
+            }
+        })
+        .unwrap()
+}
+
+/// Every tracked Markdown file at the corpus revision, checked as the relay
+/// would build it. `firstOpenBase.test.ts` writes the input under `target/`;
+/// this rewrites `inventory.json` from it.
+#[test]
+#[ignore = "needs the input firstOpenBase.test.ts writes"]
+fn first_open_inventory() {
+    let input =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/first-open-inventory.json");
+    let inputs: Vec<InventoryInput> =
+        serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+    let rows: Vec<String> = inputs
+        .iter()
+        .map(|input| {
+            assert_eq!(
+                input.sha256,
+                hex_sha256(input.markdown.as_bytes()),
+                "{}@{}",
+                input.path,
+                input.revision
+            );
+            let candidate = base64::engine::general_purpose::STANDARD
+                .decode(&input.candidate)
+                .unwrap();
+            let verdict = check(&candidate, &input.markdown, MAX_YDOC_UPDATE_BYTES);
+            let (kind, cause, disagreement) = match verdict {
+                FirstOpenCandidateVerdict::Checked(_) => ("checked", None, None),
+                FirstOpenCandidateVerdict::Refused(cause) => (
+                    "refused",
+                    Some(cause.as_str().to_owned()),
+                    (cause == FirstOpenCandidateRefusal::SettlementMismatch)
+                        .then(|| disagreement(&candidate, input)),
+                ),
+                FirstOpenCandidateVerdict::TooLarge { .. } => ("too-large", None, None),
+            };
+            serde_json::to_string(&InventoryRow {
+                path: input.path.clone(),
+                sha256: input.sha256.clone(),
+                old_guard: input.old_guard.clone(),
+                verdict: kind.to_owned(),
+                cause,
+                parity: parity(&candidate, &input.markdown),
+                disagreement,
+            })
+            .unwrap()
+        })
+        .collect();
+    std::fs::write(
+        fixture("inventory.json"),
+        format!("[\n{}\n]\n", rows.join(",\n")),
+    )
+    .unwrap();
 }
