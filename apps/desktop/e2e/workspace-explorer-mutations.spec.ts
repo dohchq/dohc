@@ -76,7 +76,7 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await renamed.press("Delete");
     const confirmation = page.getByTestId("delete-confirm");
     await expect(confirmation).toContainText(
-      "It moves to the system trash, or to this workspace's .dohc/trash folder",
+      "It moves to the system trash, or to this workspace's .dohc/local/trash folder",
     );
     await confirmation.getByRole("button", { name: "Cancel" }).click();
     await expect(renamed).toBeVisible();

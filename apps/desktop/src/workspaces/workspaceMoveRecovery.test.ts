@@ -12,6 +12,7 @@ import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -27,6 +28,7 @@ async function fixture() {
   const retirement = new AbortController();
   const operation = { workspace: { rootPath, workspaceId: "move-test", attachmentId: Symbol("move-test"), readOnly: false, shareView: undefined as unknown },
     signal: retirement.signal, state: {}, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const members: { path: string; beforePath: string; operation: "rename"; momentId: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
@@ -67,7 +69,7 @@ async function fixture() {
   });
   const move = (fromPath: string, toPath: string) => owner.movePath({}, { workspaceId: "move-test", fromPath, toPath });
   const undo = (operationId = activeOperationId, byAgent = false) => undoWorkspaceHistoryOperation(operation, { operationId }, byAgent ? agent : person, { history, agent: byAgent });
-  const recordPath = () => join(rootPath, ".dohc/trash", `move-${createHash("sha256").update(activeOperationId).digest("hex")}.json`);
+  const recordPath = () => join(rootPath, ".dohc/local/trash", `move-${createHash("sha256").update(activeOperationId).digest("hex")}.json`);
   const moveAsAgent = async (fromPath: string, toPath: string) => {
     const result = await (await prepareMoveWorkspacePathAs(operation, { fromPath, toPath }, agent, options))();
     if (!result.ok) throw new Error(result.reason);
@@ -117,7 +119,7 @@ it.each([false, true])("keeps a person's folder on the base capture path with un
     reason: `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.` } });
   expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder");
   expect(finished).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
-  await expect(readdir(join(f.rootPath, ".dohc/trash"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readdir(join(f.rootPath, ".dohc/local/trash"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 it.each([false, true])("records only an agent folder kind and refuses both authors without engine work, rename=%s", async renameOnly => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin");
@@ -451,16 +453,16 @@ it("logs a recording failure after the committed move result was published", asy
 });
 
 it("keeps a private source if flushing its fallback copy fails", async () => {
-  const f = await fixture(); await f.write(".dohc/trash/staged.txt", "kept");
+  const f = await fixture(); await f.write(".dohc/local/trash/staged.txt", "kept");
   vi.spyOn(filesystem, "link").mockRejectedValueOnce(Object.assign(new Error("unsupported"), { code: "ENOTSUP", syscall: "link" }));
   const open = filesystem.open;
   const sync = vi.fn(async () => { throw new Error("flush failed"); });
   vi.spyOn(filesystem, "open").mockImplementationOnce(async (...args: Parameters<typeof filesystem.open>) => {
     const handle = await open(...args); vi.spyOn(handle, "sync").mockImplementation(sync); return handle;
   });
-  expect(await placeBack(f.rootPath, join(f.rootPath, ".dohc/trash/staged.txt"), join(f.rootPath, "placed.txt"))).toEqual([""]);
+  expect(await placeBack(f.rootPath, join(f.rootPath, ".dohc/local/trash/staged.txt"), join(f.rootPath, "placed.txt"))).toEqual([""]);
   expect(sync).toHaveBeenCalledOnce();
-  expect(await readFile(join(f.rootPath, ".dohc/trash/staged.txt"), "utf8")).toBe("kept");
+  expect(await readFile(join(f.rootPath, ".dohc/local/trash/staged.txt"), "utf8")).toBe("kept");
 });
 
 it("refuses a rowless person's Undo through a replaced parent link", async () => {

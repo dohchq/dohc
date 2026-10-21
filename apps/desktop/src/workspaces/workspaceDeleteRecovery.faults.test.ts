@@ -11,6 +11,7 @@ import { executeCli } from "@dohc/cli";
 import { undoOperation } from "@dohc/mcp/tools";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const faults = vi.hoisted(() => ({ removeAfterStat: "", openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
@@ -95,6 +96,7 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
   await write("folder/tracked.txt", "tracked");
   await write("folder/rowless.txt", "not retained");
   const operation = { state: {}, signal: new AbortController().signal, workspace: { workspaceId: "test", attachmentId: Symbol(), rootPath: root, readOnly: false, shareView: undefined as unknown }, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const recordDelete = vi.fn(async () => "moment");
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, _author, work) =>
     work({ policy: await readWorkspaceEnginePolicy(root), recordDisk: async () => tracked, delete: recordDelete } as never) };
@@ -122,11 +124,11 @@ describe("delete recovery failures", () => {
     const record = (await readDeleteRecovery(f.root, id))!;
     record.engine = { materialized: true, momentCount: 0 };
     await writeFile(join(f.root, "folder"), "occupant");
-    const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+    const result = await undoDeleteRecovery(f.operation.workspace, record, person, f.history, "test", () => undefined, () => undefined);
     expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder", retry: false,
-      reason: `folder now occupies the old path. The deleted folder stays at .dohc/trash/${record.staged}.` }] });
+      reason: `folder now occupies the old path. The deleted folder stays at .dohc/local/trash/${record.staged}.` }] });
     expect(await readFile(join(f.root, "folder"), "utf8")).toBe("occupant");
-    expect(await readFile(join(f.root, ".dohc/trash", record.staged!, "rowless.txt"), "utf8")).toBe("not retained");
+    expect(await readFile(join(f.root, ".dohc/local/trash", record.staged!, "rowless.txt"), "utf8")).toBe("not retained");
     expect(await f.undo(id)).toEqual(result);
   });
   it("reports a missing trash copy when a folder occupies an interrupted copy's path", async () => {
@@ -137,8 +139,8 @@ describe("delete recovery failures", () => {
       faults.failCopy = "";
       await rm(faults.copyTarget); await mkdir(faults.copyTarget);
       const record = (await readDeleteRecovery(f.root, id))!;
-      faults.removeAfterStat = join(f.root, ".dohc/trash", record.staged!, "rowless.txt");
-      const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+      faults.removeAfterStat = join(f.root, ".dohc/local/trash", record.staged!, "rowless.txt");
+      const result = await undoDeleteRecovery(f.operation.workspace, record, person, f.history, "test", () => undefined, () => undefined);
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: false,
         reason: "folder/rowless.txt now occupies the old path. Its trash copy is gone." }] });
       expect(await f.undo(id)).toEqual(result);
@@ -158,7 +160,7 @@ describe("delete recovery failures", () => {
   });
   it("keeps a delete's Undo when an expired record cannot be pruned", async () => {
     const f = await fixture();
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     await mkdir(trash);
     const expired = join(trash, `delete-${"a".repeat(64)}.json`);
     await writeFile(expired, "old record");
@@ -207,7 +209,7 @@ describe("delete recovery failures", () => {
     try {
       const result = await f.remove(hand);
       expect(result).toMatchObject({ trashed: false, undo: { available: false, reason: expect.stringContaining("Delete finished") } });
-      if (!hand) expect(result).toMatchObject({ ok: true, trashPath: expect.stringContaining(".dohc/trash/") });
+      if (!hand) expect(result).toMatchObject({ ok: true, trashPath: expect.stringContaining(".dohc/local/trash/") });
       expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
       expect(existsSync(join(f.root, "folder"))).toBe(false);
     } finally { faults.failRecord = false; }
@@ -228,7 +230,7 @@ describe("delete recovery failures", () => {
       if (!hand) {
         const record = await readDeleteRecovery(f.root, result.operationId!);
         expect(record?.staged).toBeDefined();
-        expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
+        expect(existsSync(join(f.root, ".dohc/local/trash", record!.staged!))).toBe(false);
         expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
         expect(await f.undo(result.operationId!)).toMatchObject({ ok: true });
       }
@@ -245,7 +247,7 @@ describe("delete recovery failures", () => {
       expect(faults.failRecord).toBe(false);
       const record = await readDeleteRecovery(f.root, result.operationId!);
       expect(record?.staged).toBeDefined();
-      expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
+      expect(existsSync(join(f.root, ".dohc/local/trash", record!.staged!))).toBe(false);
       expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
         reason: `Cannot undo the delete. folder is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
@@ -254,14 +256,14 @@ describe("delete recovery failures", () => {
   });
   it("a healthy OS trash does not require healthy workspace trash", async () => {
     const f = await fixture(true);
-    await writeFile(join(f.root, ".dohc/trash"), "unavailable");
+    await writeFile(join(f.root, ".dohc/local/trash"), "unavailable");
     expect(await f.remove(true)).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringMatching(/in the (Recycle Bin|Trash)\. Restore it there\.$/) } });
     expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
     expect(existsSync(join(f.root, "folder"))).toBe(false);
   });
   it("prunes expired metadata once without reading records or removing fallback bytes", async () => {
     const f = await fixture();
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     await mkdir(trash);
     const record = `delete-${"b".repeat(64)}.json`;
     const temp = `${record}.00000000-0000-4000-8000-000000000000.tmp`;
@@ -282,6 +284,7 @@ describe("delete recovery failures", () => {
     const alias = join(aliasParent, "workspace");
     await symlink(f.root, alias, process.platform === "win32" ? "junction" : "dir");
     f.operation.workspace.rootPath = alias;
+    await openedLocalState(f.operation.workspace);
     const id = await deleted(f);
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"], remaining: [] });
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
@@ -298,7 +301,7 @@ describe("delete recovery placement and receipts", () => {
       await f.undo(id);
       faults.failCopy = "";
       await rm(faults.copyTarget);
-      const destination = join(f.root, ".dohc/trash");
+      const destination = join(f.root, ".dohc/local/trash");
       await symlink(destination, faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
       faults.openError = openError; faults.opened = [];
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{
@@ -328,7 +331,7 @@ describe("delete recovery placement and receipts", () => {
     faults.copyOnly = true; faults.failCopy = "write";
     try {
       expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt",
-        reason: expect.stringMatching(/folder\/rowless.txt may be incomplete\. Undo again to retry, or restore it from \.dohc\/trash\//),
+        reason: expect.stringMatching(/folder\/rowless.txt may be incomplete\. Undo again to retry, or restore it from \.dohc\/local\/trash\//),
       }] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
       faults.failCopy = "";
@@ -339,7 +342,7 @@ describe("delete recovery placement and receipts", () => {
   it.each(["parent", "source", "parent link", "fresh open"])("gives actionable recovery advice when retry cannot finish (%s)", async change => {
     const f = await fixture();
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     faults.copyOnly = true; faults.failCopy = "write";
     try {
@@ -361,7 +364,7 @@ describe("delete recovery placement and receipts", () => {
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: change !== "source",
         reason: change === "source"
           ? "folder/rowless.txt may be incomplete. Its trash copy is gone."
-          : `dohc could not put folder/rowless.txt back. It stays at .dohc/trash/${staged}/rowless.txt.`,
+          : `dohc could not put folder/rowless.txt back. It stays at .dohc/local/trash/${staged}/rowless.txt.`,
       }] });
       if (change === "source") expect(await f.undo(id)).toEqual(result);
       expect(existsSync(faults.copyTarget)).toBe(change === "source");
@@ -372,7 +375,7 @@ describe("delete recovery placement and receipts", () => {
     const f = await fixture();
     await mkdir(join(f.root, "folder/empty"));
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     const source = join(trash, staged, "empty");
     if (occupied) await writeFile(join(source, "keep.txt"), "new contents");
@@ -387,7 +390,7 @@ describe("delete recovery placement and receipts", () => {
     await mkdir(join(f.root, "folder/nested"));
     await writeFile(join(f.root, "folder/nested/child.txt"), "nested");
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     faults.copyOnly = true; faults.failCopy = "write";
     try {
@@ -426,7 +429,7 @@ describe("delete recovery placement and receipts", () => {
     faults.sourceLimit = !copySiblings;
     try {
       expect(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
-      const trash = join(f.root, ".dohc/trash");
+      const trash = join(f.root, ".dohc/local/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       await rm(join(f.root, "folder/tracked.txt"));
@@ -451,7 +454,7 @@ describe("delete recovery placement and receipts", () => {
     faults.sourceLimit = true; faults.failRemove = true; faults.readOnly = true; faults.copyTemps = [];
     try {
       expect(await f.undo(id)).toMatchObject({ remaining: [] });
-      expect((await readdir(join(f.root, ".dohc/trash"))).filter(name => name.startsWith(".dohc-undo-"))).toEqual([]);
+      expect((await readdir(join(f.root, ".dohc/local/trash"))).filter(name => name.startsWith(".dohc-undo-"))).toEqual([]);
       expect(await f.undo(id)).toMatchObject({ remaining: [] });
       expect((await stat(faults.copyTarget)).mode & 0o222).toBe(0);
     } finally { faults.sourceLimit = false; faults.failRemove = false; faults.readOnly = false; }
@@ -464,7 +467,7 @@ describe("delete recovery placement and receipts", () => {
     try {
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt" }] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe(failure === "write" || failure === "readonly-write" ? "not " : "not retained");
-      const trash = join(f.root, ".dohc/trash");
+      const trash = join(f.root, ".dohc/local/trash");
       const record = JSON.parse(await readFile(join(trash, (await readdir(trash)).find(name => name.endsWith(".json"))!), "utf8"));
       expect(record.result).toBeUndefined();
       expect(record.copies.find((copy: { path: string }) => copy.path === "folder/rowless.txt")).toMatchObject({ ino: (await stat(faults.copyTarget)).ino, size: 12 });
@@ -498,7 +501,7 @@ describe("delete recovery placement and receipts", () => {
       await f.undo(id);
       faults.failCopy = ""; faults.failRemove = false;
       if (change === "replace" || change === "link") await rm(faults.copyTarget);
-      if (change === "link") await symlink(join(f.root, ".dohc/trash"), faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
+      if (change === "link") await symlink(join(f.root, ".dohc/local/trash"), faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
       else await writeFile(faults.copyTarget, change === "edit" ? "edit" : change === "grow" ? "not retained plus a later edit" : "not ");
       const before = await stat(faults.copyTarget);
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
@@ -516,7 +519,7 @@ describe("delete recovery placement and receipts", () => {
       expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
       expect(faults.copyTemps).toEqual([faults.copyTarget]);
       expect(await readdir(join(f.root, "folder"))).toEqual(["rowless.txt"]);
-      expect(classifyEngineFilePath(".dohc/trash/delete-record.json")).toEqual({ kind: "ignored" });
+      expect(classifyEngineFilePath(".dohc/local/trash/delete-record.json")).toEqual({ kind: "ignored" });
     } finally { faults.copyOnly = false; }
   });
   it("keeps a racing occupant and names the retained trash source when publishing a copy", async () => {
@@ -527,10 +530,10 @@ describe("delete recovery placement and receipts", () => {
     try {
       const result = await f.undo(id);
       expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("raced occupant");
-      const trash = join(f.root, ".dohc/trash");
+      const trash = join(f.root, ".dohc/local/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
-        retry: false, reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
+        retry: false, reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/local/trash/${staged}/rowless.txt.` }] });
       expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.beforePublish = undefined; }
   });
@@ -547,7 +550,7 @@ describe("delete recovery placement and receipts", () => {
     const f = await fixture();
     if (failure === "flush") await chmod(join(f.root, "folder/rowless.txt"), 0o444);
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     faults.copyOnly = true; faults.failFlush = failure === "flush"; faults.failCopy = failure; faults.flushed = []; faults.exposed = false;
     try {
@@ -579,7 +582,7 @@ describe("delete recovery placement and receipts", () => {
     try {
       const result = await f.undo(id);
       expect(result).toMatchObject({ ok: true, restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
-      const trash = join(f.root, ".dohc/trash");
+      const trash = join(f.root, ".dohc/local/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(true);
@@ -640,7 +643,7 @@ describe("delete recovery placement and receipts", () => {
   it.each([false, true])("names a missing staged source before engine commit (whole folder=%s)", async whole => {
     const f = await fixture();
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
     expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
@@ -649,7 +652,7 @@ describe("delete recovery placement and receipts", () => {
   it("expires metadata without deleting fallback bytes", async () => {
     const f = await fixture();
     const id = await deleted(f);
-    const trash = join(f.root, ".dohc/trash");
+    const trash = join(f.root, ".dohc/local/trash");
     const record = (await readdir(trash)).find(name => name.endsWith(".json"))!;
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await vi.waitFor(() => expect(faults.visited).toContain(join(trash, record)));
@@ -699,7 +702,7 @@ it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retr
       return executeCli({ argv: ["history", "undo", id], cwd: f.root, request: async () => f.undo(id) });
     };
     const recordBefore = (await readDeleteRecovery(f.root, id))!;
-    const reason = `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/trash/${recordBefore.staged}/rowless.txt.`;
+    const reason = `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/local/trash/${recordBefore.staged}/rowless.txt.`;
     const occupied = await call();
     if (door === "cli") expect(occupied).toMatchObject({ exitCode: 1, stdout: expect.stringContaining(reason) });
     else expect(occupied).toMatchObject({ ok: true, remaining: [{ retry: true, reason }] });
@@ -708,7 +711,7 @@ it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retr
     const finished = await call();
     if (door === "cli") expect(finished).toMatchObject({ exitCode: 0 }); else expect(finished).toMatchObject({ ok: true, remaining: [] });
     expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
-    const record = JSON.parse(await readFile(join(f.root, ".dohc/trash", (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith(".json"))!), "utf8"));
+    const record = JSON.parse(await readFile(join(f.root, ".dohc/local/trash", (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!), "utf8"));
     expect(JSON.stringify(record)).not.toContain('"retry"');
   } finally { faults.copyOnly = false; faults.failCopy = ""; }
 });

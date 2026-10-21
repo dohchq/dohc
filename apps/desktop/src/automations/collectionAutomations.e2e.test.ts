@@ -22,6 +22,7 @@ import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { collectionAutomationId, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "../workspaces/workspaceLocalState";
 import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
 
 // A person's change claims an automation in the real engine, and the
@@ -57,6 +58,8 @@ async function harness(automations: string, run: (context: {
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const workspace = { workspaceId: "collection-automation-e2e", rootPath: root, attachmentId: Symbol("collection-automation-e2e") };
   const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
   const settles: Array<{ claimId: string; state: string; error?: string }> = [];

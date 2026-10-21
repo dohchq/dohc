@@ -6,6 +6,7 @@ import {expect, it} from "vitest";
 import * as Y from "yjs";
 import {createWorkspaceEngineCapture} from "./workspaceEngineCapture";
 import {duplicateWorkspaceFile} from "./workspaceDuplicate";
+import {readLocalStateFrom} from "./workspaceLocalState";
 import {createTestScratch} from "./testTemp";
 import {waitForPathMoments} from "./waitForPathMoments";
 import {requireEngineBinaryOrSkip} from "../testing/engineBinary";
@@ -34,10 +35,12 @@ it.skipIf(engine.missing)("Duplicate records one copy per operation and measures
   const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0});
   await withinDeadline("daemon start", () => lifecycle.start());
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const attachmentId = Symbol("duplicate-timing");
   const capture = createWorkspaceEngineCapture({workspaceId,rootPath,attachmentId,rustEngineSessions:sessions,settleDebounceMs:600_000});
   const editor = new Y.Doc();
-  const operation = {workspace:{workspaceId,rootPath},assertCurrent(){}};
+  const operation = {workspace:{workspaceId,rootPath,attachmentId},assertCurrent(){}};
   const author = {kind:"human",humanId:"person"} as const;
   let completed = false;
   try {
@@ -66,7 +69,7 @@ it.skipIf(engine.missing)("Duplicate records one copy per operation and measures
     samples.sort((a,b)=>a-b);
     console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:TIMING_SAMPLES,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
     const interrupted = await withinDeadline("duplicate before Undo", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
-    const receiptPath = join(rootPath,".dohc/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
+    const receiptPath = join(rootPath,".dohc/local/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
     await writeFile(receiptPath,JSON.stringify({workspaceId,source:"source.md",path:interrupted.path,operationId:interrupted.operationId}));
     const recovered = await withinDeadline("recover committed Duplicate", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
     expect(recovered.operationId).toBe(interrupted.operationId);

@@ -29,6 +29,7 @@ import {
 import { deferred } from "../testing/deferred";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { beginPendingRecovery, waitForRecovery } from "./workspaceDeleteRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 interface TestEvent {
   trusted: boolean;
@@ -1229,6 +1230,7 @@ describe("WorkspaceFileMutationOwner", () => {
         throw new Error("OS trash unavailable");
       },
     });
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     const markDeleted = vi.fn(() => trace.push("marked-deleted"));
@@ -1258,7 +1260,7 @@ describe("WorkspaceFileMutationOwner", () => {
     ]);
     expect(markDeleted).toHaveBeenCalledOnce();
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
-    const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
+    const trashEntries = await readdir(join(test.rootPath, ".dohc/local/trash"));
     expect(trashEntries.filter(name => name.startsWith("delete-"))).toHaveLength(1);
     expect(trashEntries.filter(name => !name.startsWith("delete-"))).toHaveLength(1);
   });
@@ -1269,6 +1271,7 @@ describe("WorkspaceFileMutationOwner", () => {
     const test = await harness({
       beforeOperation: async () => { entered.resolve(); await release.promise; },
     });
+    await openedLocalState(test.workspace);
     test.setCapture({
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
@@ -1290,6 +1293,7 @@ describe("WorkspaceFileMutationOwner", () => {
         throw new Error("OS trash unavailable");
       },
     });
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     // No engine capture: nothing records the delete, and nothing refuses it.
@@ -1298,8 +1302,8 @@ describe("WorkspaceFileMutationOwner", () => {
       relativePath: "notes",
     })).resolves.toEqual({ trashed: false, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
-    const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
-    expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
+    const [entry] = await readdir(join(test.rootPath, ".dohc/local/trash"));
+    expect(await readFile(join(test.rootPath, ".dohc/local/trash", entry!, "a.md"), "utf8")).toBe("text\n");
     expect(test.markDeletedUnderPath).toHaveBeenCalledWith(test.authorityId, "notes");
     expect(test.deletedBy).toEqual([]);
   });
@@ -1307,6 +1311,7 @@ describe("WorkspaceFileMutationOwner", () => {
   it("settles and marks an alias delete by its physical path", async () => {
     const trace: string[] = [];
     const test = await harness();
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     await symlink(
@@ -1361,7 +1366,7 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(trashItem).not.toHaveBeenCalled();
     expect(markDeleted).not.toHaveBeenCalled();
     expect(await readFile(join(test.rootPath, "notes/a.md"), "utf8")).toBe("text\n");
-    await expect(access(join(test.rootPath, ".dohc/trash"))).rejects.toThrow();
+    await expect(access(join(test.rootPath, ".dohc/local/trash"))).rejects.toThrow();
   });
 
   it("does not mark a Y.Doc deleted when both recovery paths fail", async () => {
@@ -1372,8 +1377,8 @@ describe("WorkspaceFileMutationOwner", () => {
     });
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
-    await mkdir(join(test.rootPath, ".dohc"));
-    await writeFile(join(test.rootPath, ".dohc/trash"), "not a folder");
+    await openedLocalState(test.workspace);
+    await writeFile(join(test.rootPath, ".dohc/local/trash"), "not a folder");
     const markDeleted = vi.fn();
     await openYDoc(test, "notes/a.md", markDeleted);
     const finishDebts = vi.fn();
@@ -1681,11 +1686,11 @@ it("admits operation Undo through the mutation owner and refuses missing recover
 });
 
 it("returns a person's move operation and successfully undoes it without capture", async () => {
-  const h = await harness(); await writeFile(join(h.rootPath, "before.txt"), "body");
+  const h = await harness(); await openedLocalState(h.workspace); await writeFile(join(h.rootPath, "before.txt"), "body");
   const moved = await h.owner.movePath(trustedEvent, { workspaceId: h.workspace.workspaceId, fromPath: "before.txt", toPath: "after.txt" });
   expect(moved).toMatchObject({ path: "after.txt", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
   await waitForRecovery(moved.operationId!);
   expect(await h.owner.undoHistoryOperation(trustedEvent, { workspaceId: h.workspace.workspaceId, operationId: moved.operationId! })).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
   expect(await readFile(join(h.rootPath, "before.txt"), "utf8")).toBe("body");
-  expect((await readdir(join(h.rootPath, ".dohc/trash"))).filter(name => /^move-[a-f0-9]{64}\.json$/u.test(name))).toHaveLength(1);
+  expect((await readdir(join(h.rootPath, ".dohc/local/trash"))).filter(name => /^move-[a-f0-9]{64}\.json$/u.test(name))).toHaveLength(1);
 });

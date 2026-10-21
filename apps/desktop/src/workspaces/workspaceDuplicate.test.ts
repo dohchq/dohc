@@ -6,6 +6,8 @@ import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import type { WorkspaceEngineCapture, AuthoredPathChanges } from "./workspaceEngineCapture";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, {recursive: true, force: true}); });
 async function fixture() {
@@ -13,6 +15,7 @@ async function fixture() {
   await writeFile(join(rootPath, "source.md"), "Before settlement");
   const workspace = {workspaceId: "workspace", rootPath, readOnly: false, shareView: undefined as unknown};
   const operation = {workspace, assertCurrent: vi.fn()};
+  await openedLocalState(workspace);
   const events: string[] = [];
   const engine: AuthoredPathChanges = {
     policy: await readWorkspaceEnginePolicy(rootPath), readDuplicate: vi.fn(async () => null as {path: string} | null), hasPath: vi.fn(async () => false),
@@ -65,7 +68,7 @@ it.each(["placed", "pending-placement", "not-committed"] as const)("reconciles a
   vi.mocked(f.engine.duplicateFile).mockImplementationOnce(async (_from, to) => {copyPath = to; if (state === "placed") await writeFile(join(f.rootPath, to), "committed"); return duplicateWithRecovery(to, async () => {throw new Error("daemon exited after commit");});});
   await expect(f.run()).rejects.toThrow("check the saved operation");
   const {readdir} = await import("node:fs/promises");
-  const directory = join(f.rootPath, ".dohc/duplicate-pending");
+  const directory = join(f.rootPath, ".dohc/local/duplicate-pending");
   const receipt = JSON.parse(await readFile(join(directory, (await readdir(directory))[0]!), "utf8"));
   expect(receipt).toMatchObject({source:"source.md",path:copyPath,operationId:expect.stringMatching(/^dohc-operation:/)});
   vi.mocked(f.engine.readDuplicate).mockResolvedValue(committed ? {path:copyPath} : null);
@@ -101,7 +104,7 @@ it.each(["undone", "deleted", "renamed", "superseded"])(
     });
     await expect(f.run()).rejects.toThrow("could not confirm");
     const {readdir} = await import("node:fs/promises");
-    const dir = join(f.rootPath, ".dohc/duplicate-pending");
+    const dir = join(f.rootPath, ".dohc/local/duplicate-pending");
     const receipt = JSON.parse(await readFile(join(dir, (await readdir(dir))[0]!), "utf8"));
     if (state !== "superseded") await rm(join(f.rootPath, oldPath));
     vi.mocked(f.engine.readDuplicate).mockResolvedValue(null);
@@ -112,3 +115,43 @@ it.each(["undone", "deleted", "renamed", "superseded"])(
     expect(await readdir(dir)).toEqual([]);
   },
 );
+
+// A receipt lives in `.dohc/local/duplicate-pending`. One dohc can't trust, or
+// one left at the old `.dohc/duplicate-pending`, is not reused: Duplicate
+// makes a new copy rather than report someone else's.
+it.each(["old folder", "writable by others", "hard-linked"] as const)("ignores a receipt from the %s and makes a new copy", async kind => {
+  if (process.platform === "win32" && kind === "writable by others") return;
+  const f = await fixture();
+  const {createHash} = await import("node:crypto");
+  const {chmod, link, readdir, lstat} = await import("node:fs/promises");
+  const name = createHash("sha256").update("source.md").digest("hex") + ".json";
+  const directory = join(f.rootPath, kind === "old folder" ? ".dohc/duplicate-pending" : ".dohc/local/duplicate-pending");
+  await mkdir(directory, {recursive: true, mode: 0o700});
+  const receipt = join(directory, name);
+  const planted = {workspaceId: "workspace", source: "source.md", path: "planted.md", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111"};
+  await writeFile(receipt, JSON.stringify(planted), {mode: 0o600});
+  if (kind === "writable by others") await chmod(receipt, 0o666);
+  if (kind === "hard-linked") await link(receipt, join(f.rootPath, "second-name.json"));
+  vi.mocked(f.engine.readDuplicate).mockResolvedValue({path: "planted.md"});
+  const copied = await f.run();
+  expect(copied.operationId).not.toBe(planted.operationId);
+  expect(f.engine.readDuplicate).not.toHaveBeenCalled();
+  expect(f.engine.duplicateFile).toHaveBeenCalledOnce();
+  expect(await readFile(join(f.rootPath, copied.path), "utf8")).toBe("Settled");
+  // The new copy's receipt replaced the untrusted one, then went with the copy.
+  expect(await readdir(join(f.rootPath, ".dohc/local/duplicate-pending"))).toEqual([]);
+  if (kind === "old folder") expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(planted);
+  if (process.platform !== "win32") expect((await lstat(join(f.rootPath, ".dohc/local/duplicate-pending"))).mode & 0o777).toBe(0o700);
+});
+
+it.each([
+  ["not-opened", null, "dohc did not duplicate this file because the workspace has not finished opening. Try again when it opens."],
+  ["not-excluded", false, "dohc did not duplicate this file because it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."],
+] as const)("refuses Duplicate before the workspace's open prepares .dohc/local (%s)", async (_refusal, ready, words) => {
+  const f = await fixture();
+  readLocalStateFrom(ready === null ? null : {currentBinding: () => ({localStateReady: ready})});
+  await expect(f.run()).rejects.toThrow(words);
+  expect(f.changePathsAs).not.toHaveBeenCalled();
+  const {readdir} = await import("node:fs/promises");
+  expect(await readdir(join(f.rootPath, ".dohc/local"))).toEqual([]);
+});

@@ -8,8 +8,11 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { deferred } from "../testing/deferred";
 import { readDeleteRecovery } from "./workspaceDeleteRecovery";
+import { readMoveRecovery } from "./workspaceMoveRecovery";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import type { PathChangeOptions } from "./workspaceFileMoves";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -26,6 +29,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   await write("folder/tracked.txt");
   await write("folder/assets/plain.txt");
   const operation = { workspace: { workspaceId: "owner", rootPath, shareView: undefined as unknown, readOnly: false }, signal: new AbortController().signal, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, _authored, work) => work({
     policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async () => trackedPaths, delete: vi.fn(async () => "delete-moment"),
   } as never) };
@@ -57,7 +61,7 @@ it.each([".env", ".git/config", "node_modules/pkg/index.js", "link"])("refuses t
     await symlink(outside, join(f.rootPath, "folder/assets/link"), process.platform === "win32" ? "junction" : "dir");
   } else await f.write(`folder/assets/${hidden}`);
   const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const before = await readFile(sidecar, "utf8");
   const result = await f.undo(id, true);
   expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("contains a link or a reserved, secret, or excluded path") });
@@ -98,7 +102,7 @@ it("refuses unknown ids and invalid ids without an engine Undo or record creatio
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: "This operation is not in History." });
   expect(await f.undo("11111111-1111-4111-8111-111111111111")).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
-  expect(await readdir(join(f.rootPath, ".dohc"))).toEqual([]);
+  expect(await readdir(join(f.rootPath, ".dohc/local"))).toEqual([]);
 });
 it("reads a move's references without contents and scopes its cursor", async () => {
   const f = await fixture();
@@ -124,7 +128,7 @@ it("passes a different author's lost-reply refusal through unchanged", async () 
 
 it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//host/share", "//host/share/x", "\\\\host\\share\\x"])("refuses hostile recovery paths before walking (%s)", async hostile => {
   const f = await fixture(); const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const original = JSON.parse(await readFile(sidecar, "utf8"));
   for (const patch of [{ base: hostile }, { paths: [hostile] }, { emptyFolders: [hostile] },
     { copies: [{ path: hostile, dev: 0, ino: 0, birthtimeMs: 0, size: 0 }] },
@@ -139,7 +143,7 @@ it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//
 });
 it.each(["{", "null", "{}", "directory", "wrong id", "invalid staged"])("never exposes corrupt sidecar parser errors (%s)", async body => {
   const f = await fixture(); const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   if (body === "directory") { await rm(sidecar); await mkdir(sidecar); }
   else if (body === "wrong id" || body === "invalid staged") {
     const record = JSON.parse(await readFile(sidecar, "utf8"));
@@ -235,7 +239,7 @@ it("checks recovery only on the first read page and still checks later members",
   const f = await fixture(), id = await f.remove();
   const cursor = Buffer.from(JSON.stringify({ workspaceId: "owner", operationId: id, objectId: null, versionId: "main" })).toString("base64url");
   expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true, withoutHistory: ["folder/assets"] });
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   await writeFile(sidecar, "{");
   expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor }, f.history)).toEqual({
     ok: true, operationId: id, members: [{ momentId: "delete-moment", operation: "delete", path: "folder/tracked.txt", beforePath: "folder/tracked.txt" }], nextCursor: null,
@@ -271,7 +275,7 @@ it.each(["delete", "rename"])("uses the settled person refusal without checking 
 
 it.each(["linux", "darwin"])("accepts colon names in recovery records on %s", async platform => {
   const f = await fixture(), id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const record = JSON.parse(await readFile(sidecar, "utf8"));
   record.base = "a:notes"; record.paths = ["a:notes/file.txt"]; record.emptyFolders = [];
   await writeFile(sidecar, JSON.stringify(record));
@@ -283,7 +287,7 @@ it.each(["linux", "darwin"])("accepts colon names in recovery records on %s", as
 });
 it.each([".", "..", "/root", "nested/name", "nested\\name"])("refuses a staged name that is not one safe path component (%s)", async staged => {
   const f = await fixture(), id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const record = JSON.parse(await readFile(sidecar, "utf8"));
   await writeFile(sidecar, JSON.stringify({ ...record, staged }));
   expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." });
@@ -321,4 +325,75 @@ it("does not treat an unrelated single write as Duplicate", async () => {
   f.history.readHistoryPage.mockResolvedValue({moments:[{operation:"write",path:"folder/tracked.txt"}],nextCursor:null} as never);
   expect(await f.undo(otherId)).toMatchObject({ok:false,reason:"This operation is not in History."});
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+
+// A recovery record decides where Undo writes and what it puts back, so dohc
+// reads it only from `.dohc/local/trash`, and only as a file of this user's
+// that no one else can change. Anything else reads as an invalid record or a
+// folder to fix: Undo refuses with words and changes nothing.
+const untrustedRecords = [
+  ["writable by others", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
+  ["hard-linked", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
+  ["another user's", "Cannot undo the delete. This workspace's .dohc belongs to another user. Make it and everything in it yours again, then try again."],
+  ["under a linked .dohc/local", "Cannot undo the delete. This workspace's .dohc/local is a link. Put what it links to in its place, then try again."],
+  ["under a linked trash", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
+] as const;
+it.skipIf(process.platform === "win32").each(untrustedRecords)("refuses a recovery record %s and changes nothing", async (kind, reason) => {
+  const f = await fixture(), id = await f.remove();
+  const trash = join(f.rootPath, ".dohc/local/trash");
+  const sidecar = join(trash, (await readdir(trash)).find(name => name.endsWith(".json"))!);
+  const elsewhere = await createTestScratch("history-untrusted-record-");
+  let uid: ReturnType<typeof vi.spyOn> | undefined;
+  if (kind === "writable by others") await filesystem.chmod(sidecar, 0o666);
+  if (kind === "hard-linked") await filesystem.link(sidecar, join(elsewhere, "second-name.json"));
+  if (kind === "another user's") uid = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+  const moved = kind === "under a linked .dohc/local" ? join(f.rootPath, ".dohc/local") : kind === "under a linked trash" ? trash : undefined;
+  if (moved) {
+    await rename(moved, join(elsewhere, "moved"));
+    await symlink(join(elsewhere, "moved"), moved, "dir");
+  }
+  const before = await readdir(elsewhere, { recursive: true });
+  try {
+    expect(await f.undo(id)).toEqual({ ok: false, reason });
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history))
+      .toEqual({ ok: false, reason: reason.replace("Cannot undo the delete.", "Cannot read this operation.").replace(" Restore files from History or the trash.", "") });
+  } finally { uid?.mockRestore(); }
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readdir(elsewhere, { recursive: true })).toEqual(before);
+});
+
+it("reads delete and move records only from .dohc/local/trash, never an old .dohc/trash", async () => {
+  const f = await fixture(), id = await f.remove();
+  await f.write("before.txt", "kept edits");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+    { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toMatchObject({ from: "before.txt", to: "after.txt" });
+  await rename(join(f.rootPath, ".dohc/local/trash"), join(f.rootPath, ".dohc/trash"));
+  expect(await readDeleteRecovery(f.rootPath, id)).toBeUndefined();
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toBeUndefined();
+  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("refuses Undo of a delete or rename before the workspace's open prepares .dohc/local, and changes nothing", async () => {
+  const f = await fixture(), id = await f.remove();
+  await f.write("before.txt", "kept edits");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+    { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+  readLocalStateFrom(null);
+  expect(await f.undo(id)).toEqual({ ok: false,
+    reason: "dohc did not undo the delete because the workspace has not finished opening. Try again when it opens." });
+  expect(await f.undo(moved.operationId!)).toEqual({ ok: false,
+    reason: "dohc did not undo the rename because the workspace has not finished opening. Try again when it opens." });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
+  // Reading needs no open, and the records wait for the next one.
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true, withoutHistory: ["folder/assets"] });
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/assets"], remaining: [] });
+  expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
+  expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
 });

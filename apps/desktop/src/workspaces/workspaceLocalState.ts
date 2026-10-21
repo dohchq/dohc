@@ -1,5 +1,8 @@
-import { lstat } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { notARealFolderRefusal, notOnlyYoursRefusal, outsideWorkspaceRefusal, type DohcPathGuard } from "@dohc/workspace-core";
+import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // `.dohc/local` holds what belongs to this computer rather than the
@@ -134,4 +137,51 @@ export async function ownedLocalStateDir(rootPath: string): Promise<string | nul
   if (local === "missing") return null;
   if (local) throw new LocalStateFolderError(".dohc/local", local);
   return dir;
+}
+
+// Another user who owns the folder, or can write in it, can replace what dohc
+// keeps there. Windows reports no owner or mode.
+function changeableByOthers(stats: Stats): boolean {
+  const uid = process.getuid?.();
+  return uid !== undefined && (stats.uid !== uid || (stats.mode & 0o022) !== 0);
+}
+
+/**
+ * A folder in the workspace's `.dohc/local`, for a writer, made 0700 when
+ * missing. Refuses as localStateDir does, and in `guard`'s words when what is
+ * at `name` is not a folder in the workspace that only this user can change.
+ * Never creates `.dohc/local`.
+ */
+export async function localStateFolder(workspace: LocalStateWorkspace, name: string, guard: DohcPathGuard): Promise<string> {
+  const dir = join(await localStateDir(workspace), name);
+  // Something else at the path fails mkdir with a raw errno, and the checks
+  // below name it. Two writers can both find it missing.
+  await mkdir(dir, { mode: 0o700 }).catch(async (error: unknown) => {
+    if ((await lstat(dir).catch(() => null)) === null) throw error;
+  });
+  const stats = await lstat(dir);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(guard, stats));
+  if (changeableByOthers(stats)) throw new Error(notOnlyYoursRefusal(guard));
+  // With `.dohc` and `.dohc/local` real folders, only a mount leads out.
+  if (!isInside(await realpath(workspace.rootPath), await realpath(dir))) throw new Error(outsideWorkspaceRefusal(guard));
+  return dir;
+}
+
+/**
+ * A folder in `.dohc/local` for a reader that trusts what it finds there:
+ * null when it, `.dohc/local` or `.dohc` is missing, and "unusable" when it is
+ * not a folder in the workspace that only this user can change. Throws as
+ * ownedLocalStateDir does. Does not wait for the engine, and creates nothing.
+ */
+export async function existingLocalStateFolder(rootPath: string, name: string): Promise<string | null | "unusable"> {
+  const local = await ownedLocalStateDir(rootPath);
+  if (local === null) return null;
+  const dir = join(local, name);
+  const stats = await lstat(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (stats === null) return null;
+  if (stats.isSymbolicLink() || !stats.isDirectory() || changeableByOthers(stats)) return "unusable";
+  return isInside(await realpath(rootPath), await realpath(dir)) ? dir : "unusable";
 }

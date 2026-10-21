@@ -1989,7 +1989,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     } from. ${
                       props.shareView.granterEmail ?? "The person who shared it"
                     } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/trash folder whenever the system trash refuses, and can be restored from there.`}
+                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
               </p>
               {confirmDelete.length > 1 ? (
                 <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
