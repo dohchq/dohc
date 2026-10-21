@@ -835,6 +835,35 @@ describe("deletePath", () => {
       await untouched();
     });
 
+    // An empty folder lists no entry, so the bound is checked before each
+    // folder the walk opens, and once more before it answers. A bound
+    // already past stands in for one that runs out among empty folders. Past
+    // it, the walk opens nothing more: a folder it can't open would fail.
+    it.skipIf(process.platform === "win32")("checks its time bound before each folder it opens and before it answers", async () => {
+      await mkdir(join(root, "empty"));
+      await mkdir(join(root, "locked"));
+      await chmod(join(root, "locked"), 0o000);
+      await writeFile(join(root, "local.md"), "here");
+      try {
+        await withICloudCheck({ applies: true, maxMs: -1 }, async () => {
+          for (const folder of ["empty", "locked"]) {
+            await expect(deletePath(workspace(), folder, rejectingTrash)).rejects.toThrow(
+              `dohc did not move ${folder} to the workspace trash because it holds too many files to check. Delete it in smaller parts.`,
+            );
+          }
+          await expect(deletePath(workspace(), "local.md", rejectingTrash)).rejects.toThrow(
+            "dohc did not move local.md to the workspace trash because dohc could not check for files only in iCloud Drive. Try again.",
+          );
+        });
+      } finally {
+        await chmod(join(root, "locked"), 0o755);
+      }
+      expect(existsSync(join(root, "empty"))).toBe(true);
+      expect(existsSync(join(root, "locked"))).toBe(true);
+      expect(await readFile(join(root, "local.md"), "utf8")).toBe("here");
+      expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+    });
+
     it.skipIf(process.platform === "win32")("moves nothing from a folder too large to check in its bounds", async () => {
       await evicted();
       for (const n of [1, 2, 3]) await writeFile(join(root, "folder", `${n}.md`), String(n));

@@ -60,6 +60,7 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
   if (!iCloudCheck.applies) return;
   const { maxEntries, maxMs, readFlags } = iCloudCheck;
   const deadline = performance.now() + maxMs;
+  const overdue = () => performance.now() > deadline;
   const refusal = (problem: Problem) => new ICloudCheckRefusal(basename(target), problem);
   const top = await lstat(target);
   const candidates: string[] = [];
@@ -68,9 +69,11 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
     let seen = 0;
     const folders = [target];
     for (let folder = folders.pop(); folder !== undefined; folder = folders.pop()) {
+      // An empty folder lists nothing, so its open is checked here.
+      if (overdue()) throw refusal("too-large");
       const files: string[] = [];
       for await (const entry of await opendir(folder)) {
-        if (++seen > maxEntries || performance.now() > deadline) throw refusal("too-large");
+        if (++seen > maxEntries || overdue()) throw refusal("too-large");
         const path = join(folder, entry.name);
         if (entry.isDirectory()) folders.push(path);
         else if (entry.isFile()) files.push(path);
@@ -79,10 +82,12 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
         const batch = files.slice(at, at + 64);
         const stats = await Promise.all(batch.map(path => lstat(path)));
         stats.forEach((entry, index) => { if (candidate(entry)) candidates.push(batch[index]!); });
-        if (performance.now() > deadline) throw refusal("too-large");
+        if (overdue()) throw refusal("too-large");
       }
     }
   }
+  // An answer that came late is no answer.
+  if (overdue()) throw refusal(top.isDirectory() ? "too-large" : "unchecked");
   if (!candidates.length) return;
   let flags: readonly number[];
   try {
