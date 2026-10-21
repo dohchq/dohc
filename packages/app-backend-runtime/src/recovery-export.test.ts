@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { privateFolder } from "./private-folder.test-helper";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +35,7 @@ async function fixture(){const directory=await mkdtemp(join(tmpdir(),"dohc-expor
 }
 it("streams an empty dataset with its approved originals and no fabricated event",async()=>{
   const f=await fixture(),limits={maxTotalBytes:10*1024*1024};
-  const prepared=await prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits});
+  const prepared=await prepareDatasetRecoveryExport({...f,directory: await privateFolder(join(f.directory, "exports"))(),limits});
   expect(prepared.manifest.cursor).toEqual(f.cursor);expect(prepared.manifest.entries.map(entry=>entry.kind)).toEqual(["checkpoint","artifact","artifact","artifact","history"]);
   const staged=await stageDatasetRecovery({stream:prepared.stream(),authorize:f.authorize,limits,stagingParent:f.directory,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,limits)});
   expect(await readFile(staged.files.find(file=>file.entry.id==="checkpoint")!.path)).toEqual(f.checkpoint);
@@ -42,18 +43,18 @@ it("streams an empty dataset with its approved originals and no fabricated event
 });
 it("pins events while later writes continue and refuses revoked stream disclosure",async()=>{
   const f=await fixture();const saved=f.commit();if(saved.kind!=="committed")throw Error();
-  const prepared=await prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits:{maxTotalBytes:10*1024*1024}});
+  const prepared=await prepareDatasetRecoveryExport({...f,directory: await privateFolder(join(f.directory, "exports"))(),limits:{maxTotalBytes:10*1024*1024}});
   f.commit(saved.event.cursor,"later");expect(prepared.manifest.cursor.revision).toBe(1);
   const iterator=prepared.stream();expect((await iterator.next()).done).toBe(false);f.revoke();await expect(iterator.next()).rejects.toThrow("revoked");await prepared.dispose();
 });
 it("does not label an export complete when a committed attachment is absent",async()=>{
   const f=await fixture();f.journal.commitOperation({expected:f.cursor,proposalId:"attachment",operation:"create",callerKey:"owner",idempotencyKey:"attachment",payloadSha256:hash("attachment"),resultJson:"{}",changeset:new Uint8Array(),changesetSha256:hash(new Uint8Array()),attachedFileIds:["receipt_file_0001"],authorize:f.authorize,accountAndAttach(){}});
-  await expect(prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits:{maxTotalBytes:10*1024*1024}})).rejects.toThrow("files do not match its history");
+  await expect(prepareDatasetRecoveryExport({...f,directory: await privateFolder(join(f.directory, "exports"))(),limits:{maxTotalBytes:10*1024*1024}})).rejects.toThrow("files do not match its history");
   expect(await readdir(join(f.directory,"exports"))).toEqual([]);
 });
 it("rejects tombstone-only changes during export before fencing the source", async () => {
   const f = await fixture();
-  const prepared = await prepareDatasetRecoveryExport({ ...f, directory: join(f.directory, "exports"), limits: { maxTotalBytes: 10 * 1024 * 1024 } });
+  const prepared = await prepareDatasetRecoveryExport({ ...f, directory: await privateFolder(join(f.directory, "exports"))(), limits: { maxTotalBytes: 10 * 1024 * 1024 } });
   const stream = prepared.stream();
   try {
     expect(() => prepared.assertUnchanged()).not.toThrow();

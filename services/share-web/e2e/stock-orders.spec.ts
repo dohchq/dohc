@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
+import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
 import { createLocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
@@ -17,6 +18,7 @@ const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).d
 test("stock orders use custom apps, relations, transactions, and attachments through the same Collection and agent APIs", async ({ browser }, info) => {
   test.setTimeout(90000);
   const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));
+  await openedLocalState({ workspaceId: "stock-workspace", rootPath: directory });
   const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId:"stock-workspace",workspaceRoot:directory});
   const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
   const context = await browser.newContext();

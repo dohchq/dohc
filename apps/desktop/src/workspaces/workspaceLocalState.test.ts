@@ -7,6 +7,7 @@ import {
   existingLocalStateDir,
   existingLocalStateFolder,
   localStateDir,
+  localStateFolder,
   LocalStateFolderError,
   LocalStateUnavailableError,
   ownedLocalStateDir,
@@ -173,6 +174,24 @@ describe("this computer's .dohc/local", () => {
       expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
     },
   );
+
+  it("makes each folder on the way to a nested one private, and refuses a link on the way to writers and readers", async () => {
+    const { workspace, open } = await engine();
+    await open();
+    const guard = { path: ".dohc/local/datasets/workers", lead: "dohc could not open this Collection's records." };
+    const made = await localStateFolder(workspace, "datasets/workers", guard);
+    expect(made).toBe(join(workspace.rootPath, ".dohc", "local", "datasets", "workers"));
+    if (process.platform !== "win32") for (const folder of [join(made, ".."), made]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe(made);
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/exports")).toBeNull();
+    const outside = await createTestScratch("dohc-local-state-outside-");
+    await rm(join(workspace.rootPath, ".dohc", "local", "datasets"), { recursive: true });
+    await symlink(outside, join(workspace.rootPath, ".dohc", "local", "datasets"), "dir");
+    await expect(localStateFolder(workspace, "datasets/workers", guard)).rejects.toThrow(
+      "dohc could not open this Collection's records. A link is at .dohc/local/datasets, which must be a real folder.");
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe("unusable");
+    expect(await readdir(outside)).toEqual([]);
+  });
 
   it("gives a reader the folder whatever the engine said, and null when it is missing", async () => {
     const { workspace } = await engine();

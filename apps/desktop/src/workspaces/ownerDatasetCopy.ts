@@ -2,7 +2,8 @@ import { createDatasetReplica, type DatasetReplicaSource } from "@dohc/app-backe
 import { describeApprovedDataset, parseDatasetRevision, parseDatasetDescription, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { atomicReplaceFile } from "../atomicReplaceFile";
-import { lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
+import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { join } from "node:path";
 import { z } from "zod";
 import type { OwnerDatasetData } from "./remoteDataset";
@@ -23,10 +24,13 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   const markerSchema = z.object({ binding: z.literal(binding), dataset: z.unknown().transform(value => parseDatasetDescription(value)), savedAtMs: z.number().int().nonnegative() }).strict();
   let archived: z.infer<typeof markerSchema> | null = null, metadataPending: Promise<unknown> = Promise.resolve();
   try {
-    const info = await lstat(markerPath).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
-    if (info) {
-      if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw Error("The saved Collection status is damaged. Reconnect to its server.");
-      archived = markerSchema.parse(JSON.parse(await readFile(markerPath,"utf8")));
+    // The saved status only marks the copy archived and describes it while
+    // offline, and the server says again once online. So a file dohc can't
+    // trust, being another user's, writable by others, linked, not a file or
+    // too large, reads as no saved status.
+    const read = await readOwnedFile(markerPath, 1024 * 1024);
+    if (read.status === "read") {
+      archived = markerSchema.parse(JSON.parse(read.content));
       if (archived.dataset.datasetId !== options.scope.datasetId) throw Error("The saved status belongs to another Collection.");
     }
   } catch (error) { await replica.close(); throw error; }

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
@@ -28,13 +28,15 @@ const sameEpoch = (a: DatasetCursor, b: DatasetCursor) => sameScope(a,b) && a.ho
 
 /** One owner-bound, read-only downloaded copy. Catch-up replays committed bytes, never backend actions. */
 export async function createDatasetReplica(options: {
+  /** An existing private folder, whose replica.sqlite the caller trusts. */
   directory: string; scope: DatasetScope; ownerKey: string; origin: string;
   assertOwner(): void; runtime?: PersistentRuntimeOptions; maxCheckpointBytes?: number;
 }) {
   options.assertOwner();
+  // The host made this folder, and checked what it holds, before asking.
   const root = resolve(options.directory);
-  await mkdir(root, { recursive: true });
-  if ((await lstat(root)).isSymbolicLink() || resolve(await realpath(root)) !== root) throw Error("Collection copy storage changed.");
+  const folder = await lstat(root);
+  if (!folder.isDirectory() || folder.isSymbolicLink() || resolve(await realpath(root)) !== root) throw Error("Collection copy storage changed.");
   const db = new DatabaseSync(join(root, "replica.sqlite"));
   try {
     db.exec("PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS copy(id INTEGER PRIMARY KEY CHECK(id=1),binding TEXT NOT NULL,state TEXT NOT NULL) STRICT; BEGIN IMMEDIATE; COMMIT;");
