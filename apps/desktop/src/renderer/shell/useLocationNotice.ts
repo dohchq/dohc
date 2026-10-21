@@ -6,7 +6,8 @@ export type WorkspaceLocation = NonNullable<SyncStatusResult["workspaceLocation"
 /**
  * The notice for a location. On Windows, History is as private as the folder
  * that holds it, and a user's own folder is the one private by default. On a
- * Mac or Linux computer, the engine makes History private on any local disk.
+ * Mac or Linux computer, the engine makes History private on this computer's
+ * own disk.
  */
 export function locationNotice(location: WorkspaceLocation, platform: NodeJS.Platform): { title: string; message: string } {
   if (location === "icloud-drive") {

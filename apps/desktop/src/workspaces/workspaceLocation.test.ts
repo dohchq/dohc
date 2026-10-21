@@ -102,6 +102,16 @@ describe("workspaceLocation on a Mac", () => {
     expect(asked).toEqual([]);
   });
 
+  it("still finds iCloud Drive when the mount listing fails", async () => {
+    const { probe } = computer({ finder: ["FXICloudDriveDocuments"] });
+    probe.mounts = async () => {
+      throw new Error("mount timed out");
+    };
+    await expect(workspaceLocation(`${HOME}/Library/Mobile Documents/com~apple~CloudDocs/Trip`, probe)).resolves.toBe("icloud-drive");
+    await expect(workspaceLocation(`${HOME}/Documents/Trip`, probe)).resolves.toBe("icloud-drive");
+    await expect(workspaceLocation(`${HOME}/Projects/Trip`, probe)).resolves.toBeNull();
+  });
+
   it("fails when the root does not resolve", async () => {
     const { probe } = computer();
     probe.realpath = async () => {
@@ -146,12 +156,37 @@ describe("workspaceLocation on Linux", () => {
     await expect(workspaceLocation("/home/ada/Trip", probe)).resolves.toBeNull();
   });
 
-  it("finds a share GNOME Files opened, under gvfs", async () => {
+  it("finds a share GNOME Files opened, and leaves its phones and cameras alone", async () => {
     const share = "/run/user/1000/gvfs/smb-share:server=nas,share=team/Trip";
     const { probe } = computer({ platform: "linux", links: { "/home/ada/Team": share } });
-    await expect(workspaceLocation(share, probe)).resolves.toBe("network-share");
-    await expect(workspaceLocation("/home/ada/Team", probe)).resolves.toBe("network-share");
-    await expect(workspaceLocation("/run/user/1000/doc/Trip", probe)).resolves.toBeNull();
+    for (const root of [
+      share,
+      "/home/ada/Team",
+      "/run/user/1000/gvfs/sftp:host=nas.local,user=ada/home/ada/Trip",
+      "/run/user/1000/gvfs/dav:host=cloud.example.org,ssl=true,prefix=%2Fremote.php/Trip",
+      "/run/user/1000/gvfs/google-drive:host=example.org,user=ada/Trip",
+    ]) {
+      await expect(workspaceLocation(root, probe)).resolves.toBe("network-share");
+    }
+    for (const root of [
+      "/run/user/1000/gvfs/mtp:host=Google_Pixel_8_3A051FDJH0042K/Internal shared storage/Trip",
+      "/run/user/1000/gvfs/gphoto2:host=Canon_Inc._Canon_Digital_Camera/DCIM/Trip",
+      "/run/user/1000/gvfs/afc:host=00008110-001A2D3E1E38801E/Trip",
+      "/run/user/1000/doc/Trip",
+    ]) {
+      await expect(workspaceLocation(root, probe)).resolves.toBeNull();
+    }
+  });
+
+  it("finds a share KDE opened through kio-fuse, directly or through a link", async () => {
+    const share = "/run/user/1000/kio-fuse-AbC123/smb/nas/team/Trip";
+    const { probe } = computer({ platform: "linux", links: { "/home/ada/Team": share } });
+    for (const root of [share, "/home/ada/Team", "/run/user/1000/kio-fuse-AbC123/webdavs/ada@cloud.example.org/Trip"]) {
+      await expect(workspaceLocation(root, probe)).resolves.toBe("network-share");
+    }
+    for (const root of ["/run/user/1000/kio-fuse-AbC123/mtp/Pixel 8/Trip", "/run/user/1000/kio-fuse-AbC123/smb"]) {
+      await expect(workspaceLocation(root, probe)).resolves.toBeNull();
+    }
   });
 
   it("reads no iCloud Drive location anywhere but a Mac", async () => {

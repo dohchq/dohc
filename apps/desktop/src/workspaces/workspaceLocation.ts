@@ -43,6 +43,23 @@ const systemProbe: LocationProbe = {
 // Linux f_type values of NFS, SMB, CIFS, SMB2, Ceph, AFS and 9p volumes.
 const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x00c36400, 0x5346414f, 0x01021997]);
 
+// GNOME Files and KDE mount what a person opens through FUSE, phones and
+// cameras as well as shares, so only a network backend or protocol counts.
+// GVfs names each mount <runtime dir>/gvfs/<backend>:<keys> (daemon/mount.c,
+// common/gmountspec.c). kio-fuse puts a URL at
+// <runtime dir>/kio-fuse-XXXXXX/<protocol>/<host>/<path>
+// (src/kiofuseservice.cpp, src/kiofusevfs.cpp).
+const GVFS_NETWORK_BACKENDS = new Set([
+  "smb-share", "sftp", "ftp", "ftps", "ftpis", "dav", "davs", "dav+sd", "davs+sd", "nfs", "afp-volume", "google-drive", "onedrive",
+]);
+const KIO_NETWORK_PROTOCOLS = new Set(["smb", "sftp", "ftp", "webdav", "webdavs", "nfs", "fish"]);
+
+function linuxFuseShare(root: string): boolean {
+  const gvfs = /^\/run\/user\/\d+\/gvfs\/([^/:]+):/u.exec(root)?.[1];
+  const kio = /^\/run\/user\/\d+\/kio-fuse-[^/]+\/([^/]+)\/[^/]/u.exec(root)?.[1];
+  return (gvfs !== undefined && GVFS_NETWORK_BACKENDS.has(gvfs)) || (kio !== undefined && KIO_NETWORK_PROTOCOLS.has(kio));
+}
+
 /** Where the workspace at rootPath is kept, or null for this computer's own disk. */
 export async function workspaceLocation(
   rootPath: string,
@@ -51,7 +68,12 @@ export async function workspaceLocation(
   switch (probe.platform) {
     case "darwin": {
       // A share mounted inside a folder iCloud Drive holds is still a share.
-      const [root, home, listing] = await Promise.all([probe.realpath(rootPath), probe.realpath(probe.home), probe.mounts()]);
+      // Without a mount listing, iCloud Drive is still checked.
+      const [root, home, listing] = await Promise.all([
+        probe.realpath(rootPath),
+        probe.realpath(probe.home),
+        probe.mounts().catch(() => ""),
+      ]);
       if (!macVolumeIsLocal(root, listing)) return "network-share";
       return (await inICloudDrive(root, home, probe)) ? "icloud-drive" : null;
     }
@@ -64,9 +86,8 @@ export async function workspaceLocation(
       return server !== undefined && !/^(?:[?.]|wsl\$|wsl\.localhost)$/iu.test(server) ? "network-share" : null;
     }
     case "linux": {
-      // GNOME Files mounts the shares it opens through FUSE, under gvfs.
       const root = await probe.realpath(rootPath);
-      if (/^\/run\/user\/\d+\/gvfs\//u.test(root)) return "network-share";
+      if (linuxFuseShare(root)) return "network-share";
       return LINUX_NETWORK_TYPES.has(await probe.fileSystemType(root)) ? "network-share" : null;
     }
     default:
