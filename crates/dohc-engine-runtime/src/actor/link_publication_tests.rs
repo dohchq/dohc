@@ -105,7 +105,12 @@ impl Fixture {
                 .history_operation_pending_jobs(self.ws.clone(), OP.into())
                 .await
                 .unwrap();
-            let turns = placements().lock().unwrap()[&self.ws].turns.clone();
+            let turns = placements()
+                .lock()
+                .unwrap()
+                .get(&self.ws)
+                .map(|p| p.turns.clone())
+                .unwrap_or_default();
             let remaining: Vec<_> = (0..sources)
                 .filter(|i| {
                     std::fs::read_to_string(self.root.join(format!("source-{i:04}.md")))
