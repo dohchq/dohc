@@ -23,7 +23,7 @@ impl ActorHandle {
             return;
         }
         let actor = self.clone();
-        tokio::spawn(async move {
+        std::mem::drop(async move {
             let mut cursor = 0;
             let mut backoff = Duration::from_millis(25);
             while actor.lifecycle() == super::super::LifecycleState::Ready {
