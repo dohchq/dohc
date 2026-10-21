@@ -12,7 +12,7 @@ import { createRegistryStore, type RegistryEntry } from "../workspaces/registryS
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import {
-  applyDatabaseEdit, createWorkspaceDatabaseWorkerOwner,
+  createWorkspaceDatabaseAccess, createWorkspaceDatabaseWorkerOwner,
   readPreparedDatabaseSnapshot, readDatabaseSnapshotFromBytes,
   readPreparedDatabasePage, readDatabasePageFromBytes,
 } from "../workspaces/workspaceDatabase";
@@ -89,10 +89,7 @@ async function harness() {
     readPageBytes: (path, bytes, table, offset) => readDatabasePageFromBytes(path, bytes, table, offset, { worker, signal }),
   }));
   type Dependencies = Parameters<typeof registerDesktopDatabaseIpcHandlers<Sender, { sender: Sender }, RegistryEntry>>[0];
-  const edit = vi.fn<Dependencies["editWorkspaceDatabaseInWorker"]>((input) => applyDatabaseEdit(
-    input.rootPath, input.relativePath, input.edit, input.author, input.nowMs,
-    { worker, signal: input.signal, createId: () => input.operationId! },
-  ));
+  const edit = vi.fn<Dependencies["editWorkspaceDatabaseInWorker"]>(createWorkspaceDatabaseAccess(worker).editWorkspaceDatabaseInWorker);
   const readOwner = vi.fn<ShareViewFiles["read"]>(async () => ({ kind: "asset", bytes: Buffer.from("id,value\n1,owner value\n"), mediaType: "text/csv" }));
   const writable = vi.fn((candidate: RegistryEntry) => {
     const refusal = workspaceWriteRefusal(registry.find(candidate.workspaceId)?.shareView);
@@ -172,7 +169,7 @@ describe("desktop database IPC composition", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
     await expect(h.invoke(CHANNELS.applyDatabaseEdit, { ...editPayload, rootPath: "C:/untrusted", author: { kind: "agent" } })).resolves.toMatchObject({ path: "data.sqlite", table: "items", version: 1, page: { rows: [expect.objectContaining({ value: "changed" }), expect.objectContaining({ value: "next value" })] } });
     expect(h.edit).toHaveBeenCalledTimes(1);
-    expect(h.edit.mock.calls[0]?.[0]).toEqual({ rootPath: h.workspace.rootPath, relativePath: "data.sqlite", edit: editPayload.edit, author: { kind: "user", userId: "local" }, nowMs: 1_700_000_000_000, operationId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), signal: h.signals[1] });
+    expect(h.edit.mock.calls[0]?.[0]).toEqual({ workspace: expect.objectContaining({ workspaceId: h.workspace.workspaceId, rootPath: h.workspace.rootPath }), relativePath: "data.sqlite", edit: editPayload.edit, author: { kind: "user", userId: "local" }, nowMs: 1_700_000_000_000, operationId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), signal: h.signals[1] });
     const log = (await readFile(join(h.workspace.rootPath, databaseOpLogPath("data.sqlite")), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(log).toEqual([expect.objectContaining({ operationId: h.edit.mock.calls[0]![0].operationId, appliedAt: 1_700_000_000_000, author: { kind: "user", userId: "local" }, payload: { value: "changed" } })]);
   });

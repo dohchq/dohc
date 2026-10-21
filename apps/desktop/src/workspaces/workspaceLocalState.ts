@@ -2,6 +2,7 @@ import type { Stats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { notARealFolderRefusal, notOnlyYoursRefusal, outsideWorkspaceRefusal, type DohcPathGuard } from "@dohc/workspace-core";
+import { ownedFileRefusal } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -199,6 +200,24 @@ export async function localStateFolder(workspace: LocalStateWorkspace, name: str
   // With `.dohc` and `.dohc/local` real folders, only a mount leads out.
   if (!isInside(await realpath(workspace.rootPath), await realpath(dir))) throw new Error(outsideWorkspaceRefusal(guard));
   return dir;
+}
+
+/**
+ * Whether dohc can open the SQLite database `name` in `folder` and trust what
+ * it says: the database and its -wal, -shm and -journal files are each
+ * missing, or a file this user owns, that no other user can write, with one
+ * name. `folder` must be one only this user can change, such as one from
+ * localStateFolder, so a check by name holds until the database opens.
+ */
+export async function ownedSqliteFiles(folder: string, name: string): Promise<boolean> {
+  for (const file of [name, `${name}-wal`, `${name}-shm`, `${name}-journal`]) {
+    const stats = await lstat(join(folder, file)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stats && ownedFileRefusal(stats) !== null) return false;
+  }
+  return true;
 }
 
 /**

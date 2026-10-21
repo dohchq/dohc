@@ -1,4 +1,5 @@
-import { databaseOpLogPath } from "@dohc/workspace-core";
+import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
+import { mkdirSync } from "node:fs";
 import {
   copyFile,
   link,
@@ -213,11 +214,14 @@ function operation(
   };
 }
 
+// The desktop makes the counter's folder in `.dohc/local` before an edit; the
+// worker makes only the log's.
 function editPaths(root: string) {
-  const logPath = join(root, databaseOpLogPath("data.sqlite"));
+  const counterFolder = join(root, ".dohc", "local", "databases", databaseFolderName("data.sqlite"));
+  mkdirSync(counterFolder, { recursive: true });
   return {
-    logPath,
-    statePath: join(dirname(logPath), "state.sqlite"),
+    logPath: join(root, databaseOpLogPath("data.sqlite")),
+    statePath: join(counterFolder, "state.sqlite"),
   };
 }
 
@@ -418,12 +422,14 @@ describe("workspace database worker", () => {
     expect(workers).toHaveLength(2);
   });
 
-  it("migrates the old nonblank-line version once and keeps the counter across restart", async () => {
+  it("starts a missing counter after the log's highest number, not its line count, and keeps it across restart", async () => {
     const root = await createTestScratch("dohc-db-worker-migration-");
     const databasePath = join(root, "data.sqlite");
     seedDatabase(databasePath);
     const paths = editPaths(root);
     await mkdir(dirname(paths.logPath), { recursive: true });
+    // Two operations whose numbers are past the line count: numbers reserved
+    // for edits that failed, or written by an earlier counter.
     await writeFile(
       paths.logPath,
       `${JSON.stringify({ version: 40, old: 1 })}\n\n${JSON.stringify({ version: 99, old: 2 })}\n`,
@@ -437,7 +443,7 @@ describe("workspace database worker", () => {
       edit: UPDATE,
       operation: operation("op-migrated"),
     });
-    expect(first.version).toBe(3);
+    expect(first.version).toBe(100);
     await firstOwner.dispose();
     owners.delete(firstOwner);
 
@@ -453,7 +459,7 @@ describe("workspace database worker", () => {
       edit: secondEdit,
       operation: operation("op-after-restart", secondEdit),
     });
-    expect(second.version).toBe(4);
+    expect(second.version).toBe(101);
     await secondOwner.dispose();
     owners.delete(secondOwner);
 
@@ -465,14 +471,56 @@ describe("workspace database worker", () => {
       edit: thirdEdit,
       operation: operation("op-after-second-restart", thirdEdit),
     });
-    expect(third.version).toBe(5);
+    expect(third.version).toBe(102);
     expect((await logOperations(paths.logPath)).map((entry) => entry.version)).toEqual([
       40,
       99,
-      3,
-      4,
-      5,
+      100,
+      101,
+      102,
     ]);
+  });
+
+  it("starts a missing counter past a gap in the log, so no number repeats", async () => {
+    const root = await createTestScratch("dohc-db-worker-seed-gap-");
+    const databasePath = join(root, "data.sqlite");
+    seedDatabase(databasePath);
+    const paths = editPaths(root);
+    await mkdir(dirname(paths.logPath), { recursive: true });
+    // Number 3 went to an edit that failed, so three lines end at number 4.
+    await writeFile(paths.logPath, [1, 2, 4].map((version) => `${JSON.stringify({ version })}\n`).join(""));
+
+    const edited = await owner().editPath({
+      absolutePath: databasePath,
+      path: "data.sqlite",
+      ...paths,
+      edit: UPDATE,
+      operation: operation("op-after-gap"),
+    });
+
+    expect(edited.version).toBe(5);
+    expect((await logOperations(paths.logPath)).map((entry) => entry.version)).toEqual([1, 2, 4, 5]);
+  });
+
+  it("refuses a number past the safe range rather than give one out again", async () => {
+    const root = await createTestScratch("dohc-db-worker-seed-limit-");
+    const databasePath = join(root, "data.sqlite");
+    seedDatabase(databasePath);
+    const paths = editPaths(root);
+    await mkdir(dirname(paths.logPath), { recursive: true });
+    await writeFile(paths.logPath, `${JSON.stringify({ version: Number.MAX_SAFE_INTEGER })}\n`);
+    const before = await readFile(databasePath);
+
+    await expect(owner().editPath({
+      absolutePath: databasePath,
+      path: "data.sqlite",
+      ...paths,
+      edit: UPDATE,
+      operation: operation("op-past-limit"),
+    })).rejects.toThrow("Database operation version must be a non-negative integer");
+
+    expect(await readFile(databasePath)).toEqual(before);
+    expect(await logOperations(paths.logPath)).toHaveLength(1);
   });
 
   it("pages at the row limit and at the serialized byte budget", async () => {

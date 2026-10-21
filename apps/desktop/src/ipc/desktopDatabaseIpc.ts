@@ -29,7 +29,7 @@ export function registerDesktopDatabaseIpcHandlers<
   shareViewFiles: Pick<ShareViewFiles, "read">;
   workerDatabaseReader(signal?: AbortSignal): OwnedWorkspaceDatabaseReader;
   editWorkspaceDatabaseInWorker(input: {
-    rootPath: string;
+    workspace: Workspace;
     relativePath: string;
     edit: DatabaseEdit;
     author: ChangeAuthor;
@@ -82,7 +82,7 @@ export function registerDesktopDatabaseIpcHandlers<
     // Serialize edits with Undo without invalidating queued writes: database edits do not change paths.
     edit: (operation, input) => withExclusiveWorkspaceOperation(operation.workspace.rootPath, () =>
       editWorkspaceDatabaseInWorker({
-        rootPath: operation.workspace.rootPath,
+        workspace: operation.workspace,
         relativePath: input.relativePath,
         edit: input.edit,
         author: { kind: "user", userId: "local" },

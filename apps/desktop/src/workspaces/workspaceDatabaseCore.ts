@@ -288,16 +288,30 @@ function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
   ).run(...values);
 }
 
-// A counter file that does not exist yet seeds from the operations already in
-// the log, so versions keep climbing from where the log left off.
+// A counter that does not exist yet starts after every operation in the log,
+// so it never gives out a number the log already holds. The line count alone
+// is not enough: a number reserved for an edit that failed leaves a gap.
 async function seedOperationCountFromLog(logPath: string): Promise<number> {
+  let text: string;
   try {
-    const text = await readFile(logPath, "utf8");
-    return text.split("\n").filter((line) => line.trim().length > 0).length;
+    text = await readFile(logPath, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw error;
   }
+  let lines = 0;
+  let highest = 0;
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    lines += 1;
+    try {
+      const { version } = JSON.parse(line) as { version?: unknown };
+      if (Number.isSafeInteger(version) && Number(version) > highest) highest = Number(version);
+    } catch {
+      // A line that does not parse names no number, but still counts as one.
+    }
+  }
+  return Math.max(lines, highest);
 }
 
 function openCounter(statePath: string): SqliteDb {
@@ -328,7 +342,8 @@ async function reserveOperationVersion(input: {
       ? Number(row.value)
       : await seedOperationCountFromLog(input.logPath);
     const version = currentVersion + 1;
-    if (!Number.isInteger(version) || version < 0) {
+    // Past the safe range, adding one can give the same number back.
+    if (!Number.isSafeInteger(version) || version < 0) {
       throw new Error("Database operation version must be a non-negative integer");
     }
     state
@@ -414,7 +429,6 @@ export async function editDatabaseAtPath(input: {
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
   await mkdir(dirname(input.logPath), { recursive: true });
-  await mkdir(dirname(input.statePath), { recursive: true });
   const version = await reserveOperationVersion(input);
   const operation = createValidatedOperation(input.operation, version);
   const { DatabaseSync } = nodeSqlite();
