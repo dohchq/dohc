@@ -42,11 +42,13 @@ impl ActorHandle {
                     let _gates = gates;
                     #[cfg(test)]
                     let mut turn = tests::publication::Turn::start(&p.workspace);
-                    let stopped = state.stops.lock().unwrap().contains_key(&p.operation)
-                        || store.read_with(|conn| conn.query_row(
+                    let stopped = store.read_with(|conn| conn.query_row(
                             "SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",
                             params![p.workspace, p.operation], |r| r.get::<_, bool>(0))
                             .map_err(StorageError::corrupt_public))?;
+                    if !stopped && state.stops.lock().unwrap().contains_key(&p.operation) {
+                        return Ok(Some((0, false)));
+                    }
                     let version = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                     let jobs: Vec<(i64, String)> = if stopped { Vec::new() } else {
                         store.read_with(|conn| {

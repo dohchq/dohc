@@ -1,5 +1,5 @@
 use super::*;
-use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
+use dohc_engine_domain::{RenameTextFile, WriteText};
 use dohc_engine_runtime::{CancellationToken, NoFaults};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
@@ -35,53 +35,56 @@ async fn pending_rewrite_publication_recovers_at_open_and_undo_races_it_safely()
         let open = service.open(Some(&handle)).unwrap();
         let capture = open.capture_apply_gate.clone().lock_owned().await;
         let root = scratch.path().to_path_buf();
-        open.actor
-            .run(move |store, _| {
-                let mut domain = VersionedTextStore::new(store);
-                let version = domain.get_active_version(WS)?.version_id;
-                for (i, path) in ["old.md", "one.md", "two.md", "three.md"]
-                    .iter()
-                    .enumerate()
-                {
-                    let text = if i == 0 { "target" } else { BEFORE };
-                    domain.write_text(
-                        &WriteText {
-                            workspace_id: WS.into(),
-                            version_id: version.clone(),
-                            object_id: format!("object-{i}"),
-                            path: (*path).into(),
-                            text: text.into(),
-                            moment_id: format!("seed-{i}"),
-                            request_id: None,
-                            metadata_origin: "api".into(),
-                            metadata_summary: None,
-                            metadata_correlation_id: None,
-                            author_json: None,
-                            now_ms: 1,
-                        },
-                        &NoFaults,
-                    )?;
-                    std::fs::write(root.join(path), text).unwrap();
-                }
-                domain.rename_text_file(
-                    &RenameTextFile {
+        let version = open.actor.active_version_id(WS.into()).await.unwrap();
+        for (i, path) in ["old.md", "one.md", "two.md", "three.md"]
+            .iter()
+            .enumerate()
+        {
+            let text = if i == 0 { "target" } else { BEFORE };
+            open.actor
+                .versioned_text_write(
+                    WriteText {
                         workspace_id: WS.into(),
-                        version_id: version,
-                        from_path: "old.md".into(),
-                        to_path: "new.md".into(),
-                        moment_id: "rename".into(),
+                        version_id: version.clone(),
+                        object_id: format!("object-{i}"),
+                        path: (*path).into(),
+                        text: text.into(),
+                        moment_id: format!("seed-{i}"),
                         request_id: None,
                         metadata_origin: "api".into(),
                         metadata_summary: None,
-                        metadata_correlation_id: Some(OP.into()),
+                        metadata_correlation_id: None,
                         author_json: None,
-                        now_ms: 2,
+                        now_ms: 1,
                     },
-                    &NoFaults,
-                )?;
-                std::fs::rename(root.join("old.md"), root.join("new.md")).unwrap();
-                Ok(())
-            })
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            std::fs::write(root.join(path), text).unwrap();
+        }
+        std::fs::rename(root.join("old.md"), root.join("new.md")).unwrap();
+        open.actor
+            .versioned_text_rename(
+                RenameTextFile {
+                    workspace_id: WS.into(),
+                    version_id: version,
+                    from_path: "old.md".into(),
+                    to_path: "new.md".into(),
+                    moment_id: "rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some(OP.into()),
+                    author_json: None,
+                    now_ms: 2,
+                },
+                root,
+                Arc::new(service.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         let reply = open
@@ -148,7 +151,7 @@ async fn pending_rewrite_publication_recovers_at_open_and_undo_races_it_safely()
                     }) {
                         break;
                     }
-                    open.actor.run(|_, _| Ok(())).await.unwrap();
+                    open.actor.active_version_id(WS.into()).await.unwrap();
                     tokio::task::yield_now().await;
                 }
             })

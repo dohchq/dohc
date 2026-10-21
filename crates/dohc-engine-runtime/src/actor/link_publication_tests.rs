@@ -72,11 +72,17 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let last = self.root.join(format!("source-{:04}.md", sources - 1));
+            let mut next = 0;
             loop {
-                if std::fs::read_to_string(&last).ok().as_deref()
-                    == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+                while next < sources
+                    && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
+                        .ok()
+                        .as_deref()
+                        == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
                 {
+                    next += 1;
+                }
+                if next == sources {
                     break;
                 }
                 self.actor.run(|_, _| Ok(())).await.unwrap();
@@ -158,15 +164,17 @@ async fn undo_cancels_publication_between_complete_file_placements() {
     let (entered, release) = pause(&f.ws);
     drop(hold);
     entered.notified().await;
-    let undo = f.undo();
-    tokio::pin!(undo);
-    std::future::poll_fn(|cx| {
-        assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    release.send(()).unwrap();
-    let result = undo.await.unwrap();
+    let result = {
+        let undo = f.undo();
+        tokio::pin!(undo);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        undo.await.unwrap()
+    };
     assert_eq!(result.moments.len(), 4);
     assert!(result.not_restored.is_empty());
     for i in 0..3 {
@@ -215,7 +223,7 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
     let (entered, release) = pause(&f.ws);
     drop(hold);
     entered.notified().await;
-    let admission = f.serial.lock();
+    let admission = f.serial.clone().lock_owned();
     tokio::pin!(admission);
     std::future::poll_fn(|cx| {
         assert!(std::future::Future::poll(admission.as_mut(), cx).is_pending());
@@ -269,7 +277,7 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
         "turnsBeforeQueuedUpdate":turns_before_update,"longestActorHoldNs":turns.iter().map(|(_,ns)|ns).max(),
         "fsyncP95Ns":flushes[1899],"fsyncP99Ns":flushes[1979],"fsyncMaxNs":flushes.last(),
         "placementTurns":turns});
-    eprintln!("LINK_PUBLICATION {evidence}");
+    eprintln!("LINK_PUBLICATION sources=2000 diskNs={disk_ns} updateWaitNs={update_ns}");
     if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -337,6 +345,64 @@ async fn a_refused_placement_stays_pending_and_retries_after_its_hold_is_release
         })
         .await
         .unwrap();
+    f.wait_disk(1).await;
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_undo_before_its_plan_resumes_pending_publication() {
+    let f = Fixture::new(1, 1);
+    let capture = f.capture.clone().lock_owned().await;
+    f.pass("cancel-undo-publication", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let undo_gate = f.actor.link_rewrites.undo_gate.clone().lock_owned().await;
+    let token = CancellationToken::new();
+    {
+        let undo = f.actor.history_undo_in_turns(
+            f.ws.clone(),
+            OP.into(),
+            "cancelled-undo".into(),
+            None,
+            f.root.to_path_buf(),
+            Arc::new(NoFaults),
+            10,
+            [f.capture.clone(), f.serial.clone()],
+            Arc::new(()),
+            None,
+            token.clone(),
+        );
+        tokio::pin!(undo);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(capture);
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if placements()
+                    .lock()
+                    .unwrap()
+                    .get(&f.ws)
+                    .is_some_and(|p| !p.turns.is_empty())
+                {
+                    break;
+                }
+                f.actor.run(|_, _| Ok(())).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+            BODY
+        );
+        token.cancel();
+        assert!(matches!(undo.await, Err(RuntimeError::Cancelled)));
+    }
+    drop(undo_gate);
     f.wait_disk(1).await;
     f.close().await;
 }
