@@ -110,7 +110,7 @@ it("follows typed and build-only runtime package exports into their dependencies
 });
 
 it.each(["types", "runtime"])("rejects declaration files reached through a package's %s export", target => {
-  const fixture = mkdtempSync(resolve(tmpdir(), "dohc-authorization-declaration-"));
+  const fixture = realpathSync.native(mkdtempSync(resolve(tmpdir(), "dohc-authorization-declaration-")));
   const entry = resolve(fixture, "authorization.ts");
   const packageRoot = resolve(fixture, "node_modules/@dohc/sdk");
   try {
