@@ -30,6 +30,7 @@ pub(super) struct Turn {
 }
 impl Turn {
     pub(super) fn start(ws: &str, phase: &'static str) -> Self {
+        undo_probe::trace_reserve_rows(phase == "reserve");
         if phase != "plan" {
             undo_probe::begin_turn(ws);
         }
@@ -42,6 +43,7 @@ impl Turn {
 }
 impl Drop for Turn {
     fn drop(&mut self) {
+        undo_probe::trace_reserve_rows(false);
         if self.phase != "plan" {
             undo_probe::record_phase(&self.ws, self.phase, None, self.start.elapsed(), true);
         }
@@ -175,7 +177,8 @@ impl Fixture {
     ) -> Result<Value, RuntimeError> {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut backoff = Duration::from_millis(100);
-        loop {
+        let mut retries = 0;
+        let result = loop {
             let result = self
                 .actor
                 .history_rewrite_links(
@@ -194,17 +197,20 @@ impl Fixture {
                 Err(RuntimeError::Storage(StorageError::FileLocked)) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
-                        return result;
+                        break result;
                     }
                     tokio::time::sleep(backoff.min(remaining)).await;
                     if Instant::now() >= deadline {
-                        return result;
+                        break result;
                     }
                     backoff = (backoff * 2).min(Duration::from_secs(1));
                 }
-                result => return result,
+                result => break result,
             }
-        }
+            retries += 1;
+        };
+        eprintln!("LINK_REWRITE_RETRIES request={request} retries={retries}");
+        result
     }
     async fn text(&self, path: &str) -> String {
         let (ws, path) = (self.ws.clone(), path.to_owned());
@@ -562,10 +568,16 @@ struct CrashAfterDocuments {
     store: Mutex<EngineStore>,
     request: String,
     documents: i64,
+    point: FaultPoint,
 }
 impl FaultInjector for CrashAfterDocuments {
     fn poll(&self, point: FaultPoint) -> FaultAction {
-        if point != FaultPoint::StorageAfterCommitBeforeAck {
+        if point != self.point {
+            return FaultAction::Continue;
+        }
+        // A retried pass reserves its receipt again. Before-persist faults
+        // must wait for a source transaction, even if progress is already saved.
+        if point == FaultPoint::StorageBeforePersist && undo_probe::sources_in_turn() == 0 {
             return FaultAction::Continue;
         }
         let documents: Option<i64> = self.store.lock().unwrap().read_with(|conn| {
@@ -782,10 +794,11 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
         FaultPoint::StorageAfterCommitBeforeAck,
     ] {
         let mut f = Fixture::new(3, 3);
-        let faults = Arc::new(CrashNth {
+        let faults = Arc::new(CrashAfterDocuments {
+            store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
+            request: "crash-rewrite".into(),
+            documents: if point == FaultPoint::StorageBeforePersist { 1 } else { 2 },
             point,
-            nth: 3,
-            seen: AtomicUsize::new(0),
         });
         let result = f.pass("crash-rewrite", faults).await;
         assert!(
@@ -1030,6 +1043,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
         request: "performance".into(),
         documents: 1000,
+        point: FaultPoint::StorageAfterCommitBeforeAck,
     });
     let result = f.pass("performance", crash).await;
     assert!(
