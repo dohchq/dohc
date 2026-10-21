@@ -27,6 +27,10 @@ dohc starts, including the engine, chat runners, and the commands agents run, so
 each of them can also create user namespaces. Point Ubuntu and Debian users to
 the `.deb`.
 
+On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
+`/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
+([reference](../reference/cli-mcp-sdk.md)).
+
 ## Keep signing credentials on reviewed code
 
 Store the Windows signing secrets in the GitHub `desktop-release` environment.

@@ -71,6 +71,7 @@ if (config) {
   check(config.productName === "dohc", "productName is dohc");
   check(typeof config.appId === "string" && config.appId.includes("dohc"), `appId carries dohc (${config.appId})`);
   check(config.executableName === "dohc", "executableName is filesystem-safe");
+  check(config.linux?.executableName === "dohc-desktop", "the Linux app's command leaves dohc to the chat CLI");
   check(
     config.linux?.syncDesktopName === true,
     "Linux launcher filename and StartupWMClass sync to desktopName",
