@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
+import {LIVE_MARKDOWN_MAX_BYTES} from "@dohc/live-session-contract/limits";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import {firstOpenCandidateBinding, type FirstOpenCandidateCheck, type FirstOpenCandidateInput} from "@dohc/workspace-engine-client/daemon";
@@ -44,12 +45,14 @@ export function parseFirstOpenRequest(body: Record<string, unknown>): FirstOpenR
 /**
  * What the service host's engine said about a candidate, or why it gave no
  * verdict. An answer holds only while `current()` does: the host that checked
- * still stands with the workspace attached. `integrity`: what the relay sent
+ * still stands with the workspace attached. `host-capacity`: the host's
+ * configuration can never admit this check. `integrity`: what the relay sent
  * and what the engine read disagree.
  */
 export type FirstOpenNativeCheck =
   | {readonly kind: "answered"; readonly check: FirstOpenCandidateCheck; current(): boolean}
-  | {readonly kind: "unavailable"; readonly reason: FirstOpenHostFailure | "busy" | "host-limits"}
+  | {readonly kind: "unavailable"; readonly reason: FirstOpenHostFailure | "busy"}
+  | {readonly kind: "host-capacity"}
   | {readonly kind: "integrity"};
 /** The running service host's check. Cancellation rejects with the signal's reason. */
 export interface FirstOpenCheckHost {
@@ -60,9 +63,13 @@ export interface FirstOpenCheckHost {
 class FirstOpenBoundExceeded extends Error {
   constructor(readonly bound: FirstOpenBaseBound) {super("A first-open base exceeds its configured bounds.");}
 }
-/** The host that checked the candidate retired or detached its workspace before the writer. */
+/**
+ * A check that no longer holds in the writer. `host-absent`: the host that
+ * checked retired or detached its workspace. `reconfigured`: the validation
+ * policy the base was built under changed.
+ */
 class FirstOpenCheckLapsed extends Error {
-  constructor() {super("The engine that checked a first-open candidate no longer stands.");}
+  constructor(readonly reason: "host-absent" | "reconfigured") {super("A first-open check no longer holds.");}
 }
 
 /** A history read or build that failed rather than answered. */
@@ -190,6 +197,8 @@ export function createFirstOpenPublisher(options: {
     const head = storage.readFirstOpenMoment(workspaceId, objectId);
     if (!head || head.sourceMomentId !== request.sourceMomentId || head.path !== request.path || head.sourceDigest !== request.sourceDigest ||
       head.contentKind !== "text" || head.sourceByteLength === null) return answer({kind: "refused", reason: "stale-source"});
+    // A live document holds no more Markdown than this, so nothing longer is built or sent to the engine.
+    if (head.sourceByteLength > LIVE_MARKDOWN_MAX_BYTES) return answer({kind: "refused", reason: "too-large", code: "source-limit"});
     const bytes = storage.getBlob(workspaceId, head.sourceDigest);
     if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
     let markdown: string;
@@ -208,7 +217,11 @@ export function createFirstOpenPublisher(options: {
     if (built.kind === "refused") {
       switch (built.reason) {
         case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});
-        case "invalid-base": return answer({kind: "integrity", reason: "candidate"});
+        // The file's own content can leave the shared schema; a malformed or mutated seed is the relay's fault.
+        case "invalid-base":
+          if (built.fault === "invalid-schema") return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
+          console.error("[sync-relay] first-open candidate invalid", built.fault);
+          return answer({kind: "integrity", reason: "candidate"});
         case "unsupported-source": return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
         default: return answer({kind: "refused", reason: "too-large", code: built.reason});
       }
@@ -225,6 +238,7 @@ export function createFirstOpenPublisher(options: {
     const native = await host.checkFirstOpenCandidate(workspaceId, asked, signal);
     signal.throwIfAborted();
     if (native.kind === "unavailable") return answer({kind: "unavailable", reason: native.reason});
+    if (native.kind === "host-capacity") return answer({kind: "refused", reason: "too-large", code: "host-capacity"});
     if (native.kind === "integrity" || !isDeepStrictEqual(native.check.binding, firstOpenCandidateBinding(asked))) {
       return answer({kind: "integrity", reason: "check-evidence"});
     }
@@ -236,12 +250,13 @@ export function createFirstOpenPublisher(options: {
 
     // The writer commits only bytes with the checked digest, over the proof's source, which it rechecks.
     const base = {namespace, bytes: built.base, sha256: checked.candidateSha256, recordedAtMs: head.recordedAtMs};
-    // The writer's own checks: authorization, standing, the checking host and the bounds that apply now.
+    // The writer's own checks: authorization, standing, the checking host, the policy the base was built under and the bounds that apply now.
     const writerGuard = (context: AppendLogBatchGuardContext) => {
       if (standing(context.enforceWorkspaceIdentity) !== objectId) throw notFound();
       const current = options.activation();
       if (!current) throw notFound();
-      if (!checked.current()) throw new FirstOpenCheckLapsed();
+      if (!checked.current()) throw new FirstOpenCheckLapsed("host-absent");
+      if (!isDeepStrictEqual(current.validation, config.validation)) throw new FirstOpenCheckLapsed("reconfigured");
       const exceeded = firstOpenBaseExceeds(checked.sizes, bounds(current, source, identity, originId));
       if (exceeded) throw new FirstOpenBoundExceeded(exceeded);
     };
@@ -250,7 +265,7 @@ export function createFirstOpenPublisher(options: {
       try {written = storage.writeFirstOpen(proof, base, writerGuard);}
       catch (error) {
         if (error instanceof FirstOpenBoundExceeded) return answer({kind: "refused", reason: "too-large", code: error.bound});
-        if (error instanceof FirstOpenCheckLapsed) return answer({kind: "unavailable", reason: "host-absent"});
+        if (error instanceof FirstOpenCheckLapsed) return answer({kind: "unavailable", reason: error.reason});
         throw error;
       }
       if (written.kind === "published") return answer({kind: "published", receipt: written.receipt});

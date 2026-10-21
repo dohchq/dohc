@@ -250,8 +250,15 @@ describe("first-open base", () => {
     } finally { projector.mockRestore(); }
   });
 
-  it("refuses a base the live validator refuses", () => {
-    expect(buildFirstOpenBase(policy, input("Body", { currentPath: "docs/a.txt" }))).toEqual({ kind: "refused", reason: "invalid-base" });
+  it("refuses a base the live validator refuses, with the validator's reason", () => {
+    expect(buildFirstOpenBase(policy, input("Body", { currentPath: "docs/a.txt" }))).toEqual({ kind: "refused", reason: "invalid-base", fault: "invalid-input" });
+    // The live schema keeps no link around inline code.
+    expect(buildFirstOpenBase(policy, input("See [`lock()`](https://example.com/lock).\n")))
+      .toEqual({ kind: "refused", reason: "invalid-base", fault: "invalid-schema" });
+    const encode = vi.spyOn(richdocSeed, "encodeRichdocSeed").mockImplementationOnce(() => { throw new Error("an encoder bug"); });
+    try {
+      expect(buildFirstOpenBase(policy, input("Body"))).toEqual({ kind: "refused", reason: "invalid-base", fault: "seed-encoder" });
+    } finally { encode.mockRestore(); }
   });
 
   it("refuses a base over the engine's update limit before decoding it", () => {

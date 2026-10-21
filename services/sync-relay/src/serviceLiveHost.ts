@@ -235,6 +235,8 @@ export async function startServiceLiveHost(options: {
   let activation:ServiceActivationDriver|undefined;
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
+  // Whether a first-open check is queued or running on this host.
+  let firstOpenChecking = false;
   let requestId = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
@@ -950,7 +952,8 @@ export async function startServiceLiveHost(options: {
        * file. Takes no turn, so an activation pass can wait on it, and runs
        * while the host still prepares. The host must stand and keep the
        * workspace attached from before the call until its answer is used;
-       * `current()` says whether it still does.
+       * `current()` says whether it still does. One check at a time, queued
+       * or running, so checks never crowd out live writes.
        */
       async checkFirstOpenCandidate(workspaceId: string, input: FirstOpenCandidateInput, callerSignal: AbortSignal): Promise<FirstOpenNativeCheck> {
         const handle = members.get(workspaceId)?.handle;
@@ -965,7 +968,9 @@ export async function startServiceLiveHost(options: {
         callerSignal.throwIfAborted();
         if (!current()) return failed("host-absent");
         // An upload the client can never hold is this host's configuration, not contention.
-        if (firstOpenCandidateUploadBytes(firstOpenCandidateBinding(input)) > config.client.aggregateBytes) return failed("host-limits");
+        if (firstOpenCandidateUploadBytes(firstOpenCandidateBinding(input)) > config.client.aggregateBytes) return {kind: "host-capacity"};
+        if (firstOpenChecking) return failed("busy");
+        firstOpenChecking = true;
         try {
           const check = await withLiveHostSignal(signal, callerSignal, joined => client.checkFirstOpenCandidate(
             {id: nextRequestId(), workspace: handle!, deadlineMs: config.client.requestDeadlineMs}, input, joined));
@@ -977,7 +982,10 @@ export async function startServiceLiveHost(options: {
           if (!current()) return failed("host-absent", error);
           const code = engineCode(error);
           if (code === "OVERLOADED" || (error instanceof NativeRequestQueueError && error.reason === "capacity")) return failed("busy");
-          if (code === "LIMIT_EXCEEDED") return failed("host-limits", error);
+          if (code === "LIMIT_EXCEEDED") {
+            console.error("[service-live-host] first-open check exceeds this host's capacity", error);
+            return {kind: "host-capacity"};
+          }
           if (code === "DEADLINE_EXCEEDED" || error instanceof NativeRequestQueueError) return failed("check-deadline", error);
           if (code === "BLOB_INVALID" || code === "INVALID_PARAMS" || error instanceof InvalidFirstOpenCandidateCheck) {
             console.error("[service-live-host] first-open check disagreed with its candidate", error);
@@ -987,7 +995,7 @@ export async function startServiceLiveHost(options: {
           if (code !== undefined) return failed("check-failed", error);
           if (error instanceof EngineClientError) return failed("host-unreachable", error);
           throw error;
-        }
+        } finally {firstOpenChecking = false;}
       },
       drain,
       close,

@@ -294,7 +294,6 @@ it("asks the engine to check a first-open candidate outside any turn, and says w
     expect(check.mock.calls[0]![1]).toBe(input);
     for (const [error, reason] of [
       [wire("OVERLOADED"), "busy"], [new NativeRequestQueueError("capacity", "full"), "busy"],
-      [wire("LIMIT_EXCEEDED"), "host-limits"],
       [wire("DEADLINE_EXCEEDED"), "check-deadline"], [new NativeRequestQueueError("deadline", "late"), "check-deadline"],
       [new EngineRequestDeadlineError(7, "liveApplication.checkFirstOpenCandidate", 10), "check-deadline"],
       [wire("WORKSPACE_UNAVAILABLE"), "host-absent"], [wire("SESSION_EXPIRED"), "host-absent"],
@@ -304,6 +303,9 @@ it("asks the engine to check a first-open candidate outside any turn, and says w
       check.mockRejectedValueOnce(error);
       expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal), String(error)).toEqual({kind: "unavailable", reason});
     }
+    // A check an idle engine could never admit is this host's configuration.
+    check.mockRejectedValueOnce(wire("LIMIT_EXCEEDED"));
+    expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "host-capacity"});
     for (const error of [wire("BLOB_INVALID"), wire("INVALID_PARAMS"), new InvalidFirstOpenCandidateCheck()]) {
       check.mockRejectedValueOnce(error);
       expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "integrity"});
@@ -315,13 +317,28 @@ it("asks the engine to check a first-open candidate outside any turn, and says w
     check.mockImplementationOnce(async () => { abort.abort(new Error("cancelled")); throw wire("CANCELLED"); });
     await expect(host.checkFirstOpenCandidate("workspace", input, abort.signal)).rejects.toThrow("cancelled");
     // Neither another workspace nor an upload the client can never hold reaches the engine.
-    const calls = check.mock.calls.length;
+    let calls = check.mock.calls.length;
     expect(await host.checkFirstOpenCandidate("other", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
     // 5 MiB plus the 3 MiB request allowance passes 8 MiB.
     const large = new Uint8Array(5 * 1024 * 1024);
     expect(await host.checkFirstOpenCandidate("workspace", {...input, candidate: large, candidateSha256: digest(large)}, new AbortController().signal))
-      .toEqual({kind: "unavailable", reason: "host-limits"});
+      .toEqual({kind: "host-capacity"});
     expect(check.mock.calls.length).toBe(calls);
+    // One check at a time: another is busy until the first answers or fails.
+    type Release = {resolve(value: unknown): void; reject(error: unknown): void};
+    for (const settle of [(release: Release) => release.resolve(verdict), (release: Release) => release.reject(wire("INTERNAL"))]) {
+      let release!: Release;
+      check.mockImplementationOnce(() => new Promise((resolve, reject) => { release = {resolve, reject}; }));
+      const first = host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+      await vi.waitFor(() => expect(check.mock.calls.length).toBe(calls + 1));
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "busy"});
+      expect(check.mock.calls.length).toBe(calls + 1);
+      settle(release);
+      await first;
+      check.mockResolvedValueOnce(verdict);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toMatchObject({kind: "answered"});
+      calls += 2;
+    }
     // The answer holds only while its host stands.
     expect(answered.kind === "answered" && answered.current()).toBe(true);
     await host.close();

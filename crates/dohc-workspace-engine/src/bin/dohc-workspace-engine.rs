@@ -3966,4 +3966,348 @@ mod tests {
         first_differs[0] ^= 0x01;
         assert!(!constant_time_eq(&first_differs, expected.as_bytes()));
     }
+
+    /// First-open checks through the daemon's real transport and a configured
+    /// live host.
+    mod first_open_checks {
+        use super::*;
+        use dohc_engine_collab::{ContentKind, Ydoc};
+        use dohc_engine_protocol::wire::{Cancel, WorkspaceHandle};
+        use dohc_engine_storage::hex_sha256;
+        use serde_json::{Value, json};
+
+        /// While held, the daemon's writes wait with their waker filed.
+        #[derive(Clone, Default)]
+        struct OutputGate(Arc<Mutex<(bool, Option<std::task::Waker>)>>);
+
+        impl OutputGate {
+            fn hold(&self) {
+                lock(&self.0).0 = true;
+            }
+            fn release(&self) {
+                let waker = {
+                    let mut gate = lock(&self.0);
+                    gate.0 = false;
+                    gate.1.take()
+                };
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            }
+        }
+
+        struct GatedWriter<W> {
+            output: W,
+            gate: OutputGate,
+        }
+
+        impl<W: AsyncWrite + Unpin> AsyncWrite for GatedWriter<W> {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                {
+                    let mut gate = lock(&self.gate.0);
+                    if gate.0 {
+                        gate.1 = Some(cx.waker().clone());
+                        return Poll::Pending;
+                    }
+                }
+                Pin::new(&mut self.output).poll_write(cx, bytes)
+            }
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+            ) -> Poll<io::Result<()>> {
+                Pin::new(&mut self.output).poll_flush(cx)
+            }
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+            ) -> Poll<io::Result<()>> {
+                Pin::new(&mut self.output).poll_shutdown(cx)
+            }
+        }
+
+        /// The engine, reporting each request's id once the engine has it: a
+        /// plain request when its call starts, an upload once it is answered.
+        struct ReportingService {
+            engine: Arc<EngineService>,
+            seen: tokio::sync::mpsc::UnboundedSender<u64>,
+        }
+
+        impl ProtocolEngineService for ReportingService {
+            type Input = LiveApplicationInput;
+            async fn call(
+                &self,
+                ctx: RequestContext,
+                request: WireRequest,
+            ) -> Result<ServiceResponse, WireError> {
+                let _ = self.seen.send(request.id);
+                ProtocolEngineService::call(&*self.engine, ctx, request).await
+            }
+            async fn call_with_input(
+                &self,
+                ctx: RequestContext,
+                request: WireRequest,
+                input: Option<LiveApplicationInput>,
+            ) -> Result<ServiceResponse, WireError> {
+                let id = request.id;
+                let answer =
+                    ProtocolEngineService::call_with_input(&*self.engine, ctx, request, input)
+                        .await;
+                let _ = self.seen.send(id);
+                answer
+            }
+        }
+
+        /// One ordinary workspace on a configured live host, behind the
+        /// daemon's transport with a gate on its output.
+        struct Daemon {
+            root: dohc_engine_testkit::ScratchDir,
+            sender: tokio::io::DuplexStream,
+            receiver: tokio::io::DuplexStream,
+            decoder: FrameDecoder,
+            gate: OutputGate,
+            seen: tokio::sync::mpsc::UnboundedReceiver<u64>,
+            workspace: WorkspaceHandle,
+            attached: bool,
+            task: tokio::task::JoinHandle<Result<(), io::Error>>,
+        }
+
+        impl Daemon {
+            async fn start() -> Self {
+                let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+                let config = serde_json::from_value(json!({
+                    "version": 1, "relayNamespace": "relay",
+                    "host": {"hostId": "host", "hostEpoch": 1, "instanceId": "instance", "connectionId": "connection"},
+                    "workspaces": [{"root": root.path(), "workspaceId": "ordinary", "maxRegistrations": 4,
+                        "relay": {"baseUrl": "https://relay.example", "bearerToken": "owner-credential"}}],
+                    "ingress": {"aggregateBytes": 512 * 1024 * 1024, "applicationWorkingReserveBytes": 8 * 1024 * 1024,
+                        "maxUploads": 2, "uploadDeadlineMs": 30_000}
+                }))
+                .unwrap();
+                let (engine, owner, ingress) =
+                    EngineService::configured_live_host(config).await.unwrap();
+                let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();
+                let supervisor = Arc::new(Supervisor::new(
+                    SupervisorConfig::default(),
+                    Arc::new(ReportingService {
+                        engine,
+                        seen: seen_tx,
+                    }),
+                ));
+                let (sender, input) = tokio::io::duplex(64 * 1024);
+                let (output, receiver) = tokio::io::duplex(64 * 1024);
+                let gate = OutputGate::default();
+                let output = GatedWriter {
+                    output,
+                    gate: gate.clone(),
+                };
+                let task = tokio::spawn(async move {
+                    run_transport_with_live(
+                        TEST_AUTH_TOKEN.into(),
+                        input,
+                        output,
+                        supervisor,
+                        no_events().into(),
+                        || Ok(()),
+                        Some((owner, ingress)),
+                    )
+                    .await
+                });
+                let mut daemon = Self {
+                    root,
+                    sender,
+                    receiver,
+                    decoder: FrameDecoder::new(WireLimits::default()),
+                    gate,
+                    seen,
+                    workspace: WorkspaceHandle(String::new()),
+                    attached: true,
+                    task,
+                };
+                daemon
+                    .send(&Envelope::Hello(Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        auth_token: TEST_AUTH_TOKEN.into(),
+                        capabilities: vec!["blobs".into()],
+                        last_session_generation: None,
+                        max_frame_bytes: None,
+                    }))
+                    .await;
+                assert!(matches!(daemon.next().await, Envelope::HelloAck(_)));
+                daemon
+                    .request(1, "liveApplication.hosts", None, json!({}))
+                    .await;
+                let hosts = daemon.response(1).await;
+                daemon.workspace =
+                    serde_json::from_value(hosts["workspaces"][0]["workspaceHandle"].clone())
+                        .unwrap();
+                daemon
+            }
+
+            async fn send(&mut self, envelope: &Envelope) {
+                self.sender
+                    .write_all(&encode_envelope(envelope))
+                    .await
+                    .unwrap();
+            }
+
+            async fn request(
+                &mut self,
+                id: u64,
+                method: &str,
+                workspace: Option<WorkspaceHandle>,
+                params: Value,
+            ) {
+                self.send(&Envelope::Request(WireRequest {
+                    id,
+                    method: method.into(),
+                    workspace,
+                    deadline_ms: Some(30_000),
+                    idempotency_key: None,
+                    progress: false,
+                    params,
+                }))
+                .await;
+            }
+
+            /// Uploads a check of a simple note against its own seed.
+            async fn check(&mut self, id: u64, workspace: WorkspaceHandle) {
+                const MARKDOWN: &str = "# Plan\n\nBring snacks.\n";
+                let doc = Ydoc::wire();
+                doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, MARKDOWN)
+                    .unwrap();
+                let candidate = doc.encode_full_state();
+                let bundle = [candidate.as_slice(), MARKDOWN.as_bytes()].concat();
+                let binding = json!({"objectId": "object", "path": "notes/a.md", "sourceMomentId": "moment",
+                    "sourceSha256": hex_sha256(MARKDOWN.as_bytes()), "sourceByteLength": MARKDOWN.len(),
+                    "candidateSha256": hex_sha256(&candidate), "candidateByteLength": candidate.len(),
+                    "replicationEpoch": "epoch", "streamIdentity": "stream", "maxFullStateBytes": 20 * 1024 * 1024});
+                let params = json!({"contractVersion": 1, "binding": binding, "streamId": id,
+                    "byteLength": bundle.len(), "digest": hex_sha256(&bundle)});
+                self.request(
+                    id,
+                    "liveApplication.checkFirstOpenCandidate",
+                    Some(workspace),
+                    params,
+                )
+                .await;
+                self.send(&Envelope::BlobStart(BlobStart {
+                    request_id: id,
+                    stream_id: id,
+                    total_bytes: Some(bundle.len() as u64),
+                    sha256: Some(hex_sha256(&bundle)),
+                }))
+                .await;
+                self.sender
+                    .write_all(
+                        &encode_blob_chunk_frame(id, true, &bundle, &WireLimits::default())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            /// Waits until the engine has request `id`, as `ReportingService` reports it.
+            async fn seen(&mut self, id: u64) {
+                while self.seen.recv().await.unwrap() != id {}
+            }
+
+            async fn next(&mut self) -> Envelope {
+                next_envelope(
+                    &mut self.decoder,
+                    &mut self.receiver,
+                    &WireLimits::default(),
+                )
+                .await
+            }
+
+            /// The next envelope, which must answer `id`.
+            async fn response(&mut self, id: u64) -> Value {
+                match self.next().await {
+                    Envelope::Response(response) if response.id == id => response.result,
+                    other => panic!("expected the answer to {id}, got {other:?}"),
+                }
+            }
+
+            /// Detaches the workspace, so it closes before its root goes, and
+            /// ends the transport.
+            async fn close(mut self) {
+                if self.attached {
+                    let workspace = self.workspace.clone();
+                    self.request(
+                        1_000,
+                        "liveApplication.detachWorkspace",
+                        Some(workspace),
+                        json!({}),
+                    )
+                    .await;
+                    assert_eq!(self.response(1_000).await["detached"], true);
+                }
+                let Self {
+                    root, sender, task, ..
+                } = self;
+                drop(sender);
+                task.await.unwrap().unwrap();
+                drop(root);
+            }
+        }
+
+        /// A cancel that reaches the daemon after the engine answered a check,
+        /// while the answer waits for the writer, still lets the answer out,
+        /// and the connection keeps answering checks.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_answer_held_at_the_writer_outlasts_a_late_cancel() {
+            let mut daemon = Daemon::start().await;
+            let workspace = daemon.workspace.clone();
+            daemon.gate.hold();
+            daemon.check(2, workspace.clone()).await;
+            daemon.seen(2).await;
+            daemon.send(&Envelope::Cancel(Cancel { id: 2 })).await;
+            // The daemon reads in order, so it has the cancel once it has the next request.
+            daemon
+                .request(3, "liveApplication.hosts", None, json!({}))
+                .await;
+            daemon.seen(3).await;
+            daemon.gate.release();
+            assert_eq!(daemon.response(2).await["status"], "checked");
+            daemon.response(3).await;
+            daemon.check(4, workspace).await;
+            assert_eq!(daemon.response(4).await["status"], "checked");
+            daemon.close().await;
+        }
+
+        /// A check for a workspace detached while it was on the way is refused
+        /// once its upload drains, and the connection keeps answering.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_check_after_its_workspace_detached_ends_only_that_request() {
+            let mut daemon = Daemon::start().await;
+            let workspace = daemon.workspace.clone();
+            daemon
+                .request(
+                    2,
+                    "liveApplication.detachWorkspace",
+                    Some(workspace.clone()),
+                    json!({}),
+                )
+                .await;
+            assert_eq!(daemon.response(2).await["detached"], true);
+            daemon.attached = false;
+            daemon.check(3, workspace).await;
+            match daemon.next().await {
+                Envelope::Error(ErrorEnvelope { id: Some(3), error }) => {
+                    assert_eq!(error.code, ErrorCode::WorkspaceUnavailable)
+                }
+                other => panic!("expected the check refused, got {other:?}"),
+            }
+            daemon
+                .request(4, "liveApplication.hosts", None, json!({}))
+                .await;
+            daemon.response(4).await;
+            daemon.close().await;
+        }
+    }
 }

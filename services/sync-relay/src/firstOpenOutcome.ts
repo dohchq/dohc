@@ -26,7 +26,8 @@ export type FirstOpenHostFailure = "host-absent" | "host-unreachable" | "check-f
  * Why a current file cannot start live. The engine's own causes name how it
  * refused the candidate. `not-utf8`: the file is not UTF-8 text.
  * `relay-projection`: the relay's validator does not read the candidate back
- * as the file.
+ * as the file, or the file holds what the live schema cannot, such as a link
+ * around inline code.
  */
 export type FirstOpenUnsupportedCause = FirstOpenCandidateRefusal | "not-utf8" | "relay-projection";
 
@@ -48,18 +49,20 @@ export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" |
  * - `existing-history`: the document had live authority before; nothing was appended.
  * - `refused`: nothing was appended. `deletion` excludes the document for good,
  *   whatever was restored since. `unsupported-source` names its `cause`.
- *   `too-large` names the bound in `code`. The service host reports
- *   `ordinary-activation-refused` after capture; the route never does.
+ *   `too-large` names the bound in `code`; `source-limit`: the file is longer
+ *   than a live document can be; `host-capacity`: the service host's
+ *   configuration can never fit this check until its operator raises it. The
+ *   service host reports `ordinary-activation-refused` after capture; the
+ *   route never does.
  * - `unavailable`: the document's history says nothing yet. `contention`: the
  *   workspace kept moving through every attempt. `busy`: no worker slot or
- *   engine capacity was free. `history-unavailable`: its history could not be
+ *   engine capacity was free. `reconfigured`: the validation policy changed
+ *   after the base was built under it. `history-unavailable`: its history could not be
  *   read. `worker-failed`: the worker building the base failed. The host
  *   failures say why the engine gave no verdict. Nothing was appended or
  *   retained for any of these. `storage-failed`: the relay database failed in
  *   a way that can pass, possibly while committing the base; asking again
- *   replays any base that was appended. `host-limits`: the service host's
- *   configuration can never fit this check, so asking again cannot help until
- *   its operator raises it. The relay logs the failures.
+ *   replays any base that was appended. The relay logs the failures.
  * - `integrity`: the relay's own records, or what it told the engine, disagree.
  *   Nothing was overwritten.
  */
@@ -68,9 +71,9 @@ export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readon
   | {readonly kind: "existing-history"; readonly reason: "prior-authority"}
   | {readonly kind: "refused"; readonly reason: "deletion" | "stale-source"}
   | {readonly kind: "refused"; readonly reason: "unsupported-source"; readonly cause: FirstOpenUnsupportedCause}
-  | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound}
+  | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound | "source-limit" | "host-capacity"}
   | {readonly kind: "refused"; readonly reason: "ordinary-activation-refused"; readonly code?: string}
-  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "host-limits" | FirstOpenFailure | FirstOpenHostFailure}
+  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "reconfigured" | FirstOpenFailure | FirstOpenHostFailure}
   | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate" | "check-evidence"}
 );
 
@@ -80,7 +83,7 @@ type Answer = FirstOpenOutcome extends infer O ? O extends unknown ? Omit<O, "so
 export function firstOpenRecovery(answer: Answer): FirstOpenRecovery {
   switch (answer.kind) {
     case "published": case "replayed": case "existing-history": return "pull";
-    case "unavailable": return answer.reason === "host-limits" ? "report" : "retry-later";
+    case "unavailable": return "retry-later";
     case "integrity": return "report";
     case "refused":
       switch (answer.reason) {

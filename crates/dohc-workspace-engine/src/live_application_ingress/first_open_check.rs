@@ -123,9 +123,6 @@ pub(super) fn begin(
     if request.idempotency_key.is_some() || ingress.has_request(request.id) {
         return Err(invalid("invalid-first-open-check-request"));
     }
-    let host = ingress
-        .service
-        .first_open_check_host(connection, request.workspace.as_ref())?;
     let params: Params = serde_json::from_value(std::mem::take(&mut request.params))
         .map_err(|_| invalid("invalid-first-open-check-upload"))?;
     if params.contract_version != CONTRACT_VERSION
@@ -142,6 +139,11 @@ pub(super) fn begin(
     }
     let mut bytes = Vec::new();
     let admission = (|| {
+        // Refused once the upload drains, so a workspace detached while its
+        // check was on the way ends only that request, not the connection.
+        let host = ingress
+            .service
+            .first_open_check_host(connection, request.workspace.as_ref())?;
         // A check this host could not admit even idle is its configuration,
         // not contention, so asking again cannot help.
         let (reservation, allowance) = ingress
@@ -395,43 +397,75 @@ mod tests {
         f.close().await;
     }
 
+    /// Uploads a check and returns why it was refused, which it learns only
+    /// once its upload drains.
+    fn drained_refusal(
+        ingress: &mut LiveApplicationIngress,
+        request: Request,
+        bundle: &[u8],
+        connection: &ConnectionHandle,
+    ) -> ErrorCode {
+        let (id, stream) = (request.id, request.params["streamId"].as_u64().unwrap());
+        ingress.begin(request, connection).unwrap();
+        assert!(ingress.first_open_checks[&id].bytes.is_empty());
+        let Some(UploadCompletion::Refused(refused, error)) =
+            send(ingress, id, stream, bundle).unwrap()
+        else {
+            panic!("a check ran without standing")
+        };
+        assert_eq!(refused, id);
+        error.code
+    }
+
     #[tokio::test]
     async fn only_the_configured_connection_on_an_ordinary_workspace_may_upload() {
         let mut f = Fixture::new().await;
         let bytes = candidate(MARKDOWN);
-        let (params, _) = upload(1, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
         let other = ConnectionOwner::authenticated();
         let foreign = WorkspaceHandle("ws-ffffffffffffffff".into());
-        for (workspace, connection) in [
-            (&f.private, f.owner.handle()),
-            (&foreign, f.owner.handle()),
-            (&f.ordinary, other.handle()),
-        ] {
-            let refused = f
-                .ingress
-                .begin(request(1, workspace, params.clone()), &connection)
-                .unwrap_err();
-            assert_eq!(refused.code, ErrorCode::WorkspaceUnavailable);
+        let capacity = f.ingress.budget.available_permits();
+        for (id, (workspace, connection)) in (1..).zip([
+            (Some(f.private.clone()), f.owner.handle()),
+            (Some(foreign), f.owner.handle()),
+            (Some(f.ordinary.clone()), other.handle()),
+            (None, f.owner.handle()),
+        ]) {
+            let (params, bundle) = upload(id, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
+            let mut request = request(id, &f.ordinary, params);
+            request.workspace = workspace;
+            assert_eq!(
+                drained_refusal(&mut f.ingress, request, &bundle, &connection),
+                ErrorCode::WorkspaceUnavailable
+            );
         }
-        let mut unscoped = request(1, &f.ordinary, params.clone());
-        unscoped.workspace = None;
-        assert!(f.ingress.begin(unscoped, &f.owner.handle()).is_err());
         // An engine without the configured host has no such authority.
         let mut unconfigured = LiveApplicationIngress::new(
             Arc::new(EngineService::new()),
             crate::live_application_ingress::tests::config(),
         )
         .unwrap();
-        let refused = unconfigured
-            .begin(request(1, &f.ordinary, params.clone()), &f.owner.handle())
-            .unwrap_err();
-        assert_eq!(refused.code, ErrorCode::Forbidden);
+        let (params, bundle) = upload(10, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
+        assert_eq!(
+            drained_refusal(
+                &mut unconfigured,
+                request(10, &f.ordinary, params),
+                &bundle,
+                &f.owner.handle()
+            ),
+            ErrorCode::Forbidden
+        );
         assert_eq!(f.ingress.pending(), 0);
+        assert_eq!(f.ingress.budget.available_permits(), capacity);
         f.owner.retire();
-        assert!(
-            f.ingress
-                .begin(request(1, &f.ordinary, params), &f.owner.handle())
-                .is_err()
+        let (params, bundle) = upload(11, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
+        assert_eq!(
+            drained_refusal(
+                &mut f.ingress,
+                request(11, &f.ordinary, params),
+                &bundle,
+                &f.owner.handle()
+            ),
+            ErrorCode::WorkspaceUnavailable
         );
         f.close().await;
     }
@@ -461,11 +495,16 @@ mod tests {
         let workspace: WorkspaceHandle =
             serde_json::from_value(opened.response.result["workspace"].clone()).unwrap();
         let bytes = candidate(MARKDOWN);
-        let (params, _) = upload(1, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
-        let refused = ingress
-            .begin(request(1, &workspace, params), &owner.handle())
-            .unwrap_err();
-        assert_eq!(refused.code, ErrorCode::Forbidden);
+        let (params, bundle) = upload(1, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
+        assert_eq!(
+            drained_refusal(
+                &mut ingress,
+                request(1, &workspace, params),
+                &bundle,
+                &owner.handle()
+            ),
+            ErrorCode::Forbidden
+        );
         service
             .call(
                 RequestContext::unbounded(),

@@ -141,8 +141,9 @@ it.skipIf(engine.missing)("publishes a candidate the engine checked, once, with 
   expect(outcomes.filter(outcome => outcome.kind === "published")).toHaveLength(1);
   expect(f.bases()).toHaveLength(1);
   const payload = JSON.parse(String(f.bases()[0]!.payload_json)), base = f.storage.getBlob(WS, payload.updateBlobSha256)!;
-  // Whichever requests reached the engine, each checked the bytes the relay committed.
+  // Whichever requests reached the engine, each checked the bytes the relay committed. The host takes one check at a time; the rest found it busy.
   for (const [index, answer] of f.answers.entries()) {
+    if (answer.kind === "unavailable" && answer.reason === "busy") continue;
     const check = checked(answer);
     expect(check.binding.candidateSha256).toBe(payload.updateBlobSha256);
     expect(Buffer.from(f.asked[index]!.candidate).equals(Buffer.from(base))).toBe(true);
@@ -289,11 +290,11 @@ it.skipIf(engine.missing)("lets the engine encode exactly the measured full stat
   }
 }, 240_000);
 
-it.skipIf(engine.missing)("answers a check the host's configuration can never admit for its operator, and keeps the host", async () => {
+it.skipIf(engine.missing)("refuses a check the host's configuration can never admit as too large for it, and keeps the host", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   const f = await fixture({service: {ingress: {...profile.ingress, maxUploads: 1}}});
   for (let attempt = 0; attempt < 2; attempt++) {
-    expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-limits", recovery: "report"});
+    expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "host-capacity", recovery: "none"});
   }
   expect(f.host!.invalidated.aborted).toBe(false);
   nothingAppended(f);
@@ -314,6 +315,9 @@ it.skipIf(engine.missing)("frees the engine and keeps the host when the caller c
   nothingAppended(f);
 }, 120_000);
 
+// The notes whose candidates the relay's validator refuses before the engine: each has a link around inline code.
+const RELAY_PROJECTION = [".agents/skills/dohc-writing/SKILL.md", "AGENTS.md", "README.md", "crates/yrs-interop/README.md",
+  "docs/engineering/verify-agent-work.md", "docs/how-to/self-host-recovery.md", "docs/reference/cli-mcp-sdk.md", "vendor/file-guard-0.2.0/README.md"];
 // Each tracked Markdown file of the parity inventory through the real route. Run with DOHC_FIRST_OPEN_INVENTORY=1.
 it.runIf(!engine.missing && process.env.DOHC_FIRST_OPEN_INVENTORY === "1")("rechecks the real-note inventory through the route", async () => {
   const inventory = JSON.parse(execFileSync("git", ["show", "HEAD:crates/dohc-engine-collab/tests/first-open-base/inventory.json"], {encoding: "utf8"})) as
@@ -326,11 +330,12 @@ it.runIf(!engine.missing && process.env.DOHC_FIRST_OPEN_INVENTORY === "1")("rech
     const outcome = await f.open({objectId, path, ...written}, {bearer: f.enroll(path)});
     verdicts.push({path: note.path, oldGuard: note.oldGuard, inventory: note.verdict, cause: note.cause, outcome: outcome.kind,
       ...("reason" in outcome ? {reason: outcome.reason} : {}), ...("cause" in outcome ? {route: outcome.cause} : {})});
-    // A note the engine refuses either reaches it, or is one whose candidate the relay's own validator refuses first.
+    // A note the engine refuses reaches it, unless the relay's own validator refuses its candidate first; either way it stays an ordinary file.
     if (note.verdict === "checked") expect(outcome.kind, note.path).toBe("published");
-    else if (outcome.kind === "refused") expect(outcome, note.path).toMatchObject({reason: "unsupported-source", cause: note.cause});
-    else expect(outcome, note.path).toMatchObject({kind: "integrity", reason: "candidate"});
+    else expect(outcome, note.path).toMatchObject({kind: "refused", reason: "unsupported-source",
+      cause: RELAY_PROJECTION.includes(note.path) ? "relay-projection" : note.cause, recovery: "none"});
   }
   console.log(JSON.stringify(verdicts, null, 1));
   expect(verdicts.filter(row => row.outcome === "published")).toHaveLength(15);
+  expect(verdicts.filter(row => row.route === "relay-projection").map(row => row.path)).toEqual(RELAY_PROJECTION);
 }, 600_000);

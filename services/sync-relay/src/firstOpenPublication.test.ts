@@ -2,6 +2,7 @@ import {afterEach, expect, it, vi} from "vitest";
 import {join} from "node:path";
 import {DatabaseSync} from "node:sqlite";
 import * as Y from "yjs";
+import {LIVE_MARKDOWN_MAX_BYTES} from "@dohc/live-session-contract/limits";
 import {sha256Hex} from "@dohc/workspace-core/hash";
 import {accountDeletionIdentity} from "@dohc/workspace-auth/accountDeletion";
 import {yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
@@ -529,8 +530,9 @@ it("tells the engine's absence, failures and limits apart, appends nothing for a
     f.checkWith(async () => ({kind: "unavailable", reason}));
     expect(await f.open(), reason).toMatchObject({kind: "unavailable", reason, recovery: "retry-later"});
   }
-  f.checkWith(async () => ({kind: "unavailable", reason: "host-limits"}));
-  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-limits", recovery: "report"});
+  // A check the host's configuration can never admit refuses this file until its operator raises it.
+  f.checkWith(async () => ({kind: "host-capacity"}));
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "host-capacity", recovery: "none"});
   // The host that checked retired or detached the workspace before the writer.
   f.checkWith(async (input, signal) => ({...await accepting(input, signal), current: () => false}));
   expect(await f.open()).toMatchObject({kind: "unavailable", reason: "host-absent", recovery: "retry-later"});
@@ -613,7 +615,7 @@ it("asks the engine for no more than the least remaining update, capture or read
   for (const f of [oversized, reduced]) nothingAppended(f);
 });
 
-it("refuses a valid base the validation policy cannot afford as too large, and an invalid one as an integrity failure", async () => {
+it("refuses a valid base the validation policy cannot afford as too large, a file the live schema cannot hold as unsupported, and an invalid base by its fault", async () => {
   const f = await fixture();
   f.setActivation(configured({validation: {...selfHostLiveProfile().service.activation.validation, maxStructVisits: 1}}));
   expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "validation-budget", recovery: "none"});
@@ -621,13 +623,46 @@ it("refuses a valid base the validation policy cannot afford as too large, and a
   // The same seed under the configured policy publishes.
   f.setActivation(configured());
   expect((await f.open()).kind).toBe("published");
-  // A base the validator rejects is the relay's own fault.
-  const g = await fixture(), doc = new Y.Doc();
-  doc.getXmlFragment("prosemirror").insert(0, [new Y.XmlElement("not-a-node")]);
-  vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(Y.encodeStateAsUpdate(doc));
-  doc.destroy();
-  expect(await g.open()).toMatchObject({kind: "integrity", reason: "candidate", recovery: "report"});
+  // A link around inline code, as eight real notes have, stays an ordinary file.
+  const g = await fixture({markdown: "See [`lock()`](https://example.com/lock).\n"});
+  expect(await g.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "relay-projection", recovery: "none"});
+  expect(g.checks).not.toHaveBeenCalled();
   nothingAppended(g);
+  // A seed that is no valid update, or that the encoder failed to build, is the relay's own fault.
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  for (const [fault, encode] of [["invalid-update", () => Uint8Array.of(0xff, 0xff, 0xff)], ["seed-encoder", () => { throw new Error("an encoder bug"); }]] as const) {
+    const h = await fixture();
+    vi.spyOn(richdocSeed, "encodeRichdocSeed").mockImplementationOnce(encode);
+    expect(await h.open(), fault).toMatchObject({kind: "integrity", reason: "candidate", recovery: "report"});
+    expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", fault);
+    nothingAppended(h);
+  }
+});
+
+it("publishes nothing when the validation policy changes while the engine checks, and builds under the new policy next time", async () => {
+  const f = await fixture(), validation = selfHostLiveProfile().service.activation.validation;
+  const changed = {...validation, maxStructVisits: validation.maxStructVisits + 1};
+  // Only the policy changes: every bound stays as it was.
+  f.checkWith(async (input, signal) => { const answer = await accepting(input, signal); f.setActivation(configured({validation: changed})); return answer; });
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "reconfigured", recovery: "retry-later"});
+  expect(f.writes).toHaveBeenCalledTimes(1);
+  nothingAppended(f);
+  f.checkWith(accepting);
+  expect((await f.open()).kind).toBe("published");
+  expect(f.builds.mock.calls[1]![0]).toEqual(changed);
+});
+
+it("refuses a file longer than a live document before building or asking the engine", async () => {
+  const over = await fixture({markdown: "a".repeat(LIVE_MARKDOWN_MAX_BYTES + 1)});
+  expect(await over.open()).toMatchObject({kind: "refused", reason: "too-large", code: "source-limit", recovery: "none"});
+  expect(over.builds).not.toHaveBeenCalled();
+  expect(over.checks).not.toHaveBeenCalled();
+  nothingAppended(over);
+  // A file at the limit is built.
+  const at = await fixture({markdown: "a".repeat(LIVE_MARKDOWN_MAX_BYTES)});
+  at.buildWith(async () => ({kind: "busy"}));
+  expect(await at.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(at.builds).toHaveBeenCalledTimes(1);
 });
 
 it("tells contention, capacity, cancellation and failure apart, and appends nothing for any", async () => {

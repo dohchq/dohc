@@ -35,6 +35,9 @@ export interface FirstOpenBaseInput {
 export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget" | "validation-budget";
 /** A base's length and the length of native's full-state encoding of it. */
 export interface FirstOpenBaseSizes { baseBytes: number; fullStateBytes: number }
+type RegistrationRefusal = Extract<ReturnType<ReturnType<typeof createLiveMarkdownRegistrationValidator>>, { kind: "refused" }>["reason"];
+/** Why a base is invalid: the registration validator's reason, or `seed-encoder` when encoding the seed threw. */
+export type FirstOpenBaseFault = Exclude<RegistrationRefusal, "capacity-refused"> | "seed-encoder";
 export type FirstOpenBaseResult =
   | { kind: "built"; base: Uint8Array; lineageClaimId: string }
   | {
@@ -43,8 +46,9 @@ export type FirstOpenBaseResult =
        * `source-mismatch`: the input is not the verified head. `unsupported-source`:
        * the head is current, but the validator does not read its base back as it.
        */
-      reason: "source-mismatch" | "unsupported-source" | "invalid-base" | FirstOpenBaseBound;
-    };
+      reason: "source-mismatch" | "unsupported-source" | FirstOpenBaseBound;
+    }
+  | { kind: "refused"; reason: "invalid-base"; fault: FirstOpenBaseFault };
 
 const sha256 = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
@@ -99,8 +103,8 @@ export function buildFirstOpenBase(
   input: FirstOpenBaseInput,
 ): FirstOpenBaseResult {
   const { document, currentPath, markdown, sourceDigest, sourceByteLength, bounds } = input;
-  const refused = (reason: Extract<FirstOpenBaseResult, { kind: "refused" }>["reason"]) =>
-    ({ kind: "refused", reason }) as const;
+  const refused = (reason: "source-mismatch" | "unsupported-source" | FirstOpenBaseBound) => ({ kind: "refused", reason }) as const;
+  const invalid = (fault: FirstOpenBaseFault) => ({ kind: "refused", reason: "invalid-base", fault }) as const;
   if (Buffer.byteLength(markdown) !== sourceByteLength || sha256(markdown) !== sourceDigest) {
     return refused("source-mismatch");
   }
@@ -116,7 +120,7 @@ export function buildFirstOpenBase(
   try {
     base = encodeRichdocSeed(markdown, clientID);
   } catch {
-    return refused("invalid-base");
+    return invalid("seed-encoder");
   }
   // Refused before anything decodes it, as is a base that leaves native no room.
   const room = firstOpenEncodingCap(base.byteLength, bounds);
@@ -128,7 +132,7 @@ export function buildFirstOpenBase(
     checkpoint: base,
   });
   if (validated.kind !== "accepted") {
-    return refused(validated.reason === "capacity-refused" ? "validation-budget" : "invalid-base");
+    return validated.reason === "capacity-refused" ? refused("validation-budget") : invalid(validated.reason);
   }
   const { evidence } = validated;
   if (evidence.projectedMarkdownSha256 !== sourceDigest || evidence.projectedMarkdownByteLength !== sourceByteLength) {
