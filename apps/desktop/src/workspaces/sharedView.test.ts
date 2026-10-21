@@ -1895,10 +1895,12 @@ describe("shared view refresh", () => {
       await refreshSharedViewOnceWithPull({
         rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, pull: harness.pullFor(target),
         pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, store,
-        excludeFromMaterialization: notes, protectedPaths: notes,
+        excludeFromMaterialization: notes, protectedPaths: notes, trackPendingMaterialization: true,
       });
 
       expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("local bytes\n");
+      // The delete left undone keeps its debt, so a capture after the owner is free settles the file.
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set(["Notes.md"]));
     } finally {
       await store.close();
     }

@@ -266,15 +266,17 @@ async function reachesOtherSpelling(rootDir: string, path: string): Promise<bool
 }
 
 // `protectedPaths` are the paths this refresh or capture keeps its hands off,
-// such as preserved paths and ones whose capture failed.
+// such as preserved paths and ones whose capture failed. Answers the deletes
+// it left undone because a protected path owns their file; their debt stays.
 async function materializeSharedViewPaths(
   rootDir: string,
   workspaceId: string,
   changedPaths: readonly ShareViewChangedPath[],
   store: CaptureVersionedTextStore,
   protectedPaths: ReadonlySet<string> = new Set(),
-): Promise<void> {
-  if (changedPaths.length === 0) return;
+): Promise<string[]> {
+  const kept: string[] = [];
+  if (changedPaths.length === 0) return kept;
   const realRoot = await realpath(rootDir);
   // Real containment for the write, not just the lexical check above: a
   // symlink planted inside the materialized tree (a linked directory or a
@@ -404,8 +406,12 @@ async function materializeSharedViewPaths(
       const owner = await aliasOwner(change.path, resolvedTarget);
       if (owner !== null) {
         // A protected owner, such as one whose local edits capture could not
-        // save, keeps its file untouched, and its debt waits for capture.
-        if (protectedPaths.has(owner)) continue;
+        // save, keeps its file untouched. The delete keeps its debt, so a
+        // capture after the owner is free settles the file.
+        if (protectedPaths.has(owner)) {
+          kept.push(change.path);
+          continue;
+        }
         const write = await ownerWrite(owner, resolvedTarget);
         if (write && !ordered.some((other) => other.path === owner && other.operation !== "delete")) ordered.push(write);
         continue;
@@ -444,6 +450,7 @@ async function materializeSharedViewPaths(
         : { flag: "wx" },
     );
   }
+  return kept;
 }
 
 async function writeDiskContentToStore(input: {
@@ -1608,7 +1615,7 @@ async function captureSharedViewLocalDivergence(input: {
   };
   // The paths capture keeps its hands off so far: preserved ones, and ones it
   // could not capture or journal for a reason other than a local collision,
-  // whose file is another spelling's.
+  // whose file is usually another spelling's.
   const captureProtected = () => new Set([
     ...preserved,
     ...settlement.failedPaths,
@@ -2196,7 +2203,7 @@ async function refreshSharedViewOnce(input: {
       excludedPaths.filter((path) => collisionRecordedPaths.has(path)),
     );
   }
-  await materializeSharedViewPaths(
+  const kept = await materializeSharedViewPaths(
     input.rootDir,
     input.workspaceId,
     pathsToMaterialize,
@@ -2207,10 +2214,10 @@ async function refreshSharedViewOnce(input: {
     // The latest canonical value discharges every earlier attempt recorded
     // for this path. A page retried after failing before cursor commit can
     // increment its debt more than once, so decrementing once would leave a
-    // clean projection reported as pending.
+    // clean projection reported as pending. A delete left undone keeps its debt.
     await clearAllPendingMaterializationPaths(
       input.rootDir,
-      pendingMaterializationPaths,
+      pendingMaterializationPaths.filter((path) => !kept.includes(path)),
     );
     await clearPullInFlightMarker(input.rootDir);
   }
@@ -2269,7 +2276,9 @@ async function refreshCapturedShareView(
       ...captured.unjournalablePaths.map((path) => path.path),
       ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
     ]),
-    // A local collision is the one exclusion whose file is not its own.
+    // A local collision is left out: its file is usually another spelling's,
+    // which a delete of that spelling settles. One from a crashed pull can hold
+    // this path's own edits; that delete writes over them, where main removed them.
     protectedPaths: new Set([
       ...(preservedPaths ?? preTrackedPaths),
       ...(captured.failedPaths ?? []),
