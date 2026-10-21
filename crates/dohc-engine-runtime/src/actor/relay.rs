@@ -1954,6 +1954,38 @@ impl ActorHandle {
         .await
     }
 
+    /// [`Self::relay`], answered by `transport` instead of a relay over HTTP.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn relay_through<T>(
+        &self,
+        transport: Arc<T>,
+        operation: RelayOperation,
+        token: CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        T: RelayTransport + Send + Sync + 'static,
+    {
+        Box::pin(self.relay_with_io(
+            transport.publishes_native_settlements(),
+            operation,
+            LeaseRegistry::new(),
+            token,
+            None,
+            move |request, _token| {
+                let transport = Arc::clone(&transport);
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        execute_blocking_request(&*transport, request)
+                    })
+                    .await
+                    .map_err(|_| relay_io_aborted())?
+                }
+            },
+        ))
+        .await
+    }
+
     async fn relay_with_io<F, Fut>(
         &self,
         native_settlements: bool,
@@ -2191,7 +2223,7 @@ async fn execute_http_request(
         .map(RelayIoResponse::DownloadBlobs);
     }
 
-    tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
+    tokio::task::spawn_blocking(move || execute_blocking_request(&*transport, request))
         .await
         .map_err(|_| relay_io_aborted())?
 }
@@ -2337,8 +2369,8 @@ where
     Ok(BlobDownloadBatchResponse { results })
 }
 
-fn execute_blocking_http_request(
-    transport: &HttpRelayTransport,
+fn execute_blocking_request<T: RelayTransport + ?Sized>(
+    transport: &T,
     request: RelayIoRequest,
 ) -> Result<RelayIoResponse, RelayError> {
     match request {
@@ -2350,7 +2382,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::PullHosted(request) => transport
             .pull_hosted(request)
             .map(RelayIoResponse::PullHosted),
-        RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
+        RelayIoRequest::LookupCoordinates(requests) => transport
+            .lookup_log_coordinates(requests)
+            .map(RelayIoResponse::LookupCoordinates),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -2367,7 +2401,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
-        RelayIoRequest::DownloadBlobs(_) => Err(RelayError::InvalidResponse),
+        RelayIoRequest::DownloadBlobs(request) => transport
+            .download_blobs(request)
+            .map(RelayIoResponse::DownloadBlobs),
         RelayIoRequest::UploadKeyEnvelope(request) => transport
             .upload_key_envelope(request)
             .map(RelayIoResponse::UploadKeyEnvelope),

@@ -1899,9 +1899,9 @@ pub(crate) enum Incoming<'a> {
 /// the row could destroy what the tail retains: any replacement, a write that
 /// moves the document, and an update that lands off the tail's binding or
 /// that structural inspection does not admit. The hold carries the binding
-/// and records no refusal. `relay_namespace` is the feed's, as the pull's
-/// trusted configuration names it, and `tails` keeps the tails the actor
-/// validated.
+/// and records no refusal. A row the tail admits returns the binding it was
+/// admitted under. `relay_namespace` is the feed's, as the pull's trusted
+/// configuration names it, and `tails` keeps the tails the actor validated.
 #[allow(clippy::too_many_arguments)]
 fn hold_released_lineage(
     tx: &rusqlite::Connection,
@@ -1912,7 +1912,7 @@ fn hold_released_lineage(
     relay_namespace: Option<&str>,
     tails: &ReleasedTails,
     incoming: Incoming<'_>,
-) -> Result<(), SyncError> {
+) -> Result<Option<Box<ReleasedLineageBinding>>, SyncError> {
     use dohc_engine_collab::live_update_application::{
         IncomingCoordinate, Protection, ProtectionKey, protection,
     };
@@ -1945,7 +1945,7 @@ fn hold_released_lineage(
     .map_err(protection_failure)?;
     let (binding, head) = match protected {
         Protection::Protected { binding, head } => (binding, head),
-        Protection::Unprotected => return Ok(()),
+        Protection::Unprotected => return Ok(None),
         Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
     };
     if identity.is_none() {
@@ -1970,7 +1970,7 @@ fn hold_released_lineage(
     if destructive {
         return Err(SyncError::ReleasedLineageUnsettled(binding));
     }
-    Ok(())
+    Ok(Some(binding))
 }
 
 fn protection_failure(
@@ -2040,12 +2040,12 @@ pub(crate) fn hold_released_file_operation(
     relay_namespace: Option<&str>,
     tails: &ReleasedTails,
     incoming: Incoming<'_>,
-) -> Result<(), SyncError> {
+) -> Result<Option<Box<ReleasedLineageBinding>>, SyncError> {
     let Some(lineage) = dohc_engine_collab::read_marker_in(tx, key)
         .map_err(map_collab_hard_error)?
         .and_then(|marker| marker.lineage_claim_id)
     else {
-        return Ok(());
+        return Ok(None);
     };
     hold_released_lineage(
         tx,

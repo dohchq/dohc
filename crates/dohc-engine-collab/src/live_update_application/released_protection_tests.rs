@@ -657,6 +657,98 @@ fn closing_cancels_validation_and_waits_for_the_worker() {
     assert_eq!((tails.validation_requests(), tails.validations()), (1, 0));
 }
 
+/// Opus's 1a-2g finding 4: closing stops a running scan at its next
+/// statement instead of waiting for the rest of it.
+#[test]
+fn closing_stops_a_running_scan_at_its_next_statement() {
+    let (f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    let request = pending(&f, &tails);
+    tails.stall_validation(1_000);
+    let running = request.validate();
+    assert_eq!(tails.stalled_statements(), 1);
+    tails.close();
+    assert_eq!(running.wait(), Err(ValidationError::Closed));
+    assert_eq!(tails.stalled_statements(), 1, "no statement ran after close");
+}
+
+/// Move the fixture document's generation without changing what its tails
+/// read.
+fn bump_generation(f: &mut Fixture) {
+    write_unchecked(f, "PRAGMA foreign_keys=OFF;
+        UPDATE live_owner_activations SET source_byte_length=source_byte_length");
+}
+
+/// Sol's 1a-2g finding 1: a queued validation nobody waits for leaves the
+/// queue, however many requests a cancelled caller abandons while the worker
+/// is busy, and one a live waiter still shares stays and completes for it.
+#[test]
+fn abandoned_validations_leave_the_queue() {
+    let (mut f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    tails.pause_validation();
+    let running = pending(&f, &tails).validate();
+    tails.wait_for_paused_validation();
+    for _ in 0..32 {
+        bump_generation(&mut f);
+        drop(pending(&f, &tails).validate());
+    }
+    assert_eq!(tails.queued_validations(), 0, "every abandoned request left");
+    bump_generation(&mut f);
+    let request = pending(&f, &tails);
+    let (kept, abandoned) = (request.validate(), request.validate());
+    drop(abandoned);
+    assert_eq!(tails.queued_validations(), 1, "shared with a live waiter");
+    tails.resume_validation();
+    assert_eq!(running.wait(), Ok(()));
+    assert_eq!(kept.wait(), Ok(()));
+    assert_eq!(tails.queued_validations(), 0);
+    assert_eq!((tails.validation_requests(), tails.validations()), (34, 2));
+}
+
+/// `validation`'s result, or a failure once it has not completed for long
+/// enough that it never will.
+fn completed(validation: Validation) -> Result<(), ValidationError> {
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sent.send(validation.wait()));
+    received.recv_timeout(std::time::Duration::from_secs(60)).expect("the validation completed")
+}
+
+/// Opus's 1a-2g finding 1: a validation that panics fails its waiters, and
+/// the worker goes on to the next.
+#[test]
+fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
+    let (f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    let request = pending(&f, &tails);
+    tails.panic_validations(1);
+    assert_eq!(completed(request.validate()), Err(ValidationError::Failed));
+    assert_eq!(tails.validations(), 0);
+    assert_eq!(completed(request.validate()), Ok(()), "the worker goes on");
+    assert!(protected_in(&f, &incoming(), &tails).is_some());
+    assert_eq!((tails.validation_requests(), tails.validations()), (2, 1));
+}
+
+/// Opus's 1a-2g finding 2: while an activation is current nothing protects
+/// the lineage, and no decision waits for validation, however often owner
+/// edits move the generation.
+#[test]
+fn a_document_with_a_current_activation_never_waits() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let tails = ReleasedTails::default();
+    for edit in 0..3 {
+        let generation = tail_generation_of(&f);
+        native_tail_edit(&mut f, &format!("# Own edit {edit}\n"), 11 + edit);
+        assert!(tail_generation_of(&f) > generation, "an owner edit moves the generation");
+        let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
+        let bound = tails.bound_to(&f.store);
+        let decided = f.store.read_with(|conn| protection(conn, &key, &bound)).unwrap();
+        assert!(matches!(decided, Protection::Unprotected), "edit {edit}");
+    }
+    assert_eq!(tails.validation_requests(), 0);
+}
+
 /// Opus's 1a-2b finding 3: a Carried delivery applied exactly is proven
 /// only while its accepted history agrees. History of it at another
 /// coordinate conflicts, and the tail protects as invalid.

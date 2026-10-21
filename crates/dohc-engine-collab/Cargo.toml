@@ -42,8 +42,9 @@ dohc-engine-domain = { path = "../dohc-engine-domain" }
 # The ydoc SQL runs against the store's connection/transaction through its
 # read_with/write_with seams. Pinned to storage's exact rusqlite so the shared
 # Connection/Transaction types unify (the `bundled` SQLite comes from storage
-# via feature unification). Incremental reads retain one metadata chunk.
-rusqlite = { version = "0.40", features = ["blob"] }
+# via feature unification). Incremental reads retain one metadata chunk. The
+# released-tails worker's reader stops on close through a progress handler.
+rusqlite = { version = "0.40", features = ["blob", "hooks"] }
 # The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
 # with OffsetKind::Utf16 (binding constraint 1).
 yrs = "=0.27.3"

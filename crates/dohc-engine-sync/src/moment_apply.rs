@@ -823,32 +823,36 @@ fn apply_moment_append(
         });
     }
     // A delete, rename or binary write retires or rebinds the lineage, and a
-    // text write rebinds it when it moves the document.
-    if let MomentApplyMode::Ordinary(tails) = mode {
-        let key = DocKey::new(
-            &envelope.workspace_id,
-            &payload.version_id,
-            &payload.object_id,
-        )
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append Y.Doc coordinates are invalid",
-        })?;
-        let incoming = if payload.operation == "write" && after_kind == ContentKind::Text {
-            crate::ydoc_apply::Incoming::Write {
-                path: &payload.payload_after_path,
-            }
-        } else {
-            crate::ydoc_apply::Incoming::Replacement
-        };
-        crate::ydoc_apply::hold_released_file_operation(
-            tx,
-            &key,
-            envelope,
-            relay_namespace,
-            tails,
-            incoming,
-        )?;
-    }
+    // text write rebinds it when it moves the document. This is the moment's
+    // one decision, made before it writes anything.
+    let protected = match mode {
+        MomentApplyMode::Ordinary(tails) => {
+            let key = DocKey::new(
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+            )
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "moment.append Y.Doc coordinates are invalid",
+            })?;
+            let incoming = if payload.operation == "write" && after_kind == ContentKind::Text {
+                crate::ydoc_apply::Incoming::Write {
+                    path: &payload.payload_after_path,
+                }
+            } else {
+                crate::ydoc_apply::Incoming::Replacement
+            };
+            crate::ydoc_apply::hold_released_file_operation(
+                tx,
+                &key,
+                envelope,
+                relay_namespace,
+                tails,
+                incoming,
+            )?
+        }
+        _ => None,
+    };
 
     let mut owner_settlement = None;
     if mode.ordinary() {
@@ -1143,7 +1147,7 @@ fn apply_moment_append(
             ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
         };
         let mut record_facts = None;
-        if let MomentApplyMode::Ordinary(tails) = mode {
+        if mode.ordinary() {
             match crate::reconcile_imported_resulting_head_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -1153,29 +1157,14 @@ fn apply_moment_append(
                 envelope.recorded_at_ms,
             ) {
                 // A head the lineage does not project would replace it, so a
-                // protected lineage holds the moment as its own.
+                // protected lineage holds the moment as its own, with the
+                // binding its decision named.
                 Err(
                     pending @ SyncError::RetryableState {
                         reason: "ydoc-resulting-head-pending",
                     },
                 ) => {
-                    let key = DocKey::new(
-                        &envelope.workspace_id,
-                        &payload.version_id,
-                        &payload.object_id,
-                    )
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "moment.append Y.Doc coordinates are invalid",
-                    })?;
-                    crate::ydoc_apply::hold_released_file_operation(
-                        tx,
-                        &key,
-                        envelope,
-                        relay_namespace,
-                        tails,
-                        crate::ydoc_apply::Incoming::Replacement,
-                    )?;
-                    return Err(pending);
+                    return Err(protected.map_or(pending, SyncError::ReleasedLineageUnsettled));
                 }
                 reconciled => reconciled?,
             }

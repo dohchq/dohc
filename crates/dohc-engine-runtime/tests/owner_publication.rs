@@ -8197,6 +8197,85 @@ async fn a_pass_waiting_for_validation_goes_on_from_the_row_that_waited() {
     w.close().await;
 }
 
+/// Sol's 1a-2g finding 2: the same through the actor, where each attempt of
+/// the request runs a new client and only the request's transport keeps the
+/// pass. The neighbour's create applies and the next row waits; the actor
+/// serves other work, a non-relay operation among it, while the request
+/// stays outstanding. Once validation completes the request goes on from
+/// the row that waited, fetched once, with the neighbour still counted and
+/// its change still reported.
+#[tokio::test]
+async fn an_actor_pull_waiting_for_validation_goes_on_from_the_row_that_waited() {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("Safe")
+    };
+    let feed = std::sync::Arc::new(HostedFeed::new(&[
+        ("neighbour", NEIGHBOUR_PATH),
+        ("object", WINDOW_PATH),
+    ]));
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let safe = feed.serve(
+        ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false),
+        safe,
+    );
+    let fold = feed.serve(fold, fold_bytes);
+    let tails = w.actor.released_tails();
+    tails.pause_validation();
+    let mut pull = tokio::spawn({
+        let (actor, feed) = (w.actor.clone(), std::sync::Arc::clone(&feed));
+        let operation = dohc_engine_runtime::RelayOperation::PullHosted {
+            workspace_id: "workspace".into(),
+            root: w.root.path().to_owned(),
+            relay_namespace: Some("relay".into()),
+            now_ms: 1_000_000,
+        };
+        async move {
+            actor
+                .relay_through(feed, operation, CancellationToken::new())
+                .await
+        }
+    });
+    held_validation(&tails, &mut pull).await;
+    assert!(journaled(&w.store, &created), "the neighbour applied first");
+    assert!(
+        !journaled(&w.store, &safe),
+        "the row that waits applied nothing"
+    );
+    w.actor
+        .remote_changes_applied("workspace".into())
+        .await
+        .expect("the actor serves other work");
+    assert!(!pull.is_finished(), "the pull is outstanding");
+    tails.resume_validation();
+    let dohc_engine_runtime::RelayOperationOutcome::HostedPass { pass, .. } =
+        pull.await.unwrap().unwrap()
+    else {
+        panic!("a hosted pass");
+    };
+    assert_eq!(pass.applied, 2, "the neighbour and the safe row");
+    assert!(
+        pass.changed_paths
+            .iter()
+            .any(|change| change.path == NEIGHBOUR_PATH),
+        "{:?}",
+        pass.changed_paths
+    );
+    assert!(journaled(&w.store, &safe));
+    assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
+    assert_eq!(feed.pulls(), 1, "fetched once");
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    desktop.close().await;
+    w.close().await;
+}
+
 /// The released-lineage binding `pass` holds the window document with.
 fn held_object(pass: &dohc_engine_sync::HostedPassOutcome) -> ReleasedLineageBinding {
     match pass.held.get("object") {

@@ -7,7 +7,8 @@
 use super::*;
 use crate::Ydoc;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, Waker};
 
 mod binding;
@@ -188,7 +189,9 @@ fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, Applica
 /// connection is the store's only writer; [`crate::WriterDocCache`] keeps one
 /// of these for it, and binding it to another open of a store, a reopen or
 /// restore among them, forgets everything kept before. [`Self::close`] stops
-/// the worker and waits for its connection to close.
+/// the worker and waits for its connection to close. A queued validation
+/// nobody waits for any more leaves the queue, and one that panics fails its
+/// waiters without stopping the worker.
 #[derive(Clone)]
 pub struct ReleasedTails(Option<Arc<Shared>>);
 
@@ -199,7 +202,13 @@ struct Shared {
     state: Mutex<State>,
     /// Wakes the worker, and anyone waiting on it, when the state changes.
     changed: Condvar,
+    /// Set once the tails close; the worker's reader stops at its next
+    /// statement, and within [`READER_STEP_OPS`] steps of the one running.
+    stopped: Arc<AtomicBool>,
 }
+
+/// SQLite VM steps between the worker reader's checks for close.
+const READER_STEP_OPS: std::ffi::c_int = 100;
 
 #[derive(Default)]
 struct State {
@@ -211,8 +220,6 @@ struct State {
     /// The latest worker thread; it ends once the queue is empty.
     worker: Option<std::thread::JoinHandle<()>>,
     working: bool,
-    /// Stops the read the worker has open.
-    interrupt: Option<rusqlite::InterruptHandle>,
     closed: bool,
     validations: u64,
     requests: u64,
@@ -247,19 +254,35 @@ struct Job {
 #[derive(Default)]
 struct Outcome {
     result: Option<Result<(), ValidationError>>,
-    wakers: Vec<Waker>,
+    /// Each [`Validation`] still waiting, by its number, with the task it
+    /// last polled from.
+    waiters: HashMap<u64, Option<Waker>>,
+    next_waiter: u64,
 }
 
 impl Job {
     fn complete(&self, result: Result<(), ValidationError>) {
-        let wakers = {
+        let waiters = {
             let mut outcome = lock(&self.outcome);
             outcome.result = Some(result);
-            std::mem::take(&mut outcome.wakers)
+            std::mem::take(&mut outcome.waiters)
         };
-        for waker in wakers {
+        for waker in waiters.into_values().flatten() {
             waker.wake();
         }
+    }
+
+    /// A new waiter for this job of `tails`.
+    fn join(self: &Arc<Self>, tails: &Arc<Shared>) -> Validation {
+        let mut outcome = lock(&self.outcome);
+        let waiter = outcome.next_waiter;
+        outcome.next_waiter += 1;
+        outcome.waiters.insert(waiter, None);
+        Validation(Waiting::Job {
+            job: Arc::clone(self),
+            waiter,
+            tails: Arc::downgrade(tails),
+        })
     }
 }
 
@@ -347,7 +370,7 @@ impl PendingValidation {
         }
         let key = (self.doc.clone(), self.lineage.clone(), self.generation);
         if let Some(job) = state.jobs.get(&key) {
-            return Validation(Waiting::Job(Arc::clone(job)));
+            return job.join(shared);
         }
         let job = Arc::new(Job {
             key: key.clone(),
@@ -372,30 +395,68 @@ impl PendingValidation {
                 Err(_) => {
                     state.jobs.remove(&job.key);
                     state.queue.clear();
-                    drop(state);
-                    job.complete(Err(ValidationError::Failed));
-                    return Validation(Waiting::Job(job));
+                    return Validation::ready(Err(ValidationError::Failed));
                 }
             }
         }
+        let validation = job.join(shared);
         shared.changed.notify_all();
         drop(state);
         // The thread it replaces had found the queue empty and was ending.
         if let Some(ended) = ended {
             let _ = ended.join();
         }
-        Validation(Waiting::Job(job))
+        validation
     }
 }
 
 /// Completes when a requested validation does, whichever request asked for
-/// it first. It never fails over to validating anywhere else.
+/// it first. It never fails over to validating anywhere else. Dropping it
+/// stops waiting, and a validation still queued that nobody else waits for
+/// leaves the queue.
 #[must_use]
 pub struct Validation(Waiting);
 
 enum Waiting {
     Ready(Option<Result<(), ValidationError>>),
-    Job(Arc<Job>),
+    Job {
+        job: Arc<Job>,
+        waiter: u64,
+        tails: Weak<Shared>,
+    },
+}
+
+impl Drop for Validation {
+    fn drop(&mut self) {
+        let Waiting::Job { job, waiter, tails } = &self.0 else {
+            return;
+        };
+        let Some(shared) = tails.upgrade() else {
+            return;
+        };
+        let mut state = lock(&shared.state);
+        let mut outcome = lock(&job.outcome);
+        outcome.waiters.remove(waiter);
+        if outcome.result.is_some() || !outcome.waiters.is_empty() {
+            return;
+        }
+        drop(outcome);
+        // One already running completes, and a later request can join it.
+        if let Some(at) = state
+            .queue
+            .iter()
+            .position(|queued| Arc::ptr_eq(queued, job))
+        {
+            state.queue.remove(at);
+            if state
+                .jobs
+                .get(&job.key)
+                .is_some_and(|current| Arc::ptr_eq(current, job))
+            {
+                state.jobs.remove(&job.key);
+            }
+        }
+    }
 }
 
 impl Validation {
@@ -435,17 +496,18 @@ impl std::future::Future for Validation {
     ) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
             Waiting::Ready(result) => Poll::Ready(result.take().unwrap_or(Ok(()))),
-            Waiting::Job(job) => {
+            Waiting::Job { job, waiter, .. } => {
                 let mut outcome = lock(&job.outcome);
                 if let Some(result) = outcome.result {
                     return Poll::Ready(result);
                 }
-                if !outcome
-                    .wakers
-                    .iter()
-                    .any(|waker| waker.will_wake(context.waker()))
-                {
-                    outcome.wakers.push(context.waker().clone());
+                if let Some(slot) = outcome.waiters.get_mut(waiter) {
+                    if !slot
+                        .as_ref()
+                        .is_some_and(|waker| waker.will_wake(context.waker()))
+                    {
+                        *slot = Some(context.waker().clone());
+                    }
                 }
                 Poll::Pending
             }
@@ -475,8 +537,13 @@ fn work(shared: &Shared) {
                 .map(|store| store.path.clone());
             (job, path)
         };
+        // A panic fails this validation's waiters, and the next goes on.
         let validated = match path {
-            Some(path) => validate_committed(shared, &job, &path).map(Some),
+            Some(path) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                validate_committed(shared, &job, &path)
+            }))
+            .unwrap_or(Err(ValidationError::Failed))
+            .map(Some),
             None => Ok(None),
         };
         let result = {
@@ -528,58 +595,72 @@ fn validate_committed(
 ) -> Result<Validated, ValidationError> {
     let (doc, lineage, requested) = &job.key;
     let mut reader = open_reader(path).map_err(|_| ValidationError::Failed)?;
-    {
-        let mut state = lock(&shared.state);
-        if state.closed {
-            return Err(ValidationError::Closed);
-        }
-        state.interrupt = Some(reader.get_interrupt_handle());
+    let stopped = Arc::clone(&shared.stopped);
+    reader
+        .progress_handler(
+            READER_STEP_OPS,
+            Some(move || stopped.load(Ordering::Relaxed)),
+        )
+        .map_err(|_| ValidationError::Failed)?;
+    if shared.stopped.load(Ordering::Relaxed) {
+        return Err(ValidationError::Closed);
     }
-    let validated = (|| {
-        let tx = reader.transaction().map_err(|_| ValidationError::Failed)?;
-        let (generation, engine) =
-            tail_generation(&tx, doc).map_err(|_| ValidationError::Failed)?;
-        if engine != job.engine {
-            return Err(ValidationError::Failed);
-        }
-        let generation = generation
-            .filter(|generation| generation >= requested)
-            .ok_or(ValidationError::Uncommitted)?;
-        #[cfg(any(test, feature = "test-support"))]
-        gate(shared)?;
-        let tails = protected_tails(&tx, doc, lineage)
-            .map_err(|_| ValidationError::Failed)?
-            .map(Arc::new);
-        tx.commit().map_err(|_| ValidationError::Failed)?;
-        Ok(Validated {
-            engine,
-            generation,
-            tails,
-        })
-    })();
-    lock(&shared.state).interrupt = None;
+    let tx = reader.transaction().map_err(|_| ValidationError::Failed)?;
+    let (generation, engine) = tail_generation(&tx, doc).map_err(|_| ValidationError::Failed)?;
+    if engine != job.engine {
+        return Err(ValidationError::Failed);
+    }
+    let generation = generation
+        .filter(|generation| generation >= requested)
+        .ok_or(ValidationError::Uncommitted)?;
+    #[cfg(any(test, feature = "test-support"))]
+    gate(shared, &tx)?;
+    let tails = protected_tails(&tx, doc, lineage)
+        .map_err(|_| ValidationError::Failed)?
+        .map(Arc::new);
+    tx.commit().map_err(|_| ValidationError::Failed)?;
     drop(reader);
-    validated
+    Ok(Validated {
+        engine,
+        generation,
+        tails,
+    })
 }
 
 /// What tests hold the worker with: a pause at each validation's committed
-/// snapshot, and failures to report instead of validating.
+/// snapshot, failures to report or panics to raise instead of validating,
+/// and a scan of many statements that waits for close after its first.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct Gate {
     paused: bool,
     waiting: bool,
     failures: u64,
+    panics: u64,
+    /// Statements the next validation's stalled scan runs.
+    stall: u64,
+    /// How many of them ran.
+    stalled: u64,
     /// Tasks waiting for a validation to hold at the pause.
     wakers: Vec<Waker>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn gate(shared: &Shared) -> Result<(), ValidationError> {
+fn gate(shared: &Shared, conn: &Connection) -> Result<(), ValidationError> {
     let mut state = lock(&shared.state);
     if state.gate.failures > 0 {
         state.gate.failures -= 1;
         return Err(ValidationError::Failed);
+    }
+    if state.gate.panics > 0 {
+        state.gate.panics -= 1;
+        drop(state);
+        panic!("a released-tail validation panicked");
+    }
+    let statements = std::mem::take(&mut state.gate.stall);
+    if statements > 0 {
+        drop(state);
+        return stall(shared, conn, statements);
     }
     state.gate.waiting = true;
     shared.changed.notify_all();
@@ -595,6 +676,31 @@ fn gate(shared: &Shared) -> Result<(), ValidationError> {
     state.gate.waiting = false;
     if state.closed {
         return Err(ValidationError::Closed);
+    }
+    Ok(())
+}
+
+/// A scan of `statements` statements, each of a few thousand VM steps,
+/// that waits between its first and second until the tails close.
+#[cfg(any(test, feature = "test-support"))]
+fn stall(shared: &Shared, conn: &Connection, statements: u64) -> Result<(), ValidationError> {
+    for ran in 1..=statements {
+        conn.query_row(
+            "WITH RECURSIVE steps(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM steps WHERE n<200)
+             SELECT count(*) FROM steps",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| ValidationError::Failed)?;
+        let mut state = lock(&shared.state);
+        state.gate.stalled = ran;
+        shared.changed.notify_all();
+        while ran == 1 && !state.closed {
+            state = shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
     }
     Ok(())
 }
@@ -647,9 +753,9 @@ impl ReleasedTails {
     }
 
     /// Stop validating for good: refuse new requests, cancel queued ones and
-    /// interrupt the one running, wake everyone waiting, and wait for the
-    /// worker and its connection to end. Call it off the actor, before the
-    /// store's files are replaced.
+    /// stop the read of the one running, wake everyone waiting, and wait for
+    /// the worker and its connection to end. Call it off the actor, before
+    /// the store's files are replaced.
     pub fn close(&self) {
         let Some(shared) = &self.0 else {
             return;
@@ -657,9 +763,7 @@ impl ReleasedTails {
         let (queued, worker) = {
             let mut state = lock(&shared.state);
             state.closed = true;
-            if let Some(interrupt) = &state.interrupt {
-                interrupt.interrupt();
-            }
+            shared.stopped.store(true, Ordering::Relaxed);
             state.jobs.clear();
             let queued: Vec<_> = state.queue.drain(..).collect();
             shared.changed.notify_all();
@@ -761,6 +865,50 @@ impl ReleasedTails {
         }
     }
 
+    /// Have the next `count` validations panic instead of reading.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn panic_validations(&self, count: u64) {
+        if let Some(shared) = &self.0 {
+            lock(&shared.state).gate.panics += count;
+        }
+    }
+
+    /// Have the next validation scan `statements` statements, waiting after
+    /// the first until these tails close.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stall_validation(&self, statements: u64) {
+        if let Some(shared) = &self.0 {
+            lock(&shared.state).gate.stall = statements;
+        }
+    }
+
+    /// How many statements the stalled scan ran, once its first did.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stalled_statements(&self) -> u64 {
+        self.0.as_ref().map_or(0, |shared| {
+            let mut state = lock(&shared.state);
+            while state.gate.stalled == 0 {
+                state = shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            state.gate.stalled
+        })
+    }
+
+    /// How many validations wait in the queue, none of them running.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn queued_validations(&self) -> usize {
+        self.0
+            .as_ref()
+            .map_or(0, |shared| lock(&shared.state).queue.len())
+    }
+
     /// The protected tails of the document lineage, as `conn` reads them, or
     /// the validation they wait for.
     fn read(
@@ -785,16 +933,30 @@ impl ReleasedTails {
                 Ok(Read::Tails(None))
             };
         };
-        let state = lock(&shared.state);
-        let Some(store) = &state.store else {
-            return Err(corrupt("released tails are not bound to a store"));
+        let opening = {
+            let state = lock(&shared.state);
+            let Some(store) = &state.store else {
+                return Err(corrupt("released tails are not bound to a store"));
+            };
+            if let Some(kept) = state
+                .validated
+                .get(&(doc.clone(), lineage.to_owned()))
+                .filter(|kept| kept.generation == generation && kept.engine == engine)
+            {
+                return Ok(Read::Tails(kept.tails.clone()));
+            }
+            store.opening
         };
-        if let Some(kept) = state
-            .validated
-            .get(&(doc.clone(), lineage.to_owned()))
-            .filter(|kept| kept.generation == generation && kept.engine == engine)
+        // The window is empty while an activation is current, as the worker
+        // would find; every owner edit moves the generation, so asking it
+        // would wait after each one.
+        if readable(super::owner_activations::current_activation(
+            conn, None, doc, lineage,
+        ))?
+        .flatten()
+        .is_some()
         {
-            return Ok(Read::Tails(kept.tails.clone()));
+            return Ok(Read::Tails(None));
         }
         Ok(Read::Pending(PendingValidation {
             tails: Arc::clone(shared),
@@ -802,7 +964,7 @@ impl ReleasedTails {
             lineage: lineage.to_owned(),
             generation,
             engine,
-            opening: store.opening,
+            opening,
         }))
     }
 }
