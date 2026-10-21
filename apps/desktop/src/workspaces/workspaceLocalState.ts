@@ -27,12 +27,28 @@ const REFUSAL_WORDS: Record<LocalStateRefusal, string> = {
   "not-excluded": "dohc could not keep this workspace's .dohc/local out of iCloud Drive, so it saves nothing there. Restart dohc to try again.",
 };
 
-/** dohc won't write this computer's state for a workspace. */
+/**
+ * dohc won't write this computer's state for a workspace. A writer whose
+ * refusal a person sees gives words that name what it did not save.
+ */
 export class LocalStateUnavailableError extends Error {
-  constructor(readonly refusal: LocalStateRefusal) {
-    super(REFUSAL_WORDS[refusal]);
+  constructor(readonly refusal: LocalStateRefusal, message = REFUSAL_WORDS[refusal]) {
+    super(message);
     this.name = "LocalStateUnavailableError";
   }
+}
+
+/**
+ * Whether a reader of state that changes what dohc does, such as settings,
+ * can use the workspace's `.dohc/local`: this user owns it, or the engine's
+ * current open of the workspace prepared it. The engine refuses another
+ * user's folder on a local volume, and takes a network share's owners as the
+ * server gives them, so its open answers for a share. A read never waits for
+ * the engine. Windows reports no owner, so there the folder is used as is.
+ */
+export function readsLocalState(workspace: LocalStateWorkspace, folder: { readonly uid: number }): boolean {
+  const uid = process.getuid?.();
+  return uid === undefined || folder.uid === uid || currentBinding(workspace) !== null;
 }
 
 let bindings: LocalStateBindings | null = null;

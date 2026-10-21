@@ -178,6 +178,10 @@ export function SettingsDialog(props: {
   const { updateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed(() => setUpdateError(null));
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workspaceWritesRef = useRef<{
+    save: (patch: WorkspaceSettingsPatch) => Promise<void>;
+    reset: () => Promise<void>;
+  }>({ save: async () => undefined, reset: async () => undefined });
   const [settingsFilePath, setSettingsFilePath] = useState<string | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
@@ -387,7 +391,11 @@ export function SettingsDialog(props: {
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(ipcErrorMessage(cause));
-        props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
+        props.onError?.(
+          ipcErrorMessage(cause, "dohc could not save this workspace's settings."),
+          cause,
+          () => workspaceWritesRef.current.save(patch),
+        );
       }
     },
     [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
@@ -459,9 +467,16 @@ export function SettingsDialog(props: {
       }
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
+      props.onError?.(
+        ipcErrorMessage(cause, "dohc could not reset this workspace's settings."),
+        cause,
+        () => workspaceWritesRef.current.reset(),
+      );
     }
   }, [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId]);
+  // Try again runs the save or reset this dialog would run now, so a retried
+  // save merges onto the settings shown then.
+  workspaceWritesRef.current = { save: saveWorkspaceSettings, reset: resetWorkspaceSettings };
 
   // Trusted opens main's dialog, and the person answers there. Restricted
   // Mode also stops the workspace's running app commands.

@@ -16,8 +16,16 @@ import {
   type WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import {
+  localStateDir,
+  LocalStateUnavailableError,
+  readsLocalState,
+  type LocalStateRefusal,
+  type LocalStateWorkspace,
+} from "./workspaceLocalState";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
+// Each computer keeps its own settings for a workspace, in `.dohc/local`.
 export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
 export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
@@ -64,27 +72,34 @@ function unreadableSettings(
   };
 }
 
+/** Where the settings file is, to show and to open. Never creates `.dohc/local`. */
 export async function workspaceSettingsPath(rootPath: string): Promise<string> {
-  return join(await resolveWorkspaceMetadataDir(rootPath), WORKSPACE_SETTINGS_FILE);
+  return join(await resolveWorkspaceMetadataDir(rootPath), "local", WORKSPACE_SETTINGS_FILE);
 }
 
 export async function readWorkspaceSettingsFile(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsResult> {
-  return (await loadWorkspaceSettings(rootPath)).result;
+  return (await loadWorkspaceSettings(workspace)).result;
 }
 
+const NO_SETTINGS_FILE: WorkspaceSettingsOnDisk = {
+  raw: null,
+  result: { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" },
+};
+
 async function loadWorkspaceSettings(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsOnDisk> {
+  const rootPath = workspace.rootPath;
   // The metadata resolver refuses a symlinked or non-directory .dohc by
   // throwing, and its contract says readers stay tolerant by catching. A
   // throw here is the settings-unreadable class one level up — the FOLDER is
   // untrustworthy — so it takes the same fail-closed path, with a warning
   // that names the folder to repair. Restart alone cannot fix this class.
-  let path: string;
+  let metadata: string | null;
   try {
-    path = await workspaceSettingsPath(rootPath);
+    metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
   } catch {
     return {
       raw: null,
@@ -94,6 +109,21 @@ async function loadWorkspaceSettings(
       ),
     };
   }
+  if (metadata === null) return NO_SETTINGS_FILE;
+  // These settings change what dohc does, such as whether a link opens
+  // without asking, so a folder another user made is not read. The read does
+  // not wait for the engine to prepare the folder, so the saved settings
+  // apply from the moment the window opens.
+  const folder = join(metadata, "local");
+  const folderStats = await lstat(folder).catch(() => null);
+  if (folderStats === null) return NO_SETTINGS_FILE;
+  if (!folderStats.isDirectory() || !readsLocalState(workspace, folderStats)) {
+    return {
+      raw: null,
+      result: unreadableSettings("dohc cannot use the workspace's .dohc/local folder.", folder),
+    };
+  }
+  const path = join(folder, WORKSPACE_SETTINGS_FILE);
   try {
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
@@ -117,9 +147,7 @@ async function loadWorkspaceSettings(
       return { raw, result: settingsFromObject(raw) };
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { raw: null, result: { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" } };
-    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return NO_SETTINGS_FILE;
   }
   return {
     raw: null,
@@ -159,11 +187,11 @@ function queueWorkspaceSettingsWrite<T>(
 }
 
 export function saveWorkspaceSettingsFile(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
-  return queueWorkspaceSettingsWrite(rootPath, () =>
-    applyWorkspaceSettingsPatch(rootPath, patch),
+  return queueWorkspaceSettingsWrite(workspace.rootPath, () =>
+    applyWorkspaceSettingsPatch(workspace, patch),
   );
 }
 
@@ -171,12 +199,13 @@ export function saveWorkspaceSettingsFile(
 // This is also the way out the refusal names, so it must land even over a file
 // dohc cannot read — including a directory or a link at that path.
 export function resetWorkspaceSettingsFile(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsResult> {
-  return queueWorkspaceSettingsWrite(rootPath, async () => {
+  return queueWorkspaceSettingsWrite(workspace.rootPath, async () => {
     const replaced = await writeWorkspaceSettingsFile(
-      rootPath,
+      workspace,
       DEFAULT_WORKSPACE_SETTINGS,
+      "reset",
     );
     return {
       settings: DEFAULT_WORKSPACE_SETTINGS,
@@ -203,12 +232,12 @@ export function resetWorkspaceSettingsFile(
 // closes that, and every other stale-snapshot save with it. Only the changed
 // keys are written, so keys dohc does not use stay as the person left them.
 async function applyWorkspaceSettingsPatch(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
-  const current = await loadWorkspaceSettings(rootPath);
+  const current = await loadWorkspaceSettings(workspace);
   if (current.result.source === "recovered") {
-    const path = await workspaceSettingsPath(rootPath);
+    const path = await workspaceSettingsPath(workspace.rootPath);
     return {
       ...current.result,
       refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
@@ -218,7 +247,7 @@ async function applyWorkspaceSettingsPatch(
   const content = current.raw
     ? overlaySettings(current.raw, current.result.settings, settings)
     : settings;
-  await writeSettingsContent(rootPath, content);
+  await writeSettingsContent(workspace, content, "save");
   return settingsFromObject(content);
 }
 
@@ -227,17 +256,37 @@ async function applyWorkspaceSettingsPatch(
 // case — the settings artifact itself, whose content a reset discards by
 // definition, is replaced atomically by the rename).
 export async function writeWorkspaceSettingsFile(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   settings: WorkspaceSettings,
+  verb: "save" | "reset" = "save",
 ): Promise<"folder" | "link" | null> {
-  return writeSettingsContent(rootPath, decodeWorkspaceSettings(settings));
+  return writeSettingsContent(workspace, decodeWorkspaceSettings(settings), verb);
+}
+
+// What a save or a reset tells the person when the engine has not prepared
+// `.dohc/local` for this computer's settings. Nothing is written then.
+function notWritten(verb: "save" | "reset", refusal: LocalStateRefusal): string {
+  return refusal === "not-opened"
+    ? `dohc did not ${verb} this workspace's settings because the workspace has not finished opening. Try again when it opens.`
+    : `dohc did not ${verb} this workspace's settings because it can't keep this computer's settings out of iCloud Drive. Restart dohc to try again.`;
 }
 
 async function writeSettingsContent(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   content: Record<string, unknown>,
+  verb: "save" | "reset",
 ): Promise<"folder" | "link" | null> {
-  const path = await workspaceSettingsPath(rootPath);
+  const rootPath = workspace.rootPath;
+  let folder: string;
+  try {
+    folder = await localStateDir(workspace);
+  } catch (error) {
+    if (error instanceof LocalStateUnavailableError) {
+      throw new LocalStateUnavailableError(error.refusal, notWritten(verb, error.refusal));
+    }
+    throw error;
+  }
+  const path = join(folder, WORKSPACE_SETTINGS_FILE);
   let squatter: "folder" | "link" | null = null;
   await atomicReplaceFile(path, async (tmp) => {
     await writeFile(tmp, `${JSON.stringify(content, null, 2)}\n`);
