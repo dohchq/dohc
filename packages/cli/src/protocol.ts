@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
@@ -131,6 +132,9 @@ const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
 const groupsFullArgsSchema = z.object(argsBase).strict();
+export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
+  group: z.string().min(1).max(500),
+}).strict();
 
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
@@ -397,6 +401,9 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("chatLinks"), args: z.union([
+    ChatLinksInput.extend(argsBase).strict(), chatLinksGroupInputSchema.extend(argsBase).strict(),
+  ]) }).strict(),
   z.object({ ...requestBase, verb: z.literal("chatFileMentions"), args: ChatFileMentionsInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("linksEdges"), args: LinksEdgesInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
@@ -495,6 +502,7 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  chatLinks: ["chat.read"],
   chatFileMentions: ["chat.read"],
   linksEdges: ["links.edges"],
   linksIn: ["links.in"],
@@ -658,7 +666,7 @@ const cliGrepMatchSchema = z
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
 const groupsResultSchema = z
-  .object({ groups: z.array(cliGroupSchema) })
+  .object({ groups: z.array(cliGroupSchema.extend({ channelWireId: z.string().min(1).max(500).nullable().optional() }).strict()) })
   .strict();
 const threadsResultSchema = z
   .object({
@@ -929,6 +937,7 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
         z
           .object({
             id: rawChannelIdSchema,
+            channelWireId: z.string().min(1).max(500).nullable().optional(),
             name: z.string().min(1),
             slug: z.string().min(1),
             kind: z.enum(["group", "dm", "agent"]),
@@ -1357,6 +1366,7 @@ export const cliResultSchemas = {
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
+  chatLinks: ChatLinksPage,
   chatFileMentions: ChatFileMentionsPage,
   linksEdges: LinksEdgesResult,
   linksIn: LinksInResult,

@@ -418,6 +418,8 @@ describe("document request schemas", () => {
 
 it("preserves a group's purpose and each thread's lane", () => {
   const group = { id: "c:team", name: "Team", slug: "team", kind: "group", purpose: "Plan the launch" };
+  const listed = { ...group, channelWireId: "wire" };
+  expect(parseCliResult("groups", { groups: [listed] })).toEqual({ groups: [listed] });
   expect(parseCliResult("groups", { groups: [group] })).toEqual({ groups: [group] });
   const threads = ["posts", "chat"].map((lane, index) => ({
     id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
@@ -465,4 +467,17 @@ it("maps Access refresh and accepts only actionable request outcomes", () => {
   }
   expect(() => parseCliResult("accessRefresh", { status: "finished" })).toThrow();
   expect(() => parseCliResult("accessRefresh", { status: "unavailable" })).toThrow();
+});
+
+it("accepts one Links target shape for CLI or MCP, and older group listings", () => {
+  const base = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "chatLinks" };
+  const args = { cwd: "/workspace", actor: "agent", cursor: "sealed" };
+  for (const target of [{ group: "general" }, { channelWireId: "wire" }]) {
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(true);
+  }
+  for (const target of [{}, { group: "general", channelWireId: "wire" }]) {
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(false);
+  }
+  const group = { id: "channel-old", name: "Old", slug: "old", kind: "group", threadCount: 0, threads: [] };
+  expect(parseCliResult("groupsFull", { ok: true, groups: [group] })).toEqual({ ok: true, groups: [group] });
 });

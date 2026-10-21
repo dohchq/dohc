@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
@@ -341,6 +342,7 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  chatLinks?(workspace:CliRegistryWorkspace,input:ChatLinksInput):Promise<ChatLinksPage>;
   chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
   links?: {
     edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
@@ -1415,6 +1417,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
   return (
     verb === "groups" ||
     verb === "threads" ||
+    verb === "chatLinks" ||
     verb === "inbox" ||
     verb === "show" ||
     verb === "grep" ||
@@ -1440,6 +1443,8 @@ function chatReadTarget(
       return { threadId: request.args.target };
     case "threads":
       return { channelId: request.args.group };
+    case "chatLinks":
+      return "group" in request.args ? { channelId: request.args.group } : undefined;
     default:
       return undefined;
   }
@@ -2508,11 +2513,14 @@ async function dispatchWorkspace(
         if (fullChannels.length !== before.length) {
           await notifyWrite(options, context);
         }
+        const wireIds = await Promise.all(fullChannels.map(channel =>
+          context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }).catch(() => null)));
         const withThreads = [];
-        for (const channel of fullChannels) {
+        for (const [index, channel] of fullChannels.entries()) {
           const threads = await listCliChannelThreads(context, channel);
           withThreads.push({
             id: channel.id,
+            channelWireId: wireIds[index] ?? null,
             name: channel.name,
             slug: channel.slug,
             kind: cliGroupKind(channel.kind),
@@ -3029,7 +3037,10 @@ async function dispatchWorkspace(
 
   switch (request.verb) {
     case "groups":
-      return { groups: channels.map(({ cli }) => cli) };
+      return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
+        ...cli,
+        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }).catch(() => null),
+      }))) };
 
     case "threads": {
       const channel = resolveChannel(request.args.group, channels);
@@ -3479,11 +3490,27 @@ async function dispatchWorkspace(
 }
 
 async function dispatchMentionAndLinkReads(
-  request: Extract<CliRequest, { verb: "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
+  request: Extract<CliRequest, { verb: "chatLinks" | "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
   options: CliServerOptions,
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (request.verb === "chatLinks") {
+    if (!options.chatLinks) throw new CliCommandError("Chat links are unavailable.");
+    let channelWireId: string | null;
+    if ("group" in request.args) {
+      const context = await workspaceContextForRequest(request, options);
+      const loaded = await loadChannels(context);
+      if (loaded.provisioned) await notifyWrite(options, context);
+      const channel = resolveChannel(request.args.group, loaded.channels);
+      channelWireId = await context.store.getChannelWireId({
+        workspaceId: context.workspaceId, channelId: channel.engine.id,
+      }).catch(() => null);
+    } else {
+      channelWireId = request.args.channelWireId;
+    }
+    return channelWireId === null ? null : options.chatLinks(workspace, { channelWireId, cursor: request.args.cursor });
+  }
   if (request.verb === "chatFileMentions") {
     if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");
     return options.chatFileMentions(workspace, { subject: request.args.subject, cursor: request.args.cursor });
@@ -3595,7 +3622,7 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
+      : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
         ? await dispatchMentionAndLinkReads(request, options)
         : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);

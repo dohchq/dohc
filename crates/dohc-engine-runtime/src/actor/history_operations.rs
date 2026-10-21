@@ -88,6 +88,7 @@ impl ActorHandle {
                                 &policy,
                                 &m,
                                 input.now_ms,
+                                false,
                             )?;
                         }
                         Ok(HistoryOperation {
@@ -107,6 +108,35 @@ impl ActorHandle {
                     TxnOutcome::Committed(result) => Ok(result),
                     TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
                 }
+            })
+        })
+        .await
+    }
+
+    pub async fn history_undo_open_writes(
+        &self,
+        ws: String,
+        operation: String,
+    ) -> Result<HashSet<String>, RuntimeError> {
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&ws)?
+                .version_id;
+            store.read_with(|conn| {
+                let mut objects = HashSet::new();
+                for member in operation_moments_in(conn, &ws, &version, &operation)? {
+                    if member.operation == "write"
+                        && !dohc_engine_domain::is_duplicate_in(
+                            conn,
+                            &ws,
+                            &operation,
+                            member.moment_order,
+                        )?
+                    {
+                        objects.insert(member.object_id);
+                    }
+                }
+                Ok(objects)
             })
         })
         .await
@@ -567,6 +597,7 @@ fn place_undo_members(
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             now,
             faults,
@@ -642,6 +673,7 @@ pub(super) fn test_undo_in_turns(
                             now,
                             [Arc::default(), Arc::default()],
                             Arc::new(()),
+                            None,
                             crate::CancellationToken::new(),
                         )
                         .await?;
@@ -1583,6 +1615,7 @@ fn publish_undo_member(
     policy: &crate::search::SearchPolicySnapshot,
     m: &dohc_engine_domain::MomentRecord,
     now: i64,
+    live: bool,
 ) -> Result<(), DomainError> {
     let mut journal_eligibility = None;
     if m.operation == dohc_engine_domain::MomentOp::Delete {
@@ -1650,17 +1683,21 @@ fn publish_undo_member(
     } else {
         dohc_engine_sync::ResultingHead::BinaryOrAbsent
     };
-    dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-        tx,
-        ws,
-        version_id,
-        &m.object_id,
-        head,
-        None,
-        None,
-        now,
-    )
-    .map_err(|e| DomainError::Storage(StorageError::persist_public(std::io::Error::other(e))))?;
+    if !live {
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            head,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
+    }
     if let Some(text) = text.as_deref() {
         crate::search::index::insert_file_search_index_with_policy(
             tx,
@@ -1708,13 +1745,15 @@ fn publish_undo_member(
             },
         )?;
     }
-    journal_moment_outbound_with_batch_in_tx(
-        tx,
-        ws,
-        &m.moment_id,
-        false,
-        &mut journal_eligibility,
-    )?;
+    if !live {
+        journal_moment_outbound_with_batch_in_tx(
+            tx,
+            ws,
+            &m.moment_id,
+            false,
+            &mut journal_eligibility,
+        )?;
+    }
     Ok(())
 }
 

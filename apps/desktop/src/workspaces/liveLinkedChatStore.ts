@@ -210,6 +210,7 @@ export function createLiveLinkedChatStore(
         async (adapter) =>
           await adapter.listThreadAttachments(workspaceId, threadId),
       ),
+    linksPage: async input => await invokeRead(adapter => adapter.linksPage(input)),
     fileMentionsPage: input => invokeRead(adapter => adapter.fileMentionsPage(input)),
     markThreadReadByAgent: async (input) =>
       await invoke(

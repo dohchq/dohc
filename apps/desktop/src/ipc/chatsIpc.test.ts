@@ -1,3 +1,8 @@
+import { createChatLinksReader } from "../workspaces/chatLinks";
+import { chatLinks as mcpChatLinks } from "@dohc/mcp/tools";
+import { executeCli } from "@dohc/cli";
+import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "@dohc/cli/protocol";
+import { handleCliRequestLine, type CliServerOptions, type CliWorkspaceContext } from "../cli/cliServer";
 import { chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -74,6 +79,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     listMessages: vi.fn<DesktopLinkedChatStore["listMessages"]>(async () => [message]),
     listThreads: vi.fn<DesktopLinkedChatStore["listThreads"]>(async () => [thread]),
     listThreadsForFile: vi.fn<DesktopLinkedChatStore["listThreadsForFile"]>(async () => [thread]),
+    linksPage: vi.fn<DesktopLinkedChatStore["linksPage"]>(async () => ({ versionId: "main", subject: {channelWireId:"wire"}, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: "sealed" })),
     fileMentionsPage: vi.fn<DesktopLinkedChatStore["fileMentionsPage"]>(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     getThreadRevision: vi.fn<DesktopLinkedChatStore["getThreadRevision"]>(async () => 7),
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
@@ -173,9 +179,16 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   const assertTrustedSender = vi.fn((event: Event) => {
     if (!event.sender.trusted) throw new Error("Untrusted sender");
   });
+  const chatLinks = createChatLinksReader({
+    requireChatScope: chatScope.requireChatScope, syncWorkspaceSharedChannels,
+    readWorkspace: () => workspace, principalGeneration: () => 0,
+    currentAttachment: () => authorities.currentBinding(workspace.workspaceId).attachmentId,
+    resolveEngineFiles, presentationRequest: async () => async () => neutralPresentation,
+  });
   registerChatsIpcHandlers<Event["sender"], Event, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
+    chatLinks,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace, currentCredentialGeneration: () => 0,
     stateDir: () => stateDirectory,
@@ -197,7 +210,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     if (!handler) throw new Error(`Missing chat handler: ${channel}`);
     return await handler(event, payload);
   }
-  return { invoke, workspace, thread, message, bookmark, syncWorkspaceSharedChannels, storeMethods, captureMethods, capture, ensureGroupFolder,
+  return { invoke, chatLinks, chatWrites, workspace, thread, message, bookmark, syncWorkspaceSharedChannels, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
@@ -814,4 +827,56 @@ describe("registered chat channel and read-state boundaries", () => {
     expect(test.storeMethods.markThreadRead).not.toHaveBeenCalled();
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
   });
+});
+
+it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission", async () => {
+  const h=fixture(),root=createTestScratchSync("chat-links-doors-");
+  h.storeMethods.listChannels.mockResolvedValue([{
+    id:"channel",workspaceId:"workspace",name:"Group",slug:"group",kind:"channel",type:"posts",purpose:"",
+    createdAtMs:1,updatedAtMs:1,threadCount:1,unreadCount:0,
+  }]);
+  h.storeMethods.linksPage.mockResolvedValue({
+    versionId:"main",subject:{channelWireId:"wire"},entries:[{
+      file:{objectId:"object",path:"notes/a.md",folder:"notes"},attachmentId:"attachment",
+      threadId:"thread",messageId:"message",mentionedAtMs:1,
+      author:{authorKind:"human",authorDisplayName:"Sam",authorUserId:"secret",authorActorKey:"secret"},
+    }],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"sealed",
+  });
+  const options:CliServerOptions={
+    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,
+    stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
+    chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
+    openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},
+  };
+  const request=async(value:CliRequestWithoutToken,serverOptions=options)=>{
+    const token="a".repeat(64);
+    const response=JSON.parse(await handleCliRequestLine(JSON.stringify({...value,token}),token,serverOptions));
+    if(!response.ok)throw Error(response.error);
+    return response.result;
+  };
+  const ipc=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
+  const cliPage=await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",
+    args:{cwd:root,actor:"agent",channelWireId:"wire",cursor:"sealed"}});
+  // Resolving a group needs a chat context; wire-ID reads must bypass it.
+  const cli=await executeCli({argv:["chat","links","Group","--cursor","sealed","--json"],cwd:root,env:{},
+    request:value=>request(value,{...options,openWorkspace:async()=>({
+      workspaceId:"workspace",rootPath:root,readOnly:true,store:h.storeMethods,
+    } as unknown as CliWorkspaceContext)}),
+  });
+  expect(cli.exitCode).toBe(0);
+  const {schemaVersion:_,...groupPage}=JSON.parse(cli.stdout);
+  expect(groupPage).toEqual(ipc);
+  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request},{channelWireId:"wire",cursor:"sealed"});
+  expect(cliPage).toEqual(ipc);expect(mcp).toEqual(ipc);
+  const calls=h.storeMethods.linksPage.mock.calls.map(([input])=>input);
+  expect(calls).toHaveLength(4);
+  for(const call of calls.slice(1)) expect(call).toMatchObject({cursor:"sealed",scope:calls[0]!.scope});
+  expect(JSON.stringify(ipc)).not.toMatch(/secret|authorUserId|authorActorKey/);
+  h.resolveEngineFiles.mockResolvedValue([{status:"absent"}]);
+  const denied=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
+  expect(await mcpChatLinks({root,home:root,request},{channelWireId:"wire"})).toEqual(denied);
+  h.storeMethods.listChannels.mockResolvedValue([]);
+  expect(await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"})).toBeNull();
+  expect(await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",args:{cwd:root,actor:"agent",channelWireId:"wire"}})).toBeNull();
+  await expect(h.invoke("desktop:chat-links",{workspaceId:"other",channelWireId:"wire"})).rejects.toThrow();
 });

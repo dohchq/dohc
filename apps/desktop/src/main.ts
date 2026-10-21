@@ -1,3 +1,6 @@
+import { createChatLinksReader } from "./workspaces/chatLinks";
+import { createActorPresentationRequest } from "./workspaces/actorPresentation";
+import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
 import { linksOperations } from "./ipc/linksOperations";
@@ -4805,6 +4808,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     },
   }),
   links: workspaceLinks,
+  chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   listWorkspaces,
@@ -6089,6 +6093,23 @@ const workspaceChatFileMentions = createChatFileMentionsReader({
   principalGeneration: () => credentialCacheGeneration,
 });
 
+const workspaceChatLinks = createChatLinksReader({
+  requireChatScope: chatScope.requireChatScope, syncWorkspaceSharedChannels, readWorkspace: findWorkspace,
+  principalGeneration: () => credentialCacheGeneration,
+  currentAttachment: id => workspaceAuthorities.currentBinding(id).attachmentId,
+  resolveEngineFiles,
+  presentationRequest: async (scope, check) => {
+    await warmCredentialCache();
+    check();
+    const agentColors = await agentColorsForPresentation(stateDir());
+    check();
+    return createActorPresentationRequest({
+      agentColors, store: scope.store, readWorkspace: () => findWorkspace(scope.workspace.workspaceId),
+      assertCurrent: check, installationId: localInstallationId(), credentials: cachedCredentials,
+    });
+  },
+});
+
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
@@ -7026,6 +7047,7 @@ function registerIpcHandlers(): void {
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     readWorkspace: findWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
+    chatLinks: workspaceChatLinks,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,
     automationCollectionOf: (workspaceId) => {

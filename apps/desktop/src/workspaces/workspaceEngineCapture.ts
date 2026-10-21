@@ -40,6 +40,7 @@ import {
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import type {
   MaterializeRelayPullPage,
   RelayMaterializedPath,
@@ -6447,6 +6448,7 @@ export function createWorkspaceEngineCapture(
         // base/current/incoming when it conflicts). The differing paths come
         // from the engine's metadata listing, one page at a time — the walk
         // needs paths, never text bodies.
+        const deletedPaths: string[] = [];
         const changedPaths: string[] = [];
         {
           let afterPath: string | undefined;
@@ -6457,10 +6459,27 @@ export function createWorkspaceEngineCapture(
               targetVersionId: ENGINE_MAIN_VERSION_ID,
               ...(afterPath !== undefined ? { afterPath } : {}),
             });
-            changedPaths.push(...page.entries.map((entry) => entry.path));
+            for (const entry of page.entries) {
+              changedPaths.push(entry.path);
+              if (entry.status === "deleted") deletedPaths.push(entry.path);
+            }
             afterPath = page.nextAfterPath ?? undefined;
           } while (afterPath !== undefined);
         }
+        // Each text merge reaches disk at once. A path Main loses that another
+        // spelling of the same file replaces merges first, like the protected
+        // half below, so its delete cannot remove the new spelling's file.
+        const deleted = new Set(deletedPaths);
+        const writtenKeys = new Set(
+          changedPaths.filter((path) => !deleted.has(path)).map(pathCollisionKey),
+        );
+        const respelled = new Set(
+          deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
+        );
+        const mergeOrder = [
+          ...respelled,
+          ...changedPaths.filter((path) => !respelled.has(path)),
+        ];
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.
@@ -6491,7 +6510,7 @@ export function createWorkspaceEngineCapture(
         let conflictCount = 0;
         let mergedFileCount = 0;
         let unchangedFileCount = 0;
-        for (const path of changedPaths) {
+        for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
             conflictCount += 1;
             continue;

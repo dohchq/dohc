@@ -222,8 +222,14 @@ impl ActorHandle {
         leases: LeaseRegistry,
         session_ops: Arc<tokio::sync::Mutex<()>>,
         faults: Arc<dyn FaultInjector>,
+        documents: (
+            super::link_documents::DocumentIsOpen,
+            super::link_documents::DocumentResync,
+        ),
+        recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
+        let (is_open, resync) = documents;
         let _pass = tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
@@ -240,7 +246,7 @@ impl ActorHandle {
             guard = session_ops.clone().lock_owned() => guard,
         };
         let (journal_ws, journal_op) = (workspace.clone(), operation.clone());
-        let (db, external) = self
+        let (db, external, checkpoint) = self
             .run(move |store, _| {
                 let _admission = serial;
                 #[cfg(test)]
@@ -259,7 +265,11 @@ impl ActorHandle {
                             .map_err(StorageError::corrupt_public)?,
                     )
                 })?;
-                Ok((store.database_path().to_path_buf(), external))
+                Ok((
+                    store.database_path().to_path_buf(),
+                    external,
+                    Arc::new(store.checkpoint_cycle()),
+                ))
             })
             .await?;
         let state = self.link_rewrites.clone();
@@ -337,20 +347,36 @@ impl ActorHandle {
         let Some(plan) = plan else {
             return Ok(result);
         };
-        let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
-        #[cfg(test)]
-        let reserve_ws = workspace.clone();
-        let serial = tokio::select! {
-            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = session_ops.clone().lock_owned() => guard,
-        };
-        self.run(move |store, _| {
-            let _admission = serial;
+        let mut reserve_locked_since = None;
+        loop {
+            let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
             #[cfg(test)]
-            let _turn = tests::Turn::start(&reserve_ws, "reserve");
-            save(store, &r, false, &initial, f.as_ref())
-        })
-        .await?;
+            let reserve_ws = workspace.clone();
+            let serial = tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = session_ops.clone().lock_owned() => guard,
+            };
+            let outcome = self
+                .run(move |store, _| {
+                    let _admission = serial;
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&reserve_ws, "reserve");
+                    save(store, &r, false, &initial, f.as_ref())
+                })
+                .await;
+            match outcome {
+                Ok(()) => break,
+                Err(error) if error.code() == "file-locked" => {
+                    Self::wait_undo_checkpoint(
+                        &token,
+                        &mut reserve_locked_since,
+                        checkpoint.clone(),
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let (plan, before, after) = tokio::task::spawn_blocking(move || {
             let old = plan.rename.before_path.as_deref().unwrap_or("");
             let before = Resolver::new(
@@ -365,20 +391,12 @@ impl ActorHandle {
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let initially_open: HashSet<_> = plan
-            .candidates
-            .sources
-            .iter()
-            .filter_map(|(object, _)| {
-                let key = DocKey::new(&workspace, &plan.version, object).ok()?;
-                leases.is_held(&key).then(|| object.clone())
-            })
-            .collect();
-        let initially_open = Arc::new(initially_open);
         let mut unchecked = plan.candidates.unchecked.clone();
-        let mut cursor = 0;
+        let mut pending: VecDeque<_> = plan.candidates.sources.clone().into();
         let mut stopped = false;
-        'sources: while cursor < plan.candidates.sources.len() {
+        let mut locked_since = None;
+        let mut commit_locked_since = None;
+        'sources: while !pending.is_empty() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -386,9 +404,18 @@ impl ActorHandle {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
             };
-            let (ws, p, open) = (workspace.clone(), plan.clone(), initially_open.clone());
-            let (next_cursor, sources, skipped, admitted) = self
-                .run(move |store, _| {
+            let (ws, p, open, read_root, read_token, read_recorder, check_before, check_after) = (
+                workspace.clone(),
+                plan.clone(),
+                is_open.clone(),
+                root.clone(),
+                token.clone(),
+                recorder.clone(),
+                before.clone(),
+                after.clone(),
+            );
+            let (remaining, sources, skipped, admitted, locked) = self
+                .run(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
                     let _admission = serial;
@@ -399,53 +426,113 @@ impl ActorHandle {
                         .get_active_version(&ws)?
                         .version_id;
                     if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p, true))? {
-                        return Ok((cursor, sources, skipped, false));
+                        return Ok((pending, sources, skipped, false, false));
                     }
-                    let mut next = cursor;
-                    while next < p.candidates.sources.len() && next - cursor < 16 {
+                    let mut read_count = 0;
+                    let mut locked = false;
+                    while read_count < 16
+                        && (read_count == 0 || started.elapsed() < Duration::from_millis(5))
+                    {
+                        let Some((object, path)) = pending.pop_front() else {
+                            break;
+                        };
+                        read_count += 1;
                         #[cfg(test)]
                         tests::source();
-                        let (object, path) = &p.candidates.sources[next];
-                        if open.contains(object) {
-                            skipped.push(path.clone());
+                        let key = DocKey::new(&ws, &p.version, &object)?;
+                        let mut irrelevant = false;
+                        let usable = if open(&key) {
+                            match super::link_documents::baseline(
+                                store,
+                                cache,
+                                &read_root,
+                                &key,
+                                &path,
+                                &read_token,
+                                read_recorder.as_ref(),
+                                |text| {
+                                    irrelevant = rewrite::forward(
+                                        text,
+                                        &path,
+                                        p.rename.before_path.as_deref().unwrap_or(""),
+                                        &p.rename.path,
+                                        &check_before,
+                                        &check_after,
+                                    )
+                                    .is_some_and(|(_, links)| links == 0);
+                                    !irrelevant
+                                },
+                            ) {
+                                Ok(value) => value,
+                                Err(
+                                    RuntimeError::Domain(DomainError::UndoRefused { .. })
+                                    | RuntimeError::Sync(
+                                        dohc_engine_sync::SyncError::LiveDocumentBindingActive,
+                                    ),
+                                ) => false,
+                                Err(error) if error.code() == "file-locked" => {
+                                    pending.push_front((object, path));
+                                    locked = true;
+                                    break;
+                                }
+                                Err(error) => return Err(error),
+                            }
                         } else {
+                            true
+                        };
+                        if irrelevant {
+                            continue;
+                        }
+                        if usable {
                             let source = store.read_with(|conn| {
-                                let source = incoming::read_source(conn, &ws, &p.version, object)?;
+                                let source = incoming::read_source(conn, &ws, &p.version, &object)?;
                                 #[cfg(test)]
-                                tests::after_read(conn, &ws, object);
-                                Ok::<_, StorageError>(source)
+                                tests::after_read(conn, &ws, &object);
+                                let live = if open(&key) {
+                                    dohc_engine_collab::read_marker_in(conn, &key)?
+                                        .map(|marker| {
+                                            dohc_engine_collab::load_doc_in(conn, &key)
+                                                .map(|doc| (doc, marker))
+                                        })
+                                        .transpose()?
+                                } else {
+                                    None
+                                };
+                                Ok::<_, RuntimeError>((source, live))
                             })?;
-                            if let Some(source) = source {
-                                sources.push((object.clone(), path.clone(), source));
+                            if let (Some(source), live) = source {
+                                sources.push((object.clone(), path.clone(), source, live));
                             } else {
                                 skipped.push(path.clone());
                             }
-                        }
-                        next += 1;
-                        if started.elapsed() >= Duration::from_millis(5) {
-                            break;
+                        } else {
+                            skipped.push(path.clone());
                         }
                     }
-                    Ok((next, sources, skipped, true))
+                    Ok((pending, sources, skipped, true, locked))
                 })
                 .await?;
+            pending = remaining;
+            if locked {
+                #[cfg(test)]
+                super::history_operations::turns::tests::checkpoint_wait(&workspace).await;
+                Self::wait_undo_checkpoint(&token, &mut locked_since, checkpoint.clone()).await?;
+            } else {
+                locked_since = None;
+            }
             unchecked.extend(skipped);
             if !admitted {
                 stopped = true;
-                unchecked.extend(
-                    plan.candidates.sources[cursor..]
-                        .iter()
-                        .map(|(_, p)| p.clone()),
-                );
+                unchecked.extend(pending.iter().map(|(_, p)| p.clone()));
                 break;
             }
-            cursor = next_cursor;
-            let (p, before, after) = (plan.clone(), before.clone(), after.clone());
+            let (p, parse_before, parse_after) = (plan.clone(), before.clone(), after.clone());
             let (mut prepared, skipped) = tokio::task::spawn_blocking(move || {
                 let mut prepared = VecDeque::new();
                 let mut skipped = Vec::new();
-                for (object, path, source) in sources {
-                    let text = source.text().unwrap_or("").to_owned();
+                for (object, path, source, live) in sources {
+                    let original_text = source.text().unwrap_or("").to_owned();
+                    let text = original_text.clone();
                     let parsed = source.parse()?;
                     let edit = if parsed.reason.is_some() {
                         None
@@ -455,13 +542,29 @@ impl ActorHandle {
                             &path,
                             p.rename.before_path.as_deref().unwrap_or(""),
                             &p.rename.path,
-                            &before,
-                            &after,
+                            &parse_before,
+                            &parse_after,
                         )
                     };
                     match (parsed.head, edit) {
                         (Some(head), Some((text, links))) if links > 0 => {
-                            prepared.push_back((object, head, text, links))
+                            let was_open = live.is_some();
+                            let live = live
+                                .map(|(doc, marker)| {
+                                    super::link_documents::prepare_doc(
+                                        &doc,
+                                        marker,
+                                        &original_text,
+                                        &text,
+                                    )
+                                })
+                                .transpose()?
+                                .flatten();
+                            if was_open && live.is_none() {
+                                skipped.push(path);
+                            } else {
+                                prepared.push_back((object, head, text, links, live));
+                            }
                         }
                         (Some(_), Some(_)) => {}
                         _ => skipped.push(path),
@@ -477,7 +580,7 @@ impl ActorHandle {
                     () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     guard = Arc::clone(&session_ops).lock_owned() => guard,
                 };
-                let (ws, op, author, root, p, r, token, f, leases, mut next_result) = (
+                let (ws, op, author, root, p, r, turn_token, f, leases, resync, mut next_result) = (
                     workspace.clone(),
                     operation.clone(),
                     author.clone(),
@@ -487,8 +590,10 @@ impl ActorHandle {
                     token.clone(),
                     faults.clone(),
                     leases.clone(),
+                    resync.clone(),
                     result.clone(),
                 );
+                let turn_open = is_open.clone();
                 let committed = self
                 .run(move |store, cache| {
                     #[cfg(test)]
@@ -496,7 +601,9 @@ impl ActorHandle {
                     let _admission = serial;
                     let started = Instant::now();
                     let mut skipped = Vec::new();
-                    while let Some((object, head, text, links)) = prepared.pop_front() {
+                    let mut refresh = Vec::new();
+                    let mut locked = false;
+                    while let Some((object, head, text, links, live)) = prepared.pop_front() {
                     #[cfg(test)]
                     tests::source();
                     let source_path = head.path.clone();
@@ -506,10 +613,15 @@ impl ActorHandle {
                         Err(CollabError::LeaseHeld) => None,
                         Err(error) => return Err(error.into()),
                     };
+                    if lease.is_none() && !turn_open(&key) {
+                        skipped.push(source_path); continue;
+                    }
+                    if lease.is_none() && live.is_none() {
+                        refresh.push((object, source_path)); continue;
+                    }
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
-                    let committed = (|| -> Result<bool, RuntimeError> {
-                    if lease.is_none() { return Ok(false); }
-                    if token.is_cancelled() {
+                    let outcome = (|| -> Result<bool, RuntimeError> {
+                    if turn_token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
                     }
                     let active = VersionedTextStore::new(store)
@@ -553,6 +665,9 @@ impl ActorHandle {
                     {
                         return Ok(false);
                     }
+                    let live = if lease.is_none() {
+                        match live { Some(edit) => Some(edit), None => return Ok(false) }
+                    } else { None };
                     let input = WriteText {
                         workspace_id: ws.clone(),
                         version_id: p.version.clone(),
@@ -574,6 +689,15 @@ impl ActorHandle {
                         now_ms: crate::links::now_ms(),
                     };
                     with_local_file_mutation_cache_reset(cache, || {
+                        if let Some(edit) = &live {
+                            return match super::link_documents::write(store, &input, &root, &key, edit,
+                                &head.hash, &|tx| r.save(tx, false, &next), f.as_ref()) {
+                                Ok(()) => { resync(&key); Ok(true) },
+                                Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {..} |
+                                    DomainError::UndoRefused {..})) => Ok(false),
+                                Err(error) => Err(error),
+                            };
+                        }
                         match versioned_text_write_with_publication_on_store(
                             store,
                             &input,
@@ -585,7 +709,7 @@ impl ActorHandle {
                             }),
                             Some(&|tx| r.save(tx, false, &next)),
                             f.as_ref(),
-                            &token,
+                            &turn_token,
                         ) {
                             Ok(_) => Ok(true),
                             Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
@@ -594,22 +718,40 @@ impl ActorHandle {
                             Err(error) => Err(error),
                         }
                     })
-                    })()?;
+                    })();
+                    let committed = match outcome {
+                        Ok(value) => value,
+                        Err(error) if error.code() == "file-locked" => {
+                            refresh.push((object, source_path));
+                            locked = true;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if committed { next_result = next; } else { skipped.push(source_path); }
                     if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
-                    Ok((prepared, next_result, skipped, stopped))
+                    Ok((prepared, next_result, skipped, stopped, refresh, locked))
                 }).await?;
                 (prepared, result) = (committed.0, committed.1);
                 unchecked.extend(committed.2);
                 stopped = committed.3;
+                pending.extend(committed.4);
+                if committed.5 {
+                    #[cfg(test)]
+                    super::history_operations::turns::tests::checkpoint_wait(&workspace).await;
+                    Self::wait_undo_checkpoint(
+                        &token,
+                        &mut commit_locked_since,
+                        checkpoint.clone(),
+                    )
+                    .await?;
+                } else {
+                    commit_locked_since = None;
+                }
                 if stopped {
-                    unchecked.extend(prepared.drain(..).map(|(_, head, _, _)| head.path));
-                    unchecked.extend(
-                        plan.candidates.sources[cursor..]
-                            .iter()
-                            .map(|(_, path)| path.clone()),
-                    );
+                    unchecked.extend(prepared.drain(..).map(|(_, head, _, _, _)| head.path));
+                    unchecked.extend(pending.iter().map(|(_, path)| path.clone()));
                     break 'sources;
                 }
             }
@@ -620,25 +762,40 @@ impl ActorHandle {
         result["complete"] = json!(unchecked.is_empty());
         result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
         let reply = result.clone();
-        let serial = tokio::select! {
-            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = session_ops.clone().lock_owned() => guard,
-        };
-        self.run(move |store, _| {
-            let _admission = serial;
+        let mut reply_locked_since = None;
+        loop {
             #[cfg(test)]
-            let _turn = tests::Turn::start(&workspace, "reply");
-            save(store, &receipt, !stopped, &result, faults.as_ref())?;
-            store
-                .read_with(|conn| {
-                    conn.execute_batch(
+            let reply_ws = workspace.clone();
+            let (receipt, result, faults) = (receipt.clone(), result.clone(), faults.clone());
+            let serial = tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = session_ops.clone().lock_owned() => guard,
+            };
+            let outcome = self
+                .run(move |store, _| {
+                    let _admission = serial;
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&reply_ws, "reply");
+                    save(store, &receipt, !stopped, &result, faults.as_ref())?;
+                    store
+                        .read_with(|conn| {
+                            conn.execute_batch(
                         "DELETE FROM rewrite_alias_watch; DELETE FROM rewrite_alias_changes;",
                     )
+                        })
+                        .map_err(StorageError::corrupt_public)?;
+                    Ok(())
                 })
-                .map_err(StorageError::corrupt_public)?;
-            Ok(())
-        })
-        .await?;
+                .await;
+            match outcome {
+                Ok(()) => break,
+                Err(error) if error.code() == "file-locked" => {
+                    Self::wait_undo_checkpoint(&token, &mut reply_locked_since, checkpoint.clone())
+                        .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(reply)
     }
 }

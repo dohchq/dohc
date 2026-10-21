@@ -213,7 +213,7 @@ function caseInsensitiveDisk(root: string, path: string, text: string) {
   return { writer, operations, read: (path: string) => files.get(key(join(root, path))) };
 }
 
-describe("protected materialization order", () => {
+describe("merge materialization order", () => {
   it("keeps a protected merge's case-variant target on a case-insensitive disk", async () => {
     const root = await createTestScratch("dohc-protected-merge-order-");
     const loopback = new VersionedLoopbackEngine();
@@ -263,6 +263,57 @@ describe("protected materialization order", () => {
       });
       expect(disk.read("Foo.env")).toBe("VALUE=draft\n");
       expect(disk.operations).toEqual(["delete", "write"]);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  // The engine places each text merge on disk before the next one starts.
+  it.each([
+    ["merges a text file's old spelling before its new one", "notes.md", "Notes.md", ["notes.md", "Notes.md"]],
+    ["keeps path order for a rename to another name", "b.md", "a.md", ["a.md", "b.md"]],
+    ["merges a dotless i's old spelling first", "\u0131.md", "I.md", ["\u0131.md", "I.md"]],
+    ["merges a normalization respelling's old spelling first", "caf\u00e9.md", "cafe\u0301.md", ["caf\u00e9.md", "cafe\u0301.md"]],
+  ])("%s", async (_name, from, to, order) => {
+    const root = await createTestScratch("dohc-text-merge-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const merged: string[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        merged.push((request.params as { path: string }).path);
+      }
+      return await send(request);
+    });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: from, text: "old\n" });
+    await write(root, from, "old\n");
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      await stores.store.deleteTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: draftId,
+        path: from,
+        metadata: { origin: "api" },
+      });
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: draftId,
+        path: to,
+        text: "new\n",
+      });
+      await engine.switchVersion("main");
+
+      await engine.mergeVersionIntoMain(draftId);
+      expect(merged).toEqual(order);
     } finally {
       await engine.stop();
     }
