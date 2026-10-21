@@ -57,7 +57,8 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
                     .any(|prefix| {
                         sql.get(..prefix.len())
                             .is_some_and(|sql| sql.eq_ignore_ascii_case(prefix))
-                    }) {
+                    })
+                {
                     work.checkpoint_rows += 1;
                 } else {
                     work.rows += 1;
@@ -105,7 +106,6 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     let work = STORE_WORK.with(std::cell::Cell::get);
     assert_eq!(work.rows, 3, "keep phase SELECT and data_version rows");
     assert_eq!(work.checkpoint_rows, 4, "separate checkpoint bookkeeping");
-
 }
 pub(in crate::actor) fn source() {
     STORE_WORK.with(|cell| {
