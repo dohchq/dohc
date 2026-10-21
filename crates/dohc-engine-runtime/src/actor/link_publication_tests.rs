@@ -786,11 +786,14 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publication_turn_retries_a_temporary_staging_error_that_clears_on_the_second_attempt() {
+async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {
     let f = Fixture::new(1, 1);
     let gate = f.capture.clone().lock_owned().await;
     f.pass("temporary-error", Arc::new(NoFaults)).await.unwrap();
     let staging = f.root.join(".dohc/engine/displaced");
+    let started = Mutex::new(None::<Instant>);
+    let retry_gap = Arc::new(Mutex::new(None));
+    let observed_gap = retry_gap.clone();
     placements()
         .lock()
         .unwrap()
@@ -798,11 +801,13 @@ async fn publication_turn_retries_a_temporary_staging_error_that_clears_on_the_s
         .or_default()
         .before_attempt = Some(Arc::new(move |attempt| {
         if attempt == 1 {
+            *started.lock().unwrap() = Some(Instant::now());
             if staging.is_dir() {
                 std::fs::remove_dir(&staging).unwrap();
             }
             std::fs::write(&staging, "temporarily unavailable").unwrap();
-        } else if attempt == 2 {
+        } else if started.lock().unwrap().unwrap().elapsed() >= Duration::from_millis(500) {
+            *observed_gap.lock().unwrap() = Some(started.lock().unwrap().unwrap().elapsed());
             std::fs::remove_file(&staging).unwrap();
         }
     }));
@@ -834,6 +839,7 @@ async fn publication_turn_retries_a_temporary_staging_error_that_clears_on_the_s
         "a temporary hard error must get its second attempt"
     );
     assert_eq!(deferred, 0);
+    assert!(retry_gap.lock().unwrap().unwrap() >= Duration::from_secs(1));
     assert_eq!(disk, "[[new#part|label]] [[./new.md]] [old](old.md)");
 }
 

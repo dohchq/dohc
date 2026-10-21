@@ -27,6 +27,7 @@ impl ActorHandle {
             let mut cursor = 0;
             let mut cursor_version = String::new();
             let mut retry = false;
+            let mut hard_retry = false;
             let mut backoff = Duration::from_millis(25);
             let holds = Arc::new(Mutex::new(None::<(u64, dohc_engine_files::PlacementHolds)>));
             while actor.lifecycle() == super::super::LifecycleState::Ready {
@@ -52,7 +53,7 @@ impl ActorHandle {
                         params![p.workspace, p.operation], |r| r.get::<_, bool>(0))
                         .map_err(StorageError::corrupt_public))?;
                     if !stopped && state.stops.lock().unwrap().contains_key(&p.operation) {
-                        return Ok(Some((0, false, prior_version)));
+                        return Ok(Some((0, false, prior_version, false)));
                     }
                     let version = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                     let after = if version == prior_version { cursor } else { 0 };
@@ -69,12 +70,12 @@ impl ActorHandle {
                         })?
                     };
                     let Some((order, id)) = job else {
-                        if !stopped && after != 0 && retry { return Ok(Some((0, false, version))); }
+                        if !stopped && after != 0 && retry { return Ok(Some((0, false, version, false))); }
                         state.publishers.lock().unwrap().remove(&turn_key);
                         return Ok(None);
                     };
                     if state.deferred_placements.lock().unwrap().contains(&id) {
-                        return Ok(Some((order, true, version)));
+                        return Ok(Some((order, true, version, false)));
                     }
                     #[cfg(test)]
                     { turn.jobs = 1; turn.ready(); }
@@ -94,6 +95,7 @@ impl ActorHandle {
                         store, &p.root, &p.workspace, &cached.as_ref().unwrap().1,
                         p.recorder.as_ref(), crate::links::now_ms(), faults.as_ref(), &selected,
                     )?;
+                    let hard_error = !summary.hard_errors.is_empty();
                     for (job, error) in summary.hard_errors {
                         let mut failures = state.placement_failures.lock().unwrap();
                         let attempts = failures.entry(job.clone()).or_default();
@@ -106,21 +108,30 @@ impl ActorHandle {
                         .is_none_or(|job| job.status != dohc_engine_storage::JobStatus::Pending);
                     if completed { state.placement_failures.lock().unwrap().remove(&id); }
                     let done = completed || state.deferred_placements.lock().unwrap().contains(&id);
-                    Ok(Some((order, done, version)))
+                    Ok(Some((order, done, version, hard_error)))
                 }).await;
                 match outcome {
                     Ok(None) => return,
-                    Ok(Some((next, completed, version))) => {
+                    Ok(Some((next, completed, version, hard_error))) => {
                         cursor = next;
                         cursor_version = version;
                         if next == 0 {
                             retry = false;
-                            tokio::time::sleep(backoff).await;
+                            // Hard errors may be transient OS obstructions. Wait between
+                            // passes, outside both gates, while other jobs can finish first.
+                            let delay = if hard_retry {
+                                Duration::from_secs(1)
+                            } else {
+                                backoff
+                            };
+                            hard_retry = false;
+                            tokio::time::sleep(delay).await;
                             backoff = (backoff * 2).min(Duration::from_secs(1));
                         } else if completed {
                             backoff = Duration::from_millis(25);
                         } else {
                             retry = true;
+                            hard_retry |= hard_error;
                         }
                     }
                     Err(_) if actor.lifecycle() != super::super::LifecycleState::Ready => break,

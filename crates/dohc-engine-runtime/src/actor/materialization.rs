@@ -730,14 +730,6 @@ fn replay_materializations(
             },
         )?;
         reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
-    } else {
-        reconcile_selected_settlement_attempts(
-            store,
-            scope.workspace_id,
-            selected.unwrap(),
-            now_ms,
-            faults,
-        )?;
     }
     let mut jobs = if let Some(selected) = selected {
         let mut jobs = selected
