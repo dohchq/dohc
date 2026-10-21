@@ -273,6 +273,31 @@ describe("workspace settings file store", () => {
     });
   });
 
+  // A folder dohc can't look into is not one without settings. chmod can't
+  // hide a folder from root, and Windows has no such mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "names a .dohc dohc can't look into, rather than read its settings as missing",
+    async () => {
+      const workspace = await openedWorkspace();
+      await saveWorkspaceSettingsFile(workspace, { privacy: { confirmExternalLinks: false } });
+      const dohc = join(workspace.rootPath, ".dohc");
+      await chmod(dohc, 0o600);
+      try {
+        const read = await readWorkspaceSettingsFile(workspace);
+        expect(read.source).toBe("recovered");
+        expect(read.warning).toBe(
+          "This workspace's .dohc/local can't be read, so dohc is using default settings. Make sure you can open it, then try again.",
+        );
+        expect((await saveWorkspaceSettingsFile(workspace, { sites: { defaultPreviewMode: "static" } })).refusal).toBe(
+          "dohc did not save workspace settings because this workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+        );
+      } finally {
+        await chmod(dohc, 0o700);
+      }
+      expect((await readWorkspaceSettingsFile(workspace)).settings.privacy.confirmExternalLinks).toBe(false);
+    },
+  );
+
   it("names the folder, not Reset, for a linked .dohc/local holding a malformed file of this user's", async () => {
     const workspace = await openedWorkspace();
     const folder = join(workspace.rootPath, ".dohc", "local");

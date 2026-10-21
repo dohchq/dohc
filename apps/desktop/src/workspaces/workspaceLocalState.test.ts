@@ -1,12 +1,15 @@
-import { lstat, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
+  existingLocalStateFolder,
   localStateDir,
+  LocalStateFolderError,
   LocalStateUnavailableError,
+  ownedLocalStateDir,
   readLocalStateFrom,
 } from "./workspaceLocalState";
 import { createTestScratch } from "./testTemp";
@@ -145,6 +148,31 @@ describe("this computer's .dohc/local", () => {
     expect(await existingLocalStateDir(workspace.rootPath)).toBeNull();
     expect(await readdir(outside)).toEqual([]);
   });
+
+  // What dohc can't look at may hold what protects a person's work, so only a
+  // folder that is not there reads as missing. chmod can't hide a folder from
+  // root, and Windows has no such mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "refuses a reader whose .dohc dohc can't look into, rather than read it as missing",
+    async () => {
+      const { workspace, open } = await engine();
+      await open();
+      await mkdir(join(workspace.rootPath, ".dohc", "local", "trash"));
+      const dohc = join(workspace.rootPath, ".dohc");
+      await chmod(dohc, 0o600);
+      try {
+        const refused = await ownedLocalStateDir(workspace.rootPath).then(() => null, (error: unknown) => error);
+        expect(refused).toBeInstanceOf(LocalStateFolderError);
+        expect((refused as Error).message).toBe(
+          "This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+        );
+        await expect(existingLocalStateFolder(workspace.rootPath, "trash")).rejects.toBeInstanceOf(LocalStateFolderError);
+      } finally {
+        await chmod(dohc, 0o700);
+      }
+      expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
+    },
+  );
 
   it("gives a reader the folder whatever the engine said, and null when it is missing", async () => {
     const { workspace } = await engine();

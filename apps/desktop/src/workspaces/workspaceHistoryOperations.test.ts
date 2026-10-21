@@ -363,6 +363,21 @@ it.skipIf(process.platform === "win32").each(untrustedRecords)("refuses a recove
   expect(await readdir(elsewhere, { recursive: true })).toEqual(before);
 });
 
+// A trash dohc can't look into may hold the record, so Undo names the folder
+// instead of calling the record missing. chmod can't hide a folder from root,
+// and Windows has no such mode.
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("refuses Undo when it can't look into .dohc, and changes nothing", async () => {
+  const f = await fixture(), id = await f.remove();
+  const dohc = join(f.rootPath, ".dohc");
+  await filesystem.chmod(dohc, 0o600);
+  try {
+    expect(await f.undo(id)).toEqual({ ok: false,
+      reason: "Cannot undo the delete. This workspace's .dohc/local can't be read. Make sure you can open it, then try again." });
+  } finally { await filesystem.chmod(dohc, 0o700); }
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 it("reads delete and move records only from .dohc/local/trash, never an old .dohc/trash", async () => {
   const f = await fixture(), id = await f.remove();
   await f.write("before.txt", "kept edits");
