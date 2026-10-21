@@ -399,6 +399,7 @@ impl ApplicationOwner {
     pub fn resume_restore(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreResume,
         coordinate: ApplicationHostCoordinate,
         max_bytes: usize,
@@ -471,7 +472,7 @@ impl ApplicationOwner {
             };
             return Ok(receipt);
         }
-        let result=self.with_restore_settlement(store,input.application.clone(),coordinate,max_bytes,max_events,|store,audit| {
+        let result=self.with_restore_settlement(store, resolver,input.application.clone(),coordinate,max_bytes,max_events,|store,audit| {
             let outcome=store.write_with(faults,|tx|->Result<_,ApplicationError>{
                 let b=audit.binding();
                 let (moment,markdown,vector):(String,String,String)=tx.query_row("SELECT moment_id,markdown_digest,source_state_vector_digest FROM live_device_settlements WHERE settlement_id=?1 AND relay_database_namespace=?2 AND restore_operation_id=?3",params![input.settlement_id,held.namespace,operation.operation_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;

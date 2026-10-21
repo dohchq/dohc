@@ -211,10 +211,9 @@ impl ReaderResolver {
             checkpoint,
         };
         let restore_generation = if let Some(expected) = snapshot.restore_fence {
-            let current: Option<i64> = conn.query_row(
-                "SELECT new_generation FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 ORDER BY new_generation DESC LIMIT 1",
-                params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-            ).optional().map_err(crate::durable::map_sql)?;
+            let current =
+                crate::live_update_application::restore_fence::latest_generation(conn, key)?
+                    .map(|row| row.0);
             if current != Some(expected) {
                 return Err(CollabError::RestoreFenced);
             }

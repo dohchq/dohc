@@ -24,20 +24,8 @@ pub fn resolve_history(
     resolver: Option<&ReaderResolver>,
     max_source_bytes: usize,
 ) -> Result<String, CollabError> {
-    let moment: Option<(String, i64)> = conn.query_row(
-        concat!("SELECT moment_id, (SELECT byte_length FROM blobs WHERE sha256=m.after_blob_sha256) FROM moments m WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-          AND path=?4 AND after_content_kind='text' AND after_blob_sha256=?5 AND ",
-          dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY moment_order LIMIT 1"),
-        params![key.workspace_id,key.version_id,key.object_id,snapshot.path,snapshot.digest], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(crate::durable::map_sql)?;
-    let (moment, length) = moment.ok_or(CollabError::MarkdownReaderUnavailable)?;
-    if usize::try_from(length)
-        .ok()
-        .filter(|n| *n <= max_source_bytes)
-        .is_none()
-    {
-        return Err(CollabError::ConfiguredByteBudgetExceeded);
-    }
+    let (moment, _) =
+        history_artifact(conn, key, snapshot.path, snapshot.digest, max_source_bytes)?;
     resolve(
         conn,
         key,
@@ -49,6 +37,31 @@ pub fn resolve_history(
         },
         resolver,
     )
+}
+
+/// Select stored bytes by the frozen witness, independently of the current snapshot.
+pub(crate) fn history_artifact(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    digest: &str,
+    max_source_bytes: usize,
+) -> Result<(String, i64), CollabError> {
+    let moment: Option<(String, i64)> = conn.query_row(
+        concat!("SELECT moment_id,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+          AND path=?4 AND after_content_kind='text' AND after_blob_sha256=?5 AND ",
+          dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY moment_order LIMIT 1"),
+        params![key.workspace_id,key.version_id,key.object_id,path,digest], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(crate::durable::map_sql)?;
+    let (moment, length) = moment.ok_or(CollabError::MarkdownReaderUnavailable)?;
+    if usize::try_from(length)
+        .ok()
+        .filter(|n| *n <= max_source_bytes)
+        .is_none()
+    {
+        return Err(CollabError::ConfiguredByteBudgetExceeded);
+    }
+    Ok((moment, length))
 }
 
 pub fn resolve(
@@ -99,29 +112,13 @@ pub(crate) fn verify_restore_prefix(
     snapshot: &SnapshotIdentity<'_>,
     resolver: Option<&ReaderResolver>,
     max_source_bytes: usize,
-) -> Result<(String, usize), CollabError> {
+) -> Result<usize, CollabError> {
     let resolver = resolver.ok_or(CollabError::MarkdownReaderUnavailable)?;
-    let current: Option<(String, String, i64)> = if snapshot.moment.is_empty() {
-        conn.query_row(
-        "SELECT s.latest_moment_id,s.blob_sha256,b.byte_length FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text'",
-        params![key.workspace_id,key.version_id,key.object_id,snapshot.path],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    ).optional().map_err(crate::durable::map_sql)?
-    } else {
-        conn.query_row(
-        "SELECT m.moment_id,m.after_blob_sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text'",
-        params![key.workspace_id,key.version_id,key.object_id,snapshot.path,snapshot.moment],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    ).optional().map_err(crate::durable::map_sql)?
-    };
-    let (moment, digest, length) = current.ok_or(CollabError::MarkdownReaderUnavailable)?;
-    if usize::try_from(length)
-        .ok()
-        .filter(|n| *n <= max_source_bytes)
-        .is_none()
-    {
-        return Err(CollabError::ConfiguredByteBudgetExceeded);
-    }
+    let reference = doc
+        .markdown_source_reference()
+        .ok_or(CollabError::MarkdownReaderUnavailable)?;
+    let digest = reference.source_sha256;
+    let (moment, _) = history_artifact(conn, key, snapshot.path, &digest, max_source_bytes)?;
     let snapshot = SnapshotIdentity {
         moment: &moment,
         digest: &digest,
@@ -136,5 +133,5 @@ pub(crate) fn verify_restore_prefix(
         &snapshot,
         &source,
     )?;
-    Ok((moment, source.len()))
+    Ok(source.len())
 }

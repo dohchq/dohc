@@ -84,21 +84,29 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
   const context = cut({checkpoint: input.accepted.checkpoint, suffix: contextSuffix});
   const frozen = registration({document, currentPath, checkpoint: input.frozenState});
   if (frozen.kind !== "accepted") throw new Error(`Restore content refused: ${frozen.reason}.`);
-  const point = cut(input.point);
-  refuse(point.projectedMarkdownSha256 === input.pointMarkdownDigest, "selected artifact differs");
   const sameReaderState = () => {
     if (!input.artifact) return false;
-    const doc = new Y.Doc({gc:false}), selected = new Y.Doc({gc:false});
+    if (!isDeepStrictEqual(Y.decodeUpdate(context.stateUpdate),Y.decodeUpdate(frozen.evidence.stateUpdate))) return false;
+    const doc = new Y.Doc({gc:false}), retained = new Y.Doc({gc:false}), selected = new Y.Doc({gc:false});
     try {
       Y.applyUpdate(doc,context.stateUpdate);
-      Y.applyUpdate(selected,point.stateUpdate);
-      return (doc.getMap("meta").get("dohcMarkdownSourceReader") === 1 ||
-        selected.getMap("meta").get("dohcMarkdownSourceReader") === 1) &&
-        isDeepStrictEqual(Y.decodeUpdate(context.stateUpdate),Y.decodeUpdate(frozen.evidence.stateUpdate));
-    } finally {doc.destroy(); selected.destroy();}
+      Y.applyUpdate(retained,frozen.evidence.stateUpdate);
+      let marked = doc.getMap("meta").get("dohcMarkdownSourceReader") === 1 ||
+        retained.getMap("meta").get("dohcMarkdownSourceReader") === 1;
+      if (!marked) {
+        // Native-to-reader restores can retain reordered attributes in a native prefix.
+        try {
+          for (const update of [input.point.checkpoint, ...input.point.suffix]) Y.applyUpdate(selected, update);
+          marked = selected.getMap("meta").get("dohcMarkdownSourceReader") === 1;
+        } catch {return false;}
+      }
+      return marked;
+    } finally {doc.destroy(); retained.destroy(); selected.destroy();}
   };
   // Yrs can reorder object properties in a retained attribute without changing its value or any struct.
   refuse(context.stateUpdateSha256 === frozen.evidence.stateUpdateSha256 || sameReaderState(), "frozen context differs from retained sources");
+  const point = cut(input.point);
+  refuse(point.projectedMarkdownSha256 === input.pointMarkdownDigest, "selected artifact differs");
   const restored = journal({document, currentPath, checkpoint: context.stateUpdate, suffix: [], candidate: input.candidate});
   if (restored.kind !== "accepted") throw new Error(`Restore content refused: ${restored.reason}.`);
   refuse(isDeepStrictEqual(restored.evidence.candidate.ranges, input.replacementRanges), "replacement ranges differ");

@@ -45,9 +45,6 @@ pub struct NativeRestoreProposalReceipt {
     pub accepted_history: NativeRestoreHistoryProof,
     pub native_sources: Vec<NativeRestoreSource>,
     pub native_source_manifest_digest: String,
-    /// Stored artifact selected before replacing an E head with a native point.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reader_prefix_moment: Option<String>,
 }
 
 /// Constructed only after native verification or verified durable replay.
@@ -250,9 +247,11 @@ impl NativeRestorePreparation {
 
 impl ApplicationOwner {
     /// Prepare under the actor writer exclusion. No canonical edit or admission occurs here.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_restore(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestorePreparation,
         coordinate: ApplicationHostCoordinate,
         max_bytes: usize,
@@ -280,7 +279,7 @@ impl ApplicationOwner {
                 &input,
                 max_bytes,
                 max_events,
-                self.reader_resolver.as_deref(),
+                resolver.map(Arc::as_ref),
             )
         })?;
         match outcome {
@@ -433,25 +432,11 @@ fn prepare_in(
         let json: String = tx.query_row("SELECT proposal_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation.operation_id],|r|r.get(0)).map_err(read_sql)?;
         let receipt: NativeRestoreProposalReceipt =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-        if frozen.has_reader_source() && !point.has_reader_source() {
-            let moment = receipt
-                .reader_prefix_moment
-                .as_deref()
-                .ok_or(ApplicationError::Corrupt)?;
-            prefix_source(
-                tx,
-                held,
-                &frozen,
-                input,
-                resolver,
-                Some(moment),
-                &mut budget,
-            )?;
-        } else if receipt.reader_prefix_moment.is_some() {
-            return Err(ApplicationError::Corrupt);
-        }
         if receipt.fence != input.fence || receipt.point != input.point {
             return Err(ApplicationError::Conflict);
+        }
+        if frozen.has_reader_source() && !point.has_reader_source() {
+            prefix_source(tx, held, &frozen, input, resolver, &mut budget)?;
         }
         if receipt.origin_evidence_digest != origin_digest
             || receipt.native_sources != native_sources
@@ -506,19 +491,9 @@ fn prepare_in(
         }
         return Ok(proposal);
     }
-    let reader_prefix_moment = if frozen.has_reader_source() && !point.has_reader_source() {
-        Some(prefix_source(
-            tx,
-            held,
-            &frozen,
-            input,
-            resolver,
-            None,
-            &mut budget,
-        )?)
-    } else {
-        None
-    };
+    if frozen.has_reader_source() && !point.has_reader_source() {
+        prefix_source(tx, held, &frozen, input, resolver, &mut budget)?;
+    }
     let frozen_state_bytes = budget.state(&frozen)?;
     let point_state_bytes = budget.state(&point)?;
     let before = frozen.state_vector();
@@ -584,7 +559,6 @@ fn prepare_in(
         selected_history: selected_history.proof,
         native_sources,
         native_source_manifest_digest,
-        reader_prefix_moment,
     };
     let check = Ydoc::wire();
     check.apply(&frozen_state_bytes)?;
@@ -799,19 +773,18 @@ fn prefix_source(
     doc: &Ydoc,
     input: &NativeRestorePreparation,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
-    moment: Option<&str>,
     budget: &mut Budget,
-) -> Result<String, ApplicationError> {
+) -> Result<(), ApplicationError> {
     let b = &held.binding;
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let authority = serde_json::to_string(&(&held.namespace, b, &input.fence, &input.point))
         .map_err(|_| ApplicationError::Corrupt)?;
-    let (moment, length) = crate::reader_snapshot::verify_restore_prefix(
+    let length = crate::reader_snapshot::verify_restore_prefix(
         conn,
         &key,
         doc,
         &crate::reader_snapshot::SnapshotIdentity {
-            moment: moment.unwrap_or(""),
+            moment: "",
             path: &b.current_path,
             digest: "",
             lineage: &b.lineage_claim_id,
@@ -821,8 +794,8 @@ fn prefix_source(
         resolver,
         budget.remaining,
     )?;
-    budget.charge(length + moment.len())?;
-    Ok(moment)
+    budget.charge(length)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

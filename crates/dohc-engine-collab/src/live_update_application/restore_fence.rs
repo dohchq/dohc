@@ -53,16 +53,22 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
     }
 }
 
+pub(crate) fn latest_generation(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<(i64, bool)>, CollabError> {
+    conn.query_row(
+        CURRENT_GENERATION,
+        params![key.workspace_id, key.version_id, key.object_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))
+}
+
 /// Fresh sessions capture this value; queued work must retain its original value.
 pub fn current_generation(conn: &Connection, key: &DocKey) -> Result<Option<i64>, CollabError> {
-    let row: Option<(i64, bool)> = conn
-        .query_row(
-            CURRENT_GENERATION,
-            params![key.workspace_id, key.version_id, key.object_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))?;
+    let row = latest_generation(conn, key)?;
     match row {
         None => Ok(None),
         Some((generation, true)) if (1..=SAFE).contains(&generation) => Ok(Some(generation)),
@@ -223,12 +229,13 @@ impl ApplicationOwner {
     pub fn fence_restore(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, input, coordinate, now_ms, faults, false)
+        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, false)
     }
 
     /// The authenticated host adapter holds its current connection output guard.
@@ -236,17 +243,20 @@ impl ApplicationOwner {
     pub fn fence_restore_after_reconnect(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, input, coordinate, now_ms, faults, true)
+        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fence_restore_inner(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
@@ -321,6 +331,16 @@ impl ApplicationOwner {
             let (terminal, sequence) = applied_tip(tx, &held, &input)?;
             if terminal != input.terminal || sequence != input.applied_sequence || marker.head_update_seq < sequence {
                 return Err(ApplicationError::Conflict);
+            }
+            let current = durable::load_doc_in(tx, &key)?;
+            if current.has_reader_source() {
+                let reference = current.markdown_source_reference().ok_or(CollabError::MarkdownReaderUnavailable)?;
+                if resolver.is_none() { return Err(CollabError::MarkdownReaderUnavailable.into()); }
+                crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+                    .map_err(|error| match error {
+                        CollabError::ConfiguredByteBudgetExceeded => CollabError::MarkdownReaderUnavailable,
+                        error => error,
+                    })?;
             }
             let receipt = NativeRestoreFenceReceipt {
                 operation: input.clone(),

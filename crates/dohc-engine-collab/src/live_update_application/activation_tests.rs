@@ -1067,7 +1067,7 @@ fn reader_adoption_validates_the_receipts_reader_baseline() {
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
 fn reader_restore_can_fence_before_lazy_proof_dispatch() {
     let mut f = reader_fixture_case("valid");
-    let resolver = reader_resolver();
+    let resolver = Arc::new(reader_resolver());
     let captured = prove_activation(&mut f, &resolver).unwrap();
     f.cut.adoption_id = captured.activation_id;
     reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
@@ -1081,9 +1081,9 @@ fn reader_restore_can_fence_before_lazy_proof_dispatch() {
     let mut receipt = None;
     for reconnect in [false, true] {
         let result = if reconnect {
-            f._owner.fence_restore_after_reconnect(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
         } else {
-            f._owner.fence_restore(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
         };
         let result = result.unwrap();
         if let Some(previous) = &receipt { assert_eq!(previous, &result); }

@@ -159,6 +159,7 @@ impl ApplicationOwner {
     pub fn with_restore_settlement<E, T>(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreApplication,
         coordinate: ApplicationHostCoordinate,
         max_bytes: usize,
@@ -186,7 +187,7 @@ impl ApplicationOwner {
             live: false,
         };
         let result = store.write_with(&NoFaults, |tx| -> Result<LiveSettlementAudit, ApplicationError> {
-            let (proposal, application) = restore_content::applied_proposal(tx, &held, &input, max_bytes, max_events, self.reader_resolver.as_deref())?;
+            let (proposal, application) = restore_content::applied_proposal(tx, &held, &input, max_bytes, max_events, resolver.map(Arc::as_ref))?;
             let source = proposal.reader_source().map(ToOwned::to_owned);
             let prior = read_prior(tx, &held, &application, max_bytes)?;
             let owner = adoption::read_origin(tx, &held)?;
@@ -216,7 +217,7 @@ impl ApplicationOwner {
                 previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, terminal_source: false, receipts, interval_digest,
                 bootstrap_moment: expected_moment, bootstrap_digest: expected_digest,
                 first: owner.is_none() && prior.is_none() && last_settled.is_none(),
-                restore: Some(Box::new(RestoreAudit { source, reader_resolver: self.reader_resolver.clone(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
+                restore: Some(Box::new(RestoreAudit { source, reader_resolver: resolver.cloned(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
                 replay_anchor: None,
             };
             if let Some(restore) = &audit.restore {restore.verify_saved_anchor(tx,&audit)?;}

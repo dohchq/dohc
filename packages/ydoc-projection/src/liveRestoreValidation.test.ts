@@ -4,7 +4,8 @@ import {expect, it, vi} from "vitest";
 import * as Y from "yjs";
 import {restoreValidators} from "./liveRestoreValidation.js";
 import {compareLiveRestoreContent} from "./liveRestoreContent.js";
-import {yDocToMarkdown} from "./import-export.js";
+import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
+import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
@@ -12,6 +13,18 @@ const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDe
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const vector = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-collab/tests/reader-resolver.json", import.meta.url), "utf8"));
+it("keeps main's native journal refusal when an artifact getter is available", () => {
+  const doc = markdownToYDoc("Native paragraph\n");
+  try {
+    doc.getMap("meta").set("dohcLineageEpoch", "e".repeat(64));
+    const checkpoint = Y.encodeStateAsUpdate(doc);
+    const input = {document: {workspaceId:"w",mainVersionId:"main",objectId:"o",lineageClaimId:"l"},
+      currentPath:"a.md",checkpoint,suffix:[],candidate:Uint8Array.of(0,0)};
+    const native = createLiveMarkdownJournalValidator(policy)(input);
+    expect(native.kind).toBe("refused");
+    expect(restoreValidators(policy, () => undefined).journal(input)).toEqual(native);
+  } finally {doc.destroy();}
+});
 function fixture(damage = "valid") {
   const doc = new Y.Doc({gc: false});
   Y.applyUpdate(doc, Buffer.from(vector.checkpoint, "base64"));
@@ -74,14 +87,14 @@ it.each(["reader-restore","reader-to-reader","native-to-reader","reader-to-nativ
   expect(checked.projectReview(2_000_000).restoredMarkdown).toBe(direction === "reader-to-native" ? "native original\n" : saved.source);
 });
 
-it("parses the retained prefix moment without accepting malformed identities", async () => {
+it("does not accept the obsolete prefix identity in a restore receipt", async () => {
   const {parseNativeRestoreProposalReceipt} = await import("../../../services/sync-relay/src/liveRestoreProposal.js");
   const saved = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-collab/tests/reader-to-native.json",import.meta.url),"utf8"));
-  const receipt = {...saved.receipt,readerPrefixMoment:"reader-current"};
+  const {readerPrefixMoment: _removed, ...receipt} = saved.receipt;
   // The exported JSON fixture sorts object keys after computing the wire digest.
   receipt.nativeSourceManifestDigest = hash(JSON.stringify([receipt.fence,receipt.nativeSources]));
-  expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt),{maxBytes:2_000_000,maxEvents:100}).readerPrefixMoment).toBe("reader-current");
-  for (const readerPrefixMoment of [null,"",42,"a".repeat(2049)]) {
+  expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt),{maxBytes:2_000_000,maxEvents:100})).toBeDefined();
+  for (const readerPrefixMoment of ["reader-current",null,"",42,"a".repeat(2049)]) {
     expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...receipt,readerPrefixMoment}),{maxBytes:2_000_000,maxEvents:100})).toThrow();
   }
 });

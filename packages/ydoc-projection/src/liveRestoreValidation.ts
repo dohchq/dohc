@@ -29,11 +29,11 @@ export function restoreValidators(policy: OrderedLiveUpdateCutPolicy, artifact?:
     if (!bytes || hash(bytes) !== digest) throw new Error("Restore source snapshot unavailable.");
     return bytes;
   };
-  const prove = (input: LiveMarkdownJournalInput) => {
+  const prove = <T>(input: LiveMarkdownJournalInput, fallback: T) => {
     strict ??= createLiveMarkdownJournalValidator(policy, true);
     reader ??= createEngineMarkdownReader(policy);
     const result = strict(input);
-    if (result.kind !== "accepted") return result;
+    if (result.kind !== "accepted") return fallback;
     const doc = new Y.Doc({gc: false});
     try {
       // The strict non-dropping journal bounds and validates this full state first.
@@ -48,11 +48,12 @@ export function restoreValidators(policy: OrderedLiveUpdateCutPolicy, artifact?:
         // A replacement may remove the marker when the selected point is native.
         const before = strict({...input, suffix: [], candidate: noop});
         const native = nativeRegistration({document: input.document, currentPath: input.currentPath, checkpoint: result.evidence.stateUpdate});
-        if (before.kind !== "accepted" || native.kind !== "accepted") throw new Error("Restore checkpoint refused.");
+        if (before.kind !== "accepted") return fallback;
         const prior = new Y.Doc({gc: false});
         try {
           Y.applyUpdate(prior, before.evidence.stateUpdate);
-          if (!marked(prior)) throw new Error("Restore requires a reader-marked checkpoint.");
+          if (!marked(prior)) return fallback;
+          if (native.kind !== "accepted") throw new Error("Restore checkpoint refused.");
           const bytes = source(prior);
           const proof = reader.prove({...input, source: bytes});
           if (!matchesProof(prior, bytes, proof, before.evidence.projectedMarkdownSha256)) {
@@ -66,12 +67,12 @@ export function restoreValidators(policy: OrderedLiveUpdateCutPolicy, artifact?:
   return {
     journal(input: LiveMarkdownJournalInput) {
       const native = nativeJournal(input);
-      return native.kind === "accepted" || !artifact ? native : prove(input);
+      return native.kind === "accepted" || !artifact ? native : prove(input, native);
     },
     registration(input: LiveMarkdownRegistrationInput): LiveMarkdownRegistrationResult {
       const native = nativeRegistration(input);
       if (native.kind === "accepted" || !artifact) return native;
-      const result = prove({...input, suffix: [], candidate: noop});
+      const result = prove({...input, suffix: [], candidate: noop}, native);
       if (result.kind !== "accepted") return native;
       const doc = new Y.Doc({gc: false});
       try {

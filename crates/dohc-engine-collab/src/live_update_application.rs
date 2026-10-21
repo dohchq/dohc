@@ -934,7 +934,6 @@ struct Registration {
 pub struct ApplicationOwner {
     workspace_id: String,
     current: Vec<Arc<Mutex<Registration>>>,
-    reader_resolver: Option<Arc<crate::reader_resolver::ReaderResolver>>,
 }
 /// A captured lifetime. Replacement invalidates every clone of the old handle.
 #[derive(Clone)]
@@ -948,14 +947,7 @@ impl ApplicationOwner {
         Ok(Self {
             workspace_id,
             current: Vec::new(),
-            reader_resolver: None,
         })
-    }
-    pub fn configure_reader_resolver(
-        &mut self,
-        resolver: Option<Arc<crate::reader_resolver::ReaderResolver>>,
-    ) {
-        self.reader_resolver = resolver;
     }
     pub fn register(
         &mut self,
