@@ -4,7 +4,8 @@ import {sha256Hex} from "@dohc/workspace-core/hash";
 import {accountDeletionIdentity} from "@dohc/workspace-auth/accountDeletion";
 import {yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
 import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
-import {closeTestStorages, inspectDatabase, storagePath, testStorage} from "./testing";
+import {closeTestStorage, closeTestStorages, inspectDatabase, storagePath, testStorage} from "./testing";
+import {guardRelayResponses} from "./relayResponseStanding";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute, serviceHostReplicationRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -188,6 +189,53 @@ it("replays a receipt another request committed after this one's first look", as
   expect(other).toMatchObject({kind: "published"});
   expect(outcome).toMatchObject({kind: "replayed", receipt: published(other!)});
   expect(f.bases()).toHaveLength(1);
+});
+
+it("replays a receipt another request committed before an ordinary write made this one's source stale", async () => {
+  const f = await fixture();
+  let other: FirstOpenOutcome | undefined;
+  // While this request builds, the other publishes this source's base, then the file changes.
+  f.buildWith(async (policy, input) => {
+    f.buildWith(inThread);
+    other = await f.open();
+    f.writeText("# Plan\n\nBring drinks.\n");
+    return buildFirstOpenBase(policy, input);
+  });
+  const outcome = await f.open();
+  expect(other).toMatchObject({kind: "published"});
+  expect(outcome).toMatchObject({kind: "replayed", receipt: published(other!)});
+  expect(f.bases()).toHaveLength(1);
+});
+
+it("replays a receipt another request committed during this one's last catch-up", async () => {
+  const f = await fixture();
+  let other: FirstOpenOutcome | undefined, own = 0;
+  // This request's first two reads see the workspace move; its third takes its snapshot, then the other publishes.
+  f.readWith(async read => {
+    const history = readFirstOpenHistoryFile(read);
+    own++;
+    if (own < FIRST_OPEN_WRITER_ATTEMPTS) f.writeText(`chat ${own}`, {objectId: `object-chat-${own}`, path: `chat/${own}.md`});
+    else if (own === FIRST_OPEN_WRITER_ATTEMPTS) other = await f.open();
+    return history;
+  });
+  const outcome = await f.open();
+  expect(other).toMatchObject({kind: "published"});
+  expect(outcome).toMatchObject({kind: "replayed", receipt: published(other!)});
+  expect(f.writes).toHaveBeenCalledTimes(FIRST_OPEN_WRITER_ATTEMPTS + 1);
+  expect(f.bases()).toHaveLength(1);
+});
+
+it("replays a base published over a moment ID the log holds twice, at the time of the row it was published over", async () => {
+  const f = await fixture(), bytes = new TextEncoder().encode(MARKDOWN).byteLength;
+  f.append("moment.append", {momentId: f.source.sourceMomentId, objectId: OBJECT, versionId: "main", operation: "write", path: PATH, payloadAfterPath: PATH,
+    payloadAfterBlobSha256: f.source.sourceDigest, payloadAfterByteLength: bytes, payloadAfterContentKind: "text", recordedAtMs: 5_000});
+  const receipt = published(await f.open());
+  expect(f.bases()[0]).toMatchObject({recorded_at_ms: 5_000});
+  expect(await f.open()).toMatchObject({kind: "replayed", receipt});
+  // The same moment again after the base does not change which row the base was published over.
+  f.append("moment.append", {momentId: f.source.sourceMomentId, objectId: OBJECT, versionId: "main", operation: "write", path: PATH, payloadAfterPath: PATH,
+    payloadAfterBlobSha256: f.source.sourceDigest, payloadAfterByteLength: bytes, payloadAfterContentKind: "text", recordedAtMs: 9_000});
+  expect(await f.open()).toMatchObject({kind: "replayed", receipt});
 });
 
 it("refuses squatting on the reserved coordinate, then publishes there", async () => {
@@ -428,6 +476,23 @@ it("refuses a base over each configured bound, at the boundary the real verifier
   for (const f of [oversized, reduced]) nothingAppended(f);
 });
 
+it("refuses a valid base the validation policy cannot afford as too large, and an invalid one as an integrity failure", async () => {
+  const f = await fixture();
+  f.setActivation(configured({validation: {...selfHostLiveProfile().service.activation.validation, maxStructVisits: 1}}));
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "validation-budget", recovery: "none"});
+  nothingAppended(f);
+  // The same seed under the configured policy publishes.
+  f.setActivation(configured());
+  expect((await f.open()).kind).toBe("published");
+  // A base the validator rejects is the relay's own fault.
+  const g = await fixture(), doc = new Y.Doc();
+  doc.getXmlFragment("prosemirror").insert(0, [new Y.XmlElement("not-a-node")]);
+  vi.spyOn(richdocSeed, "encodeRichdocSeed").mockReturnValueOnce(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  expect(await g.open()).toMatchObject({kind: "integrity", reason: "candidate", recovery: "report"});
+  nothingAppended(g);
+});
+
 it("tells contention, capacity, cancellation and failure apart, and appends nothing for any", async () => {
   // Every read sees the workspace move once more, so each writer attempt finds a new head.
   const moving = await fixture();
@@ -449,18 +514,146 @@ it("tells contention, capacity, cancellation and failure apart, and appends noth
   busy.buildWith(async () => ({kind: "busy"}));
   expect(await busy.open()).toMatchObject({kind: "unavailable", reason: "busy"});
 
-  const failing = await fixture();
-  failing.readWith(async () => { throw new Error("history unavailable"); });
-  expect((await failing.post()).status).toBe(500);
-  failing.readWith(async read => readFirstOpenHistoryFile(read));
-  failing.buildWith(async () => { throw new Error("Live validation worker exited."); });
-  expect((await failing.post()).status).toBe(500);
-
   const cancelled = await fixture(), abort = new AbortController();
   cancelled.buildWith(async (policy, input) => { const built = buildFirstOpenBase(policy, input); abort.abort(new Error("cancelled")); return built; });
   await expect(cancelled.post({}, {signal: abort.signal}).then(response => response.status)).resolves.not.toBe(200);
   expect(cancelled.writes).not.toHaveBeenCalled();
-  for (const f of [busy, failing, cancelled]) nothingAppended(f);
+  for (const f of [busy, cancelled]) nothingAppended(f);
+});
+
+it("answers a failed history read, worker or database as a typed transient outcome, and logs its cause", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const sqlite = () => Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10});
+  const f = await fixture(), failures: Array<[string, () => void]> = [
+    ["history-unavailable", () => f.readWith(async () => { throw new Error("the history reader exited"); })],
+    ["worker-failed", () => f.buildWith(async () => { throw new Error("Live validation worker exited."); })],
+    ["storage-failed", () => f.writes.mockImplementationOnce(() => { throw sqlite(); })],
+  ];
+  for (const [reason, fail] of failures) {
+    f.readWith(async read => readFirstOpenHistoryFile(read));
+    f.buildWith(inThread);
+    fail();
+    expect(await f.open(), reason).toMatchObject({kind: "unavailable", reason, recovery: "retry-later", source: {workspaceId: WS, objectId: OBJECT, ...f.source}});
+    expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open unavailable", expect.anything());
+  }
+  // The workspace moves, and the catch-up read fails.
+  f.readWith(async read => { if (read.afterRelaySeq > 0) throw new Error("worker exited"); return readFirstOpenHistoryFile(read); });
+  f.afterRead(() => { f.afterRead(); f.writeText("chat", {objectId: "object-chat", path: "chat/a.md"}); });
+  const writes = f.writes.mock.calls.length;
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "history-unavailable"});
+  expect(f.writes.mock.calls.length).toBe(writes + 1);
+  nothingAppended(f);
+  // An unexpected fault is no outcome, and neither is a timeout nor a cancellation during a read.
+  f.readWith(async read => readFirstOpenHistoryFile(read));
+  f.writes.mockImplementationOnce(() => { throw new TypeError("a relay bug"); });
+  expect(await f.post().then(response => response.json())).toMatchObject({ok: false, code: "internal_error"});
+  for (const reason of [new DOMException("timed out", "TimeoutError"), new Error("cancelled")]) {
+    const abort = new AbortController();
+    f.readWith(async read => { abort.abort(reason); return readFirstOpenHistoryFile(read); });
+    const response = await f.post({}, {signal: abort.signal});
+    expect(response.status).not.toBe(200);
+    expect(await response.json()).not.toHaveProperty("outcome");
+  }
+  nothingAppended(f);
+});
+
+it("answers only a SQLite failure that can pass as transient, in the writer and in a history read", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(), history: FirstOpenHistoryReader = async read => readFirstOpenHistoryFile(read);
+  const coded = (errcode: number) => Object.assign(new Error("private SQLite message"), {code: "ERR_SQLITE_ERROR", errcode});
+  const raised = (sql: string) => {
+    try { f.raw.exec(sql); } catch (error) { return error; }
+    throw new Error(`${sql} raised nothing.`);
+  };
+  const fails = async (fault: unknown, where: "writer" | "history") => {
+    if (where === "writer") f.writes.mockImplementationOnce(() => { throw fault; });
+    else f.readWith(async () => { throw fault; });
+    const response = await f.post();
+    f.readWith(history);
+    return response.json();
+  };
+  // BUSY, LOCKED, NOMEM, IOERR and an extended IOERR, FULL, CANTOPEN.
+  for (const errcode of [5, 6, 7, 10, 266, 13, 14]) {
+    expect(await fails(coded(errcode), "writer"), String(errcode)).toMatchObject({outcome: {kind: "unavailable", reason: "storage-failed", recovery: "retry-later"}});
+    expect(await fails(coded(errcode), "history"), String(errcode)).toMatchObject({outcome: {kind: "unavailable", reason: "history-unavailable"}});
+  }
+  // A real constraint failure, missing table and invalid SQL, then CORRUPT, NOTADB and a plain constraint code.
+  const deterministic = [raised("CREATE TEMP TABLE probe(x UNIQUE); INSERT INTO probe VALUES (1),(1)"), raised("SELECT * FROM missing_table"), raised("SELEC 1"),
+    coded(11), coded(26), coded(19)];
+  expect(deterministic.map(error => (error as {errcode: number}).errcode & 255)).toEqual([19, 1, 1, 11, 26, 19]);
+  for (const fault of deterministic) {
+    for (const where of ["writer", "history"] as const) {
+      expect(await fails(fault, where), `${String(fault)} in the ${where}`).toEqual({ok: false, error: "internal error", code: "internal_error"});
+    }
+  }
+  nothingAppended(f);
+});
+
+it("answers storage that shuts down or fails before the last standing check as a request error, never as lost access", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const closing = (f: Fixture) => f.readWith(async (read, signal) => {
+    closeTestStorage(f.storage);
+    signal.throwIfAborted();
+    return readFirstOpenHistoryFile(read);
+  });
+  const f = await fixture();
+  closing(f);
+  const response = await f.post();
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  // The relay's own handler answers it as the shutdown it is.
+  const g = await fixture();
+  closing(g);
+  const guarded = await g.post({}, {handler: guardRelayResponses(g.storage, g.handle)});
+  expect(guarded.status).toBe(503);
+  expect(await guarded.json()).not.toHaveProperty("outcome");
+  // Storage that fails the standing read itself, in the writer and again in the last check.
+  const h = await fixture();
+  h.readWith(async read => {
+    vi.spyOn(h.storage, "readFirstOpenStanding").mockImplementation(() => { throw Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10}); });
+    return readFirstOpenHistoryFile(read);
+  });
+  const failing = await h.post();
+  expect(failing.status).toBe(500);
+  expect(await failing.json()).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  for (const fixture of [f, g, h]) nothingAppended(fixture);
+});
+
+it("answers a late replay or a storage failure as absent when access ends after the other request publishes", async () => {
+  const revoke = (f: Fixture) => f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20 WHERE share_id='share-1'").run();
+  // The other request publishes while this one builds, the file changes, and the grant goes.
+  const stale = await fixture();
+  stale.buildWith(async (policy, input) => {
+    stale.buildWith(inThread);
+    expect((await stale.open()).kind).toBe("published");
+    stale.writeText("# Plan\n\nBring drinks.\n");
+    revoke(stale);
+    return buildFirstOpenBase(policy, input);
+  });
+  expect((await stale.post()).status).toBe(404);
+  // The other request publishes during this one's last catch-up, then the grant goes.
+  const contended = await fixture();
+  let own = 0;
+  contended.readWith(async read => {
+    const history = readFirstOpenHistoryFile(read);
+    own++;
+    if (own < FIRST_OPEN_WRITER_ATTEMPTS) contended.writeText(`chat ${own}`, {objectId: `object-chat-${own}`, path: `chat/${own}.md`});
+    else if (own === FIRST_OPEN_WRITER_ATTEMPTS) { expect((await contended.open()).kind).toBe("published"); revoke(contended); }
+    return history;
+  });
+  expect((await contended.post()).status).toBe(404);
+  expect(contended.writes).toHaveBeenCalledTimes(FIRST_OPEN_WRITER_ATTEMPTS + 1);
+  // The other request publishes, the grant goes, and this one's writer fails as storage can.
+  const failing = await fixture();
+  failing.buildWith(async (policy, input) => {
+    failing.buildWith(inThread);
+    expect((await failing.open()).kind).toBe("published");
+    revoke(failing);
+    failing.writes.mockImplementationOnce(() => { throw Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10}); });
+    return buildFirstOpenBase(policy, input);
+  });
+  expect((await failing.post()).status).toBe(404);
+  for (const f of [stale, contended, failing]) expect(f.bases()).toHaveLength(1);
 });
 
 it("is not moved by another workspace's appends", async () => {

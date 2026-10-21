@@ -25,6 +25,8 @@ const FORBIDDEN: Array<[string, RegExp]> = [
   ["chooses a log row's relay sequence", new RegExp(String.raw`${INSERT}(?:(?!\s*\()|\s*\([^)]*\brelay_seq\b)`, "gi")],
   // An upsert rewrites the row it conflicts with.
   ["upserts log rows", new RegExp(String.raw`${INSERT}[^;\x60]*?\bON\s+CONFLICT\b[^;\x60]*?\bDO\s+UPDATE\b`, "gi")],
+  // A replacing insert deletes the row it conflicts with and appends another in its place.
+  ["replaces log rows", new RegExp(String.raw`\b(?:REPLACE|INSERT\s+OR\s+REPLACE)\s+INTO\s+${LOG}`, "gi")],
   ["writes SQLite's AUTOINCREMENT counters", new RegExp(String.raw`\b(?:UPDATE\s+(?:OR\s+\w+\s+)?|INTO\s+|DELETE\s+FROM\s+)${SEQUENCE}`, "gi")],
 ];
 
@@ -53,7 +55,9 @@ it("finds each forbidden shape however the table is named", () => {
   for (const table of ["sync_relay_log", "main.sync_relay_log", "\"sync_relay_log\"", "`sync_relay_log`", "[sync_relay_log]", "\"main\".\"sync_relay_log\"", "main . [sync_relay_log]"]) {
     expect(rules(`UPDATE ${table} SET payload_json='{}'`), table).toEqual(["rewrites log rows"]);
     expect(rules(`INSERT INTO ${table} VALUES (1)`), table).toEqual(["chooses a log row's relay sequence"]);
-    expect(rules(`INSERT OR REPLACE INTO ${table}(relay_seq,workspace_id) VALUES (1,'w')`), table).toEqual(["chooses a log row's relay sequence"]);
+    expect(rules(`INSERT OR REPLACE INTO ${table}(relay_seq,workspace_id) VALUES (1,'w')`), table).toEqual(["chooses a log row's relay sequence", "replaces log rows"]);
+    expect(rules(`REPLACE INTO ${table}(workspace_id,origin_id) VALUES ('w','o')`), table).toEqual(["replaces log rows"]);
+    expect(rules(`insert or replace into ${table} (workspace_id,origin_id) VALUES ('w','o')`), table).toEqual(["replaces log rows"]);
     expect(rules(`INSERT INTO ${table}(workspace_id,origin_id) VALUES ('w','o') ON CONFLICT(workspace_id,origin_id,origin_seq) DO UPDATE SET payload_json=excluded.payload_json`), table)
       .toEqual(["upserts log rows"]);
   }
@@ -65,5 +69,7 @@ it("finds each forbidden shape however the table is named", () => {
   expect(rules("INSERT INTO sync_relay_log (workspace_id, origin_id) VALUES (?, ?)")).toEqual([]);
   expect(rules("INSERT INTO sync_relay_log_other (relay_seq) VALUES (1)")).toEqual([]);
   expect(rules("INSERT INTO sync_relay_log(workspace_id) VALUES (?) ON CONFLICT DO NOTHING")).toEqual([]);
+  expect(rules("INSERT OR IGNORE INTO sync_relay_log(workspace_id) VALUES (?)")).toEqual([]);
+  expect(rules("INSERT OR REPLACE INTO sync_relay_log_other(workspace_id) VALUES (?)")).toEqual([]);
   expect(rules("SELECT relay_seq FROM sync_relay_log")).toEqual([]);
 });

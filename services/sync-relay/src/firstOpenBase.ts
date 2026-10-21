@@ -43,7 +43,8 @@ export interface FirstOpenBaseInput {
   sourceByteLength: number;
   bounds: FirstOpenBaseBounds;
 }
-export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget";
+/** `validation-budget`: the registration validator ran out of its configured policy. */
+export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget" | "validation-budget";
 export interface FirstOpenBaseSizes { baseBytes: number; stateUpdateBytes: number; nativeGrowthBytes: number }
 export type FirstOpenBaseResult =
   /** `sizes` lets a publisher check the base against bounds that changed since. */
@@ -168,7 +169,9 @@ export function buildFirstOpenBase(
     currentPath,
     checkpoint: base,
   });
-  if (validated.kind !== "accepted") return refused("invalid-base");
+  if (validated.kind !== "accepted") {
+    return refused(validated.reason === "capacity-refused" ? "validation-budget" : "invalid-base");
+  }
   const { evidence } = validated;
   // The validator also verifies witnesses the engine does not settle to.
   if (

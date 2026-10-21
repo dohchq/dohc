@@ -10,26 +10,35 @@ export interface FirstOpenSourceIdentity {
   readonly sourceDigest: string;
 }
 
+/** A step that failed for a reason a later request can outlast. */
+export type FirstOpenFailure = "history-unavailable" | "worker-failed" | "storage-failed";
+
 /**
  * What the caller does next. `pull`: pull the workspace normally, then capture
  * again; a receipt grants no readiness. `pull-current-source`: pull, then ask
- * again for the current source. `retry-later`: ask again on a later pass, with
- * backoff. `none`: asking again cannot help until the document's history or
- * content changes. `report`: stop; the details are for whoever runs the server.
+ * again for the current source. `retry-later`: ask again on a later pass,
+ * waiting longer each time the same answer repeats. `none`: asking again cannot
+ * help until the document's history or content changes. `report`: stop; the
+ * details are for whoever runs the server.
  */
 export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" | "none" | "report";
 
 /**
- * Every answer the first-open route gives. Failures to read history, run the
- * worker, reach storage or stay within quota are not outcomes: they fail the
- * request, and never read as eligible or as a permanent refusal.
+ * Every answer the first-open route gives. Cancellation, shutdown, a timeout,
+ * quota, authorization and the relay's own faults are not outcomes: they keep
+ * their own request errors.
  * - `published` and `replayed` carry the base's real coordinates.
  * - `existing-history`: the document had live authority before; nothing was appended.
  * - `refused`: nothing was appended. `deletion` excludes the document for good,
  *   whatever was restored since. `too-large` names the bound in `code`.
  *   The service host reports `ordinary-activation-refused` after capture; the route never does.
- * - `unavailable`: `contention` when the workspace kept moving through every
- *   attempt, `busy` when no worker slot was free. Neither retains anything.
+ * - `unavailable`: the document's history says nothing yet. `contention`: the
+ *   workspace kept moving through every attempt. `busy`: no worker slot was
+ *   free. `history-unavailable`: its history could not be read. `worker-failed`:
+ *   the worker building the base failed. Nothing was appended or retained for
+ *   any of these. `storage-failed`: the relay database failed in a way that can
+ *   pass, possibly while committing the base; asking again replays any base
+ *   that was appended. The relay logs the failures.
  * - `integrity`: the relay's own records disagree. Nothing was overwritten.
  */
 export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readonly recovery: FirstOpenRecovery} & (
@@ -38,7 +47,7 @@ export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readon
   | {readonly kind: "refused"; readonly reason: "deletion" | "stale-source" | "unsupported-source"}
   | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound}
   | {readonly kind: "refused"; readonly reason: "ordinary-activation-refused"; readonly code?: string}
-  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy"}
+  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | FirstOpenFailure}
   | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate"}
 );
 

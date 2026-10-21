@@ -421,11 +421,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readFirstOpenStanding(input: {workspaceId: string; ownerUserId: string; path: string}) {
     return firstOpenStorage.readFirstOpenStanding(this, input);
   }
-  readFirstOpenMoment(workspaceId: string, objectId: string, momentId?: string) {
-    return firstOpenStorage.readFirstOpenMoment(this, workspaceId, objectId, momentId);
+  readFirstOpenMoment(workspaceId: string, objectId: string) {
+    return firstOpenStorage.readFirstOpenMoment(this, workspaceId, objectId);
   }
-  readFirstOpenReceipt(originId: string, source: FirstOpenSource, recordedAtMs: number) {
-    return firstOpenStorage.readFirstOpenReceipt(this, originId, source, recordedAtMs);
+  readFirstOpenReceipt(originId: string, source: FirstOpenSource) {
+    return firstOpenStorage.readFirstOpenReceipt(this, originId, source);
   }
   prepareFirstOpen(source: FirstOpenSource, signal?: AbortSignal) {
     return firstOpenStorage.prepareFirstOpen(this, source, this.firstOpenHistory, signal);

@@ -80,13 +80,10 @@ export interface FirstOpenMoment {
   readonly recordedAtMs: number;
 }
 
-/** The object's latest main moment, or the main moment named `momentId`. */
-export function readFirstOpenMoment(storage: StorageContext, workspaceId: string, objectId: string, momentId?: string): FirstOpenMoment | null {
-  const row = momentId === undefined
-    ? storage.db.prepare(`SELECT moment_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms FROM sync_relay_object_moments INDEXED BY idx_sync_relay_object_moments_latest
-      WHERE workspace_id=? AND version_id='main' AND object_id=? ORDER BY relay_seq DESC LIMIT 1`).get(workspaceId, objectId)
-    : storage.db.prepare(`SELECT moment_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms FROM sync_relay_object_moments
-      WHERE workspace_id=? AND object_id=? AND version_id='main' AND moment_id=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, objectId, momentId);
+/** The object's latest main moment, or its latest one before `beforeRelaySeq`. */
+export function readFirstOpenMoment(storage: StorageContext, workspaceId: string, objectId: string, beforeRelaySeq = Number.MAX_SAFE_INTEGER): FirstOpenMoment | null {
+  const row = storage.db.prepare(`SELECT moment_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms FROM sync_relay_object_moments INDEXED BY idx_sync_relay_object_moments_latest
+    WHERE workspace_id=? AND version_id='main' AND object_id=? AND relay_seq<? ORDER BY relay_seq DESC LIMIT 1`).get(workspaceId, objectId, beforeRelaySeq);
   const text = (value: unknown) => typeof value === "string" ? value : null;
   return row ? Object.freeze({sourceMomentId: String(row.moment_id), path: text(row.path), sourceDigest: text(row.blob_sha256), contentKind: text(row.content_kind),
     sourceByteLength: typeof row.byte_length === "number" ? row.byte_length : null, recordedAtMs: Number(row.recorded_at_ms)}) : null;
@@ -95,17 +92,23 @@ export function readFirstOpenMoment(storage: StorageContext, workspaceId: string
 export type FirstOpenStoredReceipt =
   | {kind: "absent"}
   | {kind: "receipt"; receipt: FirstOpenReceipt; updateBlobSha256: string}
-  /** Anything but exactly one accepted first-open base for the source, recorded at `recordedAtMs`, with its bytes. */
+  /**
+   * Anything but exactly one accepted first-open base for the source, with its
+   * bytes, published over the source moment and recorded at that moment's time.
+   */
   | {kind: "occupied"};
 
 /** What the source's reserved origin holds. Never rewrites it. */
-export function readFirstOpenReceipt(storage: StorageContext, originId: string, source: FirstOpenSource, recordedAtMs: number): FirstOpenStoredReceipt {
+export function readFirstOpenReceipt(storage: StorageContext, originId: string, source: FirstOpenSource): FirstOpenStoredReceipt {
   const rows = storage.db.prepare(`SELECT origin_seq,relay_seq,op_kind,payload_json,recorded_at_ms,admitted_author_snapshot_json,settlement_admission_json,relay_admission
     FROM sync_relay_log WHERE workspace_id=? AND origin_id=? ORDER BY origin_seq LIMIT 2`).all(source.workspaceId, originId);
   if (!rows.length) return {kind: "absent"};
   const [row] = rows;
-  if (rows.length > 1 || row!.origin_seq !== 0 || row!.op_kind !== "ydoc.update" || row!.recorded_at_ms !== recordedAtMs ||
+  if (rows.length > 1 || row!.origin_seq !== 0 || row!.op_kind !== "ydoc.update" ||
     row!.admitted_author_snapshot_json !== null || row!.settlement_admission_json !== null || row!.relay_admission !== null) return {kind: "occupied"};
+  // A moment ID can recur; publication took the object's head as it stood just before the base.
+  const moment = readFirstOpenMoment(storage, source.workspaceId, source.objectId, Number(row!.relay_seq));
+  if (moment?.sourceMomentId !== source.sourceMomentId || row!.recorded_at_ms !== moment.recordedAtMs) return {kind: "occupied"};
   let digest: unknown;
   try { digest = (JSON.parse(String(row!.payload_json)) as {updateBlobSha256?: unknown}).updateBlobSha256; } catch { return {kind: "occupied"}; }
   if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest) || row!.payload_json !== firstOpenBasePayload(source, digest) ||
@@ -203,7 +206,7 @@ export function writeFirstOpen(storage: StorageContext, proof: FirstOpenProof, b
     if (result !== null && (typeof result === "object" || typeof result === "function") &&
       typeof (result as {then?: unknown}).then === "function") throw asynchronous();
     // The proven document's base, and the only row this transaction appended.
-    const stored = readFirstOpenReceipt(storage, originId, source, base.recordedAtMs);
+    const stored = readFirstOpenReceipt(storage, originId, source);
     const appended = storage.db.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE workspace_id=? AND relay_seq>?").get(source.workspaceId, state.cutoff ?? 0);
     if (stored.kind !== "receipt" || stored.updateBlobSha256 !== digest || appended?.n !== 1) throw notPublished();
     return {kind: "published", receipt: stored.receipt};
