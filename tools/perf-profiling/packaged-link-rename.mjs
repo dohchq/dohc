@@ -22,6 +22,17 @@ export async function rearmLinkReceipt(root, id) {
   await writeFile(recordPath(root, id), JSON.stringify(record));
 }
 
+export async function linkIndexReady(page, workspaceId) {
+  try {
+    const result = await page.evaluate(({workspaceId, path}) => window.dohcDesktop.linksIn({workspaceId, subject: {path}}),
+      {workspaceId, path: LINK_TARGET});
+    return !!result && !result.indexBuilding;
+  } catch (error) {
+    if (error.message?.includes('DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.')) return false;
+    throw error;
+  }
+}
+
 // The collection scenario's typing collector supplies trusted input and long tasks.
 // beforeInput starts the move with both observers armed, before the first key.
 export async function measureLinkRename({instance, links, typing, waitUntil, signal}) {
@@ -33,9 +44,7 @@ export async function measureLinkRename({instance, links, typing, waitUntil, sig
   const cases = [];
   try {
     await waitUntil(async () => {
-      const pageOfLinks = await page.evaluate(({workspaceId, path}) => window.dohcDesktop.linksIn({workspaceId, subject: {path}}),
-        {workspaceId: workspace.workspaceId, path: LINK_TARGET});
-      return pageOfLinks && !pageOfLinks.indexBuilding && pending() === 0 &&
+      return await linkIndexReady(page, workspace.workspaceId) && pending() === 0 &&
         Number(database.prepare('SELECT COUNT(*) AS n FROM snapshots').get().n) >= 5000;
     }, 300_000);
     for (const document of ['small.md', 'large.md']) {
