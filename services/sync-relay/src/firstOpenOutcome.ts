@@ -24,18 +24,21 @@ export type FirstOpenFailure = "history-unavailable" | "worker-failed" | "storag
 export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" | "none" | "report";
 
 /**
- * Every answer the first-open route gives. Cancellation, a timeout, quota and
- * authorization are not outcomes: they keep their own request errors.
+ * Every answer the first-open route gives. Cancellation, shutdown, a timeout,
+ * quota, authorization and the relay's own faults are not outcomes: they keep
+ * their own request errors.
  * - `published` and `replayed` carry the base's real coordinates.
  * - `existing-history`: the document had live authority before; nothing was appended.
  * - `refused`: nothing was appended. `deletion` excludes the document for good,
  *   whatever was restored since. `too-large` names the bound in `code`.
  *   The service host reports `ordinary-activation-refused` after capture; the route never does.
- * - `unavailable`: nothing was appended or retained, and the document's history
- *   says nothing yet. `contention`: the workspace kept moving through every
- *   attempt. `busy`: no worker slot was free. `history-unavailable`: its history
- *   could not be read. `worker-failed`: the worker building the base failed.
- *   `storage-failed`: the relay database failed. The relay logs the failures.
+ * - `unavailable`: the document's history says nothing yet. `contention`: the
+ *   workspace kept moving through every attempt. `busy`: no worker slot was
+ *   free. `history-unavailable`: its history could not be read. `worker-failed`:
+ *   the worker building the base failed. Nothing was appended or retained for
+ *   any of these. `storage-failed`: the relay database failed in a way that can
+ *   pass, possibly while committing the base; asking again replays any base
+ *   that was appended. The relay logs the failures.
  * - `integrity`: the relay's own records disagree. Nothing was overwritten.
  */
 export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readonly recovery: FirstOpenRecovery} & (

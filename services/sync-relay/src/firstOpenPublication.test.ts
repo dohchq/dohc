@@ -4,7 +4,8 @@ import {sha256Hex} from "@dohc/workspace-core/hash";
 import {accountDeletionIdentity} from "@dohc/workspace-auth/accountDeletion";
 import {yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
 import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
-import {closeTestStorages, inspectDatabase, storagePath, testStorage} from "./testing";
+import {closeTestStorage, closeTestStorages, inspectDatabase, storagePath, testStorage} from "./testing";
+import {guardRelayResponses} from "./relayResponseStanding";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute, serviceHostReplicationRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -524,7 +525,7 @@ it("answers a failed history read, worker or database as a typed transient outco
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   const sqlite = () => Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10});
   const f = await fixture(), failures: Array<[string, () => void]> = [
-    ["history-unavailable", () => f.readWith(async () => { throw new Error("no such table"); })],
+    ["history-unavailable", () => f.readWith(async () => { throw new Error("the history reader exited"); })],
     ["worker-failed", () => f.buildWith(async () => { throw new Error("Live validation worker exited."); })],
     ["storage-failed", () => f.writes.mockImplementationOnce(() => { throw sqlite(); })],
   ];
@@ -554,6 +555,105 @@ it("answers a failed history read, worker or database as a typed transient outco
     expect(await response.json()).not.toHaveProperty("outcome");
   }
   nothingAppended(f);
+});
+
+it("answers only a SQLite failure that can pass as transient, in the writer and in a history read", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(), history: FirstOpenHistoryReader = async read => readFirstOpenHistoryFile(read);
+  const coded = (errcode: number) => Object.assign(new Error("private SQLite message"), {code: "ERR_SQLITE_ERROR", errcode});
+  const raised = (sql: string) => {
+    try { f.raw.exec(sql); } catch (error) { return error; }
+    throw new Error(`${sql} raised nothing.`);
+  };
+  const fails = async (fault: unknown, where: "writer" | "history") => {
+    if (where === "writer") f.writes.mockImplementationOnce(() => { throw fault; });
+    else f.readWith(async () => { throw fault; });
+    const response = await f.post();
+    f.readWith(history);
+    return response.json();
+  };
+  // BUSY, LOCKED, NOMEM, IOERR and an extended IOERR, FULL, CANTOPEN.
+  for (const errcode of [5, 6, 7, 10, 266, 13, 14]) {
+    expect(await fails(coded(errcode), "writer"), String(errcode)).toMatchObject({outcome: {kind: "unavailable", reason: "storage-failed", recovery: "retry-later"}});
+    expect(await fails(coded(errcode), "history"), String(errcode)).toMatchObject({outcome: {kind: "unavailable", reason: "history-unavailable"}});
+  }
+  // A real constraint failure, missing table and invalid SQL, then CORRUPT, NOTADB and a plain constraint code.
+  const deterministic = [raised("CREATE TEMP TABLE probe(x UNIQUE); INSERT INTO probe VALUES (1),(1)"), raised("SELECT * FROM missing_table"), raised("SELEC 1"),
+    coded(11), coded(26), coded(19)];
+  expect(deterministic.map(error => (error as {errcode: number}).errcode & 255)).toEqual([19, 1, 1, 11, 26, 19]);
+  for (const fault of deterministic) {
+    for (const where of ["writer", "history"] as const) {
+      expect(await fails(fault, where), `${String(fault)} in the ${where}`).toEqual({ok: false, error: "internal error", code: "internal_error"});
+    }
+  }
+  nothingAppended(f);
+});
+
+it("answers storage that shuts down or fails before the last standing check as a request error, never as lost access", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const closing = (f: Fixture) => f.readWith(async (read, signal) => {
+    closeTestStorage(f.storage);
+    signal.throwIfAborted();
+    return readFirstOpenHistoryFile(read);
+  });
+  const f = await fixture();
+  closing(f);
+  const response = await f.post();
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  // The relay's own handler answers it as the shutdown it is.
+  const g = await fixture();
+  closing(g);
+  const guarded = await g.post({}, {handler: guardRelayResponses(g.storage, g.handle)});
+  expect(guarded.status).toBe(503);
+  expect(await guarded.json()).not.toHaveProperty("outcome");
+  // Storage that fails the standing read itself, in the writer and again in the last check.
+  const h = await fixture();
+  h.readWith(async read => {
+    vi.spyOn(h.storage, "readFirstOpenStanding").mockImplementation(() => { throw Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10}); });
+    return readFirstOpenHistoryFile(read);
+  });
+  const failing = await h.post();
+  expect(failing.status).toBe(500);
+  expect(await failing.json()).toEqual({ok: false, error: "internal error", code: "internal_error"});
+  for (const fixture of [f, g, h]) nothingAppended(fixture);
+});
+
+it("answers a late replay or a storage failure as absent when access ends after the other request publishes", async () => {
+  const revoke = (f: Fixture) => f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20 WHERE share_id='share-1'").run();
+  // The other request publishes while this one builds, the file changes, and the grant goes.
+  const stale = await fixture();
+  stale.buildWith(async (policy, input) => {
+    stale.buildWith(inThread);
+    expect((await stale.open()).kind).toBe("published");
+    stale.writeText("# Plan\n\nBring drinks.\n");
+    revoke(stale);
+    return buildFirstOpenBase(policy, input);
+  });
+  expect((await stale.post()).status).toBe(404);
+  // The other request publishes during this one's last catch-up, then the grant goes.
+  const contended = await fixture();
+  let own = 0;
+  contended.readWith(async read => {
+    const history = readFirstOpenHistoryFile(read);
+    own++;
+    if (own < FIRST_OPEN_WRITER_ATTEMPTS) contended.writeText(`chat ${own}`, {objectId: `object-chat-${own}`, path: `chat/${own}.md`});
+    else if (own === FIRST_OPEN_WRITER_ATTEMPTS) { expect((await contended.open()).kind).toBe("published"); revoke(contended); }
+    return history;
+  });
+  expect((await contended.post()).status).toBe(404);
+  expect(contended.writes).toHaveBeenCalledTimes(FIRST_OPEN_WRITER_ATTEMPTS + 1);
+  // The other request publishes, the grant goes, and this one's writer fails as storage can.
+  const failing = await fixture();
+  failing.buildWith(async (policy, input) => {
+    failing.buildWith(inThread);
+    expect((await failing.open()).kind).toBe("published");
+    revoke(failing);
+    failing.writes.mockImplementationOnce(() => { throw Object.assign(new Error("disk I/O error"), {code: "ERR_SQLITE_ERROR", errcode: 10}); });
+    return buildFirstOpenBase(policy, input);
+  });
+  expect((await failing.post()).status).toBe(404);
+  for (const f of [stale, contended, failing]) expect(f.bases()).toHaveLength(1);
 });
 
 it("is not moved by another workspace's appends", async () => {

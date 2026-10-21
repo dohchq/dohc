@@ -2,7 +2,7 @@ import {createHash} from "node:crypto";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/live-journal-validation";
-import {badRequest, notFound} from "./errors";
+import {badRequest, notFound, RelayError} from "./errors";
 import {firstOpenBaseExceeds, type FirstOpenBaseBound, type FirstOpenBaseBounds, type FirstOpenBaseInput, type FirstOpenBaseResult} from "./firstOpenBase";
 import {firstOpenOutcome, type FirstOpenFailure, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {liveValidation} from "./liveValidation";
@@ -48,7 +48,14 @@ class FirstOpenStepFailed extends Error {
   constructor(readonly reason: Exclude<FirstOpenFailure, "storage-failed">, cause: unknown) {super(`First-open ${reason}.`, {cause});}
 }
 
-const sqliteFailure = (error: unknown) => error instanceof Error && (error as {code?: unknown}).code === "ERR_SQLITE_ERROR";
+// BUSY, LOCKED, NOMEM, IOERR, FULL and CANTOPEN can pass. Every other code, CORRUPT and NOTADB among them, is the relay's own fault.
+const TRANSIENT_SQLITE = new Set([5, 6, 7, 10, 13, 14]);
+/** Whether a SQLite failure can pass, by its primary result code; undefined for an error SQLite did not raise. */
+const sqliteTransient = (error: unknown) => {
+  const fault = error instanceof Error ? error as {code?: unknown; errcode?: unknown} : undefined;
+  if (fault?.code !== "ERR_SQLITE_ERROR") return undefined;
+  return typeof fault.errcode === "number" && TRANSIENT_SQLITE.has(fault.errcode & 255);
+};
 
 export type FirstOpenBuild = (policy: OrderedLiveUpdateCutPolicy, input: FirstOpenBaseInput, signal: AbortSignal) => Promise<FirstOpenBaseResult | {kind: "busy"}>;
 export type FirstOpenPublisher = ReturnType<typeof createFirstOpenPublisher>;
@@ -92,20 +99,25 @@ export function createFirstOpenPublisher(options: {
     const objectId = standing();
     if (objectId === null || objectId !== request.objectId) throw notFound();
     // A document out of scope by the time the request ends answers as an absent one, whatever happened to it.
-    const standingKept = () => {
-      if (signal.aborted) return true;
-      try {return standing() === objectId;} catch {return false;}
+    // A check that cancellation or storage interrupted establishes nothing, so it keeps its own error.
+    const revalidate = () => {
+      signal.throwIfAborted();
+      storage.captureStanding();
+      let current: string | null;
+      try {current = standing();}
+      catch (error) {throw error instanceof RelayError ? notFound() : error;}
+      if (current !== objectId) throw notFound();
     };
     let outcome: FirstOpenOutcome;
     try {outcome = await publish(objectId);}
     catch (error) {
-      if (!standingKept()) throw notFound();
-      const reason = error instanceof FirstOpenStepFailed ? error.reason : !signal.aborted && sqliteFailure(error) ? "storage-failed" : undefined;
+      revalidate();
+      const reason = error instanceof FirstOpenStepFailed ? error.reason : sqliteTransient(error) ? "storage-failed" : undefined;
       if (!reason) throw error;
       console.error("[sync-relay] first-open unavailable", error);
       return answer({kind: "unavailable", reason});
     }
-    if (!standingKept()) throw notFound();
+    revalidate();
     return outcome;
 
   async function publish(objectId: string): Promise<FirstOpenOutcome> {
@@ -125,10 +137,10 @@ export function createFirstOpenPublisher(options: {
       if (refused.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
       return replay() ?? answer(refused.reason === "prior-authority" ? {kind: "existing-history", reason: "prior-authority"} : {kind: "refused", reason: refused.reason});
     };
-    // A failed history read or build says nothing about the document; a cancelled one stays cancelled.
+    // A failed history read or build says nothing about the document; a cancelled one stays cancelled, and a SQLite fault that can't pass stays the relay's.
     const step = async <T>(reason: FirstOpenStepFailed["reason"], run: () => Promise<T>) => {
       try {return await run();}
-      catch (error) {throw signal.aborted ? error : new FirstOpenStepFailed(reason, error);}
+      catch (error) {throw signal.aborted || sqliteTransient(error) === false ? error : new FirstOpenStepFailed(reason, error);}
     };
     const replayed = replay();
     if (replayed) return replayed;
