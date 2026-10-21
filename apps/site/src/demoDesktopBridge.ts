@@ -279,7 +279,6 @@ type DemoDesktopBridge = Pick<
   | "startChannelThread"
   | "sendChatMessage"
   | "setChatReaction"
-  | "resolveChatDecision"
   | "stopAgentRun"
   | "resumeThreadDispatch"
   | "openExternalUrl"
@@ -705,9 +704,6 @@ const demoBridge = {
         state: payload.state,
       },
     };
-  },
-  async resolveChatDecision() {
-    throw new Error("No open decision in the demo");
   },
   async stopAgentRun() {},
   async resumeThreadDispatch() {},

@@ -168,7 +168,7 @@ export const CAPABILITIES = {
   "chat.bookmark.archive": capability("Archive a saved chat bookmark.", {ipc: ["archiveChatBookmark"]}),
   "chat.thread.revision.read": capability("Read a thread's revision without marking it read.", {ipc: ["getChatThreadRevision"]}),
   "chat.decisions.list": capability("List the decisions in a thread.", {ipc: ["listChatThreadDecisions"]}),
-  "chat.decision.resolve": capability("Resolve a question or poll in a thread.", {ipc: ["resolveChatDecision"]}),
+  "chat.decision.resolve": capability("Resolve a question or poll in a thread.", {ipcReason: "The reply that answers it resolves it through sendChatMessage."}),
   "chat.attachments.list": capability("List file attachments in a thread.", {ipc: ["listChatThreadAttachments"]}),
   "chat.navigation.list": capability("List Groups and file-linked threads for chat navigation.", {ipc: ["listChatChannels"]}),
   "chat.follows.list": capability("List the local person's chat follows.", {ipc: ["listChatFollows"]}),

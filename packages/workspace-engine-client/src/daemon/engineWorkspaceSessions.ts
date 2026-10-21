@@ -58,6 +58,8 @@ export type ShareMountEngineWorkspace = EngineWorkspace & {
 export interface EngineWorkspaceBinding {
   client: EngineDaemonClient;
   workspace: WorkspaceHandle;
+  /** The open prepared `.dohc/local` for this computer's state. */
+  localStateReady: boolean;
 }
 
 export interface EngineDaemonClientSource {
@@ -452,19 +454,31 @@ export class EngineWorkspaceSessions {
     }
   }
 
-  /** Uses an existing binding without opening or reconnecting a workspace. */
-  async runIfOpen<T>(
-    workspace: EngineWorkspace,
-    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
-  ): Promise<T | null> {
+  /**
+   * The workspace's binding while it is current: its open finished, and it is
+   * not closing, retiring or rebuilding, and is on the current client. A new
+   * open makes a new binding. Never opens or reconnects a workspace.
+   */
+  currentBinding(workspace: EngineWorkspace): EngineWorkspaceBinding | null {
     const key = this.sessionKey(workspace);
     const entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
       entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
       !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
+    return entry.binding;
+  }
+
+  /** Uses an existing binding without opening or reconnecting a workspace. */
+  async runIfOpen<T>(
+    workspace: EngineWorkspace,
+    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
+  ): Promise<T | null> {
+    const binding = this.currentBinding(workspace);
+    const entry = this.entries.get(this.sessionKey(workspace));
+    if (!binding || !entry) return null;
     entry.activeRuns += 1;
     try {
-      return await operation(entry.binding);
+      return await operation(binding);
     } finally {
       this.release(entry);
     }
@@ -1287,7 +1301,11 @@ export class EngineWorkspaceSessions {
       { deadlineMs: this.workspaceOpenDeadlineMs },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
-    return { client, workspace: opened.workspace as WorkspaceHandle };
+    return {
+      client,
+      workspace: opened.workspace as WorkspaceHandle,
+      localStateReady: opened.localStateReady === true,
+    };
   }
 
   private async prepareWorkspace(rootPath: string): Promise<void> {

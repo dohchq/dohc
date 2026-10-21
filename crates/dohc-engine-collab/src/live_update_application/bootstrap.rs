@@ -201,7 +201,7 @@ where
             let source = crate::reader_snapshot::resolve(tx, &key, &doc, &canonical,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path: &binding.current_path, digest: &input.projected_markdown_digest,
-                    lineage: &binding.lineage_claim_id, authority: &authority,
+                    lineage: &binding.lineage_claim_id, restore_fence: None, authority: &authority,
                 }, cache.reader_resolver.as_deref()).map_err(ApplicationError::from).map_err(E::from)?;
             Some(source)
         } else {
@@ -662,6 +662,7 @@ mod tests {
         let receipt = owner
             .fence_restore(
                 &mut store,
+                None,
                 input.clone(),
                 coordinate.clone(),
                 200,
@@ -706,6 +707,7 @@ mod tests {
             owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     203,
@@ -717,7 +719,7 @@ mod tests {
         let mut conflict = input;
         conflict.operation_id = "different".into();
         assert!(owner
-            .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
+            .fence_restore(&mut store, None, conflict, coordinate, 204, &NoFaults)
             .is_err());
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
@@ -1027,7 +1029,7 @@ mod tests {
         let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
         let (fence, coordinate) = fence_input(&handle);
         owner
-            .fence_restore(&mut store, fence, coordinate, 200, &NoFaults)
+            .fence_restore(&mut store, None, fence, coordinate, 200, &NoFaults)
             .unwrap();
         assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
         assert!(read_next_applied(&store, &handle, &cut.position, sync_policy(), || true).is_err());
@@ -1086,6 +1088,7 @@ mod tests {
             owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     200,
@@ -1100,7 +1103,7 @@ mod tests {
                 .unwrap();
             assert!(
                 owner
-                    .fence_restore(&mut store, input, coordinate, 201, &NoFaults)
+                    .fence_restore(&mut store, None, input, coordinate, 201, &NoFaults)
                     .is_err(),
                 "{sql}"
             );
@@ -1135,6 +1138,7 @@ mod tests {
             assert!(owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     200,
@@ -1162,7 +1166,7 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, input, coordinate, 202, &NoFaults)
+                .fence_restore(&mut store, None, input, coordinate, 202, &NoFaults)
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if committed { 200 } else { 202 });
         }
@@ -1210,7 +1214,7 @@ mod tests {
             let before = counts(&store);
             assert!(
                 owner
-                    .fence_restore(&mut store, input, coordinate, 200, &NoFaults)
+                    .fence_restore(&mut store, None, input, coordinate, 200, &NoFaults)
                     .is_err(),
                 "{field}"
             );
@@ -1262,6 +1266,7 @@ mod tests {
         owner
             .fence_restore(
                 &mut store,
+                None,
                 input,
                 coordinate,
                 202,
@@ -1318,7 +1323,7 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, input, coordinate, 204, &NoFaults)
+                .fence_restore(&mut store, None, input, coordinate, 204, &NoFaults)
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if after { 202 } else { 204 });
             assert_eq!(receipt.local_head_sequence, 0);

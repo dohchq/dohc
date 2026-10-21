@@ -31,6 +31,9 @@ const LazyAboutFileChatsOff = lazy(() =>
 
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
+// A conversation's Links read as About shows it; Access waits to be opened.
+const CONVERSATION_SECTIONS_OPEN = { links: true, access: false };
+
 // A file's chat opened from search, a mention or the graph. The shell mints
 // one per hit and names the tab it belongs to, so the hit lives with the
 // shell, not with this rail, and survives About being closed.
@@ -60,7 +63,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   searchChatTarget: AboutSearchHit | null;
   onSearchHitRead: () => void;
   onSearchHitClosed: () => void;
-  openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
+  openPathWithHeading: NonNullable<LinkedChatsPanelProps["onOpenPath"]>;
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
   onAgentWaitsForTrust?: LinkedChatsPanelProps["onAgentWaitsForTrust"];
@@ -113,7 +116,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   // Null for a tab that is not a conversation's.
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
-  const [conversationAccessOpen, setConversationAccessOpen] = useState(false);
+  const [conversationSections, setConversationSections] = useState(CONVERSATION_SECTIONS_OPEN);
   const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
   return (
     <AboutRail
@@ -166,8 +169,9 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             <LazyAboutConversationPanel
               workspaceId={workspaceId}
               conversation={conversation}
-              accessOpen={conversationAccessOpen}
-              onToggleAccess={() => setConversationAccessOpen((open) => !open)}
+              sectionsOpen={conversationSections}
+              onToggleSection={(id) => setConversationSections((open) => ({ ...open, [id]: !open[id] }))}
+              onOpenFile={openPathWithHeading}
               notices={aboutNotices}
               accessContext={accessContext}
             />

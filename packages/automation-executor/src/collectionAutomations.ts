@@ -3380,7 +3380,7 @@ export class CollectionAutomations {
         ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
         : stored.runs;
       if (unreadable) {
-        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
+        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/local/automations, so it undid nothing." };
       }
       const statusRow: CollectionAutomationRun = { claimId: input.claimId, state: claim.state, error: null,
         createdAtMs: 0, updatedAtMs: 0, trigger: claim.history.trigger, definitionChanged: false,

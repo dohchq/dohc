@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type {
@@ -204,11 +206,14 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
               ),
             },
     });
+    // As the engine's open does, make `.dohc/local` private and say it is
+    // ready, so a share view's refresh records have somewhere to go.
+    mkdirSync(join(rootDir, ".dohc", "local"), { recursive: true, mode: 0o700 });
     // The handle IS the workspace id, which is what keeps the loopback's
     // per-workspace state and this transport's cursor rows in step. Two mounts
     // of one share in different hosts therefore get separate state, the way
     // two daemon workspaces would.
-    return { workspace: workspaceId };
+    return { workspace: workspaceId, localStateReady: true };
   }
 
   private commitCursor(

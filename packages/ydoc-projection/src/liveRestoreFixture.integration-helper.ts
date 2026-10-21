@@ -4,8 +4,8 @@ import {beginStopRestore, advanceStopRestoreFence, type StopRestoreIntent} from 
 import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import type {CommittedBootstrap} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 
-export function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "device" = "device", baselineBytes?: Uint8Array) {
-  const coordinate = {...host,mode}, f = registered({host: coordinate, baselineBytes}), context = f.storage as StorageContext;
+export function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "device" = "device", baselineBytes?: Uint8Array, readerArtifact?: import("./liveRestoreValidation.js").RestoreArtifact) {
+  const coordinate = {...host,mode}, f = registered({host: coordinate, baselineBytes,readerArtifact}), context = f.storage as StorageContext;
   const history = createLiveJournalHistoryAuthority({namespace: "restore-test",reconciled: true});
   const store = f.storage.createLiveCommittedDeliveryStore(history), document = f.input.evidence.document;
   const intent: StopRestoreIntent = {deliveryKind: kind,operationId: "restore",ownerUserId: "owner",document,

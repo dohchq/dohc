@@ -1862,7 +1862,7 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 // spelling irrelevant. Revert safeResolve to the lexical check alone and each
 // one fails.
 describe("a symlink cannot alias a reserved area", () => {
-  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
+  const settingsPath = (root: string) => join(root, ".dohc", "local", "settings.local.json");
   const SETTINGS = JSON.stringify({
     ...DEFAULT_WORKSPACE_SETTINGS,
     privacy: { confirmExternalLinks: false },
@@ -1872,7 +1872,7 @@ describe("a symlink cannot alias a reserved area", () => {
   // `meta -> .dohc`: an ordinary-looking folder whose real path is reserved.
   async function withDohcAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
     return withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+      await mkdir(join(ctx.root, ".dohc", "local"), { recursive: true });
       await writeFile(settingsPath(ctx.root), SETTINGS);
       await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
       return fn(ctx);
@@ -1890,7 +1890,7 @@ describe("a symlink cannot alias a reserved area", () => {
 
   it("refuses safeResolve for a path whose real target is inside .dohc", async () => {
     await withDohcAlias(async (ctx) => {
-      for (const path of ["meta", "meta/settings.local.json", "meta/trash/x.md"]) {
+      for (const path of ["meta", "meta/local/settings.local.json", "meta/trash/x.md"]) {
         const resolved = await safeResolve(ctx, path);
         expect(resolved.ok, path).toBe(false);
         expectsReservedRefusal(refusalReason(resolved));
@@ -1901,7 +1901,7 @@ describe("a symlink cannot alias a reserved area", () => {
   it("refuses the write, and the settings file is untouched", async () => {
     await withDohcAlias(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
-        path: "meta/settings.local.json",
+        path: "meta/local/settings.local.json",
         content: JSON.stringify(DEFAULT_WORKSPACE_SETTINGS),
       });
       expect(written.ok).toBe(false);
@@ -1913,7 +1913,7 @@ describe("a symlink cannot alias a reserved area", () => {
 
   it("refuses the delete, and the settings file is still where it was", async () => {
     await withDohcAlias(async (ctx) => {
-      const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+      const deleted = await deleteWorkspacePath(ctx, { path: "meta/local/settings.local.json" });
       expect(deleted.ok).toBe(false);
       expectsReservedRefusal(refusalReason(deleted));
 
@@ -1926,7 +1926,7 @@ describe("a symlink cannot alias a reserved area", () => {
       await writeFile(join(ctx.root, "note.md"), "visible");
 
       const out = await moveWorkspacePath(ctx, {
-        fromPath: "meta/settings.local.json",
+        fromPath: "meta/local/settings.local.json",
         toPath: "stolen.json",
       });
       expect(out.ok).toBe(false);
@@ -1956,7 +1956,7 @@ describe("a symlink cannot alias a reserved area", () => {
 
   it("refuses the read, so .dohc stays unreadable under any spelling", async () => {
     await withDohcAlias(async (ctx) => {
-      const read = await readWorkspaceFile(ctx, { path: "meta/settings.local.json" });
+      const read = await readWorkspaceFile(ctx, { path: "meta/local/settings.local.json" });
       expect(read.ok).toBe(false);
       expectsReservedRefusal(refusalReason(read));
     });
@@ -1985,7 +1985,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expect((await lstat(join(ctx.root, "old-meta"))).isSymbolicLink()).toBe(true);
       // Moving it does not launder it: the new spelling reads .dohc too.
       expectsReservedRefusal(
-        refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/settings.local.json" })),
+        refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/local/settings.local.json" })),
       );
       expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
@@ -2113,11 +2113,11 @@ describe("a symlink cannot alias a reserved area", () => {
     it("refuses the write, and no file appears inside .dohc", async () => {
       await withDanglingAlias(async (ctx) => {
         const written = await writeWorkspaceFile(ctx, {
-          path: "meta/settings.local.json",
+          path: "meta/local/settings.local.json",
           content: SETTINGS,
         });
         expect(refusalReason(written)).toMatch(/no target|reserved/i);
-        await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
+        await expect(stat(join(ctx.root, ".dohc", "local", "settings.local.json"))).rejects.toThrow();
       });
     });
 
@@ -2148,7 +2148,7 @@ describe("a symlink cannot alias a reserved area", () => {
     // path is still a route, and where it leads is still unknown.
     it("still refuses a delete through the broken link", async () => {
       await withDanglingAlias(async (ctx) => {
-        const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+        const deleted = await deleteWorkspacePath(ctx, { path: "meta/local/settings.local.json" });
         expect(refusalReason(deleted)).toMatch(/no target/i);
       });
     });

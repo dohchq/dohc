@@ -100,16 +100,67 @@ it("drains an existing-binding operation before close and refuses new work while
   await sessions.closeAll();
 });
 
+it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
+  const workspace = await tempWorkspace();
+  const ready = new MockClient("ready", { localStateReady: true });
+  const unmarked = new MockClient("unmarked", { localStateReady: false });
+  const silent = new MockClient("silent");
+  let client = ready;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const readiness = () => sessions.currentBinding(workspace)?.localStateReady ?? null;
+  expect(readiness()).toBeNull();
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(true);
+  // A new client makes the old binding stale before any reopen starts.
+  client = unmarked;
+  expect(readiness()).toBeNull();
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(false);
+  client = silent;
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(false);
+
+  // Closing ends it at once, and a reopen sets it only when it finishes.
+  client = ready;
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(true);
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  expect(readiness()).toBeNull();
+  await closing;
+  const held = deferred<void>();
+  ready.holdOpen = held.promise;
+  const reopening = sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBeNull();
+  held.resolve();
+  await reopening;
+  expect(readiness()).toBe(true);
+
+  // A reopen that fails leaves nothing current.
+  await sessions.closeWorkspaceBinding(workspace);
+  ready.failOpen = true;
+  await expect(sessions.run(workspace, async () => undefined)).rejects.toThrow("open refused");
+  expect(readiness()).toBeNull();
+  await sessions.closeAll();
+});
+
 class MockClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   private readonly eventHandlers = new Set<(event: Event) => void>();
 
-  constructor(private readonly handle: string) {}
+  holdOpen: Promise<void> | null = null;
+  failOpen = false;
+
+  constructor(
+    private readonly handle: string,
+    private readonly opened: { localStateReady?: boolean } = {},
+  ) {}
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
     if (request.method === "workspace.open") {
-      return { id: request.id, result: { workspace: this.handle } };
+      await this.holdOpen;
+      if (this.failOpen) throw new Error("open refused");
+      return { id: request.id, result: { workspace: this.handle, ...this.opened } };
     }
     if (request.method === "workspace.close") {
       return { id: request.id, result: { closed: true } };

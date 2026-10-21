@@ -18,6 +18,7 @@ import {
 } from "../workspaces/workspaceDatabase";
 import type { OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { createTestScratch } from "../workspaces/testTemp";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
@@ -52,6 +53,7 @@ const sharedView = { shareId: "share-db", granterEmail: null, genericChatWritabl
 async function harness() {
   const rootPath = realpathSync(await createTestScratch("desktop-database-ipc-"));
   const workspace: RegistryEntry = { workspaceId: "workspace-a", rootPath, kind: "personal", mode: "local-first" };
+  await openedLocalState(workspace);
   const registry = createRegistryStore(join(rootPath, "registry.json"));
   registry.register(workspace);
   const authority = createWorkspaceAuthorityOwner({ findWorkspace: registry.find, canonicalizeRoot: (path) => realpathSync(path), createState: () => ({}) });
@@ -338,7 +340,7 @@ describe("database import Undo", () => {
     expect(deletion.trashed).toBe(false);
     const recovery = await readDeleteRecovery(h.workspace.rootPath, deletion.operationId);
     expect(recovery).toMatchObject({ base: result.path, tracked: true });
-    expect(await readFile(join(h.workspace.rootPath, ".dohc", "trash", recovery!.staged!))).toEqual(bytes);
+    expect(await readFile(join(h.workspace.rootPath, ".dohc", "local", "trash", recovery!.staged!))).toEqual(bytes);
     await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
   });
 
@@ -402,7 +404,7 @@ describe("database import Undo", () => {
 
   it("keeps Undo available when both trash routes fail", async () => {
     const h = await harness(), result = await seed(h);
-    const trash = join(h.workspace.rootPath, ".dohc", "trash");
+    const trash = join(h.workspace.rootPath, ".dohc", "local", "trash");
     await mkdir(join(h.workspace.rootPath, ".dohc"), { recursive: true });
     await writeFile(trash, "blocks fallback trash");
     await expect(undo(h, result.operationId)).rejects.toThrow();

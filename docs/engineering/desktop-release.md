@@ -23,9 +23,13 @@ signs and notarizes a release. An unsigned build is not a stable release.
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
 installs an AppArmor profile that allows them. The profile covers every process
-dohc starts, including the engine, chat runners, and the commands agents run, so
-each of them can also create user namespaces. Point Ubuntu and Debian users to
-the `.deb`.
+the desktop app starts, including the engine, chat runners, and the commands
+agents run, so each of them can also create user namespaces. Point Ubuntu and
+Debian users to the `.deb`.
+
+On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
+`/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
+([reference](../reference/cli-mcp-sdk.md)).
 
 ## Keep signing credentials on reviewed code
 
@@ -50,7 +54,9 @@ owner [saved for unattended releases](#let-releases-run-unattended).
 
 ## Provide self-hosted runners
 
-Every release job runs on a self-hosted runner. Cloud runners stay off.
+The scheduled nightly runs every release job on a self-hosted runner.
+Until the repository is public, dispatch with `runners=github` only for the trial dry runs Ice approved.
+With `runners=github`, a job runs on GitHub's `ubuntu-24.04` image where the table names a Linux runner, and on `windows-2025` where it names a Windows one.
 
 | Jobs | Runner labels |
 | --- | --- |

@@ -1271,7 +1271,12 @@ const WorkspaceResultSchemas = {
     nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, removed:Schema.optional(Schema.Int)})),
     refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, sha256: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
   }),
-  [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
+  // An open that writes says whether `.dohc/local` is ready for this
+  // computer's state; a read-only open prepares nothing and leaves it out.
+  [WORKSPACE_METHOD.open]: mutableStruct({
+    workspace: Schema.String,
+    localStateReady: Schema.optionalKey(Schema.Boolean),
+  }),
   [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
   [WORKSPACE_METHOD.conflictsList]: mutableStruct({
     conflicts: Schema.mutable(Schema.Array(ConflictRecordSchema)),

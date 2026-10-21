@@ -265,6 +265,13 @@ export async function ensureUserSettingsFile(dir: string): Promise<string> {
   const root = resolve(dir);
   await mkdir(root, { recursive: true });
   const path = settingsPath(root);
+  // Leave every existing entry alone, including a dangling link: Windows
+  // "wx" can follow one and put the defaults at its target.
+  const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (entry !== null) return path;
   const text = `${JSON.stringify(DEFAULT_USER_SETTINGS, null, 2)}\n`;
   try {
     await writeFile(path, text, { flag: "wx" });

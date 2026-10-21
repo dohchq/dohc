@@ -327,7 +327,7 @@ import {
 import { automationFailedNoticeId } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
-import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
+import { localAutomationStoreFolder } from "./automations/localAutomationStore";
 import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
@@ -542,7 +542,7 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
-import { adoptLoginShellPath } from "./process/loginShellPath";
+import { adoptLoginShellPath, hasControllingTerminal, needsLoginShellPath } from "./process/loginShellPath";
 import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
@@ -568,10 +568,13 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 makeProcessDiagnosticsNonFatal();
 
 // Finder and the Dock start a packaged dohc with launchd's PATH, where the
-// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. The
+// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. A
+// Linux desktop's launcher starts it with the session's PATH, which misses
+// what only the shell adds, such as nvm and its npm-installed agents. The
 // login shell's PATH is read once, in parallel with startup, once this
-// instance holds the single-instance lock. Agent runs and agent detection
-// wait for it, at most for its timeout.
+// instance holds the single-instance lock, unless a Linux terminal started
+// dohc (needsLoginShellPath). Agent runs and agent detection wait for it, at
+// most for its timeout.
 let loginShellPathRead: Promise<void> = Promise.resolve();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
@@ -4511,7 +4514,7 @@ function createCollectionAutomationsFor(
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
+    store: createAutomationRunStore(localAutomationStoreFolder(workspace), () => {
       if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed. Open it again.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
@@ -4730,6 +4733,7 @@ const chatWrites = createChatWrites({
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
   scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
+  betweenDispatchScans: (workspaceId, write) => chatDispatchService.betweenScans(workspaceId, write),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 
@@ -5202,9 +5206,7 @@ function createShareViewFilesForOperation(
       receivedShareEngine.storeFor({
         engineWorkspaceId: target.storeWorkspaceId,
         rootPath: target.rootPath,
-        ...(target.storeWorkspaceId === operation.workspace.workspaceId
-          ? { attachmentId: operation.workspace.attachmentId }
-          : {}),
+        ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
       }),
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
@@ -5236,9 +5238,7 @@ function createShareViewFilesForOperation(
         .relayFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
-          ...(target.storeWorkspaceId === operation.workspace.workspaceId
-            ? { attachmentId: operation.workspace.attachmentId }
-            : {}),
+          ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
           relay,
         })
         .pullShareView({
@@ -7253,6 +7253,7 @@ if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
 // start() takes the lock first. A second instance quits without running the profile.
-if (process.platform === "darwin" && app.isPackaged && app.hasSingleInstanceLock()) {
+const fromTerminal = process.platform === "linux" && hasControllingTerminal();
+if (app.isPackaged && needsLoginShellPath(process.platform, fromTerminal) && app.hasSingleInstanceLock()) {
   loginShellPathRead = adoptLoginShellPath(process.env);
 }

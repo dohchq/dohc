@@ -212,7 +212,7 @@ pub fn capture_imported_owner_activation(
                 .map_err(|_| ApplicationError::Corrupt)?;
             crate::reader_snapshot::resolve(tx, key, &local, &projection,
                 &crate::reader_snapshot::SnapshotIdentity {
-                    moment: &moment, path, digest: &source_digest, lineage: &lineage, authority: &authority,
+                    moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
                 }, resolver)?
         } else { local
             .settled_markdown_source(&projection, || {

@@ -92,7 +92,7 @@ function assertSafeRelativePath(path: string): void {
   }
 }
 
-// Seeds .dohc/settings.local.json before launch so a spec can set
+// Seeds .dohc/local/settings.local.json before launch so a spec can set
 // per-workspace settings without driving the settings UI. Built FROM
 // DEFAULT_WORKSPACE_SETTINGS (the strict schema's canonical default) so the
 // seed can never drift from the shape the app parses.
@@ -109,11 +109,14 @@ export async function seedWorkspaceSettings(
       ...overrides.files,
     },
   };
-  const dir = join(workspace.rootPath, ".dohc");
+  // The engine's first open takes this folder and makes it private.
+  const dir = join(workspace.rootPath, ".dohc", "local");
   await mkdir(dir, { recursive: true });
+  // dohc reads a settings file only if no other user can write it.
   await writeFile(
     join(dir, "settings.local.json"),
     `${JSON.stringify(settings, null, 2)}\n`,
+    { mode: 0o600 },
   );
 }
 
@@ -358,6 +361,30 @@ export async function waitForWorkspaceFile(
       );
     },
     { expectedPath: path, id: workspaceId },
+  );
+}
+
+// Waits until the engine owns the file under a stable object id, which a
+// chat needs before it can link or mention it.
+export async function waitForFileObjectId(
+  page: Page,
+  workspaceId: string,
+  path: string,
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ id, filePath }) => {
+      const api = (window as unknown as {
+        dohcDesktop?: {
+          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+            fileObjectId: string | null;
+          }>;
+        };
+      }).dohcDesktop;
+      if (!api) return false;
+      const result = await api.listFileChats({ workspaceId: id, path: filePath });
+      return result.fileObjectId !== null;
+    },
+    { id: workspaceId, filePath: path },
   );
 }
 

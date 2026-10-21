@@ -147,7 +147,7 @@ An agent is marked visually by its rounded square avatar, and a running agent by
 ### Destructive and irreversible actions
 
 - Name the exact thing and the exact count. `Delete 12 files from Research?`
-- **State the true recovery path, including the fallback.** dohc file deletes are always recoverable: the system trash, or `<workspace>/.dohc/trash` whenever the system-trash operation fails. Which is any rejection, not only a drive that lacks a trash. Name both locations. Never write `This cannot be undone.` here.
+- **State the true recovery path, including the fallback.** dohc file deletes are always recoverable: the system trash, or `<workspace>/.dohc/local/trash` whenever the system-trash operation fails. Which is any rejection, not only a drive that lacks a trash. If neither takes the file, dohc refuses the delete. Name both locations. Never write `This cannot be undone.` here.
 - Write `This cannot be undone` only where it is true, and verify before you write it. Durability is a contract, not a tone, see the product invariants in `AGENTS.md`.
 - Label the confirm button with the verb, not `OK`. `Delete files`.
 - Never use `Are you sure?` as the whole question. It states nothing.
@@ -160,7 +160,7 @@ An agent is marked visually by its rounded square avatar, and a running agent by
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.`. With a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible. Sync is off by default and signing in alone does not enable it. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, the noun the UI uses, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and you can restore them.` | States the count and the true recovery path including the fallback. Dohc deletes are recoverable, so `This cannot be undone` would be false. |
+| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can restore them.` | States the count and the true recovery path including the fallback. Dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
 ### Where shipping copy disagrees with itself

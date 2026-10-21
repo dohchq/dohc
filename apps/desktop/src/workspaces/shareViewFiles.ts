@@ -85,6 +85,8 @@ export interface ResolvedShareViewFilesTarget {
   recipientEmail?: string | null;
   /** Present only for a mount; revalidated before any projected-folder write. */
   mountLabel?: string;
+  /** Present only for a standalone view: the attachment its engine open belongs to. */
+  attachmentId?: symbol;
 }
 
 export type ShareViewFileChange =
@@ -850,6 +852,9 @@ export function createShareViewFiles(
           ...(target.mountLabel === undefined
             ? {}
             : { mountLabel: target.mountLabel }),
+          ...(target.attachmentId === undefined
+            ? {}
+            : { attachmentId: target.attachmentId }),
         },
         workspaceLease: lease,
       },
