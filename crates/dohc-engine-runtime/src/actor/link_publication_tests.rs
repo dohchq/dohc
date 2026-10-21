@@ -14,25 +14,31 @@ fn placements() -> &'static Mutex<HashMap<String, Probe>> {
 pub(in crate::actor) struct Turn {
     ws: String,
     start: Instant,
+    paused_ns: u128,
     pub(in crate::actor) jobs: usize,
 }
 impl Turn {
     pub(in crate::actor) fn start(ws: &str) -> Self {
+        Self {
+            ws: ws.into(),
+            start: Instant::now(),
+            paused_ns: 0,
+            jobs: 0,
+        }
+    }
+    pub(in crate::actor) fn ready(&mut self) {
         let pause = placements()
             .lock()
             .unwrap()
-            .entry(ws.into())
+            .entry(self.ws.clone())
             .or_default()
             .pause
             .take();
         if let Some((entered, release)) = pause {
+            let start = Instant::now();
             entered.notify_one();
             release.recv().unwrap();
-        }
-        Self {
-            ws: ws.into(),
-            start: Instant::now(),
-            jobs: 0,
+            self.paused_ns += start.elapsed().as_nanos();
         }
     }
 }
@@ -44,7 +50,7 @@ impl Drop for Turn {
             .entry(self.ws.clone())
             .or_default()
             .turns
-            .push((self.jobs, self.start.elapsed().as_nanos()));
+            .push((self.jobs, self.start.elapsed().as_nanos() - self.paused_ns));
     }
 }
 pub(in crate::actor) fn faults(ws: &str) -> Arc<dyn FaultInjector> {

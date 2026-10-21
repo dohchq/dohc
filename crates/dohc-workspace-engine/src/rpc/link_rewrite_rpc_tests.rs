@@ -276,7 +276,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         )
         .unwrap();
     }
-    service.workspace_close(Some(handle)).await.unwrap();
+    service.workspace_close(Some(handle.clone())).await.unwrap();
 }
 
 #[path = "link_rewrite_open_rpc_tests.rs"]

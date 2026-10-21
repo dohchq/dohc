@@ -72,7 +72,7 @@ impl ActorHandle {
                     let order = *order;
                     let count = jobs.len();
                     #[cfg(test)]
-                    { turn.jobs = count; }
+                    { turn.jobs = count; turn.ready(); }
                     let selected = jobs.into_iter().map(|(_, id)| id).collect();
                     #[cfg(not(test))]
                     let faults: Arc<dyn FaultInjector> = Arc::new(dohc_engine_storage::NoFaults);
