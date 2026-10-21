@@ -14,6 +14,7 @@ import {
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -275,6 +276,39 @@ async function materializeSharedViewPaths(
     return target;
   }
   const main = await store.ensureMainVersion({ workspaceId });
+  // The view's live paths, grouped by how a disk that ignores case or Unicode
+  // normalization names them. Read once, at the first delete of a file.
+  let aliases: Map<string, string[]> | undefined;
+  // A missing entry is an answer; any other failure stops the refresh before it deletes.
+  const missingAsNull = (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  };
+  const regularFile = async (path: string) => (await lstat(path).catch(missingAsNull))?.isFile() ?? false;
+  // Whether another live path reaches the regular file at `target`, as
+  // `Notes.md` reaches `notes.md` on a disk that ignores case. That path's head
+  // owns the file, so the delete leaves it (#2294). The disk decides, not the
+  // names: a folder that keeps case apart holds two files. A link or folder at
+  // the target is never evidence of an owner; the delete repairs it.
+  async function ownedByAlias(path: string, target: string): Promise<boolean> {
+    if (!(await regularFile(target))) return false;
+    if (!aliases) {
+      aliases = new Map();
+      for (const file of await store.listTextFileMetadata({ workspaceId, versionId: main.id })) {
+        const key = pathCollisionKey(file.path);
+        aliases.set(key, [...(aliases.get(key) ?? []), file.path]);
+      }
+    }
+    const others = (aliases.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path);
+    if (others.length === 0) return false;
+    const file = await realpath(target).catch(missingAsNull);
+    if (file === null) return false;
+    for (const other of others) {
+      const otherTarget = containedTarget(rootDir, other);
+      if ((await regularFile(otherTarget)) && (await realpath(otherTarget).catch(missingAsNull)) === file) return true;
+    }
+    return false;
+  }
   // Every delete before every write. On a disk that ignores case or Unicode
   // normalization, writing `notes.md` opens the `Notes.md` that a delete then
   // removes. A refresh merges its pull's pages, so the changes can arrive in
@@ -324,6 +358,7 @@ async function materializeSharedViewPaths(
       if (!isInside(realRoot, realParent)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
       }
+      if (await ownedByAlias(change.path, resolvedTarget)) continue;
       // recursive: a locally tampered DIRECTORY at the target must not
       // wedge the refresh with EISDIR. Node's rm removes a symlink as a
       // link either way — it never recurses through one.
