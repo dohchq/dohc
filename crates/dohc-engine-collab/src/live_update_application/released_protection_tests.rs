@@ -17,13 +17,15 @@ fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
 }
 
 fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<ReleasedLineageBinding> {
-    protected_in(f, incoming, &mut PassTails::default())
+    protected_in(f, incoming, &ReleasedTails::default())
 }
 
-/// [`protected_from`], decided in `pass`.
-fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, pass: &mut PassTails) -> Option<ReleasedLineageBinding> {
+/// [`protected_from`], decided with the tails `tails` keeps for the
+/// fixture's store.
+fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
-    match f.store.read_with(|conn| protection(conn, &key, pass)).unwrap() {
+    let tails = tails.bound_to(&f.store);
+    match f.store.read_with(|conn| protection(conn, &key, &tails)).unwrap() {
         Protection::Unprotected => None,
         Protection::Protected { binding, head } => {
             assert_eq!(binding.head_digest, hex_sha256(&head.encode_full_state()), "the head it names");
@@ -34,7 +36,7 @@ fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, pass: &mut PassTails
 
 /// Every protected tail the window names.
 fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
-    match binding.tails {
+    match std::sync::Arc::unwrap_or_clone(binding.tails) {
         ProtectedTails::Listed(tails) => tails,
         ProtectedTails::Invalid => panic!("a window that reads"),
     }
@@ -88,12 +90,12 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
             restore_generation: Some(0),
             incoming: incoming(),
             head_digest: hex_sha256(&local_doc(&f).encode_full_state()),
-            tails: ProtectedTails::Listed(vec![ProtectedTail {
+            tails: std::sync::Arc::new(ProtectedTails::Listed(vec![ProtectedTail {
                 namespace: "namespace".into(),
                 activation_id: "adoption".into(),
                 release: owner_release(),
                 coverage: RetainedCoverage::Unproven(unproven),
-            }]),
+            }])),
         }
     );
     // The feed's namespace is the binding's own: another names another hold.
@@ -223,22 +225,276 @@ fn applied_exactly(f: &mut Fixture, receipt: &LiveUpdateReceipt) {
         receipt.delivery_id, receipt.update_digest, receipt.journal_cursor, receipt.accepting_host_epoch));
 }
 
-/// Opus's 1a-2b finding 1: a pass reads each lineage's tails once, on its
-/// first decision, and its later decisions reuse them, while each still
-/// reads its own path. Tail inputs that change after it, here both Carried
-/// deliveries applied, show in the next pass.
+/// The tails `tails` answers for the fixture's lineage, decided now, and
+/// whether a fresh validation reads the same.
+fn kept_matches_fresh(f: &Fixture, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
+    let kept = protected_in(f, &incoming(), tails);
+    assert_eq!(kept, protected_in(f, &incoming(), &ReleasedTails::uncached()), "kept tails read as fresh ones");
+    kept
+}
+
+/// The fixture document's released tail generation.
+fn tail_generation_of(f: &Fixture) -> Option<i64> {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation FROM released_tail_generations WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![f.key.workspace_id, f.key.version_id, f.key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+        .unwrap()
+}
+
+/// Sol's tails-cache ruling: the actor keeps a lineage's validated tails
+/// while the document's generation stands. Later decisions share the same
+/// tails, with no copy of their lists, and each reads its own path. A changed
+/// tail input, here both Carried deliveries applied, validates again.
 #[test]
-fn a_pass_reads_each_lineages_tails_once() {
+fn validated_tails_stand_until_their_generation_moves() {
     let (mut f, _, c1, c2) = released_at_b();
-    let mut pass = PassTails::default();
-    let first = protected_in(&f, &incoming(), &mut pass).expect("protected");
+    let tails = ReleasedTails::default();
+    let first = protected_in(&f, &incoming(), &tails).expect("protected");
+    assert_eq!(tails.validations(), 1);
+    write_unchecked(&mut f, "UPDATE path_aliases SET path='renamed.md' WHERE path='owner.md'");
+    let later = protected_in(&f, &incoming(), &tails).expect("kept");
+    assert!(std::sync::Arc::ptr_eq(&later.tails, &first.tails), "shared, never copied");
+    assert_eq!(tails.validations(), 1, "a path is no tail input");
+    assert_eq!(later.current_path.as_deref(), Some("renamed.md"), "the path is each decision's own");
     applied_exactly(&mut f, &c1.receipt);
     applied_exactly(&mut f, &c2.receipt);
-    write_unchecked(&mut f, "UPDATE path_aliases SET path='renamed.md' WHERE path='owner.md'");
-    let later = protected_in(&f, &incoming(), &mut pass).expect("the pass's tails");
-    assert_eq!(later.tails, first.tails, "read once");
-    assert_eq!(later.current_path.as_deref(), Some("renamed.md"), "the path is each decision's own");
-    assert!(protected(&f).is_none(), "the next pass reads both applied");
+    assert!(kept_matches_fresh(&f, &tails).is_none(), "both applied");
+    assert_eq!(tails.validations(), 2);
+}
+
+/// Sol's tails-cache ruling: a change to a row of any table the tails read
+/// moves the document's generation, so kept tails validate again and read as
+/// fresh ones; terminal blobs, the ninth, have their own test below. Each
+/// change here leaves the answer as it was, and an unrelated blob or a
+/// journal row no entry names keeps the tails.
+#[test]
+fn every_tail_input_moves_the_generation() {
+    let (mut f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    kept_matches_fresh(&f, &tails).expect("protected");
+    let mut validations = tails.validations();
+    let unrelated = [
+        "INSERT INTO binary_blobs VALUES ('unrelated',1,X'00')",
+        "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+         SELECT workspace_id,version_id,object_id,seq+1000,update_blob_sha256,recorded_at_ms FROM ydoc_updates
+         ORDER BY seq DESC LIMIT 1",
+    ];
+    for unrelated in unrelated {
+        write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF; {unrelated}"));
+        kept_matches_fresh(&f, &tails).expect("protected");
+        assert_eq!(tails.validations(), validations, "{unrelated}");
+    }
+    let inputs = [
+        "UPDATE live_owner_activations SET source_byte_length=source_byte_length",
+        "UPDATE owner_ydoc_outboxes SET created_at_ms=created_at_ms",
+        "UPDATE owner_ydoc_outbox_entries SET created_at_ms=created_at_ms",
+        "UPDATE live_device_update_applications SET received_at_ms=received_at_ms",
+        "UPDATE live_accepted_updates SET suffix_count=suffix_count",
+        "INSERT INTO ydoc_owner_activation_sources SELECT 'unnamed',relay_database_namespace,workspace_id,
+           main_version_id,object_id,lineage_claim_id,source_moment_id,source_digest,source_digest,'{}'
+         FROM live_owner_activations",
+        "UPDATE ydoc_updates SET recorded_at_ms=recorded_at_ms WHERE seq IN
+           (SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries)",
+        "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq+1000;
+         UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1000",
+    ];
+    for input in inputs {
+        let generation = tail_generation_of(&f);
+        write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF; {input}"));
+        assert!(tail_generation_of(&f) > generation, "{input}");
+        kept_matches_fresh(&f, &tails).expect("protected");
+        validations += 1;
+        assert_eq!(tails.validations(), validations, "{input}");
+    }
+}
+
+/// The coverage of each tail `binding` lists.
+fn coverage_of(binding: ReleasedLineageBinding) -> Vec<RetainedCoverage> {
+    listed(binding).into_iter().map(|tail| tail.coverage).collect()
+}
+
+/// Sol's tails-cache ruling: changed provenance invalidates what it proved.
+/// A Carried delivery's journal row, an application of a Carried delivery
+/// that claims another document, and an acknowledged seed's capture each
+/// turn kept tails invalid, as fresh validation reads them.
+#[test]
+fn changed_provenance_invalidates_kept_tails() {
+    let (mut f, _, c1, c2) = released_at_b();
+    applied_exactly(&mut f, &c1.receipt);
+    applied_exactly(&mut f, &c2.receipt);
+    let tails = ReleasedTails::default();
+    assert!(kept_matches_fresh(&f, &tails).is_none(), "proven");
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE ydoc_updates SET recorded_at_ms=recorded_at_ms+1 WHERE seq={}", c1.native_sequence));
+    let binding = kept_matches_fresh(&f, &tails).expect("a journal row that no longer proves the delivery");
+    assert_eq!(coverage_of(binding), [RetainedCoverage::Invalid]);
+
+    // The new row's own document is another, so only its delivery names
+    // the document whose tails it contradicts.
+    let (mut f, _, c1, c2) = released_at_b();
+    applied_exactly(&mut f, &c1.receipt);
+    let tails = ReleasedTails::default();
+    let binding = kept_matches_fresh(&f, &tails).expect("protected");
+    assert_eq!(coverage_of(binding), [RetainedCoverage::Unproven(vec![carried(&c2)])]);
+    let generation = tail_generation_of(&f);
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        CREATE TEMP TABLE elsewhere AS SELECT * FROM live_device_update_applications WHERE journal_cursor=3;
+        UPDATE elsewhere SET delivery_id='{}',update_digest='{}',journal_cursor={},accepting_host_epoch={},object_id='elsewhere';
+        INSERT INTO live_device_update_applications SELECT * FROM elsewhere",
+        c2.receipt.delivery_id, c2.receipt.update_digest, c2.receipt.journal_cursor, c2.receipt.accepting_host_epoch));
+    assert!(tail_generation_of(&f) > generation, "its delivery names this document");
+    let binding = kept_matches_fresh(&f, &tails).expect("an application of the delivery elsewhere");
+    assert_eq!(coverage_of(binding), [RetainedCoverage::Invalid]);
+
+    let (mut f, _, carried_deliveries) = resumed_after_catch_up(true, 1);
+    accept_seed(&mut f, 7);
+    apply_carried(&mut f, &carried_deliveries[0]);
+    host_document(&mut f, true, true);
+    retire_settled(&mut f, Some(carried_deliveries[0].receipt.clone()), "seed-retired").unwrap();
+    release_parked(&mut f);
+    returned(&mut f);
+    let tails = ReleasedTails::default();
+    kept_matches_fresh(&f, &tails).expect("the seed protects");
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE ydoc_owner_activation_sources SET full_state_digest='{}'", "0".repeat(64)));
+    let binding = kept_matches_fresh(&f, &tails).expect("protected");
+    assert_eq!(coverage_of(binding), [RetainedCoverage::Invalid], "a seed its capture no longer proves");
+}
+
+/// Sol's tails-cache ruling: a terminal blob proves a refusal by its bytes.
+/// Kept tails that set the refusal aside validate again when they change,
+/// and an unrelated blob keeps them.
+#[test]
+fn a_refusals_terminal_blob_invalidates_kept_tails() {
+    let mut f = refused_root(false);
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, None).unwrap();
+    release_and_return(&mut f);
+    let tails = ReleasedTails::default();
+    let before = kept_matches_fresh(&f, &tails);
+    write_unchecked(&mut f, "INSERT INTO binary_blobs VALUES ('unrelated',1,X'00')");
+    assert_eq!(kept_matches_fresh(&f, &tails), before);
+    assert_eq!(tails.validations(), 1, "an unrelated blob");
+    write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+        UPDATE binary_blobs SET byte_length=byte_length+1
+        WHERE sha256 IN (SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries)");
+    let binding = kept_matches_fresh(&f, &tails).expect("a refusal its bytes no longer prove");
+    assert_eq!(tails.validations(), 2);
+    assert_eq!(coverage_of(binding), [RetainedCoverage::Invalid]);
+}
+
+/// Both Carried deliveries applied, in `tx`.
+fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 2]) -> Result<(), ApplicationError> {
+    for receipt in receipts {
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE applied AS SELECT * FROM live_device_update_applications WHERE journal_cursor=3;
+             UPDATE applied SET delivery_id='{}',update_digest='{}',journal_cursor={},accepting_host_epoch={};
+             INSERT INTO live_device_update_applications SELECT * FROM applied;
+             DROP TABLE applied",
+            receipt.delivery_id, receipt.update_digest, receipt.journal_cursor, receipt.accepting_host_epoch
+        ))
+        .map_err(write_sql)?;
+    }
+    Ok(())
+}
+
+/// Sol's tails-cache ruling: a write transaction that changed the tails
+/// decides on its own state and keeps nothing, even after its savepoint
+/// rolls back. Back at committed state it reuses what was kept. A later
+/// change that reaches the generation a rolled-back transaction read never
+/// reuses what that transaction decided.
+#[test]
+fn a_rolled_back_change_keeps_no_tails() {
+    let (mut f, _, c1, c2) = released_at_b();
+    let tails = ReleasedTails::default();
+    let kept = kept_matches_fresh(&f, &tails).expect("protected");
+    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
+    let bound = tails.bound_to(&f.store);
+    let mut aborted = None;
+    let rolled_back = f.store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON; SAVEPOINT tails").map_err(write_sql)?;
+        apply_both_in(tx, [&c1.receipt, &c2.receipt])?;
+        assert!(matches!(protection(tx, &key, &bound)?, Protection::Unprotected), "its own state");
+        tx.execute_batch("ROLLBACK TO tails; RELEASE tails").map_err(write_sql)?;
+        let Protection::Protected { binding, .. } = protection(tx, &key, &bound)? else {
+            panic!("committed state again");
+        };
+        assert!(std::sync::Arc::ptr_eq(&binding.tails, &kept.tails), "what committed state kept");
+        apply_both_in(tx, [&c1.receipt, &c2.receipt])?;
+        assert!(matches!(protection(tx, &key, &bound)?, Protection::Unprotected), "its own state");
+        aborted = Some(tx.query_row(
+            "SELECT generation FROM released_tail_generations WHERE object_id=?1",
+            [&f.key.object_id],
+            |row| row.get::<_, i64>(0),
+        ).map_err(read_sql)?);
+        Err::<(), _>(ApplicationError::Conflict)
+    });
+    assert!(matches!(rolled_back, Err(ApplicationError::Conflict)), "{rolled_back:?}");
+    assert_eq!(tails.validations(), 1, "no transaction's own state is kept");
+    let aborted = aborted.unwrap();
+    while tail_generation_of(&f).unwrap() < aborted {
+        write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+            UPDATE live_owner_activations SET source_byte_length=source_byte_length");
+    }
+    assert_eq!(tail_generation_of(&f), Some(aborted), "the same generation, other rows");
+    kept_matches_fresh(&f, &tails).expect("nothing applied");
+    assert_eq!(tails.validations(), 2);
+}
+
+/// Bump the generation of whichever fixture's is lower until both read the
+/// same.
+fn same_generation(first: &mut Fixture, second: &mut Fixture) {
+    loop {
+        let (a, b) = (tail_generation_of(first).unwrap(), tail_generation_of(second).unwrap());
+        let lower = match a.cmp(&b) {
+            std::cmp::Ordering::Equal => return,
+            std::cmp::Ordering::Less => &mut *first,
+            std::cmp::Ordering::Greater => &mut *second,
+        };
+        write_unchecked(lower, "PRAGMA foreign_keys=OFF;
+            UPDATE live_owner_activations SET source_byte_length=source_byte_length");
+    }
+}
+
+/// Sol's tails-cache ruling: kept tails belong to one open store. Tails
+/// bound to another store forget them, even where the document and its
+/// generation coincide, and so does a reopen of the same file, whose
+/// generations stand. A store with no generation for the document validates
+/// each decision and keeps nothing, never assuming one.
+#[test]
+fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
+    let (mut first, _, _, _) = released_at_b();
+    let (mut second, _, c1, c2) = released_at_b();
+    applied_exactly(&mut second, &c1.receipt);
+    applied_exactly(&mut second, &c2.receipt);
+    same_generation(&mut first, &mut second);
+    let tails = ReleasedTails::default();
+    kept_matches_fresh(&first, &tails).expect("protected");
+    assert!(kept_matches_fresh(&second, &tails).is_none(), "another store's tails");
+    kept_matches_fresh(&first, &tails).expect("protected");
+    assert_eq!(tails.validations(), 3, "each store forgets the other's");
+    let generation = tail_generation_of(&first);
+    let path = first.store.database_path().to_owned();
+    first.store = EngineStore::open(&path, 0).unwrap();
+    assert_eq!(tail_generation_of(&first), generation);
+    kept_matches_fresh(&first, &tails).expect("protected");
+    kept_matches_fresh(&first, &tails).expect("protected");
+    assert_eq!(tails.validations(), 4, "a reopened store validates again, once");
+
+    let (mut f, _, c1, c2) = released_at_b();
+    write_unchecked(&mut f, "DROP TRIGGER released_tail_generation_kept; DELETE FROM released_tail_generations");
+    let tails = ReleasedTails::default();
+    kept_matches_fresh(&f, &tails).expect("protected");
+    applied_exactly(&mut f, &c1.receipt);
+    applied_exactly(&mut f, &c2.receipt);
+    assert!(kept_matches_fresh(&f, &tails).is_none(), "no generation keeps nothing");
+    assert_eq!(tails.validations(), 0);
 }
 
 /// Opus's 1a-2b finding 3: a Carried delivery applied exactly is proven
@@ -282,7 +538,7 @@ fn a_namespace_with_activations_and_no_tail_protects_as_invalid() {
     let window = f.store.read_with(|conn| settled_base::released_window(conn, &f.key, &f.binding.lineage_claim_id));
     assert!(matches!(window, Err(ApplicationError::Corrupt)), "{window:?}");
     let binding = protected(&f).expect("protected");
-    assert_eq!(binding.tails, ProtectedTails::Invalid);
+    assert_eq!(*binding.tails, ProtectedTails::Invalid);
     assert!(binding.moved("owner.md"), "every update holds");
 }
 
@@ -426,7 +682,7 @@ fn a_window_that_does_not_read_protects_as_invalid() {
         let window = f.store.read_with(|conn| settled_base::released_window(conn, &f.key, &f.binding.lineage_claim_id));
         assert!(window.is_err(), "{case}: {window:?}");
         let binding = protected(&f).unwrap_or_else(|| panic!("{case}: protected"));
-        assert_eq!(binding.tails, ProtectedTails::Invalid, "{case}");
+        assert_eq!(*binding.tails, ProtectedTails::Invalid, "{case}");
         assert!(binding.moved("owner.md"), "{case}");
     }
 }

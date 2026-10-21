@@ -37,6 +37,14 @@ pub struct EngineStore {
     database_path: PathBuf,
     passive: bool,
     completed_batch: CompletionBatch,
+    opening: u64,
+}
+
+/// The number of the next open of any store in this process.
+static NEXT_OPENING: AtomicU64 = AtomicU64::new(1);
+
+fn next_opening() -> u64 {
+    NEXT_OPENING.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The outcome of a transactional unit run through
@@ -105,6 +113,7 @@ impl EngineStore {
             database_path: path.to_path_buf(),
             passive: true,
             completed_batch: Arc::default(),
+            opening: next_opening(),
         })
     }
 
@@ -139,6 +148,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             completed_batch: Arc::default(),
+            opening: next_opening(),
         })
     }
 
@@ -161,6 +171,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
+            opening: next_opening(),
         })
     }
 
@@ -185,6 +196,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
+            opening: next_opening(),
         })
     }
 
@@ -212,6 +224,7 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
+            opening: next_opening(),
         })
     }
 
@@ -328,6 +341,13 @@ impl EngineStore {
     /// filesystem-backed policy reads.
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    /// This open's number. No other open of any store in this process shares
+    /// it, so what a caller keeps for one open never reaches another, even of
+    /// the same file after a restore.
+    pub fn opening(&self) -> u64 {
+        self.opening
     }
 
     /// Bind a fresh store to its root's token, or verify an existing binding.

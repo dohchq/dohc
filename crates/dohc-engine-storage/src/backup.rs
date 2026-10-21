@@ -72,6 +72,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_owner_adoptions",
     "live_owner_activations",
     "live_owner_retirements",
+    "released_tail_generations",
     "live_device_bootstraps",
     "live_device_settlements",
     "live_settlement_publication_states",
@@ -631,6 +632,7 @@ mod tests {
             "live_owner_adoptions",
             "live_owner_activations",
             "live_owner_retirements",
+            "released_tail_generations",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -652,6 +654,9 @@ mod tests {
                 copy.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
                 copy.execute_batch(&if missing {
                     format!("DROP TABLE {table}")
+                } else if table == "released_tail_generations" {
+                    // A generation outlives its document; only damage loses one.
+                    format!("DROP TRIGGER released_tail_generation_kept; DELETE FROM {table}")
                 } else {
                     format!("DELETE FROM {table}")
                 })
@@ -680,6 +685,7 @@ mod tests {
             "live_owner_adoptions",
             "live_owner_activations",
             "live_owner_retirements",
+            "released_tail_generations",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",

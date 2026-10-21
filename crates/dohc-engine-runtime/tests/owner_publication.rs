@@ -6270,15 +6270,6 @@ fn ingress_rows(store: &EngineStore) -> Vec<String> {
     )
 }
 
-/// Every table a released window's protected tails read.
-const TAIL_INPUTS: [&str; 5] = [
-    "live_owner_activations",
-    "owner_ydoc_outboxes",
-    "owner_ydoc_outbox_entries",
-    "live_device_update_applications",
-    "live_accepted_updates",
-];
-
 /// Every row a synced file operation could write to the document: those of
 /// [`ingress_rows`], its path, outbox, attribution requests and
 /// materialization, and none that name the neighbour.
@@ -6612,6 +6603,8 @@ struct HostedFeed {
     documents: Vec<dohc_engine_sync::HostedScopeDocument>,
     rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    /// Rows an earlier feed placed, which the relay still knows.
+    placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
 }
 
 impl HostedFeed {
@@ -6626,6 +6619,7 @@ impl HostedFeed {
                 .collect(),
             rows: Default::default(),
             blobs: Default::default(),
+            placed: Vec::new(),
         }
     }
 
@@ -6660,16 +6654,28 @@ impl HostedFeed {
         before: Option<&str>,
         text: &str,
     ) -> dohc_engine_sync::ReplicationEnvelope {
+        self.write_as("neighbour", object_id, path, before, text)
+    }
+
+    /// [`Self::write`], from `origin`.
+    fn write_as(
+        &self,
+        origin: &str,
+        object_id: &str,
+        path: &str,
+        before: Option<&str>,
+        text: &str,
+    ) -> dohc_engine_sync::ReplicationEnvelope {
         let origin_seq = self
             .rows
             .lock()
             .unwrap()
             .iter()
-            .filter(|op| op.origin_id == "neighbour")
+            .filter(|op| op.origin_id == origin)
             .count() as i64;
         let sha = hex_sha256(text.as_bytes());
         let mut payload = serde_json::json!({
-            "momentId": format!("moment-neighbour-{origin_seq}"), "versionId": "main",
+            "momentId": format!("moment-{origin}-{origin_seq}"), "versionId": "main",
             "objectId": object_id, "objectCreatedAtMs": 1, "path": path, "recordedAtMs": 2_000,
             "operation": "write", "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
             "payloadAfterBlobSha256": sha, "payloadAfterPath": path,
@@ -6690,7 +6696,7 @@ impl HostedFeed {
                 ("beforeUpdatedAtMs", serde_json::json!(2_000)),
                 (
                     "beforeLatestMomentId",
-                    serde_json::json!(format!("moment-neighbour-{}", origin_seq - 1)),
+                    serde_json::json!(format!("moment-{origin}-{}", origin_seq - 1)),
                 ),
             ] {
                 fields.insert(name.into(), value);
@@ -6701,7 +6707,7 @@ impl HostedFeed {
                 settlement_admission: None,
                 admitted_author_snapshot: None,
                 workspace_id: "workspace".into(),
-                origin_id: "neighbour".into(),
+                origin_id: origin.into(),
                 origin_seq,
                 relay_seq: None,
                 op_kind: "moment.append".into(),
@@ -6772,9 +6778,17 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
 
     fn lookup_log_coordinate(
         &self,
-        _req: dohc_engine_sync::LogCoordinateRequest,
+        req: dohc_engine_sync::LogCoordinateRequest,
     ) -> Result<dohc_engine_sync::LogCoordinateResponse, dohc_engine_sync::RelayError> {
-        Ok(dohc_engine_sync::LogCoordinateResponse::Absent)
+        Ok(self
+            .placed
+            .iter()
+            .find(|op| op.origin_id == req.origin_id && op.origin_seq == req.origin_seq)
+            .cloned()
+            .map_or(
+                dohc_engine_sync::LogCoordinateResponse::Absent,
+                dohc_engine_sync::LogCoordinateResponse::Present,
+            ))
     }
 
     refused_relay_methods! {
@@ -6902,7 +6916,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
             "{case}"
         );
         assert_eq!(binding.head_digest, hex_sha256(&native), "{case}");
-        let ProtectedTails::Listed(tails) = &binding.tails else {
+        let ProtectedTails::Listed(tails) = &*binding.tails else {
             panic!("{case}: {:?}", binding.tails);
         };
         let [tail] = tails.as_slice() else {
@@ -7426,7 +7440,7 @@ async fn a_released_window_holds_a_safe_append_once_its_binding_moves() {
         let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
             panic!("{case}: {held:?}");
         };
-        let ProtectedTails::Listed(tails) = &binding.tails else {
+        let ProtectedTails::Listed(tails) = &*binding.tails else {
             panic!("{case}: {:?}", binding.tails);
         };
         let [tail] = tails.as_slice() else {
@@ -7509,9 +7523,10 @@ async fn a_window_that_does_not_read_holds_only_its_document() {
 }
 
 /// `count` acknowledged native entries of the released tail's outbox, after
-/// the retained one, each applied here: the proven history a long-lived
-/// lineage keeps. Written past the store's checks, each still reads as valid.
-fn proven_history(w: &RetainedWindow, count: usize) {
+/// the retained one. Applied here, they are the proven history a long-lived
+/// lineage keeps; never applied, each is retained work that protects it.
+/// Written past the store's checks, each still reads as valid.
+fn retained_history(w: &RetainedWindow, count: usize, applied: bool) {
     use dohc_engine_collab::owner_outbox::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
     let mut raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
     raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
@@ -7560,6 +7575,9 @@ fn proven_history(w: &RetainedWindow, count: usize) {
                     serde_json::to_string(&receipt).unwrap()
                 ])
                 .unwrap();
+            if !applied {
+                continue;
+            }
             application
                 .execute(rusqlite::params![
                     delivery_id,
@@ -7585,107 +7603,259 @@ const APPLIED_EXACTLY: &str = "INSERT INTO live_device_update_applications (rela
     VALUES ('relay','workspace',?1,'main','object',?2,'notes/plan.md','[\"notes/plan.md\"]',0,?3,1,?4,?5,
       'owner','owner',0,0,1,'host',1,'instance','connection')";
 
-/// Opus's 1a-2b finding 1: what released-window protection costs as the
-/// lineage's proven history grows, alone and in complete hosted passes of
-/// safe rows followed by a held row the pass retries. Run in a release build:
+/// One complete hosted pass, timed: [`MEASURED_SAFE_ROWS`] rows that apply,
+/// `unrelated` creates of other documents beside them, then a row at another
+/// path that the pass holds and retries. `sample` keeps each pass's origins
+/// apart, and `placed` keeps every row a pass applied, which the relay
+/// still knows in later passes.
+fn measured_pass(
+    w: &mut RetainedWindow,
+    cache: &mut dohc_engine_collab::WriterDocCache,
+    placed: &mut Vec<dohc_engine_sync::ReplicationEnvelope>,
+    sample: &str,
+    unrelated: usize,
+) -> f64 {
+    let documents: Vec<(String, String)> = (0..unrelated)
+        .map(|index| {
+            let object = format!("unrelated-{sample}-{index}");
+            let path = format!("notes/{object}.md");
+            execute(
+                &mut w.store,
+                &format!(
+                    "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+                     VALUES ('workspace','{object}','{path}','ready',1)"
+                ),
+            );
+            (object, path)
+        })
+        .collect();
+    // The scope keeps every document an earlier pass created.
+    let hosted: Vec<(String, String)> = w
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT object_id,path FROM hosted_documents ORDER BY object_id")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap();
+    let scope: Vec<(&str, &str)> = hosted
+        .iter()
+        .map(|(object, path)| (object.as_str(), path.as_str()))
+        .collect();
+    let mut feed = HostedFeed::new(&scope);
+    feed.placed = placed.clone();
+    let doc = w.head();
+    for row in 0..MEASURED_SAFE_ROWS {
+        let bytes = doc.richdoc_append_paragraph(&format!("Row {sample}.{row}"));
+        let op = ydoc_row(
+            &format!("safe-{sample}-{row}"),
+            &bytes,
+            &w.lineage,
+            WINDOW_PATH,
+            false,
+        );
+        feed.serve(op, bytes);
+    }
+    for (object, path) in &documents {
+        feed.write_as(
+            &format!("unrelated-{sample}"),
+            object,
+            path,
+            None,
+            "Elsewhere.\n",
+        );
+    }
+    let moved = doc.richdoc_append_paragraph("Moved");
+    let held = feed.serve(
+        ydoc_row(
+            &format!("moved-{sample}"),
+            &moved,
+            &w.lineage,
+            "notes/moved.md",
+            false,
+        ),
+        moved,
+    );
+    placed.extend(
+        feed.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.origin_id != held.origin_id)
+            .cloned(),
+    );
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let started = std::time::Instant::now();
+    let pass = client
+        .pull_hosted_workspace(
+            &mut w.store,
+            cache,
+            "workspace",
+            Some("relay"),
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        )
+        .unwrap_or_else(|error| panic!("{sample}: {error:?}"));
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        pass.applied,
+        MEASURED_SAFE_ROWS + unrelated,
+        "{:?}",
+        pass.pending_cursor
+    );
+    assert!(stopped_before(&pass, &held), "{:?}", pass.pending_cursor);
+    elapsed
+}
+
+const MEASURED_SAFE_ROWS: usize = 8;
+
+/// Sol's tails-cache ruling: what released-window protection costs as the
+/// released tail's history grows, fully proven or a long list of retained
+/// work that protects the lineage. One `protection` decision with no kept
+/// tails, and with them; complete hosted passes of [`MEASURED_SAFE_ROWS`]
+/// safe rows and a held row the pass retries: with the empty cache a
+/// restart leaves, with the actor's kept tails, with them beside rows of unrelated documents, and
+/// the first pass after a tail input changes. Run in a release build:
 /// `cargo test --release -p dohc-engine-runtime --test owner_publication
 /// measure_released_window_protection -- --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "manual release-build protection timing"]
 async fn measure_released_window_protection() {
-    const SAFE_ROWS: usize = 8;
-    let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+    const SAMPLES: usize = 11;
     let summary = |mut samples: Vec<f64>| {
         samples.sort_by(f64::total_cmp);
         let p95 = (samples.len() * 95).div_ceil(100) - 1;
         (samples.len(), samples[samples.len() / 2], samples[p95])
     };
-    for entries in [0, 1_000, 10_000, 50_000] {
-        let mut w = retained_window(Retained::Carried).await;
-        proven_history(&w, entries);
-        let incoming = IncomingCoordinate {
-            relay_namespace: Some("relay".into()),
-            replication_epoch: "epoch".into(),
-            stream_identity: "stream".into(),
-            origin_id: "measure".into(),
-            origin_seq: 0,
-            relay_seq: 1,
-        };
-        let key = window_key();
-        let protection_key = ProtectionKey {
-            doc: &key,
-            lineage_claim_id: &w.lineage,
-            incoming: &incoming,
-        };
-        let mut calls = Vec::new();
-        for _ in 0..21 {
-            let started = std::time::Instant::now();
-            // A fresh pass reads the tails, as every pass's first row does.
-            let protected = w
-                .store
-                .read_with(|conn| protection(conn, &protection_key, &mut PassTails::default()))
-                .unwrap();
-            calls.push(ms(started));
-            assert!(matches!(protected, Protection::Protected { .. }));
-        }
-        let mut passes = Vec::new();
-        for sample in 0..11 {
-            let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
-            let doc = w.head();
-            for row in 0..SAFE_ROWS {
-                let bytes = doc.richdoc_append_paragraph(&format!("Row {sample}.{row}"));
-                let op = ydoc_row(
-                    &format!("safe-{sample}-{row}"),
-                    &bytes,
-                    &w.lineage,
-                    WINDOW_PATH,
-                    false,
+    for applied in [true, false] {
+        let history = if applied { "proven" } else { "protected" };
+        for entries in [0, 1_000, 10_000, 50_000] {
+            let mut w = retained_window(Retained::Carried).await;
+            retained_history(&w, entries, applied);
+            let incoming = IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "measure".into(),
+                origin_seq: 0,
+                relay_seq: 1,
+            };
+            let key = window_key();
+            let protection_key = ProtectionKey {
+                doc: &key,
+                lineage_claim_id: &w.lineage,
+                incoming: &incoming,
+            };
+            let decide = |store: &EngineStore, tails: &ReleasedTails| {
+                let started = std::time::Instant::now();
+                let protected = store
+                    .read_with(|conn| protection(conn, &protection_key, tails))
+                    .unwrap();
+                let Protection::Protected { binding, .. } = protected else {
+                    panic!("protected");
+                };
+                let ProtectedTails::Listed(tails) = &*binding.tails else {
+                    panic!("listed");
+                };
+                let listed: usize = tails
+                    .iter()
+                    .map(|tail| match &tail.coverage {
+                        RetainedCoverage::Unproven(unproven) => unproven.len(),
+                        RetainedCoverage::Invalid => panic!("readable"),
+                    })
+                    .sum();
+                assert_eq!(listed, if applied { 1 } else { entries + 1 });
+                started.elapsed().as_secs_f64() * 1000.0
+            };
+            let mut cold_validations = 0;
+            let cold: Vec<f64> = (0..21)
+                .map(|_| {
+                    let tails = ReleasedTails::default().bound_to(&w.store);
+                    let elapsed = decide(&w.store, &tails);
+                    cold_validations += tails.validations();
+                    elapsed
+                })
+                .collect();
+            let kept = ReleasedTails::default().bound_to(&w.store);
+            decide(&w.store, &kept);
+            let warm: Vec<f64> = (0..21).map(|_| decide(&w.store, &kept)).collect();
+            let warm_validations = kept.validations() - 1;
+            // After a restart the actor's cache starts empty.
+            let mut restart_validations = 0;
+            let mut placed = Vec::new();
+            let restart: Vec<f64> = (0..SAMPLES)
+                .map(|sample| {
+                    let mut cache = dohc_engine_collab::WriterDocCache::new();
+                    let elapsed = measured_pass(
+                        &mut w,
+                        &mut cache,
+                        &mut placed,
+                        &format!("restart-{sample}"),
+                        0,
+                    );
+                    restart_validations += cache.released_tails(&w.store).validations();
+                    elapsed
+                })
+                .collect();
+            let mut cache = dohc_engine_collab::WriterDocCache::new();
+            measured_pass(&mut w, &mut cache, &mut placed, "warming", 0);
+            // Each phase's samples, and how many validations they ran.
+            let mut phase = |w: &mut RetainedWindow,
+                             name: &str,
+                             unrelated: usize,
+                             invalidate: bool| {
+                let before = cache.released_tails(&w.store).validations();
+                let samples: Vec<f64> = (0..SAMPLES)
+                    .map(|sample| {
+                        if invalidate {
+                            write_unchecked(
+                                w,
+                                "UPDATE live_owner_activations SET source_byte_length=source_byte_length",
+                            );
+                        }
+                        measured_pass(
+                            w,
+                            &mut cache,
+                            &mut placed,
+                            &format!("{name}-{sample}"),
+                            unrelated,
+                        )
+                    })
+                    .collect();
+                (
+                    samples,
+                    cache.released_tails(&w.store).validations() - before,
+                )
+            };
+            let warm_passes = phase(&mut w, "warm", 0, false);
+            let beside = phase(&mut w, "unrelated", 4, false);
+            let invalidated = phase(&mut w, "invalidated", 0, true);
+            for (name, (samples, validations)) in [
+                ("protection_cold", (cold, cold_validations)),
+                ("protection_warm", (warm, warm_validations)),
+                ("pass_restart", (restart, restart_validations)),
+                ("pass_warm", warm_passes),
+                ("pass_warm_unrelated", beside),
+                ("pass_invalidated", invalidated),
+            ] {
+                let (count, p50, p95) = summary(samples);
+                println!(
+                    "released_window_{name} history={history} entries={entries} safe_rows={MEASURED_SAFE_ROWS} samples={count} validations={validations} p50_ms={p50:.3} p95_ms={p95:.3}"
                 );
-                feed.serve(op, bytes);
             }
-            let moved = doc.richdoc_append_paragraph("Moved");
-            let held = feed.serve(
-                ydoc_row(
-                    &format!("moved-{sample}"),
-                    &moved,
-                    &w.lineage,
-                    "notes/moved.md",
-                    false,
-                ),
-                moved,
-            );
-            let client = dohc_engine_sync::RelaySyncClient::new(feed);
-            let started = std::time::Instant::now();
-            let pass = hosted_pass(
-                &mut w.store,
-                &client,
-                &mut dohc_engine_collab::WriterDocCache::new(),
-            );
-            passes.push(ms(started));
-            assert_eq!(
-                pass.applied as usize, SAFE_ROWS,
-                "{:?}",
-                pass.pending_cursor
-            );
-            assert!(stopped_before(&pass, &held), "{:?}", pass.pending_cursor);
+            w.close().await;
         }
-        for (name, samples) in [("protection", calls), ("pass", passes)] {
-            let (count, p50, p95) = summary(samples);
-            println!(
-                "released_window_{name} entries={entries} safe_rows={SAFE_ROWS} samples={count} p50_ms={p50:.3} p95_ms={p95:.3}"
-            );
-        }
-        w.close().await;
     }
 }
 
-/// Opus's 1a-2b finding 1: a pass reads each protected lineage's tails once,
-/// which holds because applying a hosted `ydoc.update` or `moment.append`
-/// writes nothing the tails read. Tails that change between passes, here
-/// the Carried delivery applied, show in the next pass, which applies the
-/// fold the first one held.
+/// Sol's tails-cache ruling: the actor keeps a released lineage's validated
+/// tails across passes while the document's generation stands. A pass that
+/// applies a neighbour and a safe row and ends in a hold validates once, and
+/// the next pass, which holds again, reuses that. The Carried delivery
+/// applied moves the generation: the next pass validates again and applies
+/// the fold the earlier ones held.
 #[tokio::test]
-async fn a_pass_reads_released_tails_once_and_the_next_pass_reads_them_again() {
+async fn validated_tails_stand_across_passes_until_a_tail_input_changes() {
     let mut w = retained_window(Retained::Carried).await;
     execute(
         &mut w.store,
@@ -7709,18 +7879,23 @@ async fn a_pass_reads_released_tails_once_and_the_next_pass_reads_them_again() {
     let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
     let fold = feed.serve(fold, fold_bytes);
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let tails = table_rows(&w.store, &TAIL_INPUTS);
     let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let validations = |w: &RetainedWindow, cache: &dohc_engine_collab::WriterDocCache| {
+        cache.released_tails(&w.store).validations()
+    };
     let pass = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(pass.applied, 2, "{:?}", pass.pending_cursor);
     assert!(journaled(&w.store, &safe) && journaled(&w.store, &created));
     assert!(!journaled(&w.store, &fold));
     assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
-    assert_eq!(
-        table_rows(&w.store, &TAIL_INPUTS),
-        tails,
-        "applying writes nothing the tails read"
+    assert_eq!(validations(&w, &cache), 1, "one validation for the pass");
+    let again = hosted_pass(&mut w.store, &client, &mut cache);
+    assert!(
+        again.applied == 0 && stopped_before(&again, &fold),
+        "{:?}",
+        again.pending_cursor
     );
+    assert_eq!(validations(&w, &cache), 1, "the next pass reuses it");
     let (delivery_id, receipt): (String, String) = w
         .store
         .read_with(|conn| {
@@ -7750,6 +7925,118 @@ async fn a_pass_reads_released_tails_once_and_the_next_pass_reads_them_again() {
     let next = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(next.applied, 1, "{:?}", next.pending_cursor);
     assert!(journaled(&w.store, &fold));
+    assert_eq!(validations(&w, &cache), 2, "a tail input changed");
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's tails-cache ruling, the retired lineage Opus found: in the window,
+/// with both Carried deliveries applied here, the owner's desktop delete
+/// decides its document unprotected and retires the lineage. A base of the
+/// same bytes recreates it under the same lineage in the same pass, and the
+/// update after it is decided as uncached validation decides it: the
+/// recreated journal no longer proves the Carried deliveries, so the
+/// lineage is protected and the update, which deletes, holds. Decided on
+/// the tails kept before the retirement, it would apply.
+#[tokio::test]
+async fn a_lineage_retired_and_recreated_in_one_pass_is_validated_again() {
+    let mut w = adopted_window(true).await;
+    w.release().await;
+    execute(
+        &mut w.store,
+        "UPDATE hosted_replicas SET scope_token='scope'",
+    );
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let carried: Vec<String> = raw
+        .prepare(
+            "SELECT accepted_receipt_json FROM owner_ydoc_outbox_entries
+             WHERE accepted_receipt_json IS NOT NULL AND delivery_id<>?1",
+        )
+        .unwrap()
+        .query_map([&w.covered.delivery_id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(carried.len(), 2);
+    for receipt in carried {
+        let receipt: dohc_engine_collab::OwnerDeliveryReceipt =
+            serde_json::from_str(&receipt).unwrap();
+        raw.execute(
+            APPLIED_EXACTLY,
+            rusqlite::params![
+                receipt.delivery_id,
+                w.lineage,
+                receipt.update_digest,
+                receipt.journal_cursor,
+                receipt.accepting_host_epoch
+            ],
+        )
+        .unwrap();
+    }
+    drop(raw);
+    let desktop = desktop_of(&w.base, &w.lineage, &[w.covered_bytes.clone()]).await;
+    let (delete, delete_bytes) = desktop.change(FileChange::Delete).await;
+    let recreated = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.base).unwrap();
+        doc.richdoc_remove_block(0)
+    };
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let delete = feed.serve(delete, delete_bytes);
+    let base = feed.serve(
+        ydoc_row("recreator", &w.base, &w.lineage, WINDOW_PATH, true),
+        w.base.clone(),
+    );
+    let update = feed.serve(
+        ydoc_row(
+            "after-recreation",
+            &recreated,
+            &w.lineage,
+            WINDOW_PATH,
+            false,
+        ),
+        recreated,
+    );
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let pass = hosted_pass(&mut w.store, &client, &mut cache);
+    assert!(
+        journaled(&w.store, &delete),
+        "the delete retires the lineage"
+    );
+    assert!(journaled(&w.store, &base), "the base recreates it");
+    let incoming = IncomingCoordinate {
+        relay_namespace: Some("relay".into()),
+        replication_epoch: "epoch".into(),
+        stream_identity: "stream".into(),
+        origin_id: "after-recreation".into(),
+        origin_seq: 0,
+        relay_seq: update.relay_seq.unwrap(),
+    };
+    let key = window_key();
+    let uncached = w
+        .store
+        .read_with(|conn| {
+            protection(
+                conn,
+                &ProtectionKey {
+                    doc: &key,
+                    lineage_claim_id: &w.lineage,
+                    incoming: &incoming,
+                },
+                &ReleasedTails::uncached(),
+            )
+        })
+        .unwrap();
+    assert!(matches!(uncached, Protection::Protected { .. }));
+    assert!(!journaled(&w.store, &update), "{:?}", pass.pending_cursor);
+    assert!(stopped_before(&pass, &update), "{:?}", pass.pending_cursor);
+    assert_eq!(
+        cache.released_tails(&w.store).validations(),
+        2,
+        "before the retirement and after the recreation"
+    );
     desktop.close().await;
     w.close().await;
 }

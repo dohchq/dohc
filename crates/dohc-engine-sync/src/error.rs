@@ -376,7 +376,7 @@ mod tests {
                 relay_seq: 9,
             },
             head_digest: "b".repeat(64),
-            tails: ProtectedTails::Invalid,
+            tails: std::sync::Arc::new(ProtectedTails::Invalid),
         }));
         assert_eq!(error.code(), "retryable-state");
         assert_eq!(error.share_disposition(), ShareDisposition::Abort);

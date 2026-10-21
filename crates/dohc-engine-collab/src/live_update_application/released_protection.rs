@@ -6,6 +6,7 @@
 //! inspection shows destroys nothing.
 use super::*;
 use crate::Ydoc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.
@@ -45,7 +46,8 @@ pub struct ReleasedLineageBinding {
     pub incoming: IncomingCoordinate,
     /// The SHA-256 of the head's full state before the update.
     pub head_digest: String,
-    pub tails: ProtectedTails,
+    /// Shared with every decision the same validation answers.
+    pub tails: Arc<ProtectedTails>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +119,7 @@ impl ReleasedLineageBinding {
     /// evidence names cannot show the update stays on it.
     pub fn moved(&self, path: &str) -> bool {
         let here = |bound: &str| self.current_path.as_deref() == Some(bound);
-        let ProtectedTails::Listed(tails) = &self.tails else {
+        let ProtectedTails::Listed(tails) = &*self.tails else {
             return true;
         };
         !here(path)
@@ -144,37 +146,215 @@ fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, Applica
     }
 }
 
-/// The protected tails of each document lineage, as one pass of synced rows
-/// first read them; none for a lineage nothing protects. Tails read only
-/// activations, outboxes and their entries, applications and accepted
-/// history, which applying a synced row never writes, so a pass reads each
-/// lineage's tails once. Its owner drops it when the pass ends.
-#[derive(Debug, Default)]
-pub struct PassTails(std::collections::HashMap<(DocKey, String), Option<ProtectedTails>>);
+/// The protected tails of each document lineage as the actor last validated
+/// them on one open store, at the document's released tail generation then;
+/// none for a lineage nothing protects. Tails read activations, outboxes and
+/// their entries, applications and accepted history of their deliveries,
+/// seed captures, the journal rows native entries name, the document's head
+/// and lineage columns, and terminal blobs. The store's triggers move the
+/// generation with every change to those rows, whichever connection makes
+/// it, so a decision whose transaction reads the generation kept tails were
+/// validated at reuses them, and any other validates again, every entry as
+/// before. The path, restore generation and head stay each decision's own.
+///
+/// Only committed state is kept. Validation runs in a read-only transaction
+/// of its own that completes before the decision goes on, and its result is
+/// kept and used only when that state records the generation the deciding
+/// transaction reads. A transaction that changed the document's tail inputs
+/// reads another generation than committed state, so it validates its own
+/// state, and keeps nothing a rollback could undo. A document with no
+/// recorded generation is validated for each decision and never kept. The
+/// actor's connection is the store's only writer; [`crate::WriterDocCache`]
+/// keeps one of these for it, and binding it to another open of a store, a
+/// reopen or restore among them, forgets everything kept before.
+#[derive(Clone)]
+pub struct ReleasedTails(Option<Arc<Mutex<TailsCache>>>);
+
+#[derive(Default)]
+struct TailsCache {
+    store: Option<CachedStore>,
+    validated: std::collections::HashMap<(DocKey, String), Validated>,
+    validations: u64,
+}
+
+/// The open store kept tails come from: its opening and its file.
+struct CachedStore {
+    opening: u64,
+    path: std::path::PathBuf,
+}
+
+struct Validated {
+    generation: i64,
+    tails: Option<Arc<ProtectedTails>>,
+}
+
+impl Default for ReleasedTails {
+    fn default() -> Self {
+        Self(Some(Arc::default()))
+    }
+}
+
+fn lock(cache: &Mutex<TailsCache>) -> MutexGuard<'_, TailsCache> {
+    // Validation keeps a result only once it completes, so a panic leaves
+    // nothing half kept.
+    cache.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl ReleasedTails {
+    /// Tails each decision validates in its own transaction and never keeps.
+    pub fn uncached() -> Self {
+        Self(None)
+    }
+
+    /// These tails, for decisions on `store`. Everything kept for another
+    /// open of a store is forgotten first. Until bound, nothing is kept.
+    pub fn bound_to(&self, store: &dohc_engine_storage::EngineStore) -> Self {
+        if let Some(cache) = &self.0 {
+            let mut cache = lock(cache);
+            if cache
+                .store
+                .as_ref()
+                .is_none_or(|kept| kept.opening != store.opening())
+            {
+                cache.validated.clear();
+                cache.store = Some(CachedStore {
+                    opening: store.opening(),
+                    path: store.database_path().to_owned(),
+                });
+            }
+        }
+        self.clone()
+    }
+
+    /// How many validations these tails ran on committed state.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn validations(&self) -> u64 {
+        self.0.as_ref().map_or(0, |cache| lock(cache).validations)
+    }
+
+    /// The protected tails of the document lineage, as `conn` reads them.
+    fn read(
+        &self,
+        conn: &Connection,
+        doc: &DocKey,
+        lineage: &str,
+    ) -> Result<Option<Arc<ProtectedTails>>, ApplicationError> {
+        let fresh = || Ok(protected_tails(conn, doc, lineage)?.map(Arc::new));
+        let Some(cache) = &self.0 else {
+            return fresh();
+        };
+        let (Some(generation), engine) = tail_generation(conn, doc)? else {
+            return fresh();
+        };
+        let key = (doc.clone(), lineage.to_owned());
+        let mut cache = lock(cache);
+        if let Some(kept) = cache
+            .validated
+            .get(&key)
+            .filter(|kept| kept.generation == generation)
+        {
+            return Ok(kept.tails.clone());
+        }
+        match cache.validate(key, generation, &engine)? {
+            Some(tails) => Ok(tails),
+            None => {
+                drop(cache);
+                fresh()
+            }
+        }
+    }
+}
+
+impl TailsCache {
+    /// The lineage's tails, validated on the store's committed state in a
+    /// read-only connection and transaction that both end before this
+    /// returns, and kept at `generation`. None, keeping nothing, when no
+    /// store is bound or committed state records another generation or
+    /// engine.
+    fn validate(
+        &mut self,
+        key: (DocKey, String),
+        generation: i64,
+        engine: &str,
+    ) -> Result<Option<Option<Arc<ProtectedTails>>>, ApplicationError> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let mut reader = open_reader(&store.path)?;
+        let tx = reader.transaction().map_err(read_sql)?;
+        let committed = tail_generation(&tx, &key.0)?;
+        if committed.0 != Some(generation) || committed.1 != engine {
+            tx.commit().map_err(read_sql)?;
+            return Ok(None);
+        }
+        let tails = protected_tails(&tx, &key.0, &key.1)?.map(Arc::new);
+        tx.commit().map_err(read_sql)?;
+        self.validations += 1;
+        self.validated.insert(
+            key,
+            Validated {
+                generation,
+                tails: tails.clone(),
+            },
+        );
+        Ok(Some(tails))
+    }
+}
+
+/// A read-only connection to the store at `path` that never checkpoints it.
+fn open_reader(path: &std::path::Path) -> Result<Connection, ApplicationError> {
+    let reader = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(read_sql)?;
+    reader
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(read_sql)?;
+    reader
+        .busy_timeout(std::time::Duration::from_millis(u64::from(
+            dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+        )))
+        .map_err(read_sql)?;
+    Ok(reader)
+}
+
+/// The document's released tail generation, none before its first
+/// activation, and the identity of the store that records it.
+fn tail_generation(
+    conn: &Connection,
+    doc: &DocKey,
+) -> Result<(Option<i64>, String), ApplicationError> {
+    conn.prepare_cached(
+        "SELECT (SELECT generation FROM released_tail_generations
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),engine_uuid
+         FROM engine_ownership WHERE rowid_guard=1",
+    )
+    .map_err(read_sql)?
+    .query_row(
+        params![doc.workspace_id, doc.version_id, doc.object_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(read_sql)
+}
 
 /// Whether the released window protects the head of `key`'s lineage from
 /// the incoming update, and the binding a hold of it names. A tail whose
 /// retained work all has proof leaves the lineage unprotected; a window or
 /// tail whose evidence does not read protects it. The tails come from
-/// `pass`, read on its first decision for the lineage; the path, restore
-/// generation and head are read for each update. Storage failures stay
-/// errors.
+/// `tails` when their validation still holds; the path, restore generation
+/// and head are read for each update. Storage failures stay errors.
 pub fn protection(
     conn: &Connection,
     key: &ProtectionKey<'_>,
-    pass: &mut PassTails,
+    tails: &ReleasedTails,
 ) -> Result<Protection, ApplicationError> {
-    let (doc, lineage) = (key.doc, key.lineage_claim_id);
-    let read = (doc.clone(), lineage.to_owned());
-    let tails = match pass.0.get(&read) {
-        Some(tails) => tails.clone(),
-        None => {
-            let tails = protected_tails(conn, doc, lineage)?;
-            pass.0.insert(read, tails.clone());
-            tails
-        }
-    };
-    let Some(tails) = tails else {
+    let doc = key.doc;
+    let Some(tails) = tails.read(conn, doc, key.lineage_claim_id)? else {
         return Ok(Protection::Unprotected);
     };
     let current_path = conn

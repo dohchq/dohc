@@ -1,5 +1,4 @@
 use dohc_engine_collab::WriterDocCache;
-use dohc_engine_collab::live_update_application::PassTails;
 use dohc_engine_storage::{EngineStore, FaultInjector};
 
 use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError};
@@ -115,22 +114,11 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_in_batch(
-        store,
-        cache,
-        envelope,
-        faults,
-        leases,
-        false,
-        None,
-        &mut PassTails::default(),
-    )
+    apply_replication_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one, and `pass` holds the protected
-/// tails its pass already read.
-#[allow(clippy::too_many_arguments)]
+/// pull's trusted configuration names one.
 pub(crate) fn apply_replication_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -139,7 +127,6 @@ pub(crate) fn apply_replication_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     if envelope
         .origin_id
@@ -207,7 +194,6 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 leases,
                 batch_inactive,
                 relay_namespace,
-                pass,
             ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
@@ -233,14 +219,17 @@ pub(crate) fn apply_replication_envelope_in_batch(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::moment_apply::apply_moment_envelope_in_batch(
-                store,
-                envelope,
-                faults,
-                leases,
-                relay_namespace,
-                pass,
-            ),
+            {
+                let tails = cache.released_tails(store);
+                crate::moment_apply::apply_moment_envelope_in_batch(
+                    store,
+                    envelope,
+                    faults,
+                    leases,
+                    relay_namespace,
+                    &tails,
+                )
+            },
             |moment| RoutedApply {
                 conflicts_opened: moment.conflicts_opened,
                 materialization_changes: moment.materialization_changes,

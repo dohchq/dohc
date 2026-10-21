@@ -1,5 +1,5 @@
 use dohc_engine_collab::DocKey;
-use dohc_engine_collab::live_update_application::PassTails;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_markdown_path};
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
@@ -377,20 +377,20 @@ pub fn apply_moment_envelope_detailed(
         faults,
         leases,
         None,
-        &mut PassTails::default(),
+        &ReleasedTails::uncached(),
     )
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one, and `pass` holds the protected
-/// tails its pass already read.
+/// pull's trusted configuration names one, and `tails` keeps the protected
+/// tails the actor validated.
 pub(crate) fn apply_moment_envelope_in_batch(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
+    tails: &ReleasedTails,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
@@ -477,7 +477,7 @@ pub(crate) fn apply_moment_envelope_in_batch(
                 .flatten()
                 .as_deref(),
             relay_namespace,
-            pass,
+            tails,
         )?;
         if let Some(before) = &withheld {
             crate::hosted::record_withheld_before_in_tx(
@@ -660,8 +660,8 @@ pub(crate) fn redelivered_conflicts_opened(
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one, and `pass` holds the protected
-/// tails its pass already read.
+/// pull's trusted configuration names one, and `tails` keeps the protected
+/// tails the actor validated.
 #[allow(clippy::too_many_arguments)]
 fn apply_moment_append(
     tx: &Transaction<'_>,
@@ -672,7 +672,7 @@ fn apply_moment_append(
     content_held: bool,
     live_claim: Option<&str>,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
+    tails: &ReleasedTails,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -841,7 +841,7 @@ fn apply_moment_append(
             &key,
             envelope,
             relay_namespace,
-            pass,
+            tails,
             incoming,
         )?;
     }
@@ -1168,7 +1168,7 @@ fn apply_moment_append(
                         &key,
                         envelope,
                         relay_namespace,
-                        pass,
+                        tails,
                         crate::ydoc_apply::Incoming::Replacement,
                     )?;
                     return Err(pending);
@@ -1647,7 +1647,7 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         false,
         None,
         None,
-        &mut PassTails::default(),
+        &ReleasedTails::uncached(),
     )
 }
 

@@ -5864,7 +5864,6 @@ mod tests {
             &crate::NoLiveLeases,
             true,
             None,
-            &mut dohc_engine_collab::live_update_application::PassTails::default(),
         )
         .unwrap();
         store
@@ -5940,7 +5939,6 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
-                &mut dohc_engine_collab::live_update_application::PassTails::default(),
             )
             .unwrap();
         }
@@ -6013,7 +6011,6 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
-                &mut dohc_engine_collab::live_update_application::PassTails::default(),
             )
             .unwrap();
         }
@@ -6083,7 +6080,6 @@ mod tests {
                     &crate::NoLiveLeases,
                     true,
                     None,
-                    &mut dohc_engine_collab::live_update_application::PassTails::default(),
                 )
                 .unwrap();
                 let active_update = active.doc.plaintext_insert(0, "active ");
@@ -6100,7 +6096,6 @@ mod tests {
                     &crate::NoLiveLeases,
                     true,
                     None,
-                    &mut dohc_engine_collab::live_update_application::PassTails::default(),
                 )
                 .unwrap();
                 assert_eq!(
@@ -6185,7 +6180,6 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
-                &mut dohc_engine_collab::live_update_application::PassTails::default(),
             )
             .unwrap();
         }

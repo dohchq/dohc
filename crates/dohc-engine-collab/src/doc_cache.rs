@@ -268,9 +268,20 @@ pub struct WriterDocCache {
     removes: u64,
     max_entries: Option<usize>,
     max_total_bytes: Option<usize>,
+    /// Kept by the store's own generations, so [`Self::clear`] leaves it.
+    released_tails: crate::live_update_application::ReleasedTails,
 }
 
 impl WriterDocCache {
+    /// The protected tails the actor validated on `store`, shared with every
+    /// synced row it decides there.
+    pub fn released_tails(
+        &self,
+        store: &dohc_engine_storage::EngineStore,
+    ) -> crate::live_update_application::ReleasedTails {
+        self.released_tails.bound_to(store)
+    }
+
     pub(crate) fn take_owner_draft(
         &mut self,
         key: &DocKey,

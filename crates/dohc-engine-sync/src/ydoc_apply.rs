@@ -1,5 +1,5 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
-use dohc_engine_collab::live_update_application::PassTails;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
@@ -1900,8 +1900,8 @@ pub(crate) enum Incoming<'a> {
 /// moves the document, and an update that lands off the tail's binding or
 /// that structural inspection does not admit. The hold carries the binding
 /// and records no refusal. `relay_namespace` is the feed's, as the pull's
-/// trusted configuration names it, and `pass` holds the tails the pass
-/// already read.
+/// trusted configuration names it, and `tails` keeps the tails the actor
+/// validated.
 #[allow(clippy::too_many_arguments)]
 fn hold_released_lineage(
     tx: &rusqlite::Connection,
@@ -1910,7 +1910,7 @@ fn hold_released_lineage(
     op: &ReplicationEnvelope,
     relay_seq: Option<i64>,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
+    tails: &ReleasedTails,
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     use dohc_engine_collab::live_update_application::{
@@ -1940,7 +1940,7 @@ fn hold_released_lineage(
             lineage_claim_id: lineage,
             incoming: &coordinate,
         },
-        pass,
+        tails,
     )
     .map_err(|error| match error {
         ApplicationError::Storage(error) => SyncError::Storage(error),
@@ -1982,7 +1982,7 @@ pub(crate) fn hold_released_file_operation(
     key: &DocKey,
     op: &ReplicationEnvelope,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
+    tails: &ReleasedTails,
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     let Some(lineage) = dohc_engine_collab::read_marker_in(tx, key)
@@ -1998,7 +1998,7 @@ pub(crate) fn hold_released_file_operation(
         op,
         op.relay_seq,
         relay_namespace,
-        pass,
+        tails,
         incoming,
     )
 }
@@ -4416,22 +4416,11 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(
-        store,
-        cache,
-        envelope,
-        faults,
-        leases,
-        false,
-        None,
-        &mut PassTails::default(),
-    )
+    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one, and `pass` holds the protected
-/// tails its pass already read.
-#[allow(clippy::too_many_arguments)]
+/// pull's trusted configuration names one.
 pub(crate) fn apply_ydoc_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -4440,9 +4429,9 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
     relay_namespace: Option<&str>,
-    pass: &mut PassTails,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
+    let tails = &cache.released_tails(store);
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -4845,7 +4834,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     op,
                     Some(relay_seq),
                     relay_namespace,
-                    pass,
+                    tails,
                     Incoming::Replacement,
                 )?;
             }
@@ -5312,7 +5301,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                             op,
                             Some(relay_seq),
                             relay_namespace,
-                            pass,
+                            tails,
                             Incoming::Replacement,
                         )?;
                     }
@@ -5374,7 +5363,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op,
                 Some(relay_seq),
                 relay_namespace,
-                pass,
+                tails,
                 Incoming::Update {
                     bytes: &remote.bytes,
                     path: &update_path,
