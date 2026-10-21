@@ -347,6 +347,15 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
             held["scopePath"] = json!(scope_path);
             held["headPath"] = json!(head_path);
         }
+        HostedHold::ReleasedLineageUnsettled {
+            binding,
+            continuation,
+            binding_stale,
+        } => {
+            held["binding"] = binding.to_json();
+            held["continuation"] = json!(continuation.as_str());
+            held["bindingStale"] = json!(binding_stale);
+        }
     }
     held
 }
@@ -1935,6 +1944,51 @@ mod tests {
     use dohc_engine_sync::ShareCursor;
     use dohc_engine_sync::SyncPassOutcome;
     use serde_json::json;
+
+    /// A released-lineage hold reaches the relay with its whole binding, the
+    /// feed's namespace in it, as the engine's canonical JSON names it, and
+    /// with its continuation and staleness.
+    #[test]
+    fn a_released_lineage_hold_carries_its_binding_onto_the_wire() {
+        use dohc_engine_collab::live_update_application::{
+            IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+        };
+        let binding = ReleasedLineageBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "a".repeat(64),
+            current_path: Some("notes/plan.md".into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 3,
+                relay_seq: 9,
+            },
+            head_digest: "b".repeat(64),
+            tails: std::sync::Arc::new(ProtectedTails::Invalid),
+        };
+        let held = hosted_hold_json(
+            "object",
+            &dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+                binding: Box::new(binding.clone()),
+                continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+                binding_stale: false,
+            },
+        );
+        assert_eq!(
+            held,
+            json!({
+                "objectId": "object", "reason": "released-lineage-unsettled",
+                "binding": serde_json::from_str::<Value>(&binding.canonical_json()).unwrap(),
+                "continuation": "frozen", "bindingStale": false,
+            })
+        );
+        assert_eq!(held["binding"]["incoming"]["relayNamespace"], "relay");
+    }
 
     #[tokio::test]
     async fn direct_status_reads_offline_and_preserves_workspace_and_path_fences() {

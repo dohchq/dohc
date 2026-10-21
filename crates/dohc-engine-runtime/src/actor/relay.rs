@@ -2744,7 +2744,13 @@ fn run_relay_operation(
             cursor,
             root,
             now_ms,
-        } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+        } => match client.commit_hosted_cursor(
+            store,
+            &workspace_id,
+            &cursor,
+            &doc_cache.released_tails(store),
+            &NoFaults,
+        )? {
             TxnOutcome::Committed(commit) => {
                 let retirement =
                     park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);

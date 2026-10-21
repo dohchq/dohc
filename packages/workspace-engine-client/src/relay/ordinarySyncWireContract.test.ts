@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeHostedSyncResult, decodeOrdinarySyncResult } from "./ordinarySyncWireContract";
+import { decodeHostedSyncResult, decodeOrdinarySyncResult, releasedLineageBindingDigest } from "./ordinarySyncWireContract";
+import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 
 const decline = { path: "work.md", objectId: "work.md", versionId: "main", lineagePruned: false, headBlobSha256: null, constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
 const admission = { workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "work.md" };
@@ -88,6 +89,8 @@ const holds = [
   { objectId: "d", reason: "hosted-backfill-work-waiting" },
   { objectId: "e", reason: "hosted-scope-path-mismatch", scopePath: "docs/e.md", headPath: null },
   { objectId: "f", reason: "hosted-live-edit-unadmitted" },
+  { objectId: "g", reason: "released-lineage-unsettled", binding: JSON.parse(vectors.valid[0]!.canonical),
+    continuation: "frozen", bindingStale: false },
 ];
 const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
   pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds,
@@ -105,6 +108,25 @@ describe("hosted native sync contract", () => {
     expect(decodeHostedSyncResult("sync.commitCursor", commit)).toEqual(commit);
     expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, retirement: null, departed: null }).departed).toBeNull();
     expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, committed: false, retirement: null }).committed).toBe(false);
+  });
+
+  it("keeps a released-lineage hold's binding exactly, so its digest is the engine's", () => {
+    const held = decodeHostedSyncResult("sync.pullHosted", hosted).held[5]!;
+    if (held.reason !== "released-lineage-unsettled") throw new Error("Expected the released-lineage hold.");
+    expect(releasedLineageBindingDigest(held.binding)).toBe(vectors.valid[0]!.digest);
+    const stale = { ...holds[5], continuation: "dependency-drain", bindingStale: true };
+    expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, held: [stale] }).held).toEqual([stale]);
+  });
+
+  const binding = JSON.parse(vectors.valid[1]!.canonical);
+  it.each([
+    { held: [{ ...holds[5], binding: undefined }] }, { held: [{ ...holds[5], binding: { ...binding, extra: 1 } }] },
+    { held: [{ ...holds[5], binding: { ...binding, currentPath: undefined } }] },
+    { held: [{ ...holds[5], binding: { ...binding, incoming: { ...binding.incoming, relaySeq: 0 } } }] },
+    { held: [{ ...holds[5], continuation: "thawed" }] }, { held: [{ ...holds[5], continuation: undefined }] },
+    { held: [{ ...holds[5], bindingStale: undefined }] }, { held: [{ ...holds[5], bindingStale: 0 }] },
+  ])("rejects an unusable released-lineage hold: %j", patch => {
+    expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
   });
 
   it.each([

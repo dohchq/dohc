@@ -741,7 +741,8 @@ const PARK: [&str; 9] = [
     "DELETE FROM capture_file_holds WHERE workspace_id=?1 AND object_id=?2",
     "DELETE FROM share_direct_write_marks WHERE workspace_id=?1 AND object_id=?2",
     "UPDATE hosted_documents SET state='parked',held_reason=NULL,held_path=NULL,held_by=NULL, \
-     held_conflict_id=NULL,unmaterialized_seq=NULL WHERE workspace_id=?1 AND object_id=?2",
+     held_conflict_id=NULL,released_hold_binding_json=NULL,released_hold_continuation=NULL, \
+     released_hold_binding_stale=0,unmaterialized_seq=NULL WHERE workspace_id=?1 AND object_id=?2",
 ];
 
 /// The documents of the scope whose heads are parked. `?1` is the workspace.

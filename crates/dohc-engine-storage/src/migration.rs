@@ -3353,6 +3353,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// a recreated document never reads an earlier generation. A generation only
 /// advances, and a mutation that would take it past its bound fails, whatever
 /// conflict policy the mutation names.
+///
+/// A hosted document held for released retained work keeps the binding it
+/// holds against, how its work continues, and whether that binding went
+/// stale; no other hold carries them. Rebuilding the table keeps every row,
+/// its parked heads and aliases among them. A deferred Y.Doc update records
+/// which ingress deferred it, and a hosted one the feed it arrived on: its
+/// namespace, epoch, stream and relay sequence. A row deferred earlier is
+/// local in a workspace that is no hosted replica, and its feed is unknown
+/// in one that is.
 const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
 CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
     (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
@@ -3684,6 +3693,96 @@ UPDATE live_device_application_bindings SET activation_id=(SELECT a.adoption_id 
       AND a.main_version_id=live_device_application_bindings.main_version_id
       AND a.object_id=live_device_application_bindings.object_id
       AND a.lineage_claim_id=live_device_application_bindings.lineage_claim_id);
+CREATE TEMP TABLE hosted_parked_snapshots_kept AS SELECT * FROM hosted_parked_snapshots;
+CREATE TEMP TABLE hosted_parked_path_aliases_kept AS SELECT * FROM hosted_parked_path_aliases;
+DROP TABLE hosted_parked_path_aliases;
+DROP TABLE hosted_parked_snapshots;
+CREATE TABLE hosted_documents_next (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready','parked')),
+    held_reason TEXT CHECK (held_reason IN
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld','hosted-live-edit-unadmitted','released-lineage-unsettled')),
+    held_path TEXT CHECK (length(held_path) > 0),
+    held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    unmaterialized_seq INTEGER CHECK (unmaterialized_seq > 0),
+    released_hold_binding_json TEXT CHECK (json_valid(released_hold_binding_json)),
+    released_hold_continuation TEXT CHECK (released_hold_continuation IN ('frozen','dependency-drain')),
+    released_hold_binding_stale INTEGER NOT NULL DEFAULT 0 CHECK (released_hold_binding_stale IN (0,1)),
+    PRIMARY KEY (workspace_id, object_id),
+    CHECK ((state = 'held') = (held_reason IS NOT NULL)),
+    CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
+    CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld',
+      'hosted-live-edit-unadmitted','released-lineage-unsettled') OR held_path IS NULL),
+    CHECK (state <> 'parked' OR unmaterialized_seq IS NULL),
+    CHECK ((released_hold_binding_json IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK ((released_hold_continuation IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK (held_reason IS 'released-lineage-unsettled' OR released_hold_binding_stale = 0)
+) STRICT;
+INSERT INTO hosted_documents_next (workspace_id,object_id,path,state,held_reason,held_path,
+    held_by,held_conflict_id,backfill_cursor,scope_generation,unmaterialized_seq)
+  SELECT workspace_id,object_id,path,state,held_reason,held_path,held_by,held_conflict_id,
+    backfill_cursor,scope_generation,unmaterialized_seq FROM hosted_documents;
+DROP TABLE hosted_documents;
+ALTER TABLE hosted_documents_next RENAME TO hosted_documents;
+CREATE TABLE hosted_parked_snapshots (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    blob_sha256 TEXT REFERENCES blobs(sha256),
+    updated_at_ms INTEGER NOT NULL,
+    latest_moment_id TEXT NOT NULL,
+    metadata_origin TEXT NOT NULL,
+    content_kind TEXT NOT NULL CHECK (content_kind IN ('text', 'binary')),
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    CHECK (
+        (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
+     OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
+    ),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_snapshots_by_document ON hosted_parked_snapshots(workspace_id, object_id);
+CREATE TABLE hosted_parked_path_aliases (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_path_aliases_by_document
+  ON hosted_parked_path_aliases(workspace_id, object_id, version_id, path);
+INSERT INTO hosted_parked_snapshots SELECT * FROM temp.hosted_parked_snapshots_kept;
+INSERT INTO hosted_parked_path_aliases SELECT * FROM temp.hosted_parked_path_aliases_kept;
+DROP TABLE temp.hosted_parked_snapshots_kept;
+DROP TABLE temp.hosted_parked_path_aliases_kept;
+ALTER TABLE ydoc_deferred_updates ADD COLUMN relay_namespace TEXT
+    CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN replication_epoch TEXT
+    CHECK (replication_epoch IS NULL OR length(CAST(replication_epoch AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN stream_identity TEXT
+    CHECK (stream_identity IS NULL OR length(CAST(stream_identity AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
+    CHECK (ingress_kind IN ('local','hosted','legacy-unknown')
+      AND (ingress_kind <> 'hosted' OR (relay_namespace IS NOT NULL AND replication_epoch IS NOT NULL
+        AND stream_identity IS NOT NULL AND relay_seq IS NOT NULL AND relay_seq > 0)));
+UPDATE ydoc_deferred_updates SET ingress_kind='local'
+  WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=ydoc_deferred_updates.workspace_id);
 ";
 
 /// The triggers that keep and move a released tail generation. A store
@@ -4736,7 +4835,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "e8f2fcceffd99b9d1bac7cf9e7eb1c631fde6f4a7e321e231acd022c4e25e07c",
+                "12bb8ccd43398979b41fbd2088c52826fef0f5a4d2141e223edb35fbfd469a4f",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5408,6 +5507,173 @@ mod tests {
             })
             .unwrap();
         assert_eq!(documents, 0, "documents leave with their replica");
+    }
+
+    /// Hosted documents, held and parked ones among them, with their parked
+    /// heads and aliases, and deferred Y.Doc updates of a hosted and an
+    /// ordinary workspace.
+    const HOSTED_AND_DEFERRED_ROWS: &str = "\
+        INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+          VALUES ('hosted','service-host:a','epoch','stream',1),('ordinary','origin:a','epoch','stream',1); \
+        INSERT INTO hosted_replicas (workspace_id,scope_generation,cursor_commits,created_at_ms) \
+          VALUES ('hosted',2,5,1); \
+        INSERT INTO versioned_workspaces VALUES ('hosted','main'),('ordinary','main'); \
+        INSERT INTO versions (workspace_id,version_id,kind,name,created_at_ms) \
+          VALUES ('hosted','main','main','main',0),('ordinary','main','main','main',0); \
+        INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+          VALUES ('hosted','held',0),('ordinary','doc',0); \
+        INSERT INTO blobs (sha256,byte_length,text) VALUES (printf('%064d',0),1,'x'); \
+        INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,held_path, \
+          held_by,backfill_cursor,scope_generation,unmaterialized_seq) \
+          VALUES ('hosted','held','a.md','held','hosted-backfill-path-held','a.md','ready',4,2,NULL), \
+                 ('hosted','ready','b.md','ready',NULL,NULL,NULL,7,2,9), \
+                 ('hosted','parked','c.md','parked',NULL,NULL,NULL,3,1,NULL); \
+        INSERT INTO hosted_parked_snapshots (workspace_id,version_id,object_id,path,blob_sha256, \
+          updated_at_ms,latest_moment_id,metadata_origin,content_kind) \
+          VALUES ('hosted','main','parked','c.md',printf('%064d',0),5,'moment','sync','text'); \
+        INSERT INTO hosted_parked_path_aliases (workspace_id,version_id,path,object_id) \
+          VALUES ('hosted','main','old/c.md','parked'); \
+        INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+          recorded_at_ms,relay_seq) \
+          VALUES ('hosted','main','held','peer',1,5,3),('ordinary','main','doc','peer',1,5,NULL);";
+
+    /// Every row the hosted tables and deferred Y.Doc updates hold, by the
+    /// columns both schemas share.
+    fn hosted_and_deferred_rows(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT json_array( \
+               (SELECT json_group_array(json_array(workspace_id,object_id,path,state,held_reason,held_path, \
+                  held_by,held_conflict_id,backfill_cursor,scope_generation,unmaterialized_seq)) \
+                FROM (SELECT * FROM hosted_documents ORDER BY object_id)), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,object_id,path,blob_sha256, \
+                  updated_at_ms,latest_moment_id,metadata_origin,content_kind)) FROM hosted_parked_snapshots), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,path,object_id)) \
+                FROM hosted_parked_path_aliases), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,object_id,origin_id,origin_seq, \
+                  recorded_at_ms,lineage_claim_id,relay_seq)) \
+                FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)))",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A released-lineage hold carries its binding and continuation, and no
+    /// other hold does; a hosted deferral names its whole feed, and a local
+    /// one needs none.
+    fn released_hold_and_deferred_feed_constraints_hold(conn: &Connection) {
+        let new_columns: (Option<String>, Option<String>, i64) = conn
+            .query_row(
+                "SELECT released_hold_binding_json,released_hold_continuation,released_hold_binding_stale \
+                 FROM hosted_documents WHERE object_id='held'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(new_columns, (None, None, 0));
+        for valid in [
+            "UPDATE hosted_documents SET held_reason='released-lineage-unsettled',held_path=NULL, \
+             held_by=NULL,released_hold_binding_json='{}',released_hold_continuation='frozen' \
+             WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_continuation='dependency-drain', \
+             released_hold_binding_stale=1 WHERE object_id='held'",
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+             recorded_at_ms,relay_seq,ingress_kind,relay_namespace,replication_epoch,stream_identity) \
+             VALUES ('hosted','main','held','peer',2,6,4,'hosted','relay','epoch','stream')",
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+             recorded_at_ms,ingress_kind) VALUES ('ordinary','main','doc','peer',2,6,'local')",
+        ] {
+            conn.execute(valid, []).unwrap();
+        }
+        for invalid in [
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled' \
+             WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_binding_json='{}' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_continuation='frozen' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_json='{}', \
+             released_hold_continuation='frozen' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_json='not json' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_continuation='thawed' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_stale=2 WHERE object_id='held'",
+            "UPDATE hosted_documents SET held_path='a.md' WHERE object_id='held'",
+            "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='held'",
+            "UPDATE ydoc_deferred_updates SET ingress_kind='hosted' WHERE origin_seq=1",
+            "UPDATE ydoc_deferred_updates SET ingress_kind='remote' WHERE origin_seq=1",
+            "UPDATE ydoc_deferred_updates SET relay_namespace=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_namespace='' WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET replication_epoch=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET stream_identity=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_seq=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_seq=0 WHERE ingress_kind='hosted'",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM hosted_documents) \
+                 + (SELECT COUNT(*) FROM hosted_parked_snapshots) \
+                 + (SELECT COUNT(*) FROM hosted_parked_path_aliases)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            left, 0,
+            "documents and their parked heads leave with their replica"
+        );
+    }
+
+    /// The activations migration rebuilds the hosted documents table for the
+    /// released-lineage hold and gives deferred Y.Doc updates their feed. An
+    /// upgrade keeps every hosted document, hold, parked head and alias, and
+    /// deferred row; a deferred row of a workspace that is no hosted replica
+    /// is local, and one of a hosted replica keeps an unknown feed. A fresh
+    /// store enforces the same rules.
+    #[test]
+    fn live_owner_activations_upgrade_keeps_hosted_documents_and_classifies_deferred_rows() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut fresh = open_bare(&dir.join("fresh.db"));
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        fresh.execute_batch(HOSTED_AND_DEFERRED_ROWS).unwrap();
+        released_hold_and_deferred_feed_constraints_hold(&fresh);
+
+        let mut conn = open_bare(&dir.join("upgraded.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-live-owner-activations");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(HOSTED_AND_DEFERRED_ROWS).unwrap();
+        let kept = hosted_and_deferred_rows(&conn);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(hosted_and_deferred_rows(&conn), kept);
+        let foreign: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign, 0);
+        let feeds: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(workspace_id,ingress_kind,relay_namespace, \
+                   replication_epoch,stream_identity)) \
+                 FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            feeds,
+            r#"[["hosted","legacy-unknown",null,null,null],["ordinary","local",null,null,null]]"#
+        );
+        released_hold_and_deferred_feed_constraints_hold(&conn);
     }
 
     #[test]

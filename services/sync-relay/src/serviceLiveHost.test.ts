@@ -20,6 +20,8 @@ import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import { releasedLineageBindingDigest, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
+import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises",async importOriginal => {
@@ -1867,6 +1869,89 @@ it("brings a dormant document back into passes when its restore capture loads it
   const native = await o.host.captureNative(o.binding());
   expect(native.invalidated.aborted).toBe(false);
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// A hold of the sibling document for released retained work, bound as the
+// engine's first shared vector is, with `incoming` changed.
+const releasedHold = (incoming: Partial<ReleasedLineageBinding["incoming"]> = {}) => {
+  const binding = JSON.parse(bindingVectors.valid[0]!.canonical) as ReleasedLineageBinding;
+  return {objectId: "object", reason: "released-lineage-unsettled", binding: {...binding, incoming: {...binding.incoming, ...incoming}},
+    continuation: "frozen", bindingStale: false};
+};
+const digest = (hold: ReturnType<typeof releasedHold>) => releasedLineageBindingDigest(hold.binding);
+// The driver a host activates through, once a pass held one of its documents.
+const heldDriver = () => {
+  let driver: ServiceActivationDriver | undefined;
+  const hold = ServiceActivationDriver.prototype.hold;
+  vi.spyOn(ServiceActivationDriver.prototype, "hold").mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    driver = this; return hold.apply(this, args);
+  });
+  return () => driver;
+};
+
+// Proves: a document held for released retained work blocks only its own
+// activation, keyed by its binding's digest. It never captures, its workspace
+// keeps pushing and pulling, and passes still visit the other document. A
+// fresh binding replaces the digest. Resume, and the resolution of another
+// binding, one bound to the feed's namespace where this one names none among
+// them, leave it held. Only its own binding's resolution lets it capture again.
+it("holds a document for released retained work by its binding's digest until that binding is resolved", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], driver = heldDriver();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.other.path).length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const unbound = releasedHold({relayNamespace: null}), bound = releasedHold(), refreshed = releasedHold({relayNamespace: null, originSeq: 1});
+  o.replies.pass = {held: [unbound]};
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(unbound)));
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
+  const held = captures(), pushed = pushes();
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(held);
+  expect(pushes()).toBeGreaterThan(pushed);
+  // Resume does not resolve it, and it is no block Resume could lift.
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.host.unblock(o.sibling)).toBe(false);
+  expect(driver()!.clearResolvedHold(o.sibling, digest(bound))).toBe(false);
+  o.replies.pass = {held: [refreshed]};
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBe(digest(refreshed)));
+  expect(driver()!.clearResolvedHold(o.sibling, digest(unbound))).toBe(false);
+  await o.nextPull();
+  expect(captures()).toBe(held);
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  const visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(captures()).toBe(held);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  expect(driver()!.clearResolvedHold(o.sibling, digest(refreshed))).toBe(true);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(captures()).toBeGreaterThan(held);
+  expect(driver()!.releasedHold(o.sibling)).toBeUndefined();
+});
+
+// Proves: a restore's capture of a document held for released retained work
+// clears what its pass held it for, never its binding's digest, so later
+// passes still never capture it. Alone in its workspace, the dormant document
+// leaves the workspace ready, so its passes pull and bring the hold.
+it("keeps a released-lineage hold's digest through a restore capture", async () => {
+  const driver = heldDriver(), o = await idleHost({alone: true});
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const hold = releasedHold();
+  o.replies.pass = {held: [hold]};
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(hold)));
+  o.restore();
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  expect(driver()!.releasedHold(o.sibling)).toBe(digest(hold));
+  await o.passes();
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  expect(driver()!.releasedHold(o.sibling)).toBe(digest(hold));
 });
 
 it("keeps a dormant document dormant when the engine refuses its restore capture", async () => {

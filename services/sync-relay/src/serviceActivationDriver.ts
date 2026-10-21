@@ -2,6 +2,7 @@ import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-bi
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
+import {releasedLineageBindingDigest} from "@dohc/workspace-engine-client/relay-wire";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -81,7 +82,9 @@ export class ServiceActivationDriver {
   readonly #held=new Map<string,ServiceHostedHold["reason"]>();
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
-  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}>();
+  // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
+  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
+    {reason:"released-lineage-unsettled";digest:string}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -127,19 +130,42 @@ export class ServiceActivationDriver {
       const hold=JSON.parse(key)[0]===workspaceId?holds.find(row=>row.objectId===objectId):undefined;
       if(!hold)continue;
       this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
+      // A fresh binding replaces the one held before; that resolves nothing.
+      if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:releasedLineageBindingDigest(hold.binding)});
       for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
-  blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{return this.#blocked.get(targetKey(target))?.reason;}
-  /** Allows a blocked target one more capture. Returns whether it was blocked. */
-  unblock(target:ServiceActivationTarget){return this.#blocked.delete(targetKey(target));}
+  blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{
+    const block=this.#blocked.get(targetKey(target));
+    return block?.reason==="released-lineage-unsettled"?undefined:block?.reason;
+  }
+  /** Allows a blocked target one more capture. Returns whether it was blocked. A hold for released retained work stays. */
+  unblock(target:ServiceActivationTarget){return this.#unblock(targetKey(target));}
+  #unblock(key:string){return this.#blocked.get(key)?.reason!=="released-lineage-unsettled" && this.#blocked.delete(key);}
+  /** The digest of the binding the target is held with for released retained work, if it is. Activation skips it. */
+  releasedHold(target:ServiceActivationTarget){
+    const block=this.#blocked.get(targetKey(target));
+    return block?.reason==="released-lineage-unsettled"?block.digest:undefined;
+  }
+  /** Ends the target's hold for released retained work once the binding `digest` names is resolved. Returns whether it did. */
+  clearResolvedHold(target:ServiceActivationTarget,digest:string){
+    return this.releasedHold(target)===digest && this.#blocked.delete(targetKey(target));
+  }
+  // Keeps the target's hold for released retained work through `clear`.
+  #keepReleasedHold(key:string,clear:()=>void){
+    const block=this.#blocked.get(key);
+    clear();
+    if(block?.reason==="released-lineage-unsettled")this.#blocked.set(key,block);
+  }
   // A document with no Y.Doc lineage has nothing to activate until one reaches the relay, a held
   // document whose live edit was never admitted cannot become ready, and a retained activation
   // the engine refuses as diverged cannot resume. Each blocks after its failed capture. A document
   // that is only not ready, or whose first capture met another conflict, waits.
   #refused(key:string,resuming:boolean,update:number,error:unknown){
     const diverged=resuming && error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" && !isHostedDocumentUnready(error);
+    // A pull during this capture may have held it for released retained work.
+    if(this.#blocked.get(key)?.reason==="released-lineage-unsettled")return;
     if(isLiveDocumentWithoutLineage(error))this.#blocked.set(key,{reason:"without-lineage",update});
     else if(this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.set(key,{reason:"live-edit-unadmitted"});
     else if(diverged)this.#blocked.set(key,{reason:"refused"});
@@ -159,8 +185,7 @@ export class ServiceActivationDriver {
   sleep(target:ServiceActivationTarget,document:LiveDocumentKey){
     const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key);
     owner?.consumer.release(document);
-    this.removeTarget(target);
-    this.addTarget(target,document.objectId);
+    this.#keepReleasedHold(targetKey(target),()=>{this.removeTarget(target);this.addTarget(target,document.objectId);});
     this.#dormant.set(targetKey(target),key);
   }
   dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
@@ -226,8 +251,8 @@ export class ServiceActivationDriver {
     return owner.consumer;
   }
   workspaceReady(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) && !this.blocked(target))
-      .every(target=>this.#completedTargets.has(targetKey(target)));
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
+      !this.#blocked.has(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
   }
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
@@ -316,6 +341,9 @@ export class ServiceActivationDriver {
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     check();
     const key=targetKey(target),block=this.#blocked.get(key);
+    if(block?.reason==="released-lineage-unsettled"){
+      return {kind:"pending" as const,reason:"Hosted document is held until its retained work is resolved."};
+    }
     if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
       return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
     }
@@ -351,7 +379,7 @@ export class ServiceActivationDriver {
       try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
       catch(error){this.#refused(key,saved!==null,update,error);throw error;}
       check();
-      this.#blocked.delete(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
+      this.#unblock(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
         throw new Error("Native service activation source changed.");

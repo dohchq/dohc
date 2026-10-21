@@ -98,6 +98,8 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
             }])),
         }
     );
+    // A hold persists the binding as its canonical JSON, which reads back.
+    assert_eq!(ReleasedLineageBinding::from_canonical_json(&binding.canonical_json()), Some(binding.clone()));
     // The feed's namespace is the binding's own: another names another hold.
     let elsewhere = IncomingCoordinate { relay_namespace: Some("elsewhere".into()), ..incoming() };
     let moved_feed = protected_from(&f, &elsewhere).expect("protected");

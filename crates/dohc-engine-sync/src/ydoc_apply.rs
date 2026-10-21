@@ -1,6 +1,6 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
-use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
+use dohc_engine_collab::live_update_application::{ReleasedLineageBinding, ReleasedTails};
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
     ReplicationApplyOutcome, WriterDocCache, apply_remote_update_in_transaction_with_projection,
@@ -1914,7 +1914,7 @@ fn hold_released_lineage(
     incoming: Incoming<'_>,
 ) -> Result<(), SyncError> {
     use dohc_engine_collab::live_update_application::{
-        ApplicationError, IncomingCoordinate, Protection, ProtectionKey, protection,
+        IncomingCoordinate, Protection, ProtectionKey, protection,
     };
     let identity: Option<(String, String)> = tx
         .query_row(
@@ -1942,11 +1942,7 @@ fn hold_released_lineage(
         },
         tails,
     )
-    .map_err(|error| match error {
-        ApplicationError::Storage(error) => SyncError::Storage(error),
-        ApplicationError::Collab(error) => map_collab_hard_error(error),
-        _ => local_corruption("released lineage evidence does not read"),
-    })?;
+    .map_err(protection_failure)?;
     let Protection::Protected { binding, head } = protected else {
         return Ok(());
     };
@@ -1973,6 +1969,64 @@ fn hold_released_lineage(
         return Err(SyncError::ReleasedLineageUnsettled(binding));
     }
     Ok(())
+}
+
+fn protection_failure(
+    error: dohc_engine_collab::live_update_application::ApplicationError,
+) -> SyncError {
+    use dohc_engine_collab::live_update_application::ApplicationError;
+    match error {
+        ApplicationError::Storage(error) => SyncError::Storage(error),
+        ApplicationError::Collab(error) => map_collab_hard_error(error),
+        _ => local_corruption("released lineage evidence does not read"),
+    }
+}
+
+/// Whether `binding` still names what its held row would change: the
+/// document's lineage, path, restore generation and head, the replica's feed,
+/// and every protected tail with its retained work, as `conn` reads them now.
+pub(crate) fn released_binding_current(
+    conn: &rusqlite::Connection,
+    binding: &ReleasedLineageBinding,
+    tails: &ReleasedTails,
+) -> Result<bool, SyncError> {
+    use dohc_engine_collab::live_update_application::{Protection, ProtectionKey, protection};
+    let doc = DocKey {
+        workspace_id: binding.workspace_id.clone(),
+        version_id: binding.main_version_id.clone(),
+        object_id: binding.object_id.clone(),
+    };
+    let lineage = dohc_engine_collab::read_marker_in(conn, &doc)
+        .map_err(map_collab_hard_error)?
+        .and_then(|marker| marker.lineage_claim_id);
+    let feed: Option<(String, String)> = conn
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [&doc.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let incoming = &binding.incoming;
+    if lineage.as_deref() != Some(binding.lineage_claim_id.as_str())
+        || feed
+            .as_ref()
+            .map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))
+            != Some((&incoming.replication_epoch, &incoming.stream_identity))
+    {
+        return Ok(false);
+    }
+    let key = ProtectionKey {
+        doc: &doc,
+        lineage_claim_id: &binding.lineage_claim_id,
+        incoming,
+    };
+    Ok(
+        match protection(conn, &key, tails).map_err(protection_failure)? {
+            Protection::Protected { binding: now, .. } => *now == *binding,
+            Protection::Unprotected => false,
+        },
+    )
 }
 
 /// [`hold_released_lineage`] for an imported file operation on `key`'s

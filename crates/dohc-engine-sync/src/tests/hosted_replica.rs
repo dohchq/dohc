@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI64};
@@ -986,7 +987,7 @@ fn commit(
         return false;
     };
     match client
-        .commit_hosted_cursor(store, "ws", pending, &NoFaults)
+        .commit_hosted_cursor(store, "ws", pending, &ReleasedTails::uncached(), &NoFaults)
         .unwrap()
     {
         TxnOutcome::Committed(commit) => commit.committed,
@@ -1367,7 +1368,13 @@ fn finish_after(
         let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
         assert_eq!(
             client
-                .commit_hosted_cursor(&mut store, "ws", &pending, crash.as_ref())
+                .commit_hosted_cursor(
+                    &mut store,
+                    "ws",
+                    &pending,
+                    &ReleasedTails::uncached(),
+                    crash.as_ref(),
+                )
                 .unwrap(),
             TxnOutcome::Crashed { committed: false }
         );
@@ -2250,7 +2257,13 @@ fn a_read_stopping_before_its_document_position_is_refused() {
         },
     );
     assert!(matches!(
-        crate::commit_hosted_cursor(&mut store, "ws", pending, &NoFaults),
+        crate::commit_hosted_cursor(
+            &mut store,
+            "ws",
+            pending,
+            &ReleasedTails::uncached(),
+            &NoFaults
+        ),
         Err(SyncError::InvalidInput {
             reason: crate::hosted::STOPPED_BEFORE_READ
         })
@@ -5617,6 +5630,7 @@ fn a_hold_gone_by_commit_leaves_its_document_for_the_pass_that_writes_its_heads(
             store,
             "ws",
             outcome.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap()
@@ -5974,5 +5988,95 @@ fn a_before_side_the_feed_serves_is_fetched_and_kept() {
             .read_with(|conn| crate::hosted::withheld_before(conn, &foreign("private")))
             .unwrap()
             .is_none()
+    );
+}
+
+/// A hold persisted outside a cursor commit counts as a commit in its own
+/// transaction, so a pass pending since then commits nothing over it. The
+/// hold reads back with its exact binding, continuation and staleness, and
+/// the ready document it holds reads its own rows from the main feed's
+/// position.
+#[test]
+fn a_released_hold_outside_a_commit_invalidates_a_pending_pass() {
+    use dohc_engine_collab::live_update_application::{
+        IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+    };
+    let (_scratch, _path, mut store) = hosted_store();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "UPDATE hosted_replicas SET main_cursor=7,scope_generation=1; \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                 VALUES ('ws','doc','doc.md','ready',1)",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    let replica = read_hosted_replica(&store, "ws").unwrap().unwrap();
+    let pending = HostedCursor {
+        scope_generation: replica.scope_generation,
+        cursor_commits: replica.cursor_commits,
+        main_cursor: Some(9),
+        reads: BTreeMap::new(),
+        settlement_report_id: None,
+    };
+    let binding = ReleasedLineageBinding {
+        workspace_id: "ws".into(),
+        main_version_id: "main".into(),
+        object_id: "doc".into(),
+        lineage_claim_id: "a".repeat(64),
+        current_path: Some("doc.md".into()),
+        restore_generation: Some(0),
+        incoming: IncomingCoordinate {
+            relay_namespace: None,
+            replication_epoch: "epoch-1".into(),
+            stream_identity: "stream-1".into(),
+            origin_id: "peer".into(),
+            origin_seq: 3,
+            relay_seq: 8,
+        },
+        head_digest: "b".repeat(64),
+        tails: std::sync::Arc::new(ProtectedTails::Invalid),
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::hosted::hold_released_in_tx(
+                tx,
+                &binding,
+                crate::ReleasedHoldContinuation::DependencyDrain,
+                true,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        crate::commit_hosted_cursor(
+            &mut store,
+            "ws",
+            &pending,
+            &ReleasedTails::uncached(),
+            &NoFaults
+        )
+        .unwrap(),
+        TxnOutcome::Committed(crate::HostedCommit {
+            committed: false,
+            has_more: false
+        })
+    );
+    let after = read_hosted_replica(&store, "ws").unwrap().unwrap();
+    assert_eq!(
+        (after.cursor_commits, after.main_cursor),
+        (replica.cursor_commits + 1, 7)
+    );
+    assert_eq!(
+        after.documents["doc"],
+        HostedDocumentState {
+            path: "doc.md".into(),
+            status: HostedDocumentStatus::Held(HostedHold::ReleasedLineageUnsettled {
+                binding: Box::new(binding),
+                continuation: crate::ReleasedHoldContinuation::DependencyDrain,
+                binding_stale: true,
+            }),
+            backfill_cursor: 7,
+        }
     );
 }

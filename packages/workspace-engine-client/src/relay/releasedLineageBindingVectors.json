@@ -1,0 +1,76 @@
+{
+  "valid": [
+    {
+      "name": "listed tails",
+      "canonical": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":1,\"workspaceId\":\"workspace\"}",
+      "digest": "2bafae33ecde818e081523c30e99533911f1afd926c84a746748a59a92a915aa"
+    },
+    {
+      "name": "invalid tails without a namespace or path, while a restore fences it",
+      "canonical": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}",
+      "digest": "7d44e25e1285a6f7dc812444ebe805d5f51244f17a4258faec741b2aed882a25"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "a duplicate key",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "an integer past the wire range",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":9007199254740992,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "a negative integer",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":-1,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "a relay sequence of zero",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "a fractional integer",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1.0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "a dropped null",
+      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "a dropped null namespace",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "an empty namespace for a null one",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":\"\",\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "keys out of order",
+      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"currentPath\":null,\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "whitespace",
+      "text": "{ \"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "an unknown key",
+      "text": "{\"currentPath\":null,\"extra\":1,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "another version",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "no tails listed",
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":[],\"version\":1,\"workspaceId\":\"workspace-2\"}"
+    },
+    {
+      "name": "contributions out of order",
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":1,\"workspaceId\":\"workspace\"}"
+    },
+    {
+      "name": "two tails of one namespace",
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-a\",\"release\":null,\"unproven\":null}],\"version\":1,\"workspaceId\":\"workspace\"}"
+    }
+  ]
+}

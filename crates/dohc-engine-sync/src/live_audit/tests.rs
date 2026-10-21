@@ -4582,6 +4582,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
                 reads: BTreeMap::from([("object".to_owned(), read)]),
                 settlement_report_id: None,
             },
+            &dohc_engine_collab::live_update_application::ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();

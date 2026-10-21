@@ -6830,8 +6830,28 @@ fn hosted_pass(
         .unwrap()
 }
 
-/// `pass` stopped `object` before `op`, which it held unapplied.
-fn stopped_before(
+/// The binding `pass` held `object` with, when it stopped the document
+/// before `op`, held unapplied for released retained work.
+fn held_binding(
+    pass: &dohc_engine_sync::HostedPassOutcome,
+    op: &dohc_engine_sync::ReplicationEnvelope,
+) -> Option<ReleasedLineageBinding> {
+    let read = pass.pending_cursor.as_ref()?.reads.get("object")?;
+    let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+        binding_stale: false,
+    }) = &read.stopped
+    else {
+        return None;
+    };
+    (read.cursor == op.relay_seq.unwrap() - 1 && pass.held.get("object") == read.stopped.as_ref())
+        .then(|| *binding.clone())
+}
+
+/// `pass` stopped `object` before `op`, which waits unapplied for a reason
+/// other than released retained work.
+fn waits_before(
     pass: &dohc_engine_sync::HostedPassOutcome,
     op: &dohc_engine_sync::ReplicationEnvelope,
 ) -> bool {
@@ -6840,6 +6860,22 @@ fn stopped_before(
             read.cursor == op.relay_seq.unwrap() - 1
                 && read.stopped == Some(dohc_engine_sync::HostedHold::WorkWaiting)
         })
+    })
+}
+
+/// `pass` stopped `object` before `op`, which it held unapplied, bound to
+/// `op` on the feed the pull named.
+fn stopped_before(
+    pass: &dohc_engine_sync::HostedPassOutcome,
+    op: &dohc_engine_sync::ReplicationEnvelope,
+) -> bool {
+    held_binding(pass, op).is_some_and(|binding| {
+        binding.incoming.relay_namespace.as_deref() == Some("relay")
+            && (
+                binding.incoming.origin_id.as_str(),
+                binding.incoming.origin_seq,
+                binding.incoming.relay_seq,
+            ) == (op.origin_id.as_str(), op.origin_seq, op.relay_seq.unwrap())
     })
 }
 
@@ -7019,6 +7055,7 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
             &mut w.store,
             "workspace",
             pass.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();
@@ -7154,6 +7191,7 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
             &mut w.store,
             "workspace",
             pass.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();
@@ -7163,16 +7201,28 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     ));
     assert_ne!(ingress_rows(&w.store), rows, "the neighbour applied");
     let rows = ingress_rows(&w.store);
-    let replica = dohc_engine_sync::read_hosted_replica(&w.store, "workspace")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        replica.documents["object"].status,
-        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
+    // The commit keeps the hold's own reason and the binding the pull
+    // derived, the feed's namespace in it, never a generic wait.
+    let binding = held_binding(&pass, &fold).unwrap();
+    let hold = dohc_engine_sync::HostedDocumentStatus::Held(
+        dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+            binding: Box::new(binding.clone()),
+            continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+            binding_stale: false,
+        },
     );
+    let status = |store: &EngineStore| {
+        let replica = dohc_engine_sync::read_hosted_replica(store, "workspace")
+            .unwrap()
+            .unwrap();
+        (
+            replica.documents["object"].status.clone(),
+            replica.documents["neighbour"].status.clone(),
+        )
+    };
     assert_eq!(
-        replica.documents["neighbour"].status,
-        dohc_engine_sync::HostedDocumentStatus::Ready
+        status(&w.store),
+        (hold.clone(), dohc_engine_sync::HostedDocumentStatus::Ready)
     );
     let again = hosted_pass(
         &mut w.store,
@@ -7183,12 +7233,18 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
         stopped_before(&again, &fold) && !again.has_more && again.applied == 0,
         "{again:?}"
     );
+    assert_eq!(held_binding(&again, &fold), Some(binding.clone()));
     assert_eq!(
         (w.native(), ingress_rows(&w.store)),
         (native.clone(), rows.clone()),
         "redelivered"
     );
     w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(
+        status(&w.store),
+        (hold, dohc_engine_sync::HostedDocumentStatus::Ready),
+        "the hold reads back after a restart"
+    );
     let restarted = hosted_pass(
         &mut w.store,
         &client,
@@ -7198,6 +7254,7 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
         stopped_before(&restarted, &fold) && !restarted.has_more && restarted.applied == 0,
         "{restarted:?}"
     );
+    assert_eq!(held_binding(&restarted, &fold), Some(binding));
     assert_eq!(
         (w.native(), ingress_rows(&w.store)),
         (native.clone(), rows),
@@ -7220,6 +7277,142 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
     w.close().await;
+}
+
+/// A fence row that resumed the document at restore generation 1.
+fn restored(w: &RetainedWindow) {
+    write_unchecked(
+        w,
+        &format!(
+            "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
+               operation_id,input_json,receipt_json,proposal_json,application_json,application_delivery_id,
+               resume_receipt_json,resume_settlement_id,resume_evidence_digest)
+             VALUES ('workspace','main','object','relay','restore',
+               '{{\"oldBinding\":{{\"lineageClaimId\":\"{}\",\"restoreFenceGeneration\":0}},\"newFence\":1}}',
+               '{{}}','{{}}','{{}}','restore-delivery','{{}}','settlement','{}')",
+            w.lineage,
+            "a".repeat(64)
+        ),
+    );
+}
+
+/// A pass whose hold names what its row would change commits nothing once
+/// that moved before its commit: neither its cursor nor its hold. The
+/// document's head, path or restore generation, the replica's feed, or the
+/// tail's retained work moves it. The next pass derives the binding again
+/// from the same row, and its commit holds the document with it.
+#[tokio::test]
+async fn a_pass_whose_released_binding_went_stale_commits_nothing() {
+    type Change = fn(&mut RetainedWindow);
+    let cases: [(&str, Change); 5] = [
+        ("head", |w| {
+            let safe = {
+                let doc = Ydoc::wire();
+                doc.apply(&w.native()).unwrap();
+                doc.richdoc_append_paragraph("Safe")
+            };
+            w.store.put_binary_blob(&safe).unwrap();
+            let mut op = ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false);
+            op.relay_seq = Some(40);
+            dohc_engine_sync::apply_replication_envelope(
+                &mut w.store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )
+            .unwrap();
+        }),
+        ("path", |w| {
+            write_unchecked(
+                w,
+                "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
+            )
+        }),
+        ("restore generation", |w| restored(w)),
+        ("feed", |w| {
+            write_unchecked(
+                w,
+                "UPDATE sync_identity SET stream_identity='stream-2' WHERE workspace_id='workspace'",
+            )
+        }),
+        ("retained work", |w| {
+            write_unchecked(
+                w,
+                &format!(
+                    "DELETE FROM owner_ydoc_outbox_entries WHERE update_digest='{}'",
+                    w.retained_digest
+                ),
+            )
+        }),
+    ];
+    for (case, change) in cases {
+        let mut w = retained_window(Retained::Carried).await;
+        let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+        let (fold, bytes) = desktop
+            .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+            .await;
+        let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+        let fold = feed.serve(fold, bytes);
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let pass = hosted_pass(&mut w.store, &client, &mut cache);
+        let stale = held_binding(&pass, &fold).expect(case);
+        let replica = |store: &EngineStore| {
+            dohc_engine_sync::read_hosted_replica(store, "workspace")
+                .unwrap()
+                .unwrap()
+        };
+        let before = replica(&w.store);
+        change(&mut w);
+        let commit = |w: &mut RetainedWindow, pass: &dohc_engine_sync::HostedPassOutcome| {
+            client
+                .commit_hosted_cursor(
+                    &mut w.store,
+                    "workspace",
+                    pass.pending_cursor.as_ref().unwrap(),
+                    &ReleasedTails::uncached(),
+                    &NoFaults,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            commit(&mut w, &pass),
+            dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
+                committed: false,
+                has_more: false,
+            }),
+            "{case}"
+        );
+        assert_eq!(replica(&w.store), before, "{case}: nothing committed");
+        let next = hosted_pass(&mut w.store, &client, &mut cache);
+        let fresh = held_binding(&next, &fold).expect(case);
+        assert_ne!(fresh, stale, "{case}");
+        assert!(
+            matches!(
+                commit(&mut w, &next),
+                dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
+                    committed: true,
+                    ..
+                })
+            ),
+            "{case}"
+        );
+        assert_eq!(
+            replica(&w.store).documents["object"].status,
+            dohc_engine_sync::HostedDocumentStatus::Held(
+                dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+                    binding: Box::new(fresh),
+                    continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+                    binding_stale: false,
+                }
+            ),
+            "{case}"
+        );
+        assert!(!journaled(&w.store, &fold), "{case}");
+        desktop.close().await;
+        w.close().await;
+    }
 }
 
 /// The ingress gate's own sites: a base state, a delta of another lineage
@@ -7350,21 +7543,6 @@ fn write_unchecked(w: &RetainedWindow, sql: &str) {
 #[tokio::test]
 async fn a_released_window_holds_a_safe_append_once_its_binding_moves() {
     const RENAMED: &str = "notes/renamed.md";
-    let restored = |w: &RetainedWindow| {
-        write_unchecked(
-            w,
-            &format!(
-                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
-                   operation_id,input_json,receipt_json,proposal_json,application_json,application_delivery_id,
-                   resume_receipt_json,resume_settlement_id,resume_evidence_digest)
-                 VALUES ('workspace','main','object','relay','restore',
-                   '{{\"oldBinding\":{{\"lineageClaimId\":\"{}\",\"restoreFenceGeneration\":0}},\"newFence\":1}}',
-                   '{{}}','{{}}','{{}}','restore-delivery','{{}}','settlement','{}')",
-                w.lineage,
-                "a".repeat(64)
-            ),
-        );
-    };
     let renamed = |w: &RetainedWindow| {
         write_unchecked(
             w,
@@ -7512,6 +7690,7 @@ async fn a_window_that_does_not_read_holds_only_its_document() {
             &mut w.store,
             "workspace",
             pass.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();
@@ -8176,6 +8355,7 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
                 &mut w.store,
                 "workspace",
                 pass.pending_cursor.as_ref().unwrap(),
+                &ReleasedTails::uncached(),
                 &NoFaults,
             )
             .unwrap();
@@ -8354,6 +8534,7 @@ fn commit_pass(
             store,
             "workspace",
             pass.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();
@@ -8533,7 +8714,13 @@ async fn a_bare_text_moment_in_the_released_window_holds_only_its_document() {
     assert_eq!(main_cursor(&w.store), created.relay_seq.unwrap());
     assert_eq!(
         hosted_status(&w.store, "object"),
-        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
+        dohc_engine_sync::HostedDocumentStatus::Held(
+            dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+                binding: Box::new(held_binding(&pass, &moment).unwrap()),
+                continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+                binding_stale: false,
+            }
+        )
     );
     assert_eq!(
         (w.native(), document_rows(&w.store), notes(&w.root)),
@@ -8621,7 +8808,7 @@ async fn a_pending_text_moment_stops_only_its_document() {
     assert_eq!(pass.applied, 1, "the neighbour");
     assert!(journaled(&host.store, &created));
     assert!(!journaled(&host.store, &moment) && !journaled(&host.store, &later));
-    assert!(stopped_before(&pass, &moment), "{:?}", pass.pending_cursor);
+    assert!(waits_before(&pass, &moment), "{:?}", pass.pending_cursor);
     assert!(!pass.has_more, "no work retries hot");
     commit_pass(&mut host.store, &client, &pass);
     assert_eq!(
@@ -8661,7 +8848,7 @@ async fn a_pending_text_moment_stops_only_its_document() {
     assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
     assert!(journaled(&host.store, &edited));
     assert!(
-        stopped_before(&again, &moment) && !again.has_more,
+        waits_before(&again, &moment) && !again.has_more,
         "{again:?}"
     );
     commit_pass(&mut host.store, &client, &again);

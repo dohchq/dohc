@@ -1945,8 +1945,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlement_report_id,
             has_more: settled_more,
             stopped: _,
-            // Only a hosted pass has documents that are not ready.
+            // Only a hosted pass has documents that are not ready, or holds
+            // one for released retained work.
             redelivered: _,
+            released: _,
         } = self.apply_pulled(
             store,
             cache,
@@ -2254,11 +2256,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(
-                                &mut occupancy,
-                                &object_id,
-                                op,
-                            )?),
+                            stopped: Some(match pass.released.get(&object_id) {
+                                Some(((origin_id, origin_seq), binding))
+                                    if (origin_id, *origin_seq)
+                                        == (&op.origin_id, op.origin_seq) =>
+                                {
+                                    crate::HostedHold::ReleasedLineageUnsettled {
+                                        binding: binding.clone(),
+                                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                                        binding_stale: false,
+                                    }
+                                }
+                                _ => crate::hosted::stopped_hold(&mut occupancy, &object_id, op)?,
+                            }),
                             complete: false,
                             heads_written: false,
                         },
@@ -2340,22 +2350,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     /// Commit a hosted pass's cursor after its work materialized. Commits
     /// nothing when the scope moved or another pass committed since its
-    /// fetch.
+    /// fetch, or a released-lineage hold's binding went stale.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
+        tails: &dohc_engine_collab::live_update_application::ReleasedTails,
         faults: &dyn FaultInjector,
     ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
-        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
-            |error| match error {
+        crate::commit_hosted_cursor(store, workspace_id, cursor, tails, faults).map_err(|error| {
+            match error {
                 SyncError::InvalidInput {
                     reason: reason @ crate::hosted::NOT_A_HOSTED_REPLICA,
                 } => RelayError::HostedRefusal(reason),
                 error => local(error),
-            },
-        )
+            }
+        })
     }
 
     /// One page of the hosted feed under the stored scope: `workspace.init`
@@ -2496,16 +2507,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         relay_namespace,
                     ),
                 };
-                // The pass keeps only the hold's reason; its binding is not
-                // persisted with the hold yet.
-                let routed = match routed {
-                    Err(SyncError::ReleasedLineageUnsettled(_)) => Err(SyncError::RetryableState {
-                        reason: crate::hosted::RELEASED_LINEAGE_UNSETTLED,
-                    }),
-                    routed => routed,
+                let held_for = match routed {
+                    // The read that stops at `op` holds its document with
+                    // this binding.
+                    Err(SyncError::ReleasedLineageUnsettled(binding)) => {
+                        if let Some(object_id) = crate::hosted::hosted_document(op) {
+                            pass.released.insert(
+                                object_id.to_owned(),
+                                ((op.origin_id.clone(), op.origin_seq), binding),
+                            );
+                        }
+                        Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED)
+                    }
+                    Err(SyncError::RetryableState { reason }) => Err(reason),
+                    routed => Ok(routed),
                 };
-                match routed {
-                    Err(SyncError::RetryableState { reason }) => {
+                match held_for {
+                    Err(reason) => {
                         holding.stop_at_withheld_parent(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
@@ -2515,13 +2533,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         still_retryable.push(op);
                     }
-                    Err(SyncError::SequenceGap)
+                    Ok(Err(SyncError::SequenceGap))
                         if matches!(holding, Holding::ByOrigin) && held.contains(&op.origin_id) =>
                     {
                         still_retryable.push(op);
                     }
-                    Err(error) => return Err(local(error)),
-                    Ok(outcome) => {
+                    Ok(Err(error)) => return Err(local(error)),
+                    Ok(Ok(outcome)) => {
                         made_progress = true;
                         completed.push(op);
                         accumulate_pull_outcome(
@@ -4573,7 +4591,15 @@ struct AppliedPass {
     /// conflict parent, or whose work would pass the retention limit, whose
     /// ops did not all apply, with the first that did not.
     stopped: BTreeMap<String, ReplicationEnvelope>,
+    /// Each document an op held for released retained work, with that op's
+    /// coordinate and the binding the hold names.
+    released: BTreeMap<String, ReleasedStop>,
 }
+
+type ReleasedStop = (
+    (String, i64),
+    Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
+);
 
 /// The documents a scope names, each once, with its path.
 fn hosted_scope_documents(scope: &HostedScope) -> Result<BTreeMap<String, String>, RelayError> {

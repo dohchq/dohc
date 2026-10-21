@@ -1,6 +1,11 @@
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
+import { decodeReleasedLineageBinding, type ReleasedLineageBinding } from "./releasedLineageBinding";
+
+export { releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
 
 const Text = Schema.String.check(Schema.isMinLength(1));
 const Count = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
@@ -84,6 +89,11 @@ export function decodeOrdinarySyncResult<M extends OrdinarySyncMethod>(
   return decoded.success as OrdinarySyncMethodResultMap[M];
 }
 
+const ReleasedLineageBindingSchema = Schema.declareConstructor<ReleasedLineageBinding>()([], () => (value) => Effect.try({
+  try: () => decodeReleasedLineageBinding(value),
+  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
+}));
+
 // What holds a hosted document from being ready, with the fields its reason names.
 const HostedHold = Schema.Union([
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-path-held"), path: Text, heldBy: Text }),
@@ -92,6 +102,9 @@ const HostedHold = Schema.Union([
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-scope-path-mismatch"), scopePath: Text, headPath: Schema.NullOr(Text) }),
   // The host refused a live edit its session never admitted, so its copy is incomplete.
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-live-edit-unadmitted") }),
+  // An update that could destroy work a released activation retains, held with what it would change.
+  mutableStruct({ objectId: Text, reason: Schema.Literal("released-lineage-unsettled"), binding: ReleasedLineageBindingSchema,
+    continuation: Schema.Literals(["frozen", "dependency-drain"]), bindingStale: Schema.Boolean }),
 ]);
 const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
 

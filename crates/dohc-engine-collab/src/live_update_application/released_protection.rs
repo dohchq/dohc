@@ -8,6 +8,8 @@ use super::*;
 use crate::Ydoc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+mod binding;
+
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.
 #[derive(Debug, Clone, PartialEq, Eq)]
