@@ -50,6 +50,11 @@ pub enum SyncError {
     ReleasedLineageUnsettled(
         Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
     ),
+    /// The decision waits for its lineage's released tails to be validated
+    /// on committed state. Its transaction rolled back; nothing applied or
+    /// held, and it decides again once validation completes.
+    #[error("replication state is not ready: released-tails-validating")]
+    ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error(
         "Y.Doc projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )]
@@ -165,6 +170,7 @@ impl SyncError {
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
             | SyncError::ReleasedLineageUnsettled(_)
+            | SyncError::ValidationPending(_)
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. }
             | SyncError::FaultCrash => ShareDisposition::Abort,
@@ -178,9 +184,9 @@ impl SyncError {
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
-            SyncError::RetryableState { .. } | SyncError::ReleasedLineageUnsettled(_) => {
-                "retryable-state"
-            }
+            SyncError::RetryableState { .. }
+            | SyncError::ReleasedLineageUnsettled(_)
+            | SyncError::ValidationPending(_) => "retryable-state",
             SyncError::ProjectionTooLarge { .. } => "projection-too-large",
             SyncError::UnsupportedOperation => "invalid-input",
             // The boundary class is "the share does not cover this op". The
@@ -339,6 +345,7 @@ impl RelayError {
             // would drop content the next pull would have applied.
             | RelayError::StoreBusy
             | RelayError::HostedRefusal(_)
+            | RelayError::ValidationPending(_)
             | RelayError::Local(_) => None,
         }
     }
@@ -522,6 +529,11 @@ pub enum RelayError {
     /// which callers are shown.
     #[error("{0}")]
     HostedRefusal(&'static str),
+    /// The operation waits for released tails to be validated on committed
+    /// state ([`SyncError::ValidationPending`]). Its caller awaits
+    /// validation and runs it again with the progress it kept.
+    #[error("released tails are validating")]
+    ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error("local sync state failed: {0}")]
     Local(String),
 }

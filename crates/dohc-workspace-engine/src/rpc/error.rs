@@ -393,9 +393,12 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // recognizer above — which answers OVERLOADED for every route. This
         // arm exists for exhaustiveness and names the backpressure honestly.
         RelayError::StoreBusy => ErrorCode::Overloaded,
+        // The relay coordinator awaits every pending validation and runs the
+        // operation again, so none reaches a reply.
         RelayError::ServerInternal
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
+        | RelayError::ValidationPending(_)
         | RelayError::Local(_) => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
@@ -528,6 +531,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         // the retry-eligible class on this surface (InvalidParams is terminal).
         | SyncError::RetryableState { .. }
         | SyncError::ReleasedLineageUnsettled(_)
+        | SyncError::ValidationPending(_)
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::LiveDocumentBindingActive

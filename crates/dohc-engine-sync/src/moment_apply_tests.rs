@@ -1,3 +1,4 @@
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind as YdocContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
@@ -29,7 +30,34 @@ fn apply_moment_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn dohc_engine_storage::FaultInjector,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
-    crate::apply_moment_envelope(store, envelope, faults, &NoLiveLeases)
+    apply_leased(store, envelope, faults, &NoLiveLeases)
+}
+
+/// [`crate::apply_moment_envelope`] on fresh released tails: none of these
+/// documents has a released window.
+fn apply_leased(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+) -> Result<ApplyOutcome<i64>, SyncError> {
+    crate::apply_moment_envelope(store, envelope, faults, leases, &ReleasedTails::default())
+}
+
+/// [`crate::apply_moment_envelope_detailed`] on fresh released tails.
+fn apply_detailed(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+) -> Result<ApplyOutcome<crate::MomentApplyResult>, SyncError> {
+    crate::apply_moment_envelope_detailed(
+        store,
+        envelope,
+        faults,
+        leases,
+        &ReleasedTails::default(),
+    )
 }
 
 fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> ReplicationEnvelope {
@@ -629,9 +657,7 @@ fn moment_only_record_write_and_undo_each_keep_their_field_history() {
         ),
     );
     for op in [&write, &undo] {
-        let result =
-            crate::apply_moment_envelope_detailed(&mut store, op, &NoFaults, &NoLiveLeases)
-                .unwrap();
+        let result = apply_detailed(&mut store, op, &NoFaults, &NoLiveLeases).unwrap();
         let ApplyDisposition::Applied(result) = result.primary else {
             panic!("moment-only field change must apply")
         };
@@ -1060,8 +1086,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
             )
         })
         .unwrap();
-    let old_result =
-        crate::apply_moment_envelope_detailed(&mut store, &old, &NoFaults, &NoLiveLeases).unwrap();
+    let old_result = apply_detailed(&mut store, &old, &NoFaults, &NoLiveLeases).unwrap();
     assert!(
         matches!(old_result.primary, ApplyDisposition::Applied(ref result) if result.materialization_changes.is_empty() && result.conflicts_opened == 0)
     );
@@ -1102,15 +1127,13 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         ),
     );
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
+        apply_leased(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
             .unwrap()
             .primary,
         ApplyDisposition::Refused(_)
     ));
     assert_eq!(snapshot(&store, "object"), before);
-    let latest_result =
-        crate::apply_moment_envelope_detailed(&mut store, &latest, &NoFaults, &crate::AlwaysLive)
-            .unwrap();
+    let latest_result = apply_detailed(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap();
     assert!(
         matches!(latest_result.primary, ApplyDisposition::Applied(ref result)
         if result.conflicts_opened == 0 && result.record_facts.is_none())
@@ -1224,13 +1247,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
                 &restored_text,
             ),
         );
-        let result = crate::apply_moment_envelope_detailed(
-            &mut store,
-            &restore,
-            &NoFaults,
-            &crate::AlwaysLive,
-        )
-        .unwrap();
+        let result = apply_detailed(&mut store, &restore, &NoFaults, &crate::AlwaysLive).unwrap();
         assert!(
             matches!(result.primary, ApplyDisposition::Applied(ref result)
             if result.record_facts.is_none())
@@ -1298,7 +1315,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     );
     // Any other change to an open document still waits for its editor.
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
+        apply_leased(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -1360,7 +1377,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         ..unrelated.clone()
     };
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
+        apply_leased(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -2669,12 +2686,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
                 }))
             })
             .unwrap();
-        let result = crate::apply_moment_envelope_detailed(
-            &mut owner.store,
-            &settlement,
-            &NoFaults,
-            &crate::AlwaysLive,
-        );
+        let result = apply_detailed(&mut owner.store, &settlement, &NoFaults, &crate::AlwaysLive);
         owner
             .store
             .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
@@ -2686,13 +2698,8 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         assert_eq!(owner.store.table_row_count("replication_log").unwrap(), log);
         assert_pending_status(&owner);
     }
-    let result = crate::apply_moment_envelope_detailed(
-        &mut owner.store,
-        &settlement,
-        &NoFaults,
-        &crate::AlwaysLive,
-    )
-    .unwrap();
+    let result =
+        apply_detailed(&mut owner.store, &settlement, &NoFaults, &crate::AlwaysLive).unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
     if let Some(mut fields) = draft_fields {
         // Accepted `.nan` takes its parse flag. Draft values keep their index.
@@ -5382,12 +5389,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                     absent_text_payload("foreign-artifact", "object", "head.md", "artifact"),
                 );
                 assert!(matches!(
-                    crate::apply_moment_envelope_detailed(
-                        &mut store,
-                        &foreign,
-                        &NoFaults,
-                        &crate::AlwaysLive
-                    ),
+                    apply_detailed(&mut store, &foreign, &NoFaults, &crate::AlwaysLive),
                     Err(SyncError::RetryableState {
                         reason: "ydoc-session-live"
                     })
@@ -5447,9 +5449,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 ),
             );
             let faults = ScriptedFaults::crash_at(point);
-            let result =
-                crate::apply_moment_envelope_detailed(&mut store, &op, faults.as_ref(), &leases)
-                    .unwrap();
+            let result = apply_detailed(&mut store, &op, faults.as_ref(), &leases).unwrap();
             assert!(matches!(result.primary, ApplyDisposition::Crashed { .. }));
             assert!(faults.fired());
             drop(store);
@@ -5468,8 +5468,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 read_replication_acked_seq(&store, "ws", "peer").unwrap(),
                 if durable { seq } else { seq - 1 }
             );
-            let result =
-                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+            let result = apply_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
             if let ApplyDisposition::Applied(applied) = result.primary {
                 assert_eq!(applied.conflicts_opened, 0);
                 assert!(applied.materialization_changes.is_empty());
@@ -5495,7 +5494,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 "SELECT COUNT(*) FROM moments WHERE moment_id='moment-ydoc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND sync_record_only=1", [], |r|r.get(0))).unwrap();
             assert_eq!(rows, 1);
             assert!(matches!(
-                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases)
+                apply_detailed(&mut store, &op, &NoFaults, &leases)
                     .unwrap()
                     .primary,
                 ApplyDisposition::Skipped
@@ -5795,7 +5794,7 @@ fn assert_open_document_exclusion(case: &str) {
     let ack = read_replication_acked_seq(&store, "ws", &op.origin_id).unwrap();
     assert!(
         matches!(
-            crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+            apply_detailed(&mut store, &op, &NoFaults, &leases),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -5850,7 +5849,7 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     let leases = LeaseRegistry::new();
     let held = leases.acquire(&key).unwrap();
     assert!(matches!(
-        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+        apply_detailed(&mut store, &op, &NoFaults, &leases),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -5862,8 +5861,7 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     assert_eq!(store.table_row_count("moments").unwrap(), 1);
 
     drop(held);
-    let result =
-        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+    let result = apply_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
     assert!(matches!(
         result.primary,
         ApplyDisposition::Refused(ReplicationRefusal {
@@ -7866,7 +7864,7 @@ pub(crate) fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc
             "before remote",
         ),
     );
-    crate::apply_moment_envelope_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
+    apply_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
     drop(held);
     (scratch, store, key, doc, claim)
 }

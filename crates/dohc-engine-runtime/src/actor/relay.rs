@@ -323,6 +323,8 @@ struct DeferredRelayTransport {
     native_settlements: bool,
     state: Arc<Mutex<DeferredRelayState>>,
     push_progress: Arc<Mutex<PushWorkspaceProgress>>,
+    /// The pull pass this request stopped for released-tail validation.
+    continuation: dohc_engine_sync::PullContinuation,
 }
 
 impl DeferredRelayTransport {
@@ -2054,6 +2056,17 @@ impl ActorHandle {
                     };
                     transport.complete(request, result);
                 }
+                // The attempt's transaction ended and the actor is free. The
+                // store's worker validates; once it completes, a fresh
+                // attempt rereads every fact and goes on from the progress
+                // the transport kept.
+                Err(RuntimeError::Relay(RelayError::ValidationPending(pending))) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        validated = pending.validate() => validated.map_err(validation_failed)?,
+                    }
+                }
                 Ok(mut outcome) => {
                     transport.apply_progress(&mut outcome);
                     return Ok(outcome);
@@ -2125,6 +2138,23 @@ fn build_debug_http_transport(
         (true, None) => HttpRelayTransport::new_insecure_loopback_for_tests(base_url, token),
         (false, Some(ca)) => HttpRelayTransport::new_with_test_ca_for_tests(base_url, token, &ca),
         (true, Some(_)) => Err(test_relay_ca_refused()),
+    }
+}
+
+/// A validation that ended without a result fails its request, which never
+/// validates any other way. A store that closed is unavailable.
+fn validation_failed(
+    error: dohc_engine_collab::live_update_application::ValidationError,
+) -> RuntimeError {
+    use dohc_engine_collab::live_update_application::ValidationError;
+    match error {
+        ValidationError::Closed => RuntimeError::ActorUnavailable,
+        ValidationError::Failed => {
+            RuntimeError::Relay(RelayError::Local("released-tails-unvalidated".to_owned()))
+        }
+        ValidationError::Uncommitted => {
+            RuntimeError::Relay(RelayError::Local("released-tails-uncommitted".to_owned()))
+        }
     }
 }
 
@@ -2380,7 +2410,8 @@ fn execute_relay_operation(
     claims: &ClaimAnnouncer,
     registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
-    let client = RelaySyncClient::new(transport);
+    let continuation = transport.continuation.clone();
+    let client = RelaySyncClient::resuming(transport, continuation);
     let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
     outcome

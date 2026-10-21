@@ -71,10 +71,19 @@ pub(crate) struct ConflictEffectOwner {
     pub(crate) effect_index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MomentApplyMode {
-    Ordinary,
+/// How a moment applies. An ordinary one decides released-lineage
+/// protection on the tails it carries. A conflict parent's shadow never
+/// holds for a released lineage, so it carries none.
+#[derive(Clone, Copy)]
+enum MomentApplyMode<'a> {
+    Ordinary(&'a ReleasedTails),
     ConflictParent,
+}
+
+impl MomentApplyMode<'_> {
+    fn ordinary(self) -> bool {
+        matches!(self, Self::Ordinary(_))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -360,25 +369,23 @@ pub fn apply_moment_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
+    tails: &ReleasedTails,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
-    apply_moment_envelope_detailed(store, envelope, faults, leases)
+    apply_moment_envelope_detailed(store, envelope, faults, leases, tails)
         .map(|outcome| outcome.map(|result| result.conflicts_opened))
 }
 
+/// `tails` decides released-lineage protection, bound to `store` here; a
+/// decision that waits for validation is [`SyncError::ValidationPending`].
 pub fn apply_moment_envelope_detailed(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
+    tails: &ReleasedTails,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
-    apply_moment_envelope_in_batch(
-        store,
-        envelope,
-        faults,
-        leases,
-        None,
-        &ReleasedTails::uncached(),
-    )
+    let tails = tails.bound_to(store);
+    apply_moment_envelope_in_batch(store, envelope, faults, leases, None, &tails)
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
@@ -470,14 +477,13 @@ pub(crate) fn apply_moment_envelope_in_batch(
             envelope,
             &payload,
             search_policy.as_ref(),
-            MomentApplyMode::Ordinary,
+            MomentApplyMode::Ordinary(tails),
             content_held,
             content_held
                 .then(|| leases.bound_claim(&key))
                 .flatten()
                 .as_deref(),
             relay_namespace,
-            tails,
         )?;
         if let Some(before) = &withheld {
             crate::hosted::record_withheld_before_in_tx(
@@ -660,19 +666,17 @@ pub(crate) fn redelivered_conflicts_opened(
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one, and `tails` keeps the protected
-/// tails the actor validated.
+/// pull's trusted configuration names one.
 #[allow(clippy::too_many_arguments)]
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
     search_policy: Option<&SearchPolicySnapshot>,
-    mode: MomentApplyMode,
+    mode: MomentApplyMode<'_>,
     content_held: bool,
     live_claim: Option<&str>,
     relay_namespace: Option<&str>,
-    tails: &ReleasedTails,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -761,7 +765,7 @@ fn apply_moment_append(
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
 
-    if mode == MomentApplyMode::Ordinary
+    if mode.ordinary()
         && payload.operation == "write"
         && conflicting_occupant.is_none()
         && !is_bound_owner(
@@ -820,7 +824,7 @@ fn apply_moment_append(
     }
     // A delete, rename or binary write retires or rebinds the lineage, and a
     // text write rebinds it when it moves the document.
-    if mode == MomentApplyMode::Ordinary {
+    if let MomentApplyMode::Ordinary(tails) = mode {
         let key = DocKey::new(
             &envelope.workspace_id,
             &payload.version_id,
@@ -847,7 +851,7 @@ fn apply_moment_append(
     }
 
     let mut owner_settlement = None;
-    if mode == MomentApplyMode::Ordinary {
+    if mode.ordinary() {
         let key = DocKey::new(
             &envelope.workspace_id,
             &payload.version_id,
@@ -944,7 +948,7 @@ fn apply_moment_append(
         }
     }
 
-    if mode == MomentApplyMode::Ordinary && payload.operation == "delete" && local.is_none() {
+    if mode.ordinary() && payload.operation == "delete" && local.is_none() {
         let key = DocKey::new(
             &envelope.workspace_id,
             &payload.version_id,
@@ -965,7 +969,7 @@ fn apply_moment_append(
         insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
         // No durable CRDT state remains; remove a possible empty marker so a
         // later base starts a fresh lineage.
-        if mode == MomentApplyMode::Ordinary {
+        if mode.ordinary() {
             crate::retire_ydoc_lineage_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -992,7 +996,7 @@ fn apply_moment_append(
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
         if payload.operation == "delete" {
-            if mode == MomentApplyMode::Ordinary {
+            if mode.ordinary() {
                 freeze_incoming_scene_delete_authority(tx, envelope, payload)?;
             }
             let alias_path = local
@@ -1020,7 +1024,7 @@ fn apply_moment_append(
                 params![envelope.workspace_id, payload.version_id, payload.object_id],
             )
             .map_err(SyncError::persist)?;
-            if mode == MomentApplyMode::Ordinary {
+            if mode.ordinary() {
                 crate::retire_ydoc_lineage_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -1043,7 +1047,7 @@ fn apply_moment_append(
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
-            if mode == MomentApplyMode::Ordinary {
+            if mode.ordinary() {
                 record_materialization_changes(tx, envelope, &materialization_changes)?;
             }
             return Ok(MomentApplyResult {
@@ -1139,7 +1143,7 @@ fn apply_moment_append(
             ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
         };
         let mut record_facts = None;
-        if mode == MomentApplyMode::Ordinary {
+        if let MomentApplyMode::Ordinary(tails) = mode {
             match crate::reconcile_imported_resulting_head_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -1327,7 +1331,7 @@ fn apply_moment_append(
                 content_kind: after_kind.as_str(),
             });
         }
-        if mode == MomentApplyMode::Ordinary {
+        if mode.ordinary() {
             record_materialization_changes(tx, envelope, &materialization_changes)?;
         }
         return Ok(MomentApplyResult {
@@ -1647,7 +1651,6 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         false,
         None,
         None,
-        &ReleasedTails::uncached(),
     )
 }
 

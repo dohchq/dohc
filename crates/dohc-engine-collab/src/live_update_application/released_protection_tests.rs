@@ -24,13 +24,36 @@ fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<Released
 /// fixture's store.
 fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
-    let tails = tails.bound_to(&f.store);
-    match f.store.read_with(|conn| protection(conn, &key, &tails)).unwrap() {
+    match decided(f, &key, tails) {
         Protection::Unprotected => None,
         Protection::Protected { binding, head } => {
             assert_eq!(binding.head_digest, hex_sha256(&head.encode_full_state()), "the head it names");
             Some(*binding)
         }
+        Protection::Pending(_) => unreachable!("decided"),
+    }
+}
+
+/// `key` decided on `tails` bound to the fixture's store, each decision in
+/// a transaction of its own, waiting for every validation one asks for, as
+/// the actor's relay coordinator does.
+fn decided(f: &Fixture, key: &ProtectionKey<'_>, tails: &ReleasedTails) -> Protection {
+    let tails = tails.bound_to(&f.store);
+    loop {
+        match f.store.read_with(|conn| protection(conn, key, &tails)).unwrap() {
+            Protection::Pending(pending) => pending.validate().wait().expect("validated"),
+            decided => return decided,
+        }
+    }
+}
+
+/// The validation one decision of the fixture's lineage waits for.
+fn pending(f: &Fixture, tails: &ReleasedTails) -> PendingValidation {
+    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
+    let tails = tails.bound_to(&f.store);
+    match f.store.read_with(|conn| protection(conn, &key, &tails)).unwrap() {
+        Protection::Pending(pending) => *pending,
+        _ => panic!("nothing kept answers the decision"),
     }
 }
 
@@ -406,11 +429,12 @@ fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 
     Ok(())
 }
 
-/// Sol's tails-cache ruling: a write transaction that changed the tails
-/// decides on its own state and keeps nothing, even after its savepoint
-/// rolls back. Back at committed state it reuses what was kept. A later
-/// change that reaches the generation a rolled-back transaction read never
-/// reuses what that transaction decided.
+/// Sol's worker ruling: a write transaction that changed the tails never
+/// decides on them. Its decision waits, and the worker, which reads only
+/// committed state, refuses the generation that transaction read rather
+/// than validate anything else for it. Back at committed state after its
+/// savepoint rolls back, it reuses what was kept. A later change that
+/// reaches the generation a rolled-back transaction read validates again.
 #[test]
 fn a_rolled_back_change_keeps_no_tails() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -419,17 +443,20 @@ fn a_rolled_back_change_keeps_no_tails() {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
     let bound = tails.bound_to(&f.store);
     let mut aborted = None;
+    let mut waiting = None;
     let rolled_back = f.store.write_with(&NoFaults, |tx| {
         tx.execute_batch("PRAGMA defer_foreign_keys=ON; SAVEPOINT tails").map_err(write_sql)?;
         apply_both_in(tx, [&c1.receipt, &c2.receipt])?;
-        assert!(matches!(protection(tx, &key, &bound)?, Protection::Unprotected), "its own state");
+        let Protection::Pending(pending) = protection(tx, &key, &bound)? else {
+            panic!("its own state is never decided on");
+        };
+        waiting = Some(pending);
         tx.execute_batch("ROLLBACK TO tails; RELEASE tails").map_err(write_sql)?;
         let Protection::Protected { binding, .. } = protection(tx, &key, &bound)? else {
             panic!("committed state again");
         };
         assert!(std::sync::Arc::ptr_eq(&binding.tails, &kept.tails), "what committed state kept");
         apply_both_in(tx, [&c1.receipt, &c2.receipt])?;
-        assert!(matches!(protection(tx, &key, &bound)?, Protection::Unprotected), "its own state");
         aborted = Some(tx.query_row(
             "SELECT generation FROM released_tail_generations WHERE object_id=?1",
             [&f.key.object_id],
@@ -438,6 +465,7 @@ fn a_rolled_back_change_keeps_no_tails() {
         Err::<(), _>(ApplicationError::Conflict)
     });
     assert!(matches!(rolled_back, Err(ApplicationError::Conflict)), "{rolled_back:?}");
+    assert_eq!(waiting.unwrap().validate().wait(), Err(ValidationError::Uncommitted));
     assert_eq!(tails.validations(), 1, "no transaction's own state is kept");
     let aborted = aborted.unwrap();
     while tail_generation_of(&f).unwrap() < aborted {
@@ -467,8 +495,9 @@ fn same_generation(first: &mut Fixture, second: &mut Fixture) {
 /// Sol's tails-cache ruling: kept tails belong to one open store. Tails
 /// bound to another store forget them, even where the document and its
 /// generation coincide, and so does a reopen of the same file, whose
-/// generations stand. A store with no generation for the document validates
-/// each decision and keeps nothing, never assuming one.
+/// generations stand. Sol's worker ruling: a document never activated has no
+/// generation and is unprotected without a scan, and an activated one
+/// without its generation is corrupt, never unprotected.
 #[test]
 fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     let (mut first, _, _, _) = released_at_b();
@@ -489,20 +518,24 @@ fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     kept_matches_fresh(&first, &tails).expect("protected");
     assert_eq!(tails.validations(), 4, "a reopened store validates again, once");
 
-    let (mut f, _, c1, c2) = released_at_b();
+    let (mut f, _, _, _) = released_at_b();
     write_unchecked(&mut f, "DROP TRIGGER released_tail_generation_kept; DELETE FROM released_tail_generations");
-    let tails = ReleasedTails::default();
-    kept_matches_fresh(&f, &tails).expect("protected");
-    applied_exactly(&mut f, &c1.receipt);
-    applied_exactly(&mut f, &c2.receipt);
-    assert!(kept_matches_fresh(&f, &tails).is_none(), "no generation keeps nothing");
-    assert_eq!(tails.validations(), 0);
+    let tails = ReleasedTails::default().bound_to(&f.store);
+    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
+    let decided = f.store.read_with(|conn| protection(conn, &key, &tails));
+    assert!(matches!(decided, Err(ApplicationError::Storage(_))), "an activation without a generation");
+    let f = Fixture::new();
+    assert_eq!(tail_generation_of(&f), None);
+    let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
+    let decided = f.store.read_with(|conn| protection(conn, &key, &tails.bound_to(&f.store))).unwrap();
+    assert!(matches!(decided, Protection::Unprotected), "never activated");
+    assert_eq!((tails.validation_requests(), tails.validations()), (0, 0));
 }
 
 /// Opus's 1a-2d finding 1: a kept verdict answers only the store it was
 /// validated on. Tails bound to one store, asked through another store's
-/// connection at the same document and generation, miss and decide on that
-/// connection's own state.
+/// connection at the same document and generation, miss, and the bound
+/// store's worker refuses to validate another store's decision.
 #[test]
 fn kept_tails_answer_only_the_store_they_were_validated_on() {
     let (mut first, _, _, _) = released_at_b();
@@ -516,8 +549,89 @@ fn kept_tails_answer_only_the_store_they_were_validated_on() {
     let key = ProtectionKey { doc: &second.key, lineage_claim_id: &second.binding.lineage_claim_id, incoming: &incoming() };
     let bound = tails.bound_to(&first.store);
     let decided = second.store.read_with(|conn| protection(conn, &key, &bound)).unwrap();
-    assert!(matches!(decided, Protection::Unprotected), "the other store's own state");
-    assert_eq!(tails.validations(), 1, "nothing validated on the bound store answers it");
+    let Protection::Pending(pending) = decided else {
+        panic!("nothing validated on the bound store answers it");
+    };
+    assert_eq!(pending.validate().wait(), Err(ValidationError::Failed), "another store's identity");
+    assert_eq!(tails.validations(), 1);
+}
+
+/// Sol's worker ruling: identical requests share one validation, and one
+/// whose result is already kept completes without asking the worker. A
+/// waiter that first looks after the validation completed still sees it.
+#[test]
+fn identical_requests_share_one_validation_and_no_completion_is_lost() {
+    let (f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    let (first, second) = (pending(&f, &tails), pending(&f, &tails));
+    assert_eq!(first, second);
+    tails.pause_validation();
+    let late = first.validate();
+    let joined = second.validate();
+    tails.wait_for_paused_validation();
+    tails.resume_validation();
+    assert_eq!(joined.wait(), Ok(()));
+    // `late` never registered before the validation completed.
+    assert_eq!(late.wait(), Ok(()));
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    assert_eq!(first.validate().wait(), Ok(()), "kept");
+    assert_eq!(tails.validation_requests(), 1);
+    assert!(protected(&f).is_some());
+}
+
+/// Sol's worker ruling: a generation that moves while the worker validates
+/// an older snapshot leaves that result answering nothing current. The next
+/// decision asks again, and the current state is what it decides on.
+#[test]
+fn a_generation_moved_during_validation_validates_current_state() {
+    let (mut f, _, c1, c2) = released_at_b();
+    let tails = ReleasedTails::default();
+    let old = pending(&f, &tails);
+    tails.pause_validation();
+    let validation = old.validate();
+    tails.wait_for_paused_validation();
+    applied_exactly(&mut f, &c1.receipt);
+    applied_exactly(&mut f, &c2.receipt);
+    tails.resume_validation();
+    assert_eq!(validation.wait(), Ok(()));
+    assert_eq!(tails.validations(), 1, "the older snapshot");
+    assert_ne!(pending(&f, &tails), old, "asked again at the current generation");
+    assert!(protected_in(&f, &incoming(), &tails).is_none(), "both applied, as now committed");
+    assert_eq!(tails.validations(), 2);
+}
+
+/// Sol's worker ruling: a failed validation fails its waiters and keeps
+/// nothing; it is not retried until a decision asks again.
+#[test]
+fn a_failed_validation_fails_its_waiters_and_keeps_nothing() {
+    let (f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    let request = pending(&f, &tails);
+    tails.fail_validations(1);
+    assert_eq!(request.validate().wait(), Err(ValidationError::Failed));
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 0));
+    assert_eq!(pending(&f, &tails), request, "nothing kept");
+    assert!(protected_in(&f, &incoming(), &tails).is_some());
+    assert_eq!(tails.validation_requests(), 2);
+}
+
+/// Sol's worker ruling: closing the tails cancels the validation running,
+/// wakes its waiters, and returns only once the worker ended. Nothing
+/// validates after.
+#[test]
+fn closing_cancels_validation_and_waits_for_the_worker() {
+    let (f, _, _, _) = released_at_b();
+    let tails = ReleasedTails::default();
+    let request = pending(&f, &tails);
+    tails.pause_validation();
+    let running = request.validate();
+    tails.wait_for_paused_validation();
+    assert!(tails.validating());
+    tails.close();
+    assert!(!tails.validating(), "the worker ended");
+    assert_eq!(running.wait(), Err(ValidationError::Closed));
+    assert_eq!(request.validate().wait(), Err(ValidationError::Closed), "nothing new starts");
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 0));
 }
 
 /// Opus's 1a-2b finding 3: a Carried delivery applied exactly is proven

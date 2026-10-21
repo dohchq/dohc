@@ -1943,8 +1943,10 @@ fn hold_released_lineage(
         tails,
     )
     .map_err(protection_failure)?;
-    let Protection::Protected { binding, head } = protected else {
-        return Ok(());
+    let (binding, head) = match protected {
+        Protection::Protected { binding, head } => (binding, head),
+        Protection::Unprotected => return Ok(()),
+        Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
     };
     if identity.is_none() {
         return Err(local_corruption(
@@ -1985,6 +1987,7 @@ fn protection_failure(
 /// Whether `binding` still names what its held row would change: the
 /// document's lineage, path, restore generation and head, the replica's feed,
 /// and every protected tail with its retained work, as `conn` reads them now.
+/// [`SyncError::ValidationPending`] while those tails wait for validation.
 pub(crate) fn released_binding_current(
     conn: &rusqlite::Connection,
     binding: &ReleasedLineageBinding,
@@ -2021,12 +2024,11 @@ pub(crate) fn released_binding_current(
         lineage_claim_id: &binding.lineage_claim_id,
         incoming,
     };
-    Ok(
-        match protection(conn, &key, tails).map_err(protection_failure)? {
-            Protection::Protected { binding: now, .. } => *now == *binding,
-            Protection::Unprotected => false,
-        },
-    )
+    match protection(conn, &key, tails).map_err(protection_failure)? {
+        Protection::Protected { binding: now, .. } => Ok(*now == *binding),
+        Protection::Unprotected => Ok(false),
+        Protection::Pending(pending) => Err(SyncError::ValidationPending(pending)),
+    }
 }
 
 /// [`hold_released_lineage`] for an imported file operation on `key`'s

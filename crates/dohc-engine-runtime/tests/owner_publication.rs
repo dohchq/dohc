@@ -906,14 +906,8 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
         }),
     };
     let mut cache = dohc_engine_collab::WriterDocCache::new();
-    let applied = dohc_engine_sync::apply_replication_envelope(
-        &mut f.store,
-        &mut cache,
-        &op,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("an ordinary peer edit must not wedge the adopted owner's cursor");
+    let applied = settled_apply(&mut f.store, &mut cache, &op, &NoFaults, &NoLiveLeases)
+        .expect("an ordinary peer edit must not wedge the adopted owner's cursor");
     let ApplyDisposition::Refused(refusal) = applied.primary else {
         panic!("expected retained binding refusal")
     };
@@ -941,15 +935,9 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
     )).unwrap();
     assert_eq!(retained, peer_digest);
     assert_eq!(
-        dohc_engine_sync::apply_replication_envelope(
-            &mut f.store,
-            &mut cache,
-            &op,
-            &NoFaults,
-            &NoLiveLeases
-        )
-        .unwrap()
-        .primary,
+        settled_apply(&mut f.store, &mut cache, &op, &NoFaults, &NoLiveLeases)
+            .unwrap()
+            .primary,
         ApplyDisposition::Skipped
     );
 }
@@ -3329,7 +3317,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             Ok::<_, dohc_engine_storage::StorageError>(())
         })
         .unwrap();
-    let applied = dohc_engine_sync::apply_replication_envelope(
+    let applied = settled_apply(
         &mut f.store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope,
@@ -4608,7 +4596,7 @@ fn import_envelope(
         }),
         recorded_at_ms: 10 + relay_seq,
     };
-    let applied = dohc_engine_sync::apply_replication_envelope(
+    let applied = settled_apply(
         store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &op,
@@ -6605,6 +6593,8 @@ struct HostedFeed {
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     /// Rows an earlier feed placed, which the relay still knows.
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
+    /// How many pages the host pulled.
+    pulls: std::sync::atomic::AtomicUsize,
 }
 
 impl HostedFeed {
@@ -6620,7 +6610,12 @@ impl HostedFeed {
             rows: Default::default(),
             blobs: Default::default(),
             placed: Vec::new(),
+            pulls: Default::default(),
         }
+    }
+
+    fn pulls(&self) -> usize {
+        self.pulls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn serve(
@@ -6732,6 +6727,7 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
         &self,
         req: dohc_engine_sync::HostedPullRequest,
     ) -> Result<dohc_engine_sync::HostedPullResponse, dohc_engine_sync::RelayError> {
+        self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let ops: Vec<_> = self
             .rows
             .lock()
@@ -6812,22 +6808,51 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
 }
 
 /// One hosted pass of the host over `client`'s feed, in the relay namespace
-/// its owner activations ran in.
+/// its owner activations ran in, run to its end as the actor's relay
+/// coordinator runs it: each released-tail validation it waits for completes
+/// on the worker, and the pass goes on from where it stopped.
 fn hosted_pass(
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
     cache: &mut dohc_engine_collab::WriterDocCache,
 ) -> dohc_engine_sync::HostedPassOutcome {
-    client
-        .pull_hosted_workspace(
+    loop {
+        match client.pull_hosted_workspace(
             store,
             cache,
             "workspace",
             Some("relay"),
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,
-        )
-        .unwrap()
+        ) {
+            Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                pending.validate().wait().unwrap();
+            }
+            pass => return pass.unwrap(),
+        }
+    }
+}
+
+/// [`dohc_engine_sync::apply_replication_envelope`], applied again after
+/// each released-tail validation it waits for completes.
+fn settled_apply(
+    store: &mut EngineStore,
+    cache: &mut dohc_engine_collab::WriterDocCache,
+    op: &dohc_engine_sync::ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    leases: &dyn dohc_engine_sync::LeaseProbe,
+) -> Result<
+    dohc_engine_sync::ApplyOutcome<dohc_engine_sync::RoutedApply>,
+    dohc_engine_sync::SyncError,
+> {
+    loop {
+        match dohc_engine_sync::apply_replication_envelope(store, cache, op, faults, leases) {
+            Err(dohc_engine_sync::SyncError::ValidationPending(pending)) => {
+                pending.validate().wait().unwrap();
+            }
+            applied => return applied,
+        }
+    }
 }
 
 /// The binding `pass` held `object` with, when it stopped the document
@@ -6929,7 +6954,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         );
         // The hold carries the binding admission built. An apply outside a
         // pull names no feed namespace.
-        let held = dohc_engine_sync::apply_replication_envelope(
+        let held = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &fold,
@@ -7032,7 +7057,7 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
     w.store.put_binary_blob(&safe).unwrap();
     let mut after = ydoc_row("after", &safe, &w.lineage, WINDOW_PATH, false);
     after.relay_seq = Some(30);
-    let applied = dohc_engine_sync::apply_replication_envelope(
+    let applied = settled_apply(
         &mut w.store,
         &mut cache,
         &after,
@@ -7314,7 +7339,7 @@ async fn a_pass_whose_released_binding_went_stale_commits_nothing() {
             w.store.put_binary_blob(&safe).unwrap();
             let mut op = ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false);
             op.relay_seq = Some(40);
-            dohc_engine_sync::apply_replication_envelope(
+            settled_apply(
                 &mut w.store,
                 &mut dohc_engine_collab::WriterDocCache::new(),
                 &op,
@@ -7481,7 +7506,7 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
     ];
     let native = w.native();
     for (case, op) in &cases {
-        let held = dohc_engine_sync::apply_replication_envelope(
+        let held = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             op,
@@ -7507,7 +7532,7 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
         WINDOW_PATH,
         false,
     );
-    let applied = dohc_engine_sync::apply_replication_envelope(
+    let applied = settled_apply(
         &mut w.store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &op,
@@ -7608,7 +7633,7 @@ async fn a_released_window_holds_a_safe_append_once_its_binding_moves() {
         let mut op = ydoc_row("safe", &safe, &w.lineage, path, false);
         op.relay_seq = Some(20);
         let native = w.native();
-        let held = dohc_engine_sync::apply_replication_envelope(
+        let held = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &op,
@@ -7721,14 +7746,58 @@ fn measured_tails(store: &EngineStore) -> ReleasedTails {
     ReleasedTails::default().bound_to(store)
 }
 
+/// A decision run to its end as the actor's relay coordinator runs it: each
+/// attempt, with the request for the validation it waits for, is one actor
+/// operation, and the worker validates between them.
 fn measured_protection(
     store: &EngineStore,
     key: &ProtectionKey<'_>,
     tails: &mut ReleasedTails,
 ) -> Protection {
-    store
-        .read_with(|conn| protection(conn, key, tails))
-        .unwrap()
+    loop {
+        let decided = released_window_measure::operation(|| {
+            match store
+                .read_with(|conn| protection(conn, key, tails))
+                .unwrap()
+            {
+                Protection::Pending(pending) => Err(pending.validate()),
+                decided => Ok(decided),
+            }
+        });
+        match decided {
+            Ok(decided) => return decided,
+            Err(validation) => validation.wait().unwrap(),
+        }
+    }
+}
+
+/// A hosted pass run to its end the same way.
+fn measured_pull(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    cache: &mut dohc_engine_collab::WriterDocCache,
+) -> Result<dohc_engine_sync::HostedPassOutcome, dohc_engine_sync::RelayError> {
+    loop {
+        let attempt = released_window_measure::operation(|| {
+            match client.pull_hosted_workspace(
+                store,
+                cache,
+                "workspace",
+                Some("relay"),
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            ) {
+                Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                    Err(pending.validate())
+                }
+                pass => Ok(pass),
+            }
+        });
+        match attempt {
+            Ok(pass) => return pass,
+            Err(validation) => validation.wait().unwrap(),
+        }
+    }
 }
 
 /// Sol's tails-cache ruling: the actor keeps a released lineage's validated
@@ -7924,6 +7993,304 @@ async fn a_lineage_retired_and_recreated_in_one_pass_is_validated_again() {
     w.close().await;
 }
 
+type HeldPass = (
+    RetainedWindow,
+    Desktop,
+    dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    dohc_engine_sync::HostedPassOutcome,
+);
+
+/// The window with a ready neighbour, its feed, and a pass that holds the
+/// desktop's fold of the document after applying the neighbour's create, as
+/// yet uncommitted.
+async fn held_pass() -> HeldPass {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let fold = feed.serve(fold, bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
+    (w, desktop, client, pass)
+}
+
+fn relay_configuration() -> dohc_engine_runtime::RelayConfiguration {
+    dohc_engine_runtime::RelayConfiguration {
+        base_url: "https://relay.example".into(),
+        bearer_token: "service-credential".into(),
+        #[cfg(debug_assertions)]
+        allow_insecure_loopback_for_tests: false,
+    }
+}
+
+type Answer = Result<dohc_engine_runtime::RelayOperationOutcome, dohc_engine_runtime::RuntimeError>;
+
+/// The actor's commit of `pass`, running as a relay request does.
+fn actor_commit(
+    w: &RetainedWindow,
+    pass: &dohc_engine_sync::HostedPassOutcome,
+    token: CancellationToken,
+) -> tokio::task::JoinHandle<Answer> {
+    let actor = w.actor.clone();
+    let operation = dohc_engine_runtime::RelayOperation::CommitHostedCursor {
+        workspace_id: "workspace".into(),
+        cursor: pass.pending_cursor.clone().unwrap(),
+        root: w.root.path().to_owned(),
+        now_ms: 1_000_000,
+    };
+    tokio::spawn(async move {
+        actor
+            .relay(
+                relay_configuration(),
+                operation,
+                dohc_engine_collab::LeaseRegistry::new(),
+                token,
+                None,
+            )
+            .await
+    })
+}
+
+/// Wait until `tails` holds a validation at its pause, failing if the
+/// request answers first.
+async fn held_validation(tails: &ReleasedTails, request: &mut tokio::task::JoinHandle<Answer>) {
+    tokio::select! {
+        () = tails.paused_validation() => {}
+        answered = request => panic!("answered before its validation completed: {answered:?}"),
+    }
+}
+
+fn committed(answer: Answer) -> bool {
+    match answer.unwrap() {
+        dohc_engine_runtime::RelayOperationOutcome::HostedCursorCommitted { commit, .. } => {
+            commit.committed
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+fn cursor_commits(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT cursor_commits FROM hosted_replicas WHERE workspace_id='workspace'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Sol's worker ruling 1: a pass whose decision waits for validation stops
+/// with its row unapplied and its transaction ended. Its next run validates
+/// nothing itself and fetches nothing again: it goes on from that row with
+/// the neighbour's create it applied before still counted and still
+/// written, and holds the fold.
+#[tokio::test]
+async fn a_pass_waiting_for_validation_goes_on_from_the_row_that_waited() {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let safe = {
+        let doc = Ydoc::wire();
+        doc.apply(&w.native()).unwrap();
+        doc.richdoc_append_paragraph("Safe")
+    };
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let safe = feed.serve(
+        ydoc_row("safe", &safe, &w.lineage, WINDOW_PATH, false),
+        safe,
+    );
+    let fold = feed.serve(fold, fold_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let tails = cache.released_tails(&w.store);
+    let scans = released_tail_scans_on_this_thread();
+    let pull = |store: &mut EngineStore, cache: &mut _| {
+        client.pull_hosted_workspace(
+            store,
+            cache,
+            "workspace",
+            Some("relay"),
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        )
+    };
+    let Err(dohc_engine_sync::RelayError::ValidationPending(pending)) =
+        pull(&mut w.store, &mut cache)
+    else {
+        panic!("the window's first decision waits");
+    };
+    assert!(journaled(&w.store, &created), "the neighbour applied first");
+    assert!(
+        !journaled(&w.store, &safe),
+        "the row that waits applied nothing"
+    );
+    assert_eq!(
+        tails.validation_requests(),
+        0,
+        "nothing asked the worker yet"
+    );
+    pending.validate().wait().unwrap();
+    let pass = pull(&mut w.store, &mut cache).unwrap();
+    assert_eq!(pass.applied, 2, "the neighbour and the safe row");
+    assert!(
+        pass.changed_paths
+            .iter()
+            .any(|change| change.path == NEIGHBOUR_PATH),
+        "{:?}",
+        pass.changed_paths
+    );
+    assert!(journaled(&w.store, &safe));
+    assert!(stopped_before(&pass, &fold), "{:?}", pass.pending_cursor);
+    assert_eq!(client.transport().pulls(), 1, "fetched once");
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    assert_eq!(
+        released_tail_scans_on_this_thread(),
+        scans,
+        "no decision scanned"
+    );
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's worker ruling 1 and 4: a cursor commit whose hold waits for
+/// validation rolls back and stays outstanding while the worker validates;
+/// it never answers committed: false. The actor serves other work
+/// meanwhile, and nothing commits until validation completes. A later pass
+/// whose commit follows a tail-input change waits again the same way.
+#[tokio::test]
+async fn a_hosted_commit_waits_off_the_actor_for_validation() {
+    let (mut w, desktop, client, pass) = held_pass().await;
+    let tails = w.actor.released_tails();
+    let before = cursor_commits(&w.store);
+    tails.pause_validation();
+    let mut commit = actor_commit(&w, &pass, CancellationToken::new());
+    held_validation(&tails, &mut commit).await;
+    w.actor
+        .remote_changes_applied("workspace".into())
+        .await
+        .expect("the actor serves other work");
+    assert!(!commit.is_finished(), "the commit is outstanding");
+    assert_eq!(cursor_commits(&w.store), before, "nothing committed");
+    tails.resume_validation();
+    assert!(committed(commit.await.unwrap()));
+    assert_eq!(cursor_commits(&w.store), before + 1);
+    assert_eq!(tails.validation_requests(), 1);
+
+    // The next pass holds again; a tail input changes before its commit.
+    let again = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert_eq!(
+        again.held.get("object"),
+        pass.held.get("object"),
+        "held again"
+    );
+    write_unchecked(
+        &w,
+        "UPDATE live_owner_activations SET source_byte_length=source_byte_length",
+    );
+    tails.pause_validation();
+    let mut commit = actor_commit(&w, &again, CancellationToken::new());
+    held_validation(&tails, &mut commit).await;
+    assert!(!commit.is_finished(), "one commit outstanding");
+    tails.resume_validation();
+    assert!(committed(commit.await.unwrap()), "the binding still stands");
+    assert_eq!(tails.validation_requests(), 2);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's worker ruling 4: a validation that fails fails its commit once,
+/// committing nothing; nothing retries it on its own. A commit cancelled
+/// while it waits for validation committed nothing either, and its retry
+/// commits.
+#[tokio::test]
+async fn a_waiting_commit_fails_or_cancels_without_committing() {
+    let (w, desktop, _client, pass) = held_pass().await;
+    let tails = w.actor.released_tails();
+    let before = cursor_commits(&w.store);
+    tails.fail_validations(1);
+    let failed = actor_commit(&w, &pass, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &failed,
+            Err(dohc_engine_runtime::RuntimeError::Relay(
+                dohc_engine_sync::RelayError::Local(reason)
+            )) if reason == "released-tails-unvalidated"
+        ),
+        "{failed:?}"
+    );
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 0));
+    assert_eq!(cursor_commits(&w.store), before);
+
+    tails.pause_validation();
+    let token = CancellationToken::new();
+    let mut commit = actor_commit(&w, &pass, token.clone());
+    held_validation(&tails, &mut commit).await;
+    token.cancel();
+    assert!(matches!(
+        commit.await.unwrap(),
+        Err(dohc_engine_runtime::RuntimeError::Cancelled)
+    ));
+    assert_eq!(cursor_commits(&w.store), before);
+    tails.resume_validation();
+    assert!(committed(
+        actor_commit(&w, &pass, CancellationToken::new())
+            .await
+            .unwrap()
+    ));
+    assert_eq!(cursor_commits(&w.store), before + 1);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's worker ruling, close and replacement: closing the workspace while
+/// a commit waits cancels its validation off the actor and returns only once
+/// the worker and its connection ended. The commit fails as unavailable, and
+/// the store's file can be replaced at once.
+#[tokio::test]
+async fn closing_a_waiting_workspace_releases_its_file() {
+    let (mut w, desktop, _client, pass) = held_pass().await;
+    let tails = w.actor.released_tails();
+    tails.pause_validation();
+    let mut commit = actor_commit(&w, &pass, CancellationToken::new());
+    held_validation(&tails, &mut commit).await;
+    let elsewhere = ScratchDir::new().unwrap();
+    drop(std::mem::replace(
+        &mut w.store,
+        EngineStore::open(&engine_db_path(&elsewhere).unwrap(), 0).unwrap(),
+    ));
+    w.owner.close().await.unwrap();
+    w.supervisor.close_all().unwrap();
+    assert!(!tails.validating(), "the worker ended");
+    assert!(matches!(
+        commit.await.unwrap(),
+        Err(dohc_engine_runtime::RuntimeError::ActorUnavailable)
+    ));
+    let db = engine_db_path(&w.root).unwrap();
+    std::fs::rename(&db, db.with_extension("replaced")).expect("no connection holds the store");
+    desktop.close().await;
+}
+
 /// With nothing retained, a released chain protects nothing: the desktop's
 /// fold applies in the window as it does outside it.
 #[tokio::test]
@@ -8069,7 +8436,7 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
         );
         // The hold is the released lineage's, not another wait.
         w.store.put_binary_blob(&bytes).unwrap();
-        let held = dohc_engine_sync::apply_replication_envelope(
+        let held = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &op,
@@ -8088,7 +8455,7 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
             relay_seq: None,
             ..op.clone()
         };
-        let refused = dohc_engine_sync::apply_replication_envelope(
+        let refused = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &unplaced,
@@ -8432,7 +8799,7 @@ async fn a_bare_text_moment_in_the_released_window_holds_only_its_document() {
     );
     // The hold is the released lineage's, and writes nothing.
     w.store.put_binary_blob(&text).unwrap();
-    let held = dohc_engine_sync::apply_replication_envelope(
+    let held = settled_apply(
         &mut w.store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &moment,
@@ -8522,7 +8889,7 @@ async fn a_pending_text_moment_stops_only_its_document() {
     assert_eq!(document_rows(&host.store), rows);
     // It waits for its rewrite, not for a released lineage.
     host.store.put_binary_blob(&text).unwrap();
-    let pending = dohc_engine_sync::apply_replication_envelope(
+    let pending = settled_apply(
         &mut host.store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &moment,
@@ -8606,7 +8973,7 @@ async fn a_text_write_that_moves_the_document_holds_in_the_released_window() {
         );
         commit_pass(&mut w.store, &client, &pass);
         w.store.put_binary_blob(&bytes).unwrap();
-        let held = dohc_engine_sync::apply_replication_envelope(
+        let held = settled_apply(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &op,

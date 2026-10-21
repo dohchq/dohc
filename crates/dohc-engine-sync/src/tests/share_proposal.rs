@@ -1333,8 +1333,14 @@ fn apply_accepted_change(
     payload: serde_json::Value,
 ) -> MomentApplyResult {
     let operation = envelope("relay:share-member:recipient", 0, "moment.append", payload);
-    match apply_moment_envelope_detailed(engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("accepted change applies")
+    match apply_moment_envelope_detailed(
+        engine,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+        &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+    )
+    .expect("accepted change applies")
     {
         ApplyOutcome {
             primary: ApplyDisposition::Applied(result),

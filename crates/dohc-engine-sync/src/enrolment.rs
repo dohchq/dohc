@@ -1227,7 +1227,13 @@ mod tests {
             recorded_at_ms: 10,
         };
         assert!(matches!(
-            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_moment_envelope(
+                &mut store,
+                &refused,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+            ),
             Ok(crate::ApplyOutcome {
                 primary: crate::ApplyDisposition::Refused(_),
                 refusals: ref outcome_refusals,
@@ -1274,7 +1280,13 @@ mod tests {
             recorded_at_ms: 10,
         };
         assert!(matches!(
-            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_moment_envelope(
+                &mut store,
+                &refused,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+            ),
             Ok(crate::ApplyOutcome {
                 primary: crate::ApplyDisposition::Refused(_),
                 refusals: ref outcome_refusals,

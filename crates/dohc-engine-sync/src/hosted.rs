@@ -1016,7 +1016,10 @@ pub struct HostedCommit {
 /// it read from a position and states that one replaced, or when a binding a
 /// released-lineage hold of the pass names no longer describes what its row
 /// would change: its caller pulls again. `tails` keeps the tails the actor
-/// validated. Each document read is settled in the same transaction: held where
+/// validated; while a hold's tails wait for validation the transaction rolls
+/// back with [`SyncError::ValidationPending`], committing nothing and
+/// claiming nothing stale, and the caller commits the same cursor again
+/// once validation completes. Each document read is settled in the same transaction: held where
 /// its read stopped, ready once its read completes with nothing of it waiting
 /// in deferred work and its head at its scope's path, both when the pass read
 /// it and now, and still backfilling otherwise. So readiness never precedes

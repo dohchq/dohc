@@ -76,6 +76,7 @@ use crate::identity::EngineDbIdentity;
 pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -208,6 +209,8 @@ pub struct WorkspaceActor {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    /// The store's released tails, whose worker validates off the actor.
+    released_tails: ReleasedTails,
 }
 
 impl WorkspaceActor {
@@ -331,6 +334,8 @@ impl WorkspaceActor {
         let link_drain_holds = Arc::new(AtomicU64::new(0));
         let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let worker_state = Arc::clone(&state);
+        let released_tails = ReleasedTails::default();
+        let worker_tails = released_tails.clone();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -346,6 +351,7 @@ impl WorkspaceActor {
                     startup_tx,
                     writer_lock,
                     work,
+                    worker_tails,
                 )
             })
             .map_err(RuntimeError::ThreadSpawn)?;
@@ -370,6 +376,7 @@ impl WorkspaceActor {
                     link_metrics,
                     link_drain_holds,
                     current_views: Arc::default(),
+                    released_tails,
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -403,6 +410,7 @@ impl WorkspaceActor {
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             current_views: Arc::clone(&self.current_views),
+            released_tails: self.released_tails.clone(),
         }
     }
 
@@ -455,6 +463,10 @@ impl WorkspaceActor {
             // Finish an in-flight changed read while the writer can still commit it.
             retention.join();
         }
+        // Validation stops here, off the actor, and its connection closes
+        // before the store's files can be replaced. A request waiting on it
+        // fails as unavailable.
+        self.released_tails.close();
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -495,6 +507,7 @@ pub struct ActorHandle {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    released_tails: ReleasedTails,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -526,6 +539,13 @@ impl ActorHandle {
     pub async fn commit_count_for_harness(&self) -> Result<u64, RuntimeError> {
         self.run(|store, _| Ok(store.commit_count_for_harness()))
             .await
+    }
+
+    /// The released tails the actor decides synced rows on, for tests that
+    /// hold or count its validations.
+    #[doc(hidden)]
+    pub fn released_tails(&self) -> ReleasedTails {
+        self.released_tails.clone()
     }
 
     /// Engine diagnostics for the derived index; no store read or drain.
@@ -760,6 +780,7 @@ fn worker_main(
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
+    released_tails: ReleasedTails,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -829,7 +850,7 @@ fn worker_main(
     // serves the replay-parity gate base on the LOCAL append path only. It
     // lives and dies with this thread — exactly the single-writer scope its
     // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
-    let mut doc_cache = WriterDocCache::new();
+    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     let mut live_applications = live_application::Registry::default();
 
     // Blocking recv on the tokio channel keeps the SQLite work on this
@@ -1070,6 +1091,7 @@ mod saturation_tests {
             link_metrics: metrics,
             link_drain_holds: holds,
             current_views: Arc::default(),
+            released_tails: ReleasedTails::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
@@ -1090,6 +1112,7 @@ mod saturation_tests {
                 startup_tx,
                 Some(writer_lock),
                 None,
+                ReleasedTails::default(),
             );
         }));
         actor.store_freshly_created = startup_rx

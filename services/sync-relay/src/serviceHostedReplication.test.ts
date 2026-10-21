@@ -78,6 +78,39 @@ it("pulls again when the scope moved before the commit, and while the commit has
   }
 });
 
+/** An answer the engine gives only once the test releases it, as while it validates a released lineage's tails. */
+function heldAnswer(f: ReturnType<typeof fixture>, method: string) {
+  let release!: () => void, asked!: () => void;
+  const reached = new Promise<void>(resolve => {asked = resolve;});
+  const original = f.answers[method]!;
+  f.answers[method] = () => {
+    asked();
+    return new Promise(resolve => {release = () => resolve(original());});
+  };
+  return {reached, release: () => release()};
+}
+
+it("keeps its one commit outstanding while the engine validates, and pulls again only after it answers", async () => {
+  const f = fixture(), held = heldAnswer(f, "sync.commitCursor");
+  const pulled = f.driver.pull();
+  await held.reached;
+  expect(f.methods()).toEqual(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePendingCursor", "sync.commitCursor"]);
+  held.release();
+  expect(await pulled).toMatchObject({hasMore: false, pages: [{committed: true}]});
+  expect(f.methods().filter(method => method === "sync.pullHosted")).toHaveLength(1);
+  expect(f.methods().filter(method => method === "sync.commitCursor")).toHaveLength(1);
+});
+
+it("keeps its one pull outstanding while the engine validates", async () => {
+  const f = fixture(), held = heldAnswer(f, "sync.pullHosted");
+  const pulled = f.driver.pull();
+  await held.reached;
+  expect(f.methods()).toEqual(["sync.createHostedReplica", "sync.pullHosted"]);
+  held.release();
+  expect(await pulled).toMatchObject({hasMore: false, pages: [{committed: true}]});
+  expect(f.methods()).toEqual(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePendingCursor", "sync.commitCursor"]);
+});
+
 it("bounds a pass by its page limit", async () => {
   const f = fixture(attachment(2));
   f.answers["sync.pullHosted"] = () => pass({hasMore: true});

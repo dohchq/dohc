@@ -1,8 +1,10 @@
 //! The paired release measurement of released-window protection. Every
 //! revision it compares carries this file unchanged, so fixtures, sample
 //! progression and instrumentation match; each revision's own
-//! `owner_publication.rs` supplies the tails a decision reads, through
-//! [`measured_tails`] and [`measured_protection`].
+//! `owner_publication.rs` supplies the tails a decision reads and how a
+//! decision or pass runs to its end, through [`measured_tails`],
+//! [`measured_protection`] and [`measured_pull`], which time each actor
+//! operation with [`operation`].
 use super::*;
 use rusqlite::OptionalExtension;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
@@ -236,13 +238,30 @@ fn window_generation(store: &EngineStore) -> Option<i64> {
         .unwrap()
 }
 
-/// One measured pass or decision: its time, the tails scans it ran, and
-/// what its statements did.
+/// One measured pass or decision: its time to its end, each uninterrupted
+/// actor operation it took, the tails scans it ran, and what its statements
+/// did.
 struct Sample {
     ms: f64,
+    operations: Vec<f64>,
     validations: u64,
     generation: (Option<i64>, Option<i64>),
     sql: Sql,
+}
+
+/// The actor operations of the sample being taken, in milliseconds.
+static OPERATIONS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+
+/// Run `work` as one uninterrupted actor operation of the sample being
+/// taken, timed whole.
+pub(super) fn operation<T>(work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let done = work();
+    OPERATIONS
+        .lock()
+        .unwrap()
+        .push(started.elapsed().as_secs_f64() * 1000.0);
+    done
 }
 
 /// Measure `work` on `store`, timed from just before it starts to when it
@@ -250,6 +269,7 @@ struct Sample {
 fn sample<T>(store: &mut EngineStore, work: impl FnOnce(&mut EngineStore) -> T) -> (Sample, T) {
     let before = window_generation(store);
     let scans = released_tail_scans();
+    OPERATIONS.lock().unwrap().clear();
     *TRACED.lock().unwrap() = Some(Sql::default());
     let started = Instant::now();
     let done = work(store);
@@ -257,6 +277,7 @@ fn sample<T>(store: &mut EngineStore, work: impl FnOnce(&mut EngineStore) -> T) 
     let sql = TRACED.lock().unwrap().take().unwrap();
     let sample = Sample {
         ms,
+        operations: std::mem::take(&mut *OPERATIONS.lock().unwrap()),
         validations: released_tail_scans() - scans,
         generation: (before, window_generation(store)),
         sql,
@@ -347,15 +368,7 @@ fn measured_pass(
     );
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
     let (measured, pass) = sample(&mut w.store, |store| {
-        client
-            .pull_hosted_workspace(
-                store,
-                cache,
-                "workspace",
-                Some("relay"),
-                &NoFaults,
-                &dohc_engine_sync::NoLiveLeases,
-            )
+        measured_pull(store, &client, cache)
             .unwrap_or_else(|error| panic!("{sample_name}: {error:?}"))
     });
     assert_eq!(
@@ -438,6 +451,7 @@ fn record(
             "phase": phase,
             "sample": samples.len(),
             "ms": sample.ms,
+            "operations_ms": sample.operations,
             "validations": sample.validations,
             "generation_before": sample.generation.0,
             "generation_after": sample.generation.1,
@@ -457,9 +471,14 @@ fn record(
 /// changes and mean statement time, and every invalidating statement.
 fn summarize(plan: &Plan, scenario: (&str, usize), phase: &str, samples: &[Sample]) {
     let (history, entries) = scenario;
+    let p95 = |values: &[f64]| values[(values.len() * 95).div_ceil(100) - 1];
     let mut ms: Vec<f64> = samples.iter().map(|sample| sample.ms).collect();
     ms.sort_by(f64::total_cmp);
-    let p95 = (ms.len() * 95).div_ceil(100) - 1;
+    let mut operations: Vec<f64> = samples
+        .iter()
+        .flat_map(|sample| sample.operations.iter().copied())
+        .collect();
+    operations.sort_by(f64::total_cmp);
     let count = samples.len() as f64;
     let mean = |spent: fn(&Sql) -> Spent| {
         samples
@@ -475,12 +494,15 @@ fn summarize(plan: &Plan, scenario: (&str, usize), phase: &str, samples: &[Sampl
         .filter(|sample| sample.generation.0 != sample.generation.1)
         .count();
     println!(
-        "released_window_{phase} label={} history={history} entries={entries} safe_rows={MEASURED_SAFE_ROWS} samples={} validations={validations} generation_moved={moved} generation_advances={advances} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} mean_generation_reads_ms={:.3} mean_mutations_ms={:.3} mean_commits_ms={:.3} mean_other_sql_ms={:.3}",
+        "released_window_{phase} label={} history={history} entries={entries} safe_rows={MEASURED_SAFE_ROWS} samples={} validations={validations} generation_moved={moved} generation_advances={advances} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} operations={} operation_p95_ms={:.3} operation_max_ms={:.3} mean_generation_reads_ms={:.3} mean_mutations_ms={:.3} mean_commits_ms={:.3} mean_other_sql_ms={:.3}",
         plan.label,
         samples.len(),
         ms[ms.len() / 2],
-        ms[p95],
+        p95(&ms),
         ms[ms.len() - 1],
+        operations.len(),
+        p95(&operations),
+        operations[operations.len() - 1],
         mean(|sql| sql.generation_reads),
         mean(|sql| sql.mutations),
         mean(|sql| sql.commits),
@@ -507,9 +529,10 @@ fn summarize(plan: &Plan, scenario: (&str, usize), phase: &str, samples: &[Sampl
 /// [`MEASURED_SAFE_ROWS`] safe rows and a held row the pass retries, with
 /// the empty cache a restart leaves, with the actor's kept tails, after a
 /// tail input changes, and beside creates of [`UNRELATED_DOCUMENTS`]
-/// unrelated documents. Every sample prints a JSON record of its time, the
-/// tails scans it ran, the window's generation and the statements behind
-/// it; [`Plan`] reads the scenarios. Run in a release build:
+/// unrelated documents. Every sample prints a JSON record of its time to its
+/// end, the time of each uninterrupted actor operation it took, the tails
+/// scans it ran, the window's generation and the statements behind it;
+/// [`Plan`] reads the scenarios. Run in a release build:
 /// `cargo test --release -p dohc-engine-runtime --test owner_publication
 /// measure_released_window_protection -- --ignored --nocapture --test-threads=1`.
 #[tokio::test]

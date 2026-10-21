@@ -507,6 +507,7 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
                 &envelope,
                 &NoFaults,
                 &dohc_engine_sync::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
             )
             .unwrap_or_else(|error| panic!("apply moment envelope {error:?}: {:?}", op.payload));
             let ApplyOutcome {
@@ -783,6 +784,7 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
         &op.envelope(workspace_id),
         &NoFaults,
         &dohc_engine_sync::NoLiveLeases,
+        &dohc_engine_collab::live_update_application::ReleasedTails::default(),
     )
     .expect("apply trimmed moment envelope");
 }

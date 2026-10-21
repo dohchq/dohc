@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, WriterDocCache, Ydoc};
 use dohc_engine_domain::WriteText;
 
@@ -102,7 +103,14 @@ fn count(store: &EngineStore, table: &str) -> i64 {
         .unwrap()
 }
 fn apply(store: &mut EngineStore, op: &ReplicationEnvelope) {
-    let result = apply_moment_envelope(store, op, &NoFaults, &NoLiveLeases).unwrap();
+    let result = apply_moment_envelope(
+        store,
+        op,
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     let ApplyDisposition::Applied(result) = result.primary else {
         panic!("{result:?}")
     };
@@ -387,8 +395,14 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
     })
     .unwrap();
     hydrate(&peer, &mut source);
-    let imported =
-        apply_moment_envelope(&mut source, &exports(&peer)[0], &NoFaults, &NoLiveLeases).unwrap();
+    let imported = apply_moment_envelope(
+        &mut source,
+        &exports(&peer)[0],
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     assert_eq!(imported.primary, ApplyDisposition::Applied(1));
     let conflicts = VersionedTextStore::new(&mut source)
         .list_text_conflicts_page("ws", Some("open"), None)
@@ -541,6 +555,7 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
         exports(&peer).last().unwrap(),
         &NoFaults,
         &NoLiveLeases,
+        &ReleasedTails::default(),
     )
     .unwrap();
     assert_eq!(continued.primary, ApplyDisposition::Applied(0));
@@ -757,9 +772,15 @@ fn lane_many_settles_deliver_one_head_and_keep_owner_history() {
     hydrate(&source, &mut peer);
     apply(&mut peer, &second[1]);
     assert_eq!(
-        apply_moment_envelope(&mut peer, &second[1], &NoFaults, &NoLiveLeases)
-            .unwrap()
-            .primary,
+        apply_moment_envelope(
+            &mut peer,
+            &second[1],
+            &NoFaults,
+            &NoLiveLeases,
+            &ReleasedTails::default(),
+        )
+        .unwrap()
+        .primary,
         ApplyDisposition::Skipped
     );
     assert_eq!(count(&peer, "moments"), 2);
@@ -1401,8 +1422,14 @@ fn lane_divergence_uses_existing_conflict_and_never_echoes_imports() {
     write(&mut source, "doc", "b", "doc.md", "remote", "ydoc", 20);
     drain(&mut source);
     hydrate(&source, &mut peer);
-    let result =
-        apply_moment_envelope(&mut peer, &exports(&source)[1], &NoFaults, &NoLiveLeases).unwrap();
+    let result = apply_moment_envelope(
+        &mut peer,
+        &exports(&source)[1],
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(1)));
 
     peer.write_with(&NoFaults, |tx| {

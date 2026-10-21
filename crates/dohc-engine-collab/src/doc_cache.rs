@@ -305,6 +305,17 @@ impl WriterDocCache {
         WriterDocCache::default()
     }
 
+    /// A cache whose synced rows decide protection on `released_tails`,
+    /// which its owner closes.
+    pub fn with_released_tails(
+        released_tails: crate::live_update_application::ReleasedTails,
+    ) -> Self {
+        WriterDocCache {
+            released_tails,
+            ..WriterDocCache::default()
+        }
+    }
+
     /// A cache with tiny limits so tests can exercise eviction without
     /// building 64 MiB of documents.
     #[cfg(any(test, feature = "test-support"))]
