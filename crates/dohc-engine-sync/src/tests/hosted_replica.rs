@@ -3934,6 +3934,7 @@ fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() 
         ("a.md", "A.md"),
         ("A.md", "a.md/c.md"),
         ("a.md/c.md", "A.md"),
+        ("\u{212a}.md", "k.md"),
     ] {
         let (_scratch, _path, mut store) = hosted_store();
         let client = RelaySyncClient::new(HostedFeed::new());
