@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type FinderICloudSetting, type LocationProbe, workspaceLocation } from "./workspaceLocation";
 
 const HOME = "/Users/ada";
@@ -104,12 +104,19 @@ describe("workspaceLocation on a Mac", () => {
 
   it("still finds iCloud Drive when the mount listing fails", async () => {
     const { probe } = computer({ finder: ["FXICloudDriveDocuments"] });
+    const failure = new Error("mount timed out");
     probe.mounts = async () => {
-      throw new Error("mount timed out");
+      throw failure;
     };
-    await expect(workspaceLocation(`${HOME}/Library/Mobile Documents/com~apple~CloudDocs/Trip`, probe)).resolves.toBe("icloud-drive");
-    await expect(workspaceLocation(`${HOME}/Documents/Trip`, probe)).resolves.toBe("icloud-drive");
-    await expect(workspaceLocation(`${HOME}/Projects/Trip`, probe)).resolves.toBeNull();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(workspaceLocation(`${HOME}/Library/Mobile Documents/com~apple~CloudDocs/Trip`, probe)).resolves.toBe("icloud-drive");
+      await expect(workspaceLocation(`${HOME}/Documents/Trip`, probe)).resolves.toBe("icloud-drive");
+      await expect(workspaceLocation(`${HOME}/Projects/Trip`, probe)).resolves.toBeNull();
+      expect(logged).toHaveBeenLastCalledWith(`[desktop] could not list volumes to check where ${HOME}/Projects/Trip is kept:`, failure);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("fails when the root does not resolve", async () => {
@@ -181,7 +188,12 @@ describe("workspaceLocation on Linux", () => {
   it("finds a share KDE opened through kio-fuse, directly or through a link", async () => {
     const share = "/run/user/1000/kio-fuse-AbC123/smb/nas/team/Trip";
     const { probe } = computer({ platform: "linux", links: { "/home/ada/Team": share } });
-    for (const root of [share, "/home/ada/Team", "/run/user/1000/kio-fuse-AbC123/webdavs/ada@cloud.example.org/Trip"]) {
+    for (const root of [
+      share,
+      "/home/ada/Team",
+      "/run/user/1000/kio-fuse-AbC123/webdavs/ada@cloud.example.org/Trip",
+      "/run/user/1000/kio-fuse-AbC123/gdrive/ada@example.org/My Drive/Trip",
+    ]) {
       await expect(workspaceLocation(root, probe)).resolves.toBe("network-share");
     }
     for (const root of ["/run/user/1000/kio-fuse-AbC123/mtp/Pixel 8/Trip", "/run/user/1000/kio-fuse-AbC123/smb"]) {

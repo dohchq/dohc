@@ -50,9 +50,9 @@ const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x0
 // <runtime dir>/kio-fuse-XXXXXX/<protocol>/<host>/<path>
 // (src/kiofuseservice.cpp, src/kiofusevfs.cpp).
 const GVFS_NETWORK_BACKENDS = new Set([
-  "smb-share", "sftp", "ftp", "ftps", "ftpis", "dav", "davs", "dav+sd", "davs+sd", "nfs", "afp-volume", "google-drive", "onedrive",
+  "smb-share", "sftp", "ftp", "ftps", "ftpis", "dav", "dav+sd", "davs+sd", "nfs", "afp-volume", "google-drive", "onedrive",
 ]);
-const KIO_NETWORK_PROTOCOLS = new Set(["smb", "sftp", "ftp", "webdav", "webdavs", "nfs", "fish"]);
+const KIO_NETWORK_PROTOCOLS = new Set(["smb", "sftp", "ftp", "webdav", "webdavs", "nfs", "fish", "gdrive", "onedrive"]);
 
 function linuxFuseShare(root: string): boolean {
   const gvfs = /^\/run\/user\/\d+\/gvfs\/([^/:]+):/u.exec(root)?.[1];
@@ -72,7 +72,10 @@ export async function workspaceLocation(
       const [root, home, listing] = await Promise.all([
         probe.realpath(rootPath),
         probe.realpath(probe.home),
-        probe.mounts().catch(() => ""),
+        probe.mounts().catch((error: unknown) => {
+          console.error(`[desktop] could not list volumes to check where ${rootPath} is kept:`, error);
+          return "";
+        }),
       ]);
       if (!macVolumeIsLocal(root, listing)) return "network-share";
       return (await inICloudDrive(root, home, probe)) ? "icloud-drive" : null;
