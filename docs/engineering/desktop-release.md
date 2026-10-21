@@ -80,11 +80,14 @@ Windows jobs keep `node_modules` and the Rust `target` folder between runs, beca
 `pnpm install --frozen-lockfile` does not check the contents of packages already in `node_modules`.
 
 On the release PC, start each runner when you sign in, and keep the PC awake. Stay signed in: signing out stops both runners.
+Give both tasks priority 4, which is normal.
+With Task Scheduler's default of 7, the Windows runner and every job it starts run below normal CPU and I/O priority.
+The verification service runs at normal priority, so while it is busy the release's tests get little CPU time.
 In PowerShell, with each runner's folder, Git's folder, and the WSL distribution filled in:
 
 ```powershell
 $t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
+$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 4
 $git = "<Git folder>\bin"
 Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c set `"PATH=$git;%PATH%`" && run.cmd" -WorkingDirectory "<runner folder>")
 Register-ScheduledTask -TaskName "dohc Linux runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -- bash -lc 'cd <runner folder in WSL> && ./run.sh'")
