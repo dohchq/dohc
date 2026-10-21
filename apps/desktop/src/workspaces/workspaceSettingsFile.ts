@@ -1,4 +1,4 @@
-import { lstat, readFile, writeFile } from "node:fs/promises";
+import { lstat, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { decodeWorkspaceSettings } from "@dohc/workspace-contracts/workspace-settings";
@@ -19,7 +19,7 @@ import { moveIntoWorkspaceTrash } from "./workspaceFiles";
 import {
   localStateDir,
   LocalStateUnavailableError,
-  readsLocalState,
+  readOwnedFile,
   type LocalStateRefusal,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
@@ -45,6 +45,8 @@ function decodedOrNull(candidate: unknown): WorkspaceSettings | null {
 interface WorkspaceSettingsOnDisk {
   raw: Record<string, unknown> | null;
   result: WorkspaceSettingsResult;
+  // Why a save is refused when Reset can't help, because the folder is wrong.
+  folderRefusal?: string;
 }
 
 // An unknown key, or a value dohc cannot use, turns off only that key.
@@ -88,6 +90,38 @@ const NO_SETTINGS_FILE: WorkspaceSettingsOnDisk = {
   result: { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" },
 };
 
+// What keeps dohc from using `.dohc` or `.dohc/local` itself. Reset replaces
+// only the settings file, so these name their own way out, in the words the
+// engine's open refuses the workspace with.
+type FolderProblem = "link" | "not-folder" | "other-owner";
+const FOLDER_PROBLEM_WORDS: Record<FolderProblem, readonly [fact: string, fix: string]> = {
+  link: ["is a link", "Put what it links to in its place, then try again."],
+  "not-folder": ["is not a folder", "Rename or move it, then try again."],
+  "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
+};
+
+async function folderProblem(path: string): Promise<FolderProblem | null> {
+  const stats = await lstat(path).catch(() => null);
+  if (stats === null) return null;
+  if (stats.isSymbolicLink()) return "link";
+  if (!stats.isDirectory()) return "not-folder";
+  const uid = process.getuid?.();
+  return uid !== undefined && stats.uid !== uid ? "other-owner" : null;
+}
+
+function unusableFolder(shown: ".dohc" | ".dohc/local", problem: FolderProblem): WorkspaceSettingsOnDisk {
+  const [fact, fix] = FOLDER_PROBLEM_WORDS[problem];
+  return {
+    raw: null,
+    result: {
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: `This workspace's ${shown} ${fact}, so dohc is using default settings. ${fix}`,
+    },
+    folderRefusal: `dohc did not save workspace settings because this workspace's ${shown} ${fact}. ${fix}`,
+  };
+}
+
 async function loadWorkspaceSettings(
   workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsOnDisk> {
@@ -96,58 +130,59 @@ async function loadWorkspaceSettings(
   // throwing, and its contract says readers stay tolerant by catching. A
   // throw here is the settings-unreadable class one level up — the FOLDER is
   // untrustworthy — so it takes the same fail-closed path, with a warning
-  // that names the folder to repair. Restart alone cannot fix this class.
+  // that names the folder to repair.
   let metadata: string | null;
   try {
     metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
-  } catch {
+  } catch (error) {
+    const problem = await folderProblem(join(rootPath, ".dohc"));
+    if (problem) return unusableFolder(".dohc", problem);
+    const refused = (error as Error).message;
     return {
       raw: null,
-      result: unreadableSettings(
-        "dohc cannot use the workspace's .dohc folder.",
-        join(rootPath, ".dohc"),
-      ),
+      result: {
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+        source: "recovered",
+        warning: `dohc is using default settings. ${refused}`,
+      },
+      folderRefusal: `dohc did not save workspace settings. ${refused}`,
     };
   }
   if (metadata === null) return NO_SETTINGS_FILE;
   // These settings change what dohc does, such as whether a link opens
-  // without asking, so a folder another user made is not read. The read does
-  // not wait for the engine to prepare the folder, so the saved settings
-  // apply from the moment the window opens.
+  // without asking, so dohc uses only a file this user owns, read through
+  // one handle. The read does not wait for the engine to prepare the folder,
+  // so the saved settings apply from the moment the window opens.
   const folder = join(metadata, "local");
-  const folderStats = await lstat(folder).catch(() => null);
-  if (folderStats === null) return NO_SETTINGS_FILE;
-  if (!folderStats.isDirectory() || !readsLocalState(workspace, folderStats)) {
-    return {
-      raw: null,
-      result: unreadableSettings("dohc cannot use the workspace's .dohc/local folder.", folder),
-    };
-  }
   const path = join(folder, WORKSPACE_SETTINGS_FILE);
-  try {
-    const fileStats = await lstat(path);
-    if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
-      return {
-        raw: null,
-        result: unreadableSettings("Workspace settings are not a file dohc can read.", path),
-      };
+  const read = await readOwnedFile(path, MAX_WORKSPACE_SETTINGS_FILE_BYTES).catch(() => null);
+  if (read?.status !== "read") {
+    const problem = await folderProblem(folder);
+    if (problem) return unusableFolder(".dohc/local", problem);
+  }
+  if (read?.status === "missing") return NO_SETTINGS_FILE;
+  if (read?.status === "not-file") {
+    return { raw: null, result: unreadableSettings("Workspace settings are not a file dohc can read.", path) };
+  }
+  if (read?.status === "other-owner") {
+    return { raw: null, result: unreadableSettings("Another user made the workspace settings file.", path) };
+  }
+  if (read?.status === "too-large") {
+    return { raw: null, result: unreadableSettings("Workspace settings are too large to read.", path) };
+  }
+  if (read?.status === "read") {
+    try {
+      const raw: unknown = JSON.parse(read.content);
+      // Another version is a format this build cannot read, not one bad key.
+      if (
+        isSettingsObject(raw) &&
+        (raw.version === undefined || raw.version === DEFAULT_WORKSPACE_SETTINGS.version)
+      ) {
+        return { raw, result: settingsFromObject(raw) };
+      }
+    } catch {
+      // Not JSON: unreadable, as below.
     }
-    if (fileStats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
-      return {
-        raw: null,
-        result: unreadableSettings("Workspace settings are too large to read.", path),
-      };
-    }
-    const raw: unknown = JSON.parse(await readFile(path, "utf8"));
-    // Another version is a format this build cannot read, not one bad key.
-    if (
-      isSettingsObject(raw) &&
-      (raw.version === undefined || raw.version === DEFAULT_WORKSPACE_SETTINGS.version)
-    ) {
-      return { raw, result: settingsFromObject(raw) };
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return NO_SETTINGS_FILE;
   }
   return {
     raw: null,
@@ -237,10 +272,11 @@ async function applyWorkspaceSettingsPatch(
 ): Promise<WorkspaceSettingsResult> {
   const current = await loadWorkspaceSettings(workspace);
   if (current.result.source === "recovered") {
-    const path = await workspaceSettingsPath(workspace.rootPath);
     return {
       ...current.result,
-      refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
+      refusal:
+        current.folderRefusal ??
+        `dohc did not save workspace settings. dohc cannot read ${await workspaceSettingsPath(workspace.rootPath)}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
     };
   }
   const settings = mergeWorkspaceSettings(current.result.settings, patch);

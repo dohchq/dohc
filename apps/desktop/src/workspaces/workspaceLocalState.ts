@@ -1,4 +1,5 @@
-import { lstat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -38,17 +39,55 @@ export class LocalStateUnavailableError extends Error {
   }
 }
 
+export type OwnedFileRead =
+  | { readonly status: "read"; readonly content: string }
+  | { readonly status: "missing" | "not-file" | "other-owner" | "too-large" };
+
 /**
- * Whether a reader of state that changes what dohc does, such as settings,
- * can use the workspace's `.dohc/local`: this user owns it, or the engine's
- * current open of the workspace prepared it. The engine refuses another
- * user's folder on a local volume, and takes a network share's owners as the
- * server gives them, so its open answers for a share. A read never waits for
- * the engine. Windows reports no owner, so there the folder is used as is.
+ * Read one file of this computer's state whose content changes what dohc
+ * does, such as settings, and trust it only if this user owns the file. The
+ * file is opened once without following a link at its name, and its kind,
+ * owner and size are checked on that same handle before it is read, so a
+ * folder or path swapped meanwhile changes nothing: another local user can't
+ * make a file this user owns. That is the only protection. A file that came
+ * from a zip, a git checkout or a sync app belongs to this user and is read.
+ * Windows reports no owner, so there the owner is not checked.
  */
-export function readsLocalState(workspace: LocalStateWorkspace, folder: { readonly uid: number }): boolean {
-  const uid = process.getuid?.();
-  return uid === undefined || folder.uid === uid || currentBinding(workspace) !== null;
+export async function readOwnedFile(path: string, maxBytes: number): Promise<OwnedFileRead> {
+  // Windows has neither flag, so there a link at the name is refused first.
+  const noFollow: number | undefined = constants.O_NOFOLLOW;
+  const nonBlock: number | undefined = constants.O_NONBLOCK;
+  if (noFollow === undefined) {
+    const named = await lstat(path).catch(() => null);
+    if (named?.isSymbolicLink()) return { status: "not-file" };
+  }
+  // O_NONBLOCK keeps a FIFO at the name from holding the open.
+  const flags = constants.O_RDONLY | (noFollow ?? 0) | (nonBlock ?? 0);
+  const handle = await open(path, flags).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return "missing" as const;
+    if (error.code === "ELOOP" || error.code === "EISDIR") return "not-file" as const;
+    throw error;
+  });
+  if (typeof handle === "string") return { status: handle };
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) return { status: "not-file" };
+    const uid = process.getuid?.();
+    if (uid !== undefined && stats.uid !== uid) return { status: "other-owner" };
+    // Read one byte past the cap, so a file that grew since the check is
+    // still refused instead of cut short.
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) return { status: "too-large" };
+    return { status: "read", content: buffer.toString("utf8", 0, length) };
+  } finally {
+    await handle.close();
+  }
 }
 
 let bindings: LocalStateBindings | null = null;
