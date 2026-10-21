@@ -97,6 +97,7 @@ impl Fixture {
         })
         .await
         .expect("committed rewrites must reach disk automatically");
+        self.actor.run(|_, _| Ok(())).await.unwrap();
         for i in 0..sources {
             assert_eq!(
                 std::fs::read_to_string(self.root.join(format!("source-{i:04}.md"))).unwrap(),
