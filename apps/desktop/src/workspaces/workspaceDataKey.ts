@@ -57,16 +57,18 @@ async function verifyKeyDir(rootDir: string, path: string): Promise<void> {
   try {
     realParent = await realpath(dirname(path));
     expected = join(await realpath(rootDir), ".dohc", "engine");
-  } catch {
+  } catch (error) {
     throw new SecretFileStoreError(
       "key-corrupt",
-      "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again."
+        : "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
     );
   }
   if (realParent !== expected) {
     throw new SecretFileStoreError(
       "key-corrupt",
-      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Replace .dohc and .dohc/engine with real folders inside this workspace.",
+      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
     );
   }
 }

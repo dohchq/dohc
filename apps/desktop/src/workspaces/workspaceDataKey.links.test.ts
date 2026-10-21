@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readlink, readdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, readFile, readlink, readdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SECRET_KEY_RELATIVE_PATH, installWorkspaceDataKey, loadSecretDataKey } from "./workspaceDataKey";
@@ -6,10 +6,13 @@ import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+  return { ...actual, realpath: vi.fn(actual.realpath), writeFile: vi.fn(actual.writeFile) };
 });
 const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-afterEach(() => vi.mocked(writeFile).mockReset());
+afterEach(() => {
+  vi.mocked(realpath).mockReset();
+  vi.mocked(writeFile).mockReset();
+});
 const key = Buffer.alloc(32, 7);
 const payload = `dohc-secret-key-v1:${key.toString("base64")}\n`;
 const operations = [
@@ -64,7 +67,7 @@ describe.each(operations)("$name key custody", ({ run }) => {
       await expect(run(root)).rejects.toMatchObject({
         name: "SecretFileStoreError",
         code: "key-corrupt",
-        message: expect.stringContaining("folder resolves through a link"),
+        message: "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
       });
 
       expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
@@ -78,6 +81,30 @@ describe.each(operations)("$name key custody", ({ run }) => {
         await expect(lstat(targetKey)).rejects.toMatchObject({ code: "ENOENT" });
       }
     });
+  });
+
+  it.each([false, true])("names a missing key folder (metadata folder exists: %s)", async (metadataExists) => {
+    const root = await createTestScratch("dohc-data-key-missing-folder-");
+    if (metadataExists) await mkdir(join(root, ".dohc"));
+    await expect(run(root)).rejects.toMatchObject({
+      name: "SecretFileStoreError",
+      code: "key-corrupt",
+      message: "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again.",
+    });
+    expect(writeFile).not.toHaveBeenCalled();
+    await expect(lstat(join(root, ".dohc", "engine"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps the general words for a folder check denied by the filesystem", async () => {
+    const root = await createTestScratch("dohc-data-key-folder-denied-");
+    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
+    vi.mocked(realpath).mockRejectedValueOnce(Object.assign(new Error("denied"), { code: "EACCES" }));
+    await expect(run(root)).rejects.toMatchObject({
+      name: "SecretFileStoreError",
+      code: "key-corrupt",
+      message: "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+    });
+    expect(writeFile).not.toHaveBeenCalled();
   });
 
   it("accepts a workspace reached through an alias above its own key folder", async () => {
