@@ -10,6 +10,8 @@ const TITLES = {
 
 for (const location of ["icloud-drive", "network-share"] as const) {
   test(`@workspace-location a workspace kept in ${location} warns once on this computer`, async () => {
+    // Two launches of the app.
+    test.setTimeout(120_000);
     const workspace = await createTempWorkspace();
     const env = { DOHC_TEST_WORKSPACE_LOCATION: location };
     let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

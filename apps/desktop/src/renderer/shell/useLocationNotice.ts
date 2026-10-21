@@ -3,16 +3,24 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 export type WorkspaceLocation = NonNullable<SyncStatusResult["workspaceLocation"]>;
 
-export const LOCATION_NOTICES: Record<WorkspaceLocation, { title: string; message: string }> = {
-  "icloud-drive": {
-    title: "This workspace is in iCloud Drive",
-    message: "If two Macs use it, its Collections can lose recent changes or differ between the Macs. Keep the workspace outside iCloud Drive.",
-  },
-  "network-share": {
+/**
+ * The notice for a location. On Windows, History is as private as the folder
+ * that holds it, and a user's own folder is the one private by default. On a
+ * Mac or Linux computer, the engine makes History private on any local disk.
+ */
+export function locationNotice(location: WorkspaceLocation, platform: NodeJS.Platform): { title: string; message: string } {
+  if (location === "icloud-drive") {
+    return {
+      title: "This workspace is in iCloud Drive",
+      message: "If two Macs use it, its Collections can lose recent changes or differ between the Macs. Keep the workspace outside iCloud Drive.",
+    };
+  }
+  const destination = platform === "win32" ? "into your user folder on this computer" : "to this computer's disk";
+  return {
     title: "This workspace is on a network share",
-    message: "Anyone who can read the share can read its History, including text deleted from its files. To keep History private, move the workspace to this computer's disk.",
-  },
-};
+    message: `Anyone who can read the share can read its History, including text deleted from its files. To keep History private, move the workspace ${destination}.`,
+  };
+}
 
 // This computer's dohc profile keeps which workspaces were told, so each
 // hears it once per computer. Nothing syncs the profile's storage.
@@ -47,9 +55,10 @@ function rememberTold(key: string): void {
 export function useLocationNotice(input: {
   workspaceId: string;
   location: WorkspaceLocation | undefined;
+  platform: NodeJS.Platform;
   report: (notice: { title: string; message: string; location: WorkspaceLocation; toast: boolean }) => void;
 }): { noteDismissed: () => void } {
-  const { workspaceId, location, report } = input;
+  const { workspaceId, location, platform, report } = input;
   const key = location ? storageKey(workspaceId, location) : null;
   useEffect(() => {
     if (!location || !key) return;
@@ -60,8 +69,8 @@ export function useLocationNotice(input: {
       rememberTold(key);
       session.set(key, { dismissed: false });
     }
-    report({ ...LOCATION_NOTICES[location], location, toast: !told });
-  }, [key, location, report]);
+    report({ ...locationNotice(location, platform), location, toast: !told });
+  }, [key, location, platform, report]);
   const noteDismissed = useCallback(() => {
     if (key) session.set(key, { dismissed: true });
   }, [key]);

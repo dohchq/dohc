@@ -40,8 +40,8 @@ const systemProbe: LocationProbe = {
   fileSystemType: async (path) => (await statfs(path)).type,
 };
 
-// Linux f_type values of NFS, SMB, CIFS and SMB2 volumes.
-const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42]);
+// Linux f_type values of NFS, SMB, CIFS, SMB2, Ceph, AFS and 9p volumes.
+const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x00c36400, 0x5346414f, 0x01021997]);
 
 /** Where the workspace at rootPath is kept, or null for this computer's own disk. */
 export async function workspaceLocation(
@@ -50,28 +50,35 @@ export async function workspaceLocation(
 ): Promise<WorkspaceLocation | null> {
   switch (probe.platform) {
     case "darwin": {
-      const [root, home] = await Promise.all([probe.realpath(rootPath), probe.realpath(probe.home)]);
-      if (await inICloudDrive(root, home, probe)) return "icloud-drive";
-      return macVolumeIsLocal(root, await probe.mounts()) ? null : "network-share";
+      // A share mounted inside a folder iCloud Drive holds is still a share.
+      const [root, home, listing] = await Promise.all([probe.realpath(rootPath), probe.realpath(probe.home), probe.mounts()]);
+      if (!macVolumeIsLocal(root, listing)) return "network-share";
+      return (await inICloudDrive(root, home, probe)) ? "icloud-drive" : null;
     }
     case "win32": {
-      // A mapped network drive resolves to the server's path too. WSL's
-      // shares are this computer's.
-      const server = /^\\\\([^\\]+)\\/u.exec(await probe.realpath(rootPath))?.[1];
+      // A mapped network drive resolves to the server's path too. A path
+      // that doesn't resolve is read as given. WSL's shares are this
+      // computer's.
+      const root = await probe.realpath(rootPath).catch(() => rootPath);
+      const server = /^\\\\([^\\]+)\\/u.exec(root)?.[1];
       return server !== undefined && !/^(?:[?.]|wsl\$|wsl\.localhost)$/iu.test(server) ? "network-share" : null;
     }
-    case "linux":
-      return LINUX_NETWORK_TYPES.has(await probe.fileSystemType(rootPath)) ? "network-share" : null;
+    case "linux": {
+      // GNOME Files mounts the shares it opens through FUSE, under gvfs.
+      const root = await probe.realpath(rootPath);
+      if (/^\/run\/user\/\d+\/gvfs\//u.test(root)) return "network-share";
+      return LINUX_NETWORK_TYPES.has(await probe.fileSystemType(root)) ? "network-share" : null;
+    }
     default:
       return null;
   }
 }
 
-// APFS ignores case by default, and a path may name it either way.
+// realpath names each folder with its real capitals, and mount lists them
+// that way, so names compare exactly.
 function within(path: string, folder: string): boolean {
-  const base = folder.toLowerCase().replace(/\/$/u, "");
-  const lower = path.toLowerCase();
-  return lower === base || lower.startsWith(`${base}/`);
+  const base = folder.replace(/\/$/u, "");
+  return path === base || path.startsWith(`${base}/`);
 }
 
 // Under ~/Library/Mobile Documents, or under ~/Desktop or ~/Documents while

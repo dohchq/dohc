@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useShellError } from "./useShellError";
 import {
   forgetLocationNoticesForTests,
-  LOCATION_NOTICES,
+  locationNotice,
   useLocationNotice,
   type WorkspaceLocation,
 } from "./useLocationNotice";
@@ -17,11 +17,11 @@ afterEach(() => {
 
 // The shell's error hook and the location notice, as the workspace shell
 // wires them.
-function mountShell(workspaceId: string, location: WorkspaceLocation | undefined) {
+function mountShell(workspaceId: string, location: WorkspaceLocation | undefined, platform: NodeJS.Platform = "darwin") {
   return renderHook(
     (props: { location: WorkspaceLocation | undefined }) => {
       const shell = useShellError(workspaceId);
-      const notice = useLocationNotice({ workspaceId, location: props.location, report: shell.reportWorkspaceLocation });
+      const notice = useLocationNotice({ workspaceId, location: props.location, platform, report: shell.reportWorkspaceLocation });
       return { shell, notice };
     },
     { initialProps: { location } },
@@ -44,7 +44,7 @@ describe("useLocationNotice", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       tone: "warning",
-      ...LOCATION_NOTICES["network-share"],
+      ...locationNotice("network-share", "darwin"),
       details: [["Detail", "network-share"]],
       kind: "workspace-location",
       retry: null,
@@ -60,8 +60,25 @@ describe("useLocationNotice", () => {
     // Another workspace gets its own toast.
     const other = mountShell("ws-icloud", "icloud-drive");
     expect(other.result.current.shell.shellErrors).toMatchObject([
-      { ...LOCATION_NOTICES["icloud-drive"], details: [["Detail", "icloud-drive"]], seen: false },
+      { ...locationNotice("icloud-drive", "darwin"), details: [["Detail", "icloud-drive"]], seen: false },
     ]);
+  });
+
+  it("names the place that keeps History private on this computer", () => {
+    const sentence = "Anyone who can read the share can read its History, including text deleted from its files.";
+    for (const [platform, destination] of [
+      ["darwin", "to this computer's disk"],
+      ["linux", "to this computer's disk"],
+      ["win32", "into your user folder on this computer"],
+    ] as const) {
+      const shell = mountShell(`ws-${platform}`, "network-share", platform);
+      expect(shell.result.current.shell.shellErrors).toMatchObject([{
+        title: "This workspace is on a network share",
+        message: `${sentence} To keep History private, move the workspace ${destination}.`,
+      }]);
+      shell.unmount();
+    }
+    expect(locationNotice("icloud-drive", "win32")).toEqual(locationNotice("icloud-drive", "darwin"));
   });
 
   it("tells each workspace once per computer, not once per launch", () => {
@@ -75,7 +92,7 @@ describe("useLocationNotice", () => {
     relaunch();
     const moved = mountShell("ws-moved", "network-share");
     expect(moved.result.current.shell.shellErrors).toMatchObject([
-      { ...LOCATION_NOTICES["network-share"], seen: false },
+      { ...locationNotice("network-share", "darwin"), seen: false },
     ]);
   });
 

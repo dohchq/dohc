@@ -5002,6 +5002,7 @@ export function DesktopWorkspaceShell(props: {
   const locationNotice = useLocationNotice({
     workspaceId,
     location: syncStatus?.workspaceLocation,
+    platform: bridge().platform,
     report: reportWorkspaceLocation,
   });
   const revealRecoveryWorkspace = useCallback(() => {
