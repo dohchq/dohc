@@ -492,6 +492,10 @@ function makeBaseBridge(
     linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
+    // About for a conversation reads the files it mentions.
+    chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(async ({ channelWireId }) => ({
+      versionId: "main", subject: { channelWireId }, entries: [], unchecked: [], complete: true, indexBuilding: false,
+      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     linksEdges: vi.fn(async () => ({ versionId: "main", files: [
       {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
       entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
