@@ -97,6 +97,10 @@ export function fileChangedWhileOpeningRefusal(guard: DohcPathGuard): string {
   return `${guard.lead} The file at ${guard.path} changed while dohc opened it. Stop other programs from changing this file. Then retry.`;
 }
 
+export function folderChangedBeforeWritingRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} The folder at ${guard.path} changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.`;
+}
+
 // The path is a real folder, but another user owns it or can write in it, so
 // they could replace what dohc keeps there.
 export function notOnlyYoursRefusal(guard: DohcPathGuard): string {

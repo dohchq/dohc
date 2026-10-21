@@ -1,5 +1,5 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync } from "node:fs";
 import {
   copyFile,
   link,
@@ -220,6 +220,7 @@ function editPaths(root: string) {
   return {
     logPath,
     statePath: join(dirname(logPath), "state.sqlite"),
+    storageIdentity: lstatSync(dirname(logPath), { bigint: true }),
   };
 }
 

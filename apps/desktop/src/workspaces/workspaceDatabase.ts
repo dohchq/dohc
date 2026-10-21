@@ -143,23 +143,27 @@ export function readDatabasePageFromBytes(
   });
 }
 
-async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
-  let directory = await resolveWorkspaceMetadataDir(rootPath);
-  const slug = basename(dirname(databaseOpLogPath(databasePath)));
-  // Check each folder before creating anything beneath it.
-  for (const segment of ["databases", slug]) {
-    directory = join(directory, segment);
-    try {
-      await mkdir(directory, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const stats = await lstat(directory);
-    const path = segment === "databases" ? ".dohc/databases" : `.dohc/databases/${slug}`;
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new Error(notARealFolderRefusal({ ...DOHC_DATABASES_GUARD, path }, stats));
-    }
+async function prepareDatabaseFolder(directory: string, path: string) {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
+  const stats = await lstat(directory, { bigint: true });
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(notARealFolderRefusal({ ...DOHC_DATABASES_GUARD, path }, stats));
+  }
+  return stats;
+}
+
+async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
+  const metadata = await resolveWorkspaceMetadataDir(rootPath);
+  const slug = basename(dirname(databaseOpLogPath(databasePath)));
+  const databases = join(metadata, "databases");
+  // Check each folder before creating anything beneath it.
+  await prepareDatabaseFolder(databases, ".dohc/databases");
+  const directory = join(databases, slug);
+  const { dev, ino } = await prepareDatabaseFolder(directory, `.dohc/databases/${slug}`);
   const logPath = join(directory, "operations.jsonl");
   const statePath = join(directory, "state.sqlite");
   // SQLite can open these sidecars when recovering a previous transaction.
@@ -168,12 +172,12 @@ async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
       const stats = await lstat(join(directory, name));
       const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${slug}/${name}` };
       if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
-      if (stats.nlink !== 1) throw new Error(hardLinkedFileRefusal(guard));
+      if (stats.nlink > 1) throw new Error(hardLinkedFileRefusal(guard));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  return { logPath, statePath };
+  return { logPath, statePath, storageIdentity: { dev, ino } };
 }
 
 export async function applyDatabaseEdit(

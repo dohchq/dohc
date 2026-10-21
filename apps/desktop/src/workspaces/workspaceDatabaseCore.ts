@@ -14,9 +14,12 @@ import { basename, dirname, join } from "node:path";
 import {
   DOHC_DATABASES_GUARD,
   fileChangedWhileOpeningRefusal,
+  folderChangedBeforeWritingRefusal,
   hardLinkedFileRefusal,
   notAFileRefusal,
+  notARealFolderRefusal,
 } from "@dohc/workspace-core/guard-refusals";
+import { sameFsEntry, type FsEntryIdentity } from "@dohc/workspace-core/fs-entry-identity";
 import type {
   DatabaseColumnView,
   DatabaseEdit,
@@ -360,14 +363,27 @@ async function reserveOperationVersion(input: {
   }
 }
 
-async function appendOperationDurably(
-  logPath: string,
-  operation: DatabaseOperationInput & { version: number },
-): Promise<void> {
+async function withOperationLog<T>(
+  input: { logPath: string; storageIdentity: FsEntryIdentity },
+  run: (append: (operation: DatabaseOperationInput & { version: number }) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  const { logPath, storageIdentity } = input;
+  const folderGuard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}` };
+  const checkFolder = async () => {
+    const stats = await lstat(dirname(logPath), { bigint: true });
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error(notARealFolderRefusal(folderGuard, stats));
+    }
+    if (sameFsEntry(storageIdentity, stats) !== "same") {
+      throw new Error(folderChangedBeforeWritingRefusal(folderGuard));
+    }
+  };
+  // Refuse a queued edit before creating its log in a replacement folder.
+  await checkFolder();
   const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}/operations.jsonl` };
   const checkFile = (stats: BigIntStats) => {
     if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
-    if (stats.nlink !== 1n) throw new Error(hardLinkedFileRefusal(guard));
+    if (stats.nlink > 1n) throw new Error(hardLinkedFileRefusal(guard));
   };
   const before = await lstat(logPath, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -376,17 +392,24 @@ async function appendOperationDurably(
   if (before) checkFile(before);
   const handle = await open(logPath, before ? "a" : "ax", 0o600);
   try {
-    const opened = await handle.stat({ bigint: true });
-    const named = await lstat(logPath, { bigint: true });
-    checkFile(opened);
-    checkFile(named);
-    // Compare full NTFS file indexes, which can exceed Number's safe range.
-    if (opened.ino === 0n || opened.ino !== named.ino || opened.dev !== named.dev ||
-        (before && (opened.ino !== before.ino || opened.dev !== before.dev))) {
-      throw new Error(fileChangedWhileOpeningRefusal(guard));
-    }
-    await handle.appendFile(`${JSON.stringify(operation)}\n`, "utf8");
-    await handle.sync();
+    const checkLog = async () => {
+      const opened = await handle.stat({ bigint: true });
+      const named = await lstat(logPath, { bigint: true });
+      checkFile(opened);
+      checkFile(named);
+      if (sameFsEntry(opened, named) !== "same" ||
+          (before && sameFsEntry(before, opened) !== "same")) {
+        throw new Error(fileChangedWhileOpeningRefusal(guard));
+      }
+    };
+    await checkLog();
+    // Opening the log can yield. Recheck before SQLite opens the state file.
+    await checkFolder();
+    return await run(async (operation) => {
+      await checkLog();
+      await handle.appendFile(`${JSON.stringify(operation)}\n`, "utf8");
+      await handle.sync();
+    });
   } finally {
     await handle.close();
   }
@@ -434,49 +457,52 @@ export async function editDatabaseAtPath(input: {
   resultPath: string;
   logPath: string;
   statePath: string;
+  storageIdentity: FsEntryIdentity;
   edit: DatabaseEdit;
   operation: DatabaseOperationInput;
   pageOffset: number;
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
-  const version = await reserveOperationVersion(input);
-  const operation = createValidatedOperation(input.operation, version);
-  const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(input.absolutePath);
-  let transactionOpen = false;
-  try {
-    db.exec("BEGIN IMMEDIATE");
-    transactionOpen = true;
-    runEdit(db, input.edit);
-    await appendOperationDurably(input.logPath, operation);
-    db.exec("COMMIT");
-    transactionOpen = false;
-    const page = tablePage(
-      db,
-      input.resultPath,
-      input.edit.table,
-      input.pageOffset,
-    );
-    return {
-      path: input.resultPath,
-      table: input.edit.table,
-      page: {
-        offset: page.offset,
-        rows: page.rows,
-        nextOffset: page.nextOffset,
-      },
-      version,
-    };
-  } catch (error) {
-    if (transactionOpen) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Preserve the original edit or durable-log failure.
+  return withOperationLog(input, async (append) => {
+    const version = await reserveOperationVersion(input);
+    const operation = createValidatedOperation(input.operation, version);
+    const { DatabaseSync } = nodeSqlite();
+    const db = new DatabaseSync(input.absolutePath);
+    let transactionOpen = false;
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      runEdit(db, input.edit);
+      await append(operation);
+      db.exec("COMMIT");
+      transactionOpen = false;
+      const page = tablePage(
+        db,
+        input.resultPath,
+        input.edit.table,
+        input.pageOffset,
+      );
+      return {
+        path: input.resultPath,
+        table: input.edit.table,
+        page: {
+          offset: page.offset,
+          rows: page.rows,
+          nextOffset: page.nextOffset,
+        },
+        version,
+      };
+    } catch (error) {
+      if (transactionOpen) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // Preserve the original edit or durable-log failure.
+        }
       }
+      throw error;
+    } finally {
+      db.close();
     }
-    throw error;
-  } finally {
-    db.close();
-  }
+  });
 }

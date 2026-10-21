@@ -1,12 +1,18 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { link, lstat, mkdir, readFile, readdir, readlink, symlink, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, readlink, rename, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyDatabaseEdit, createWorkspaceDatabaseAccess } from "./workspaceDatabase";
 import { readDatabaseSnapshotAtPath } from "./workspaceDatabaseCore";
 import { createWorkspaceDatabaseWorkerOwner, type WorkspaceDatabaseWorkerOwner } from "./workspaceDatabaseWorker";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 const AUTHOR = { kind: "user", userId: "local" } as const;
@@ -25,7 +31,7 @@ beforeEach(async () => {
   } finally { db.close(); }
   worker = createWorkspaceDatabaseWorkerOwner();
 }, 30_000);
-afterEach(async () => { await worker.dispose(); });
+afterEach(async () => { vi.restoreAllMocks(); vi.mocked(fs.lstat).mockReset(); await worker.dispose(); });
 
 const entryPoints = [
   { name: "direct edit", run: (rootPath: string) => applyDatabaseEdit(rootPath, "data.sqlite", EDIT, AUTHOR, 1, { worker }) },
@@ -49,6 +55,36 @@ function rowValue(): unknown {
 }
 
 describe.each(entryPoints)("$name metadata custody", ({ run }) => {
+  it("accepts state files on a volume that reports zero links", async () => {
+    await run(root);
+    const original = vi.mocked(fs.lstat).getMockImplementation()!;
+    vi.mocked(fs.lstat).mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+      const stats = await original(...args);
+      return Object.assign(Object.create(stats), { nlink: typeof stats.nlink === "bigint" ? 0n : 0 });
+    }) as typeof fs.lstat);
+    await expect(run(root)).resolves.toMatchObject({ version: 2 });
+  });
+
+  it.each(["junction", "folder"])("refuses a slug replaced with a %s after the guard and before the worker runs", async (replacement) => {
+    const directory = dirname(join(root, databaseOpLogPath("data.sqlite")));
+    const outside = join(base, "outside");
+    await mkdir(outside);
+    const editPath = worker.editPath.bind(worker);
+    vi.spyOn(worker, "editPath").mockImplementationOnce(async (input) => {
+      await rename(directory, `${directory}-parked`);
+      if (replacement === "junction") {
+        await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
+      } else {
+        await mkdir(directory);
+      }
+      return editPath(input);
+    });
+    await expect(run(root)).rejects.toThrow(replacement === "junction" ? /must be a real folder/ : /folder.*changed before/);
+    expect(await readdir(outside)).toEqual([]);
+    expect(await readdir(replacement === "junction" ? outside : directory)).toEqual([]);
+    expect(rowValue()).toBe("before");
+  });
+
   describe.each(["operations.jsonl", "state.sqlite", "state.sqlite-journal"])("%s", (file) => {
     it.each([false, true])("refuses a file link without touching its target (exists: %s)", async (exists) => {
       const logPath = join(root, databaseOpLogPath("data.sqlite"));
@@ -122,7 +158,9 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
     else await writeFile(target, "original\n");
     await link(target, path);
     const before = await readFile(target);
+    const dispatch = vi.spyOn(worker, "editPath");
     await expect(run(root)).rejects.toThrow(/has another link.*Remove or rename this file\. Then retry\./);
+    expect(dispatch).not.toHaveBeenCalled();
     expect(await readFile(target)).toEqual(before);
     expect(await readFile(path)).toEqual(before);
     expect((await lstat(path)).nlink).toBe(2);

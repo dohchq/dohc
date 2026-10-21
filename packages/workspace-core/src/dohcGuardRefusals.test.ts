@@ -11,6 +11,7 @@ import {
   outsideWorkspaceRefusal,
   hardLinkedFileRefusal,
   fileChangedWhileOpeningRefusal,
+  folderChangedBeforeWritingRefusal,
 } from "./dohcGuardRefusals";
 
 const asFile = { isSymbolicLink: () => false, isFile: () => true };
@@ -29,6 +30,9 @@ describe("dohc guard refusals", () => {
     );
     expect(fileChangedWhileOpeningRefusal(guard)).toBe(
       "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl changed while dohc opened it. Stop other programs from changing this file. Then retry.",
+    );
+    expect(folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" })).toBe(
+      "dohc could not save this database edit. The folder at .dohc/databases/data changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.",
     );
   });
   it("names the squatter, the constraint, and the way out — one noun for both paths", () => {
