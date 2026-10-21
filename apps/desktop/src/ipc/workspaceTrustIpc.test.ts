@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it, vi } from "vitest";
 import { workspaceTrustOperations } from "./bridgeContract";
-import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, workspaceTrustHandlers } from "./workspaceTrustIpc";
+import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, restrictFailure, workspaceTrustHandlers } from "./workspaceTrustIpc";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SiteProcessHandle } from "../workspaces/siteRunner";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -18,6 +18,14 @@ async function harness(input: {
   failWrites?: { value: boolean };
   // Stands in for the workspace's stop, when a test holds it.
   stop?: () => Promise<void>;
+  // Stands in for the stop of the workspace's agent.
+  stopAgents?: (workspaceId: string) => Promise<void>;
+  // Hears the dialog open.
+  onAsk?: (workspaceId: string) => void;
+  // Hears every trust change.
+  onChange?: (workspaceId: string, trusted: boolean) => void;
+  // Keeps whether the dialog was shown, as dispatch does.
+  asked?: Set<string>;
   // Runs before each write of the trust file, to hold it.
   writeGate?: { hold: (() => Promise<void>) | null };
 } = {}) {
@@ -28,6 +36,7 @@ async function harness(input: {
   const file = join(scratch, "profile", "workspace-trust.json");
   const trust = createWorkspaceTrust({
     file,
+    ...(input.onChange ? { onChange: input.onChange } : {}),
     writeText: async (path, text) => {
       await input.writeGate?.hold?.();
       if (input.failWrites?.value) throw new Error("disk full");
@@ -51,6 +60,11 @@ async function harness(input: {
     confirm,
     stopAppCommands: (held) =>
       input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
+    stopAgents: input.stopAgents ?? (async () => undefined),
+    ...(input.onAsk || input.asked ? {
+      onAsk: (workspaceId: string) => { input.asked?.add(workspaceId); input.onAsk?.(workspaceId); },
+    } : {}),
+    ...(input.asked ? { wasAsked: (workspaceId: string) => input.asked!.has(workspaceId) } : {}),
     notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
   });
   const context = { event: { windowId: 1 }, operation };
@@ -60,6 +74,8 @@ async function harness(input: {
     leave: () => { current = false; },
     read: () => handlers.readWorkspaceTrust(payload, context),
     request: () => handlers.requestWorkspaceTrust(payload, context),
+    // As the renderer asks after a send whose agent Restricted Mode holds.
+    requestAutomatic: () => handlers.requestWorkspaceTrust({ ...payload, automatic: true }, context),
     restrict: () => handlers.restrictWorkspace(payload, context),
   };
 }
@@ -139,8 +155,11 @@ describe("main's workspace trust operations", () => {
       },
     });
     await h.request();
+    const persisting = vi.spyOn(h.trust, "persistRevocation");
     const restricting = h.restrict();
     await stopReached.promise;
+    // The save does not wait for the stop, so a quit meanwhile keeps it.
+    expect(persisting).toHaveBeenCalledWith("trip");
     // The Trust from another window is writing its grant when the stop ends.
     const writing = deferred<void>();
     const releaseWrite = deferred<void>();
@@ -151,10 +170,7 @@ describe("main's workspace trust operations", () => {
     };
     const trusting = h.request();
     await writing.promise;
-    const persisting = vi.spyOn(h.trust, "persistRevocation");
     stopping.reject(new Error("An app is still running because dohc could not stop it."));
-    // The restrict passed its first check and queued its save behind the write.
-    await vi.waitFor(() => expect(persisting).toHaveBeenCalledWith("trip"));
     releaseWrite.resolve();
     await expect(trusting).resolves.toEqual({ workspaceId: "trip", trusted: true });
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: true });
@@ -275,5 +291,84 @@ describe("main's workspace trust operations", () => {
     expect(h.lifecycle.status("trip", "portal").running).toBe(false);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
     expect(h.notified).toEqual([["trip", true], ["trip", false]]);
+  });
+
+  it("stops the workspace's agent with its apps, and says which one is still running", async () => {
+    const stopAgents = vi.fn(async (_workspaceId: string) => undefined);
+    const h = await harness({ answer: true, stopAgents });
+    await h.request();
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(stopAgents).toHaveBeenCalledWith("trip");
+
+    await h.request();
+    stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
+    await expect(h.restrict()).rejects.toThrow("An agent in this workspace is still running. dohc could not stop it.");
+    expect(await h.trust.isTrusted(h.workspace)).toBe(false);
+
+    await h.request();
+    await devServer(h, async () => { throw new Error("access denied"); });
+    stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
+    await expect(h.restrict()).rejects.toThrow("An app and an agent in this workspace are still running. dohc could not stop them.");
+    expect(restrictFailure("agent", true)).toBe(
+      "An agent in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.",
+    );
+  });
+
+  it("saves Restricted Mode and tells windows without waiting for the agent to stop", async () => {
+    const agentStopping = deferred<void>();
+    const h = await harness({ answer: true, stopAgents: () => agentStopping.promise });
+    await h.request();
+    const restricting = h.restrict();
+    // The agent is still stopping, and a restart would already find the workspace restricted.
+    await vi.waitFor(async () => expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false));
+    await vi.waitFor(() => expect(h.notified.at(-1)).toEqual(["trip", false]));
+    agentStopping.resolve();
+    await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: false });
+  });
+
+  it("tells dispatch the dialog opened, once for requests that share it, and not for a trusted workspace", async () => {
+    const asked: string[] = [];
+    const h = await harness({ answer: false, onAsk: (workspaceId) => asked.push(workspaceId) });
+    await Promise.all([h.request(), h.request()]);
+    expect(asked).toEqual(["trip"]);
+    const trusted = await harness({ answer: true, onAsk: (workspaceId) => asked.push(workspaceId) });
+    await trusted.request();
+    await trusted.request();
+    expect(asked).toEqual(["trip", "trip"]);
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops and saves a restrict, and keeps a grant, whatever a trust listener throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ answer: true, onChange: () => { throw new Error("listener failed"); } });
+    await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
+    const stop = vi.fn(async () => undefined);
+    await devServer(h, stop);
+    await expect(h.restrict()).resolves.toEqual({ workspaceId: "trip", trusted: false });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("opens an automatic question only until it was shown, and Trust workspace the person clicks always", async () => {
+    const asked = new Set<string>();
+    const h = await harness({ answer: false, asked });
+    // Two windows' sends: the second answer arrives after the person chose Stay.
+    await h.requestAutomatic();
+    await h.requestAutomatic();
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    await h.request();
+    expect(h.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts the question as asked only once the dialog was shown", async () => {
+    const asked = new Set<string>();
+    const h = await harness({ answer: false, asked });
+    h.confirm.mockRejectedValueOnce(new Error("The window closed before the dialog opened."));
+    await expect(h.requestAutomatic()).rejects.toThrow("The window closed");
+    expect(asked.size).toBe(0);
+    await h.requestAutomatic();
+    expect(h.confirm).toHaveBeenCalledTimes(2);
+    expect(asked).toEqual(new Set(["trip"]));
   });
 });

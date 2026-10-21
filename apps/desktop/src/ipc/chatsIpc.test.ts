@@ -141,6 +141,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   const scanChatDispatch = vi.fn(async () => undefined);
   const projectChatBookmarks = vi.fn();
   const ensureGroupFolder = vi.fn(async (_workspace: RegistryEntry, _folderPath: string): Promise<void> => undefined);
+  const agentWaitsForTrust = vi.fn(async (_workspaceId: string, _messageId: string) => false);
   const desktopChatBookmarks = {
     materializeChatBookmark: vi.fn(async (_workspace: RegistryEntry, _capture: WorkspaceEngineCapture, saved: ChatBookmark) => ({ ...saved, projectionState: "ready" as const })),
     archiveChatBookmark: vi.fn(async () => ({ ...bookmark, state: "archived" as const, generation: 2, projectionState: "ready" as const })),
@@ -202,7 +203,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     },
     withRendererWorkspaceOperation,
     resolveEngineFiles, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
-    ensureGroupFolder,
+    ensureGroupFolder, agentWaitsForTrust,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
     const handler = handlers.get(channel);
@@ -213,7 +214,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
-    signOutChatWrites: () => { chatCredentials = null; } };
+    agentWaitsForTrust, signOutChatWrites: () => { chatCredentials = null; } };
 }
 
 it("received file chats use tokens after a rename, so clicking the listed path finds the same thread", async () => {
@@ -427,6 +428,27 @@ describe("registered chat writes", () => {
     });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
     expect(test.scanChatDispatch).toHaveBeenCalledWith("workspace");
+  });
+
+  it("says when Restricted Mode holds the agent a sent message asks, and never fails the send over it", async () => {
+    const test = fixture();
+    const send = { workspaceId: "workspace", threadId: "thread", body: "@agent plan the day" };
+    expect(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)).waitsForTrust).toBeUndefined();
+    test.agentWaitsForTrust.mockResolvedValueOnce(true);
+    const held = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
+    expect(held.waitsForTrust).toBe(true);
+    expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", held.message.id);
+    test.agentWaitsForTrust.mockRejectedValueOnce(new Error("trust file unreadable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const unknown = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
+    warn.mockRestore();
+    expect(unknown.waitsForTrust).toBeUndefined();
+    test.agentWaitsForTrust.mockResolvedValueOnce(true);
+    const started = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: "workspace", channelId: "channel", body: "Plan the day",
+    }));
+    expect(started.waitsForTrust).toBe(true);
+    expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", started.message.id);
   });
 
   it("names the reaction's author as the viewer, locally when signed out", async () => {

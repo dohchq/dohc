@@ -1,4 +1,5 @@
 import { ShieldAlert } from "lucide-react";
+import { AGENTS_RESTRICTED_MESSAGE } from "../agents/agentToolCatalog";
 import { EmptyState, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 export const RESTRICTED_APP_WORDS = "In Restricted Mode, dohc does not run this app's code.";
@@ -34,24 +35,7 @@ export function RestrictedModeState(props: {
   onTrust: () => void;
 }) {
   if (props.variant === "band") {
-    return (
-      <div
-        data-testid="restricted-mode-state"
-        data-variant="band"
-        className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-1.5 text-[12px] text-muted"
-      >
-        <ShieldAlert size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
-        <span className="min-w-0 truncate" title={RESTRICTED_APP_WORDS}>{RESTRICTED_APP_WORDS}</span>
-        <SecondaryButton
-          size="compact"
-          className="ml-auto shrink-0"
-          disabled={props.asking}
-          onClick={props.onTrust}
-        >
-          Trust workspace
-        </SecondaryButton>
-      </div>
-    );
+    return <RestrictedModeBand testId="restricted-mode-state" words={RESTRICTED_APP_WORDS} {...props} />;
   }
   return (
     <EmptyState
@@ -65,5 +49,31 @@ export function RestrictedModeState(props: {
         Trust workspace
       </PrimaryButton>
     </EmptyState>
+  );
+}
+
+// Above Chats in a workspace whose agent Restricted Mode holds back.
+export function RestrictedAgentsBand(props: { asking: boolean; onTrust: () => void }) {
+  return <RestrictedModeBand testId="restricted-agents-state" words={AGENTS_RESTRICTED_MESSAGE} {...props} />;
+}
+
+function RestrictedModeBand(props: { testId: string; words: string; asking: boolean; onTrust: () => void }) {
+  return (
+    <div
+      data-testid={props.testId}
+      data-variant="band"
+      className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-1.5 text-[12px] text-muted"
+    >
+      <ShieldAlert size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
+      <span className="min-w-0 truncate" title={props.words}>{props.words}</span>
+      <SecondaryButton
+        size="compact"
+        className="ml-auto shrink-0"
+        disabled={props.asking}
+        onClick={props.onTrust}
+      >
+        Trust workspace
+      </SecondaryButton>
+    </div>
   );
 }

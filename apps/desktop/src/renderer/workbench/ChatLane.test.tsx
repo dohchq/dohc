@@ -14,10 +14,12 @@ vi.mock("./chatFileMentions", { spy: true });
 let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
+const onAgentWaitsForTrust = vi.fn();
 function lane(id = "channel-1", workspaceId = "workspace-a") {
   return <ReactionStoreProvider workspaceId={workspaceId}>
     <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
-      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0} />
+      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
+      onAgentWaitsForTrust={onAgentWaitsForTrust} />
   </ReactionStoreProvider>;
 }
 function send(body: string) {
@@ -28,6 +30,7 @@ function send(body: string) {
 beforeEach(() => {
   onError.mockReset();
   onThreadRead.mockReset();
+  onAgentWaitsForTrust.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation(callback => { activity = callback; return vi.fn(); });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" })] });
@@ -188,6 +191,31 @@ describe("ChatLane", () => {
     expect(bridgeMock.sendChatMessage).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", threadId: "thread-2", body: "New send" });
     await act(async () => newSend.resolve({ message: message({ id: "new-send", threadId: "thread-2", body: "New send" }) }));
     expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it("asks for trust when the person's own send waits on Restricted Mode, and never for a stale or plain send", async () => {
+    const view = render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "plain", body: "Plain" }) });
+    send("Plain");
+    await screen.findByText("Plain");
+    expect(onAgentWaitsForTrust).not.toHaveBeenCalled();
+
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "held", body: "@agent plan" }), waitsForTrust: true });
+    send("@agent plan");
+    await waitFor(() => expect(onAgentWaitsForTrust).toHaveBeenCalledWith("workspace-a"));
+    expect(onAgentWaitsForTrust).toHaveBeenCalledOnce();
+
+    // A reply that lands after the lane moved on asks nothing.
+    const stale = deferred<{ message: ReturnType<typeof message>; waitsForTrust: true }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(stale.promise);
+    send("@agent again");
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-2", channelId: "channel-2" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", threadId: "thread-2", body: "Second channel" })] });
+    view.rerender(lane("channel-2"));
+    await screen.findByText("Second channel");
+    await act(async () => stale.resolve({ message: message({ id: "stale", body: "@agent again" }), waitsForTrust: true }));
+    expect(onAgentWaitsForTrust).toHaveBeenCalledOnce();
   });
 
   it.each(["sent", "failed"] as const)("shows a slow send on the send control until it has %s", async (outcome) => {
