@@ -12,6 +12,7 @@ import {
   ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
+  LossyNoteNotice,
 } from "./fileInspectorUi";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -48,6 +49,7 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import type { LossyNoteCheck } from "./editor/lossyNote";
 import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
@@ -247,6 +249,9 @@ export function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name.
   engine: UseEngineDoc;
+  // Whether the note is a lossy note. The inspector holds the engine open
+  // until this is "clear", so "checking" waits as an open does.
+  lossyNote: LossyNoteCheck;
   // Reopen the engine session after `engine.engineMayHoldDocument`.
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
@@ -304,7 +309,7 @@ export function MarkdownView(props: {
   // editor — writable, autosaving straight TO disk — while the session about
   // to bind seeded from the engine head. Keystrokes in that window took a path
   // that session never sees. Nothing here is writable until the open answers.
-  const opening = engine.opening;
+  const opening = engine.opening || props.lossyNote === "checking";
   // What the user sees, as against `mode`, which is what the user CHOSE. An
   // opening document reads; its chosen mode is kept and restored, so a
   // document that would have opened straight into the editor still does.
@@ -856,6 +861,7 @@ export function MarkdownView(props: {
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
     engine.engineMayHoldDocument ||
+    props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -2166,7 +2172,7 @@ export function MarkdownView(props: {
                     // the open answers "not engine-backed", the file IS the
                     // document and this lifts.
                     getMarkdown: () =>
-                      engine.opening || engine.engineMayHoldDocument
+                      opening || engine.engineMayHoldDocument
                         ? null
                         : serializeDraftRef.current(),
                   }
@@ -2180,6 +2186,9 @@ export function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
+      {props.lossyNote === "lossy" ? (
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+      ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
       ) : null}

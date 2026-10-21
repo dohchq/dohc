@@ -34,6 +34,7 @@ import {
 } from "react";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { Layers, TriangleAlert } from "lucide-react";
@@ -462,6 +463,21 @@ export const FileInspector = memo(function FileInspector(
   const retryEngineOpen = useCallback(() => {
     setEngineRetryNonce((nonce) => nonce + 1);
   }, []);
+  // A note opens an engine session only once its bytes are known not to be a
+  // lossy note. Until then, and for a lossy note, the view shows the file's
+  // text read-only, and the engine sees the note as closed. A failed read is
+  // not held: the engine's own refusal is what the person needs to see.
+  const checksLossyNote = kind === "markdown" && liveDocumentKind !== null && !props.readOnly;
+  useEffect(() => {
+    if (checksLossyNote) warmLossyNoteCheck();
+  }, [checksLossyNote]);
+  const lossyNote = useLossyNote({
+    open: `${props.workspaceId}\u0000${props.path}`,
+    applies: checksLossyNote && !truncated && !error,
+    markdown: loadedPath === props.path ? text : null,
+    contentHash,
+    readSeq,
+  });
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -470,6 +486,7 @@ export const FileInspector = memo(function FileInspector(
       (kind === "markdown" || kind === "drawing") &&
       readAnswered &&
       (!truncated || liveDocumentKind === "scene") &&
+      lossyNote === "clear" &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
@@ -524,6 +541,7 @@ export const FileInspector = memo(function FileInspector(
     engine.documentUnavailable ||
     engine.liveHostUnavailable ||
     engine.opening ||
+    lossyNote !== "clear" ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||
     switchUnresyncedRef.current ||
@@ -558,7 +576,7 @@ export const FileInspector = memo(function FileInspector(
   const { scrollTarget, onScrollConsumed } = props;
   const textReady =
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
-  const activeSurfaceReady = textReady && !engine.opening;
+  const activeSurfaceReady = textReady && !engine.opening && lossyNote !== "checking";
   useEffect(() => {
     if (!activeSurfaceReady || !props.surfaceKey) return;
     props.onSurfaceReady?.(props.path, props.surfaceKey);
@@ -760,6 +778,7 @@ export const FileInspector = memo(function FileInspector(
             onButtonNotice={props.onButtonNotice}
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
+            lossyNote={lossyNote}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}

@@ -61,6 +61,7 @@ vi.mock("./editor/artifactSource", () => ({
   },
 }));
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
+import { rememberLossyNoteVerdictForTests } from "./editor/lossyNote";
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -297,6 +298,9 @@ describe("engine markdown source view", () => {
     doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const {bridgeMock} = makeEngineBridge(source);
+    // Most of these are lossy notes, which reach an engine session only when
+    // the person chooses to edit them anyway.
+    rememberLossyNoteVerdictForTests(TEST_CONTENT_HASH, false);
     bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -3141,6 +3145,9 @@ describe("engine markdown source view", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
 
     view.rerender(
       <FileInspector
@@ -3617,6 +3624,7 @@ describe("engine markdown source view", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(opens).toBe(1));
 
     // The switch: both tokens move together, exactly as the shell bumps them.
     view.rerender(

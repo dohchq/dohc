@@ -4,9 +4,10 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { Play, Share2 } from "lucide-react";
+import { Lock, Play, Share2 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
@@ -185,6 +186,44 @@ export function EngineMayHoldDocumentNotice(props: {
       >
         Try again
       </button>
+    </div>
+  );
+}
+
+// A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
+// app for the file, which edits it without dohc's editor.
+export function LossyNoteNotice(props: {
+  workspaceId: string;
+  path: string;
+  onError?: ReportButtonError;
+}) {
+  const openExternally = () => {
+    void bridge()
+      .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+      .catch((error: unknown) =>
+        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+      );
+  };
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        dohc can't edit this document yet without changing parts it can't show.
+      </span>
+      <span className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          data-testid="lossy-note-open-externally"
+          onClick={openExternally}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Open externally
+        </button>
+      </span>
     </div>
   );
 }

@@ -29,7 +29,7 @@ function engineBridge(
   const serverDoc = markdownToYDoc(markdown);
   return {
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
+    readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false, contentHash: "c".repeat(64) })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
