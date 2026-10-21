@@ -9,17 +9,20 @@
 //! The first base on the relay wins. In both arrival orders, with the
 //! desktop's document closed or open, every device ends on that one lineage,
 //! every relayed op is answered for good, what the owner typed survives, and
-//! a capture of the settled file completes.
+//! a capture of the settled file completes. An untouched seed adopts a winner
+//! whose bytes are the file's quietly; the parent's base, which settles to
+//! other bytes, opens a conflict beside the file.
 //!
-//! Mutation check: drop the untouched-seed rule in `preserve_base_sides_in_tx`
+//! Mutation checks: drop the untouched-seed rule in `preserve_base_sides_in_tx`
 //! and a desktop whose untouched seed lost writes its own projection over the
-//! file as a local moment and opens a conflict.
+//! file as a local moment and opens a conflict. Admit a write on a replaced
+//! claim and the edit typed after takeover lands in the winner.
 
 use base64::Engine as _;
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, WriterDocCache, Ydoc};
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor,
+    ActorHandle, CancellationToken, CaptureIngest, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
@@ -39,6 +42,7 @@ const PATH: &str = "docs/a.md";
 const RELAY_ORIGIN: &str = "relay-first-open";
 const TYPED_BEFORE: &str = "Typed before adoption";
 const TYPED_AFTER: &str = "Typed after adoption";
+const TYPED_STALE: &str = "Typed on the seeded claim after takeover";
 
 #[derive(serde::Deserialize)]
 struct Candidate {
@@ -83,7 +87,11 @@ fn only_client(base: &[u8]) -> yrs::StateVector {
 enum Typing {
     Untouched,
     BeforeAdoption,
+    /// The editor reopens on the active lineage, then types.
     AfterAdoption,
+    /// The editor keeps the document and claim it seeded and types into them
+    /// after the relay's base arrived.
+    AfterTakeover,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,14 +152,14 @@ fn prepare(db: &Path, head: Option<&str>) {
     }
 }
 
-/// Record `update` as the desktop editor's next write.
+/// Record `update` as the desktop editor's next write, made on `lineage`.
 async fn record(
     handle: &ActorHandle,
     key: &DocKey,
     update: Vec<u8>,
     lineage: Option<String>,
     seed: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
-) -> Option<String> {
+) -> Result<Option<String>, RuntimeError> {
     handle
         .ydoc_record_update(
             key.clone(),
@@ -171,11 +179,12 @@ async fn record(
             None,
         )
         .await
-        .expect("record editor update")
-        .lineage_claim_id
+        .map(|append| append.lineage_claim_id)
 }
 
-async fn open_note(handle: &ActorHandle) -> dohc_engine_runtime::YdocOpenState {
+async fn open_note(
+    handle: &ActorHandle,
+) -> Result<dohc_engine_runtime::YdocOpenState, RuntimeError> {
     handle
         .ydoc_open_state(
             WS.to_owned(),
@@ -188,7 +197,6 @@ async fn open_note(handle: &ActorHandle) -> dohc_engine_runtime::YdocOpenState {
             CancellationToken::new(),
         )
         .await
-        .expect("open the note")
 }
 
 /// The Y.Doc ops `store` journaled, each with its blob.
@@ -389,7 +397,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     // The desktop opens the note and seeds it under the client the engine names.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&d, 1).expect("open actor").actor;
-    let state = open_note(&handle).await;
+    let state = open_note(&handle).await.expect("open the note");
     let client = yrs::ClientID::new(u64::from(state.seed_client_id.expect("seed client")));
     assert!(only_client(desktop_seed).get(&client) > 0, "{case:?}");
     let key = state.key.clone();
@@ -400,18 +408,21 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         None,
         state.owner_seed_source,
     )
-    .await;
+    .await
+    .expect("record the seed");
+    // The editor's document, which it keeps until a resync replaces it.
+    let editor = Ydoc::wire();
+    editor.apply(desktop_seed).expect("apply seed");
     if case.typing == Typing::BeforeAdoption {
-        let doc = Ydoc::wire();
-        doc.apply(desktop_seed).expect("apply seed");
         record(
             &handle,
             &key,
-            doc.richdoc_append_paragraph(TYPED_BEFORE),
-            claim,
+            editor.richdoc_append_paragraph(TYPED_BEFORE),
+            claim.clone(),
             None,
         )
-        .await;
+        .await
+        .expect("record the typing");
     }
     supervisor.close(&d).expect("close actor");
 
@@ -435,6 +446,11 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         .as_str()
         .expect("claim")
         .to_owned();
+    let desktop_lost = case.relay_base_first;
+    // Only a winner whose bytes are the file's is adopted quietly. The
+    // parent's base settles to the canonical text, so winning over today's
+    // seed it opens a conflict beside the file.
+    let conflict_opens = desktop_lost && !case.desktop_builds_parent;
 
     // The desktop pushed, then pulls: it learns where its base landed and
     // applies the relay's base. Its own ops are not delivered back.
@@ -456,33 +472,122 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     );
     drop(d_store);
 
-    // After adoption the editor binds to the active lineage and types.
+    // After adoption the editor binds to the active lineage and types. An
+    // open conflict holds the note until the person chooses a side.
     if case.typing == Typing::AfterAdoption {
         let supervisor = WorkspaceSupervisor::new();
         let handle = supervisor.open(&d, 1).expect("open actor").actor;
-        let state = open_note(&handle).await;
-        assert_eq!(
-            state.lineage_claim_id.as_deref(),
-            Some(winner.as_str()),
-            "{case:?}"
-        );
-        let doc = Ydoc::wire();
-        doc.apply(&state.initial_update).expect("apply open state");
-        record(
+        let opened = open_note(&handle).await;
+        if conflict_opens {
+            assert!(
+                matches!(
+                    opened,
+                    Err(RuntimeError::Domain(
+                        dohc_engine_domain::DomainError::InvalidInput {
+                            reason: "ydoc-conflict-open"
+                        }
+                    ))
+                ),
+                "{case:?}: {opened:?}"
+            );
+        } else {
+            let state = opened.expect("open the note");
+            assert_eq!(
+                state.lineage_claim_id.as_deref(),
+                Some(winner.as_str()),
+                "{case:?}"
+            );
+            let doc = Ydoc::wire();
+            doc.apply(&state.initial_update).expect("apply open state");
+            record(
+                &handle,
+                &key,
+                doc.richdoc_append_paragraph(TYPED_AFTER),
+                state.lineage_claim_id,
+                None,
+            )
+            .await
+            .expect("record the typing");
+        }
+        supervisor.close(&d).expect("close actor");
+    }
+
+    // The editor still holds the document and claim it seeded and types into
+    // them. A losing claim is refused by name, and the resync hands over the
+    // winner as another device's lineage, so the editor keeps its document
+    // with the unsent edit and never replays it into the winner.
+    if case.typing == Typing::AfterTakeover {
+        let supervisor = WorkspaceSupervisor::new();
+        let handle = supervisor.open(&d, 1).expect("open actor").actor;
+        let written = record(
             &handle,
             &key,
-            doc.richdoc_append_paragraph(TYPED_AFTER),
-            state.lineage_claim_id,
+            editor.richdoc_append_paragraph(TYPED_STALE),
+            claim.clone(),
             None,
         )
         .await;
+        if desktop_lost {
+            match written {
+                Err(RuntimeError::Collab(dohc_engine_collab::CollabError::LineageWriteStale {
+                    expected,
+                    observed,
+                })) => {
+                    assert_eq!(expected, claim, "{case:?}");
+                    assert_eq!(observed.as_deref(), Some(winner.as_str()), "{case:?}");
+                }
+                other => panic!("{case:?}: a losing claim's write landed: {other:?}"),
+            }
+            let resynced = handle
+                .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+                .await
+                .unwrap_or_else(|error| panic!("{case:?}: resync {error:?}"));
+            assert_eq!(
+                resynced.lineage_claim_id.as_deref(),
+                Some(winner.as_str()),
+                "{case:?}"
+            );
+            assert!(!resynced.lineage_originated_here, "{case:?}");
+            assert!(
+                !canonical(&resynced.initial_update).contains(TYPED_STALE),
+                "{case:?}"
+            );
+            assert!(
+                editor
+                    .project(ContentKind::Richdoc)
+                    .expect("project")
+                    .content
+                    .contains(TYPED_STALE),
+                "{case:?}: the editor keeps the unsent edit"
+            );
+        } else {
+            assert_eq!(
+                written.unwrap_or_else(|error| panic!("{case:?}: {error:?}")),
+                Some(winner.clone()),
+                "{case:?}: the winning claim takes the edit"
+            );
+        }
         supervisor.close(&d).expect("close actor");
-        let d_store = EngineStore::open(&d, 9_302).expect("open desktop");
-        let mut typed = journaled(&d_store)[desktop_ops.len()..].to_vec();
-        assert_eq!(typed.len(), 1, "{case:?}: the edit is journaled once");
-        typed[0].0.relay_seq = Some(log.len() as i64 + 1);
-        log.extend(typed);
     }
+    let mut typed = journaled(&EngineStore::open(&d, 9_302).expect("open desktop"))
+        [desktop_ops.len()..]
+        .to_vec();
+    // What the owner typed that the winning lineage takes.
+    let typed_on_winner = match case.typing {
+        Typing::Untouched => None,
+        Typing::BeforeAdoption => (!desktop_lost).then_some(TYPED_BEFORE),
+        Typing::AfterAdoption => (!conflict_opens).then_some(TYPED_AFTER),
+        Typing::AfterTakeover => (!desktop_lost).then_some(TYPED_STALE),
+    };
+    assert_eq!(
+        typed.len(),
+        usize::from(typed_on_winner.is_some() && case.typing != Typing::BeforeAdoption),
+        "{case:?}: only an edit on the winner is journaled after delivery, once"
+    );
+    for (envelope, _) in &mut typed {
+        envelope.relay_seq = Some(log.len() as i64 + 1);
+    }
+    log.extend(typed);
 
     // A peer with no copy of the note pulls the whole log.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
@@ -505,35 +610,14 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         &d_store,
         "SELECT COUNT(*) FROM conflicts WHERE status='open'",
     );
-    let desktop_lost = case.relay_base_first;
-    match case.typing {
-        Typing::Untouched => {
-            assert_eq!(
-                conflicts, 0,
-                "{case:?}: an untouched seed opens no conflict"
-            );
-            assert_eq!(
-                count(
-                    &d_store,
-                    "SELECT COUNT(*) FROM moments WHERE moment_id LIKE '%-local'"
-                ),
-                0,
-                "{case:?}: an untouched seed writes no local moment"
-            );
-            assert_eq!(
-                count(&d_store, "SELECT COUNT(*) FROM ydoc_recovery_decisions"),
-                0,
-                "{case:?}"
-            );
-            // The file keeps the note unless the parent's base won over it.
-            let settled = if !desktop_lost || case.desktop_builds_parent {
-                markdown.to_owned()
-            } else {
-                canonical(relay_bytes)
-            };
-            assert_eq!(head(&d_store), settled, "{case:?}");
-        }
-        Typing::BeforeAdoption if desktop_lost => {
+    for store in [&d_store, &p_store] {
+        assert!(
+            !document(store, &key).contains(TYPED_STALE) || typed_on_winner == Some(TYPED_STALE),
+            "{case:?}: a losing claim's edit enters no device's winning document"
+        );
+    }
+    match (case.typing, typed_on_winner) {
+        (Typing::BeforeAdoption, None) => {
             // The losing edit stays the desktop's side of the conflict and
             // enters no device's winning document.
             assert_eq!(conflicts, 1, "{case:?}");
@@ -550,14 +634,55 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
             assert!(kept.contains(TYPED_BEFORE), "{case:?}: {kept:?}");
             assert!(!document(&p_store, &key).contains(TYPED_BEFORE), "{case:?}");
         }
-        typing => {
-            let typed = if typing == Typing::BeforeAdoption {
-                TYPED_BEFORE
-            } else {
-                TYPED_AFTER
-            };
+        (_, Some(typed)) => {
             assert_eq!(conflicts, 0, "{case:?}");
             assert!(document(&p_store, &key).contains(typed), "{case:?}");
+        }
+        // The engine holds nothing the owner typed, only the desktop's seed.
+        (_, None) => {
+            assert_eq!(
+                count(
+                    &d_store,
+                    "SELECT COUNT(*) FROM moments WHERE moment_id LIKE '%-local'"
+                ),
+                0,
+                "{case:?}: an untouched seed writes no local moment"
+            );
+            assert_eq!(
+                count(&d_store, "SELECT COUNT(*) FROM ydoc_recovery_decisions"),
+                0,
+                "{case:?}"
+            );
+            assert_eq!(
+                head(&d_store),
+                markdown,
+                "{case:?}: the file keeps the note"
+            );
+            if conflict_opens {
+                assert_eq!(conflicts, 1, "{case:?}");
+                let sides = d_store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT c.text, i.text FROM conflicts f \
+                             JOIN blobs c ON c.sha256=f.current_blob_sha256 \
+                             JOIN blobs i ON i.sha256=f.incoming_blob_sha256 \
+                             WHERE f.status='open'",
+                            [],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        )
+                    })
+                    .expect("read the conflict");
+                assert_eq!(
+                    sides,
+                    (markdown.to_owned(), canonical(relay_bytes)),
+                    "{case:?}"
+                );
+            } else {
+                assert_eq!(
+                    conflicts, 0,
+                    "{case:?}: an untouched seed of the file's bytes opens no conflict"
+                );
+            }
         }
     }
     drop((d_store, p_store));
@@ -642,6 +767,7 @@ async fn first_open_build_skew_keeps_one_lineage_in_both_arrival_orders() {
                     Typing::Untouched,
                     Typing::BeforeAdoption,
                     Typing::AfterAdoption,
+                    Typing::AfterTakeover,
                 ] {
                     let case = Case {
                         desktop_builds_parent,

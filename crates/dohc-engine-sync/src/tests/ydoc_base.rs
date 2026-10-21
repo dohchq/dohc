@@ -5071,34 +5071,81 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
 
 /// An untouched seed loses to a base of other text, here a file changed
 /// offline before the relay built from the older head. The file is a real
-/// divergence, so it stays the current side of a conflict. Only a winner of
-/// the same document adopts silently (`first_open_build_skew.rs`).
+/// divergence, so it stays the current side of a conflict. Only a winner
+/// whose bytes the file already holds adopts silently
+/// (`first_open_build_skew.rs`).
 ///
-/// Mutation check: drop the same-document comparison in
-/// `losing_seed_untouched_in_tx` and the older text overwrites the file.
+/// Mutation check: drop the byte comparison in `preserve_base_sides_in_tx`
+/// and the older text overwrites the file.
 #[test]
 fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
+    let file = "Written offline.\n";
+    assert_eq!(
+        untouched_seed_loses_to(
+            dohc_engine_collab::ContentKind::Plaintext,
+            file,
+            "Older head.\n"
+        ),
+        (file.to_owned(), "Older head.\n".to_owned(), file.to_owned())
+    );
+}
+
+/// The winner is the same rich document, but its source writes the list
+/// with `*` where the file, reformatted offline, writes `-`. The canonical
+/// text agrees; the bytes do not, so the file stays the current side of a
+/// conflict.
+///
+/// Mutation check: adopt on equal canonical text instead of equal bytes and
+/// the winner's `*` overwrites the file.
+#[test]
+fn an_untouched_seed_losing_to_other_source_bytes_keeps_its_file_in_a_conflict() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let (file, winner) = ("# A\n\n- x\n", "# A\n\n* x\n");
+    let canonical = |source: &str| {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
+        doc.project(ContentKind::Richdoc).unwrap().content
+    };
+    assert_eq!(canonical(file), canonical(winner), "one document");
+    assert_eq!(
+        untouched_seed_loses_to(ContentKind::Richdoc, file, winner),
+        (file.to_owned(), winner.to_owned(), file.to_owned())
+    );
+}
+
+/// Seed `file` as an untouched lineage, lose it to a base whose source is
+/// `winner`, and read the open conflict's current, incoming and head text.
+fn untouched_seed_loses_to(
+    kind: dohc_engine_collab::ContentKind,
+    file: &str,
+    winner: &str,
+) -> (String, String, String) {
     use dohc_engine_collab::{
-        ContentKind, DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
-        record_local_update,
+        DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc, record_local_update,
+    };
+    let build = |source: &str| {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(kind, source)
+            .unwrap();
+        doc.encode_full_state()
     };
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .unwrap();
     let path = "notes/offline.md";
-    let file = "Written offline.\n";
     let file_sha = seed_text_head(&mut engine, "offline", path, file);
     let key = DocKey::new("ws", "main", "offline").unwrap();
     record_local_update(
         &mut engine,
         &mut WriterDocCache::new(),
         &key,
-        &Ydoc::wire().plaintext_insert(0, file),
+        &build(file),
         LocalAppend {
             marker: Some(MarkerCreation {
                 path: Some(path),
-                content_kind: ContentKind::Plaintext,
+                content_kind: kind,
                 regime: Regime::LocalOnly,
             }),
             is_seed: true,
@@ -5110,16 +5157,14 @@ fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
         |_tx, _outcome, _sha| Ok(()),
     )
     .unwrap();
-    let remote = Ydoc::wire();
-    remote.plaintext_insert(0, "Older head.\n");
-    let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+    let claim = engine.put_binary_blob(&build(winner)).unwrap();
     let mut base_op = envelope(
         "remote",
         0,
         "ydoc.update",
         json!({
             "versionId": "main", "objectId": key.object_id, "path": path,
-            "contentKind": "plaintext", "updateBlobSha256": claim,
+            "contentKind": kind.as_str(), "updateBlobSha256": claim,
             "lineageClaimId": claim, "isBaseState": true,
         }),
     );
@@ -5132,7 +5177,7 @@ fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
         &NoLiveLeases,
     )
     .unwrap();
-    let sides: (String, String, String) = engine
+    engine
         .read_with(|conn| {
             conn.query_row(
                 "SELECT c.text,i.text,h.text FROM conflicts f
@@ -5144,11 +5189,7 @@ fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
         })
-        .unwrap();
-    assert_eq!(
-        sides,
-        (file.to_owned(), "Older head.\n".to_owned(), file.to_owned())
-    );
+        .unwrap()
 }
 
 fn resolve_seed_conflict(
