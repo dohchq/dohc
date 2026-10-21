@@ -50,7 +50,9 @@ owner [saved for unattended releases](#let-releases-run-unattended).
 
 ## Provide self-hosted runners
 
-Every release job runs on a self-hosted runner. Cloud runners stay off.
+The scheduled nightly runs every release job on a self-hosted runner.
+Until the repository is public, dispatch with `runners=github` only for the trial dry runs Ice approved.
+With `runners=github`, a job runs on GitHub's `ubuntu-24.04` image where the table names a Linux runner, and on `windows-2025` where it names a Windows one.
 
 | Jobs | Runner labels |
 | --- | --- |
