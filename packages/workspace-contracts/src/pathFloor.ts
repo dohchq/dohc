@@ -14,6 +14,19 @@ export function foldPathSegment(segment: string): string {
   return folded.normalize("NFC");
 }
 
+/**
+ * The engine's `path_collision_key`: one key for every spelling of a path
+ * that a disk ignoring case or Unicode normalization may treat as the same.
+ */
+export function pathCollisionKey(path: string): string {
+  return path
+    .split("/")
+    .map((segment) =>
+      foldPathSegment(segment.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase())
+        .replace(/[. ]+$/, ""))
+    .join("/");
+}
+
 const reservedSegments = [".dohc", ".git", "node_modules"];
 
 // Names the OS writes beside user files, with AppleDouble `._*` files checked

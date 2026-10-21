@@ -443,6 +443,7 @@ impl ActorHandle {
                                     progress: None,
                                     file_outcomes_settled: false,
                                     released_hold_paths: None,
+                                    planned_against_active_heads: false,
                                 },
                                 now,
                                 &dohc_engine_storage::NoFaults,
