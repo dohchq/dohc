@@ -38,6 +38,28 @@ export const PRIVACY_DENIED_WORDS =
 export const VOLUME_SHARES_NEW_FILES_WORDS =
   "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
 
+/**
+ * The engine's refusal to open a workspace whose `.dohc`, engine folder, or
+ * a store file in it is a link, the wrong kind of item, or another user's.
+ * The message names the reason, then the path from the workspace's root.
+ */
+const ENGINE_FOLDER_NOT_PRIVATE = /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/[^\s/]+)*)$/;
+const NOT_PRIVATE_FACTS = new Map([
+  ["link", "is a link"],
+  ["not-folder", "is not a folder"],
+  ["not-file", "is not a file"],
+  ["other-owner", "belongs to another user"],
+]);
+
+/** What keeps a workspace's History from being private, and what to do. */
+function engineFolderNotPrivateWords(message: string): string | null {
+  const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
+  const fact = NOT_PRIVATE_FACTS.get(reason);
+  if (fact === undefined) return null;
+  return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ` +
+    "Rename or move it, and dohc makes a new one when you try again.";
+}
+
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
@@ -265,6 +287,8 @@ export function readError(error: unknown): ReadError {
     const path = message.slice("capture-file-held: ".length);
     return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
   }
+  const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
+  if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }

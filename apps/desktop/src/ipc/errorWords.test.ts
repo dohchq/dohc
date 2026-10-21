@@ -195,6 +195,30 @@ describe("error words", () => {
     );
   });
 
+  it.each([
+    ["link .dohc", "This workspace's .dohc is a link, so dohc can't keep its History private."],
+    ["not-folder .dohc/engine", "This workspace's .dohc/engine is not a folder, so dohc can't keep its History private."],
+    ["other-owner .dohc/engine", "This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private."],
+    ["not-file .dohc/engine/engine.db-wal", "This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private."],
+  ])("names what keeps a workspace's History from being private, and where: %s", (detail, fact) => {
+    const message = `engine-folder-not-private: ${detail}`;
+    const words = `${fact} Rename or move it, and dohc makes a new one when you try again.`;
+    expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
+      words,
+      mapped: true,
+      cause: `DaemonRefusalError [INTERNAL]: ${message}`,
+    });
+    for (const sentence of words.split(/(?<=\.) /)) {
+      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
+    }
+  });
+
+  it("leaves a refusal of the engine's folder it has no words for to the caller", () => {
+    for (const message of ["engine-folder-not-private: constructor .dohc", "engine-folder-not-private: link /Users/me"]) {
+      expect(readError(acrossIpc(refusal("INTERNAL", message))).words).toBeNull();
+    }
+  });
+
   it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
     const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
     expect(isPrivacyDenied(eperm)).toBe(false);

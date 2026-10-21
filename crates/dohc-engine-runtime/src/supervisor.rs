@@ -497,9 +497,10 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
     // Owner-only on Unix, so other users cannot reach the store. Windows has
     // no mode; ACLs govern access there. On macOS a mode does not limit an ACL
     // entry, so each open also removes any the folder has. A refusal for a
-    // volume that keeps them reaches the wire by its own code.
+    // volume that keeps them, or for what is at a path, reaches the wire by
+    // its own code. `shown` is the folder's path as a refusal names it.
     #[cfg(target_vendor = "apple")]
-    let folder = {
+    let (folder, shown) = {
         // In a workspace, `.dohc` is checked as well as the folder.
         let depth = if parent.ends_with(".dohc/engine") {
             2
@@ -513,10 +514,13 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
         } else {
             base
         };
-        dohc_macos_files::ensure_private_dir(base, relative)
+        (
+            dohc_macos_files::ensure_private_dir(base, relative),
+            relative,
+        )
     };
     #[cfg(not(target_vendor = "apple"))]
-    let folder = {
+    let (folder, shown) = {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -524,9 +528,10 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
-        builder
+        let folder = builder
             .create(parent)
-            .and_then(|()| open_store_folder(parent))
+            .and_then(|()| open_store_folder(parent));
+        (folder, parent)
     };
     let folder = folder.map_err(|err| RuntimeError::Identity {
         reason: "could not create engine.db parent directory",
@@ -539,14 +544,14 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
         #[cfg(not(target_vendor = "apple"))]
         let local = Ok(true);
         local
-            .and_then(|local| restrict_store_files(&folder, name, local))
+            .and_then(|local| restrict_store_files(&folder, shown, name, local))
             .map_err(|err| RuntimeError::Identity {
                 reason: "could not keep the engine store private",
                 source: Some(err),
             })?;
     }
     #[cfg(not(unix))]
-    let _ = (folder, name);
+    let _ = (folder, shown, name);
     Ok(())
 }
 
@@ -571,20 +576,23 @@ fn open_store_folder(_parent: &Path) -> std::io::Result<()> {
 /// files are never opened for reading or writing: closing such a descriptor
 /// would drop the locks SQLite holds on them. On a volume that is not
 /// `local`, such as a network share, nothing is created or changed: its
-/// modes and ACLs are its server's.
+/// modes and ACLs are its server's. A refusal names the file under `shown`,
+/// the folder's path.
 #[cfg(unix)]
 fn restrict_store_files(
     folder: &std::os::fd::OwnedFd,
+    shown: &Path,
     name: &std::ffi::OsStr,
     local: bool,
 ) -> std::io::Result<()> {
-    restrict_store_files_with(folder, name, local, |_| {})
+    restrict_store_files_with(folder, shown, name, local, |_| {})
 }
 
 /// [`restrict_store_files`], with a seam just before each change of mode.
 #[cfg(unix)]
 fn restrict_store_files_with(
     folder: &std::os::fd::OwnedFd,
+    shown: &Path,
     name: &std::ffi::OsStr,
     local: bool,
     before_chmod: impl Fn(&std::ffi::OsStr),
@@ -610,11 +618,9 @@ fn restrict_store_files_with(
             Err(rustix::io::Errno::NOENT) => continue,
             Err(err) => return Err(err.into()),
         };
-        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "an engine store file is a link or not a file",
-            ));
+        let kind = FileType::from_raw_mode(stat.st_mode);
+        if kind != FileType::RegularFile {
+            return Err(not_a_store_file(shown.join(&file), kind));
         }
         if !local {
             continue;
@@ -631,6 +637,27 @@ fn restrict_store_files_with(
         }
     }
     Ok(())
+}
+
+/// The refusal of the store file at `path`, which is a link or not a file.
+/// On a Mac it names the file and why, which the desktop shows.
+#[cfg(target_vendor = "apple")]
+fn not_a_store_file(path: std::path::PathBuf, kind: rustix::fs::FileType) -> std::io::Error {
+    use dohc_macos_files::NotPrivateReason;
+    let reason = if kind == rustix::fs::FileType::Symlink {
+        NotPrivateReason::Link
+    } else {
+        NotPrivateReason::NotFile
+    };
+    std::io::Error::other(dohc_macos_files::NotPrivate { path, reason })
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn not_a_store_file(_path: std::path::PathBuf, _kind: rustix::fs::FileType) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "an engine store file is a link or not a file",
+    )
 }
 
 /// Give `name` in `folder` mode 0600. On a Mac this never follows a link at
@@ -667,6 +694,8 @@ fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Reg
 mod tests {
     use super::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
+    #[cfg(target_vendor = "apple")]
+    use dohc_macos_files::NotPrivateReason;
 
     /// A workspace folder whose ACL passes read and search to everyone must
     /// not pass them to the engine's folder or its store (#2207).
@@ -827,12 +856,23 @@ mod tests {
         let wal = with_suffix(&db, "-wal");
         std::fs::remove_file(&wal).unwrap();
         std::os::unix::fs::symlink(scratch.path().join("elsewhere"), &wal).unwrap();
-        super::restrict_store_files(&folder, name, false).unwrap_err();
+        let shown = std::path::Path::new("engine");
+        let err = super::restrict_store_files(&folder, shown, name, false).unwrap_err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            dohc_macos_files::not_private(&err),
+            Some(&dohc_macos_files::NotPrivate {
+                path: "engine/engine.db-wal".into(),
+                reason: dohc_macos_files::NotPrivateReason::Link,
+            })
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        let _ = err;
         std::fs::remove_file(&wal).unwrap();
-        super::restrict_store_files(&folder, name, false).unwrap();
+        super::restrict_store_files(&folder, shown, name, false).unwrap();
         assert_eq!(mode(&db), 0o644);
         std::fs::remove_file(&db).unwrap();
-        super::restrict_store_files(&folder, name, false).unwrap();
+        super::restrict_store_files(&folder, shown, name, false).unwrap();
         assert!(!db.exists(), "a store is created on a network volume");
     }
 
@@ -849,7 +889,9 @@ mod tests {
                 std::fs::remove_file(&wal).unwrap();
             }
         };
-        super::restrict_store_files_with(&folder, db.file_name().unwrap(), true, remove).unwrap();
+        let shown = std::path::Path::new("engine");
+        super::restrict_store_files_with(&folder, shown, db.file_name().unwrap(), true, remove)
+            .unwrap();
         assert_eq!(mode(&db), 0o600);
     }
 
@@ -876,7 +918,9 @@ mod tests {
             }
         };
         let open = std::os::fd::OwnedFd::from(std::fs::File::open(&folder).unwrap());
-        super::restrict_store_files_with(&open, db.file_name().unwrap(), true, swap).unwrap();
+        let shown = std::path::Path::new("engine");
+        super::restrict_store_files_with(&open, shown, db.file_name().unwrap(), true, swap)
+            .unwrap();
         assert_eq!(mode(&unrelated), 0o644);
         assert_eq!(mode(&db), 0o600, "the missing store is created private");
     }
@@ -900,7 +944,14 @@ mod tests {
         }
         let wal = with_suffix(&db, "-wal");
         std::os::unix::fs::symlink(&unrelated, &wal).unwrap();
-        assert!(supervisor.open(&db, 0).is_err());
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (".dohc/engine/engine.db-wal".into(), NotPrivateReason::Link)
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"mine");
         assert_eq!(mode(&unrelated), 0o644);
 
@@ -909,8 +960,46 @@ mod tests {
         std::fs::rename(&db, &real).unwrap();
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::os::unix::fs::symlink(&real, &db).unwrap();
-        assert!(supervisor.open(&db, 0).is_err());
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (".dohc/engine/engine.db".into(), NotPrivateReason::Link)
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
         assert_eq!(mode(&real), 0o644);
+
+        // A folder where a journal belongs is not a file.
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&real, &db).unwrap();
+        std::fs::create_dir(&wal).unwrap();
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (
+                ".dohc/engine/engine.db-wal".into(),
+                NotPrivateReason::NotFile
+            )
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
+    }
+
+    /// The path and reason a refused open names.
+    #[cfg(target_vendor = "apple")]
+    fn not_private(refused: Option<crate::RuntimeError>) -> (std::path::PathBuf, NotPrivateReason) {
+        match refused {
+            Some(crate::RuntimeError::Identity {
+                source: Some(err), ..
+            }) => {
+                let refused = dohc_macos_files::not_private(&err);
+                let refused = refused.unwrap_or_else(|| panic!("{err}"));
+                (refused.path.clone(), refused.reason)
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

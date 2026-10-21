@@ -930,6 +930,31 @@ describe("workspace shell errors", () => {
     ]);
   });
 
+  it("names the engine folder another user owns, and keeps its path for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [INTERNAL]: engine-folder-not-private: other-owner .dohc/engine",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    const words =
+      "This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. " +
+      "Rename or move it, and dohc makes a new one when you try again.";
+    expect(recovery.textContent).toContain(words);
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|INTERNAL|other-owner/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      `Detail: ${words}`,
+      "Cause: DaemonRefusalError [INTERNAL]: engine-folder-not-private: other-owner .dohc/engine",
+    ]);
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+  });
+
   it("stops a workspace macOS refuses, and offers System Settings beside Try again", async () => {
     const bridge = makeBridge(Promise.resolve(null), "darwin");
     bridge.openWorkspace.mockRejectedValueOnce(new Error(

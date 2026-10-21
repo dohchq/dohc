@@ -3192,6 +3192,52 @@ mod tests {
         service.workspace_close(Some(handle)).await.expect("close");
     }
 
+    /// A workspace whose engine folder or store file dohc can't keep private
+    /// is refused with what is there and where, which the desktop names to
+    /// the person (#2377).
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_names_what_keeps_the_engine_folder_from_being_private() {
+        let service = &EngineService::new();
+        let open = |root: &std::path::Path| {
+            let params = open_params(root, "private", json!({ "captureMode": "none" }));
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            }
+        };
+        let elsewhere = ScratchDir::new().expect("scratch");
+
+        let linked = ScratchDir::new().expect("scratch");
+        std::fs::create_dir(linked.path().join(".dohc")).expect("dohc");
+        std::os::unix::fs::symlink(elsewhere.path(), linked.path().join(".dohc/engine"))
+            .expect("link");
+        let refused = open(linked.path())
+            .await
+            .expect_err("a linked engine folder");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: link .dohc/engine"
+        );
+
+        let journal = ScratchDir::new().expect("scratch");
+        let opened = open(journal.path()).await.expect("open");
+        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+        let handle = handle.expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        let wal = journal.path().join(".dohc/engine/engine.db-wal");
+        let _ = std::fs::remove_file(&wal);
+        std::os::unix::fs::symlink(elsewhere.path().join("wal"), &wal).expect("link");
+        let refused = open(journal.path()).await.expect_err("a linked journal");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: link .dohc/engine/engine.db-wal"
+        );
+    }
+
     fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {
         let mut params = json!({
             "rootDir": root.to_string_lossy(),
