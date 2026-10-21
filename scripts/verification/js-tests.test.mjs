@@ -129,14 +129,15 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
         await new Promise(done=>setTimeout(done,10));
       }
     }
-    export async function run(_command,args,{log,signal}){
+    export async function run(_command,args,{log,signal,env}){
       if(args.includes('list'))return {stdout:JSON.stringify(['a-fail','b-sibling','c-queued'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
       const name=args[0]==='run'?'repository':args[1];
       writeFileSync(log,'ok');
       if(scenario==='flaky'){
         if(name==='repository'&&!existsSync('ran')){writeFileSync('ran','');await until('sibling-started',signal);writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
         if(name==='repository')writeFileSync('repository-passed','');
-        if(name==='@dohc/b-sibling'){writeFileSync('sibling-started','');await until('repository-passed',signal);}
+        if(name==='@dohc/b-sibling'){writeFileSync('sibling-started','');await until('repository-passed',signal);
+          writeFileSync(env.DOHC_TEST_RECORD,JSON.stringify({test:'src/b.test.ts › settles on retry',flaky:true,failed:false,passed:true,seconds:0.1,error:'EPERM: operation not permitted, rmdir'})+'\\n');}
         return {stdout:''};
       }
       if(name==='@dohc/a-fail'){await until('sibling-started',signal);writeFileSync('failed','');throw Object.assign(Error('package failed'),{commandExitFailure:true});}
@@ -181,7 +182,9 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
   assert.equal(flaky.stoppedBy, null);
   assert.equal(flaky.verdict, "PASS");
   assert.deepEqual(flaky.steps, { repository: "PASS", "@dohc/a-fail": "PASS", "@dohc/b-sibling": "PASS", "@dohc/c-queued": "PASS", proofs: "PASS" });
-  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" }]);
+  // A vitest test that passed on retry keeps what its failed try threw.
+  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" },
+    { step: "@dohc/b-sibling", test: "src/b.test.ts › settles on retry", error: "EPERM: operation not permitted, rmdir" }]);
 });
 
 // The vitest the desktop package runs, for a fixture that runs a real file alone.
