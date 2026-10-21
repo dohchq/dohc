@@ -33,7 +33,7 @@ describe("sendCliRequest", () => {
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: {
-        groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group" }],
+        groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group", channelWireId: "wire" }],
       },
     }));
     const result = await sendCliRequest(
@@ -45,7 +45,7 @@ describe("sendCliRequest", () => {
       { stateDir, transport, platform: "linux" },
     );
     expect(result).toEqual({
-      groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group" }],
+      groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group", channelWireId: "wire" }],
     });
     expect(transport).toHaveBeenCalledWith(
       join(stateDir, "dohc-cli.sock"),

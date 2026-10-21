@@ -1,3 +1,4 @@
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -72,6 +73,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
   dohc_chat_file_mentions: ["chat.read"],
+  dohc_chat_links: ["chat.read"],
   dohc_links_edges: ["links.edges"],
   dohc_links_in: ["links.in"],
   dohc_links_resolve: ["links.resolve"],
@@ -2345,3 +2347,5 @@ export { safeResolve };
 export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }
 
 export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
+
+export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

@@ -1,3 +1,4 @@
+import type { ChatLinksEngineInput, ChatLinksEnginePage } from "./chatLinks";
 import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "./chatFileMentions";
 import type { AutomationRunAttribution } from "./collection";
 
@@ -1151,6 +1152,7 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
   ): Promise<ChatAttachment[]>;
+  linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
   fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;

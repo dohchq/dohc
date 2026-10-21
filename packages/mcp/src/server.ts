@@ -1,3 +1,4 @@
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 // The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
 // launching it as a stdio child via its own config:
@@ -25,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -165,6 +166,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
+  register("dohc_chat_links",{description:"Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",inputSchema:ChatLinksInput.shape},async args=>text(await chatLinks(ctx,args)));
   register("dohc_chat_file_mentions", { description: "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.", inputSchema: ChatFileMentionsInput.shape }, async args => text(await chatFileMentions(ctx, args)));
   register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
   register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));

@@ -140,8 +140,8 @@ describe("markdown renderers", () => {
     expect(
       renderGroups({
         groups: [
-          engineering,
-          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
+          { ...engineering, channelWireId: "wire" },
+          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent", channelWireId: null },
         ],
       }),
     ).toMatchInlineSnapshot(`
