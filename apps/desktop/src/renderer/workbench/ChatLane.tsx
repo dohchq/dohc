@@ -268,19 +268,18 @@ export function ChatLane(props: {
     const current = token.current;
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({ workspaceId, threadId, body: option });
+      const result = await bridge().sendChatMessage({
+        workspaceId, threadId, body: option,
+        resolves: { messageId: decision.messageId, chosenOption: option },
+      });
       if (current !== token.current) return;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
       listRef.current?.scrollToEnd();
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-      const resolved = await bridge().resolveChatDecision({
-        workspaceId, threadId, messageId: decision.messageId,
-        resolvedByMessageId: result.message.id, chosenOption: option,
-      });
-      if (current !== token.current) return;
-      loadSequence.current += 1;
-      setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved.decision : entry));
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
+      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that poll."), result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
       onError(ipcErrorMessage(error, "Could not answer that poll."), error);

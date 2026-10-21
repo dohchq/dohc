@@ -3272,8 +3272,8 @@ async function dispatchWorkspace(
         }
       }
       const actor = writeActor(request.args.actor, context, options);
-      const message = await options.chatWrites.sendMessage(context, {
-        writer: { via: "cli", actor },
+      const reply = {
+        writer: { via: "cli" as const, actor },
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -3281,30 +3281,29 @@ async function dispatchWorkspace(
         ...(request.args.options ? { options: request.args.options } : {}),
         resolveAttachments: () =>
           resolveAttachments(context, request.args.cwd, request.args.attachments),
-      });
+      };
+      const sent = decisionMessage
+        ? await options.chatWrites.answer(context, {
+            ...reply,
+            resolves: {
+              messageId: decisionMessage.id,
+              ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
+            },
+          })
+        : { message: await options.chatWrites.sendMessage(context, reply) };
+      const { message } = sent;
       const linkWarning = await linkRunMessage(context, {
         actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
       }, options);
-      let resolvedByReply = false;
+      const resolvedByReply = "decision" in sent && sent.decision.resolvedByMessageId === message.id;
       let resolutionFailure: string | null = null;
-      if (decisionMessage) {
-        try {
-          const resolution = await options.chatWrites.resolveDecision(context, {
-            threadId,
-            messageId: decisionMessage.id,
-            resolvedByMessageId: message.id,
-            ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
-            reply: message,
-          });
-          resolvedByReply = resolution.resolvedByMessageId === message.id;
-        } catch (error) {
-          resolutionFailure = oneLine(
-            error instanceof Error ? error.message : "decision update failed",
-          );
-          options.onError?.(error);
-        }
+      if ("failure" in sent) {
+        resolutionFailure = oneLine(
+          sent.failure instanceof Error ? sent.failure.message : "decision update failed",
+        );
+        options.onError?.(sent.failure);
       }
       if (actor === "agent") {
         try {

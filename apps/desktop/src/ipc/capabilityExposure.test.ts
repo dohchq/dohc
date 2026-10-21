@@ -75,11 +75,11 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(14);
   });
-  it("records all 24 chat operations with their sender-workspace admission", () => {
+  it("records all 23 chat operations with their sender-workspace admission", () => {
     const channels = [
       "list-file-chats", "chat-file-mentions-page", "chat-links", "list-chat-bookmarks", "save-chat-bookmark",
       "archive-chat-bookmark", "create-file-chat", "list-chat-messages", "get-chat-thread-revision",
-      "send-chat-message", "list-chat-thread-decisions", "resolve-chat-decision", "list-chat-thread-attachments",
+      "send-chat-message", "list-chat-thread-decisions", "list-chat-thread-attachments",
       "list-chat-channels", "list-chat-follows", "set-chat-follow", "list-personal-chat-feed",
       "mark-personal-chat-feed-seen", "create-chat-channel", "list-channel-threads", "start-channel-thread",
       "mark-chat-thread-read", "list-chat-reactions", "set-chat-reaction",

@@ -114,6 +114,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
     scanChatDispatch: async () => undefined,
+    betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {

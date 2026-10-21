@@ -376,22 +376,36 @@ describe("ChatLane", () => {
     expect(bridgeMock.listChatMessages).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "old-a" });
   });
 
-  it("shows poll choices and sends the chosen answer before resolving", async () => {
+  it("shows poll choices and sends the chosen answer with its resolution", async () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", body: "Monday" }) });
-    bridgeMock.resolveChatDecision.mockImplementation(async () => {
+    bridgeMock.sendChatMessage.mockImplementation(async () => {
       const resolved = { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" };
       bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
-      return { decision: resolved };
+      return { message: message({ id: "answer", body: "Monday" }), resolved };
     });
     render(lane());
     fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
     await screen.findByTestId("chats-lane-decision-resolved");
-    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Monday" });
-    expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", messageId: "message-1", resolvedByMessageId: "answer", chosenOption: "Monday" });
-    expect(bridgeMock.sendChatMessage.mock.invocationCallOrder[0]).toBeLessThan(bridgeMock.resolveChatDecision.mock.invocationCallOrder[0]!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Monday",
+      resolves: { messageId: "message-1", chosenOption: "Monday" },
+    });
     await waitFor(() => expect(screen.getByRole("button", { name: "Monday" }).getAttribute("aria-pressed")).toBe("true"));
+  });
+
+  it("shows the posted answer and says why its poll stayed open", async () => {
+    const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "answer", body: "Monday" }),
+      resolveFailure: "Error: This poll changed. Try again.",
+    });
+    render(lane());
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("This poll changed. Try again.", "Error: This poll changed. Try again."));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
   function draftPoll(question: string, choices: string[]) {
