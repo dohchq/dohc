@@ -157,6 +157,35 @@ impl ReaderResolver {
         snapshot: &crate::reader_snapshot::SnapshotIdentity<'_>,
         source: String,
     ) -> Result<String, CollabError> {
+        if !self.check_snapshot(conn, key, doc, canonical, snapshot, &source)? {
+            return Err(CollabError::MarkdownReaderUnavailable);
+        }
+        Ok(source)
+    }
+
+    /// Expiry validates an edited prefix, but cannot authorize exact source output.
+    pub(crate) fn verify_snapshot(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+        doc: &Ydoc,
+        canonical: &str,
+        snapshot: &crate::reader_snapshot::SnapshotIdentity<'_>,
+        source: &str,
+    ) -> Result<(), CollabError> {
+        self.check_snapshot(conn, key, doc, canonical, snapshot, source)
+            .map(|_| ())
+    }
+
+    fn check_snapshot(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+        doc: &Ydoc,
+        canonical: &str,
+        snapshot: &crate::reader_snapshot::SnapshotIdentity<'_>,
+        source: &str,
+    ) -> Result<bool, CollabError> {
         let reference = doc
             .markdown_source_reference()
             .ok_or(CollabError::MarkdownReaderUnavailable)?;
@@ -181,7 +210,17 @@ impl ReaderResolver {
             source: source.as_bytes().to_vec(),
             checkpoint,
         };
-        let restore_generation = crate::live_update_application::restore_generation(conn, key)?;
+        let restore_generation = if let Some(expected) = snapshot.restore_fence {
+            let current =
+                crate::live_update_application::restore_fence::latest_generation(conn, key)?
+                    .map(|row| row.0);
+            if current != Some(expected) {
+                return Err(CollabError::RestoreFenced);
+            }
+            current
+        } else {
+            crate::live_update_application::restore_generation(conn, key)?
+        };
         let fresh = self.lookup(
             Key {
                 document: key.clone(),
@@ -199,10 +238,7 @@ impl ReaderResolver {
             request,
             crate::hex_sha256(canonical.as_bytes()),
         )?;
-        if !fresh {
-            return Err(CollabError::MarkdownReaderUnavailable);
-        }
-        Ok(source)
+        Ok(fresh)
     }
 
     fn lookup(

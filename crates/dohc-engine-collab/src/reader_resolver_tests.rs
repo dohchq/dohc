@@ -294,6 +294,22 @@ fn pending(result: Result<Option<String>, CollabError>) -> Arc<PendingProof> {
         other => panic!("{other:?}"),
     }
 }
+
+pub(crate) fn evict_with_other_snapshot_misses(resolver: &ReaderResolver) {
+    let (conn, key, doc, _, _) = fixture();
+    for index in 0..MAX_ENTRIES {
+        conn.execute(
+            "UPDATE snapshots SET latest_moment_id=?1",
+            [format!("other-workspace-{index}")],
+        )
+        .unwrap();
+        assert!(matches!(
+            lookup(&conn, &key, &doc, resolver),
+            Err(CollabError::MarkdownReaderPending(_))
+        ));
+    }
+    assert_eq!(resolver.entries.lock().unwrap().len(), MAX_ENTRIES);
+}
 fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver) {
     // This cache test supplies the receipt; the real-reader test below obtains it from the child.
     pending(lookup(conn, key, doc, resolver))

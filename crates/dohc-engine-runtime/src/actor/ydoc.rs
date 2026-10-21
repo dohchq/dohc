@@ -2247,6 +2247,26 @@ fn ydoc_file_holds_head(
     Ok(holds == Some(true))
 }
 
+fn application_audit_error(
+    error: dohc_engine_collab::live_update_application::ApplicationError,
+) -> RuntimeError {
+    match error {
+        dohc_engine_collab::live_update_application::ApplicationError::Storage(error) => {
+            error.into()
+        }
+        error => error.into(),
+    }
+}
+
+fn settlement_audit_error(
+    error: dohc_engine_collab::live_update_application::ApplicationError,
+) -> RuntimeError {
+    match application_audit_error(error) {
+        RuntimeError::Storage(error) => DomainError::Storage(error).into(),
+        error => error,
+    }
+}
+
 /// Record that the workspace file holds this lineage up to its current head,
 /// for a settle that proved it without writing. An open that finds the two
 /// still equal knows the lineage is not ahead of its file. For an accepted
@@ -2295,14 +2315,14 @@ fn record_file_holds_head(
             return Ok(false);
         }
     }
-    let recorded = store.write_with(faults, |tx| {
+    let recorded = store.write_with(faults, |tx| -> Result<_, RuntimeError> {
         if !holds_head {
             if accepted_prefix {
                 dohc_engine_collab::author_coverage::advance_accepted_prefix_in(tx, key, false)
             } else {
                 dohc_engine_collab::author_coverage::advance_in(tx, key, false)
             }
-            .map_err(StorageError::persist_public)?;
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
             tx.execute(
                 "UPDATE ydoc_docs SET \
              last_settled_sha=COALESCE(?4,last_settled_sha) \
@@ -2314,13 +2334,13 @@ fn record_file_holds_head(
                     verified_projection_sha
                 ],
             )
-            .map_err(StorageError::persist_public)?;
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         }
         if let Some(audit) = live_audit {
-            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
-                    publication_state_bytes.ok_or(StorageError::StateCorrupt { source: None })?,
+                    publication_state_bytes.ok_or(DomainError::Storage(StorageError::StateCorrupt { source: None }))?,
                 ),
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
@@ -2331,9 +2351,9 @@ fn record_file_holds_head(
                 &current.blob_sha256,
                 source_state_vector_sha256,
                 now_ms,
-            )?;
+            ).map_err(settlement_audit_error)?;
             if let Some(state) = state {
-            audit.record_publication_state_in_tx(tx, &id, state)?;
+            audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
@@ -2341,9 +2361,9 @@ fn record_file_holds_head(
                 &id,
                 now_ms,
             )
-            .map_err(StorageError::persist_public)?;
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         }
-        settled_collection_record_reconcile_required_in_tx(tx, key, path, richdoc)
+        settled_collection_record_reconcile_required_in_tx(tx, key, path, richdoc).map_err(Into::into)
     })?;
     match recorded {
         TxnOutcome::Committed(required) => Ok(required),
@@ -2437,7 +2457,10 @@ fn restore_live_settlement_marker(
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
     let b = audit.binding();
-    if !store.read_with(|conn| audit.covers_projection_in(conn, moment, markdown))? {
+    if !store
+        .read_with(|conn| audit.covers_projection_in(conn, moment, markdown))
+        .map_err(application_audit_error)?
+    {
         return Ok(());
     }
     let Some(job) = store.load_materialization_job(&format!("ydoc-mat_{moment}"))? else {
@@ -2463,7 +2486,7 @@ fn restore_live_settlement_marker(
         return Err(DomainError::ConflictStaleTarget.into());
     }
     let outcome=store.write_with(faults,|tx| -> Result<(),RuntimeError> {
-        if !audit.covers_projection_in(tx,moment,markdown)? {return Err(DomainError::ConflictStaleTarget.into());}
+        if !audit.covers_projection_in(tx,moment,markdown).map_err(application_audit_error)? {return Err(DomainError::ConflictStaleTarget.into());}
         let matches:bool=tx.query_row(concat!("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)"),params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
         if !matches || !permitted_disk() {return Err(DomainError::ConflictStaleTarget.into());}
         let changed=tx.execute("UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL WHERE job_id=?1 AND workspace_id=?2 AND target_path=?3 AND content_sha256=?4 AND target_generation=?5 AND status IN ('conflict','complete')",params![job.job_id,b.workspace_id,b.current_path,markdown,job.target_generation]).map_err(StorageError::persist_public)?;
@@ -2886,9 +2909,9 @@ pub(super) fn ydoc_settle_on_store(
     // A live settlement names its own moment unless the head already is its
     // latest audited settlement.
     let reuses_head = match (live_audit, head_probe.as_ref()) {
-        (Some(audit), Some(head)) => store.read_with(|conn| {
-            audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256)
-        })?,
+        (Some(audit), Some(head)) => store
+            .read_with(|conn| audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256))
+            .map_err(application_audit_error)?,
         _ => true,
     };
     // Idempotent no-op: when the lineage's last settled content is exactly
@@ -2982,7 +3005,7 @@ pub(super) fn ydoc_settle_on_store(
         destructive: projection_destructive,
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
-    let outcome = store.write_with(faults, |tx| {
+    let outcome = store.write_with(faults, |tx| -> Result<_, RuntimeError> {
         if live_audit.is_none() {
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
                 |_| DomainError::InvalidInput {
@@ -3000,7 +3023,7 @@ pub(super) fn ydoc_settle_on_store(
         }
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
-            return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
+            return Err(dohc_engine_domain::DomainError::BinaryHeadNotText.into());
         }
         // The path may have changed owners since ydoc.open (another write
         // claimed it with a different object). Settling anyway would overwrite
@@ -3009,7 +3032,7 @@ pub(super) fn ydoc_settle_on_store(
         if let Some(snapshot) = current.snapshot.as_ref()
             && snapshot.object_id != key.object_id
         {
-            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
         // SAME-object divergence: capture (an external disk edit) or another
         // writer may have advanced this object's head since the session's
@@ -3021,7 +3044,7 @@ pub(super) fn ydoc_settle_on_store(
             .as_ref()
             .map(|snapshot| snapshot.blob_sha256.clone());
         if current_sha != expected_head_sha {
-            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
         let preimage = if bootstrap_absent {
             Preimage::Absent
@@ -3108,10 +3131,10 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
-            let capture = audit.prepare_publication_state_in_tx(tx)?;
+            let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
-                    publication_state_bytes.as_deref().ok_or(StorageError::StateCorrupt { source: None })?,
+                    publication_state_bytes.as_deref().ok_or(DomainError::Storage(StorageError::StateCorrupt { source: None }))?,
                 ),
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Retained(bytes) => Some(bytes.as_slice()),
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::Unavailable => None,
@@ -3122,9 +3145,9 @@ pub(super) fn ydoc_settle_on_store(
                 &result.snapshot.blob_sha256,
                 &source_state_vector_sha256,
                 now_ms,
-            )?;
+            ).map_err(settlement_audit_error)?;
             if let Some(state) = state {
-            audit.record_publication_state_in_tx(tx, &id, state)?;
+            audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
@@ -3132,7 +3155,7 @@ pub(super) fn ydoc_settle_on_store(
                 &id,
                 now_ms,
             )
-            .map_err(StorageError::persist_public)?;
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.
