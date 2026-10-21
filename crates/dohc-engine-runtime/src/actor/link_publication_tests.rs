@@ -327,6 +327,16 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
             }
         }
     }
+    let jobs_before_update: usize = placements().lock().unwrap()[&f.ws]
+        .turns
+        .iter()
+        .take(turns_before_update)
+        .map(|(n, _)| n)
+        .sum();
+    assert!(
+        jobs_before_update <= 1,
+        "queued update waits behind at most one placement: {jobs_before_update}"
+    );
     let update_ns = update_start.elapsed().as_nanos();
     drop(admission);
     f.wait_disk(2000).await;
