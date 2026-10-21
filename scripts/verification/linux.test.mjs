@@ -56,14 +56,14 @@ test("a sync refuses a leftover scope, fetches only missing commits, prunes none
   assert.doesNotMatch(syncScript({ bundle: null, ref: "refs/verification-linux/r1", missing: [], head, base }), /git fetch/);
 });
 
-test("the run script runs clippy for a PR and installs then verifies for a full run, quotes the grant, and limits memory and time", () => {
+test("the run script runs clippy and the compiler owner's tests for a PR and installs then verifies for a full run, quotes the grant, and limits memory and time", () => {
   const grant = { request: "it's", attempt: 1, head, base };
   const script = full => runScript({ unit: "dohc-verification-linux-r1", base, grant, output: "/mnt/c/o", jobs: 8, full });
   assert.match(script(true), /DOHC_VERIFICATION_GRANT='\{"request":"it'\\''s"/);
   assert.match(script(true), /CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 NEXTEST_TEST_THREADS=8 CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0/);
   assert.match(script(true), /--unit=dohc-verification-linux-r1 -p RuntimeMaxSec=7200 -p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue/);
   assert.match(script(true), new RegExp(`\npnpm install --frozen-lockfile --config\\.confirm-modules-purge=false && node scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
-  assert.match(script(false), /\ncargo clippy --locked --workspace --all-targets --all-features -- -D warnings\n/);
+  assert.match(script(false), /\ncargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo nextest run --locked --package dohc-compiler-owner\n/);
   assert.doesNotMatch(script(false), /verify\.mjs|pnpm/);
   // Tests bind Unix sockets under the temp folder, whose paths must stay under SUN_LEN, so the job keeps /tmp.
   assert.doesNotMatch(script(true), /TMPDIR/);
@@ -118,9 +118,10 @@ function readJson(path) {
 }
 
 const quiet = { memoryPeak: 1, oomKills: 0 };
-/** The scope's command as it ends: an optional receipt, the scope's record, then an optional failure. */
-const ends = ({ receipt, scope = quiet, exitCode } = {}) => output => {
+/** The scope's command as it ends: an optional receipt and log, the scope's record, then an optional failure. */
+const ends = ({ receipt, log, scope = quiet, exitCode } = {}) => output => {
   if (receipt) writeFileSync(join(output, "result.json"), JSON.stringify(receipt));
+  if (log) writeFileSync(join(output, "wsl-run.log"), log);
   if (scope) writeFileSync(join(output, "scope.json"), JSON.stringify(scope));
   if (exitCode !== undefined) throw Object.assign(new Error(`wsl.exe failed (${exitCode}).`), { exitCode, commandExitFailure: true });
 };
@@ -196,15 +197,25 @@ test("a checkout that has both commits gets no bundle", windowsOnly, async () =>
   assert.equal(result.gitCalls.filter(args => args[0] === "update-ref").length, 0);
 });
 
-test("a PR's clippy passes or fails the change by cargo's exit, and writes its own receipt", windowsOnly, async () => {
+test("a PR's clippy and compiler owner's tests pass or fail the change by cargo's exit, and its own receipt names the failed and flaky tests", windowsOnly, async () => {
   const pass = await job({ full: false, verify: ends() });
-  assert.deepEqual(pass.receipt, { version: 1, mode: "clippy", final: true, commit: head, baseCommit: base, verdict: "PASS", failed: [], flaky: [] });
+  assert.deepEqual(pass.receipt, { version: 1, mode: "pr", final: true, commit: head, baseCommit: base, verdict: "PASS", failed: [], flaky: [] });
   assert.deepEqual(pass.written, pass.receipt);
-  assert.match(pass.scripts.run, /\ncargo clippy /);
+  assert.match(pass.scripts.run, /\ncargo clippy .* && cargo nextest run /);
   const fail = await job({ full: false, verify: ends({ exitCode: 101 }) });
   assert.equal(fail.error, undefined);
   assert.equal(fail.receipt.verdict, "FAIL");
-  assert.match(fail.receipt.error, /cargo clippy failed on Linux/);
+  assert.match(fail.receipt.error, /cargo clippy or the compiler owner's tests failed/);
+  assert.deepEqual(fail.receipt.failed, []);
+  const rules = "dohc-compiler-owner::bin/dohc-compiler-owner sys::linux::tests::the_rules_keep_a_confined_child_to_its_build";
+  const reaper = "dohc-compiler-owner::bin/dohc-compiler-owner sys::linux::tests::the_owner_reaps_an_exited_child_but_not_the_worker";
+  const log = `        FAIL [   0.020s] (1/13) ${rules}\n     Summary [  12.345s] 13 tests run: 12 passed (1 flaky), 1 failed, 0 skipped\n`
+    + `       FLAKY 2/2 [   0.010s] ${reaper}\n        FAIL [   0.020s] ${rules}\nerror: test run failed\n`;
+  const tests = await job({ full: false, verify: ends({ log, exitCode: 100 }) });
+  assert.equal(tests.receipt.verdict, "FAIL");
+  assert.deepEqual(tests.receipt.failed, [{ step: "rust", test: rules }]);
+  assert.deepEqual(tests.receipt.flaky, [{ step: "rust", test: reaper }]);
+  assert.deepEqual(tests.written, tests.receipt);
   for (const exitCode of [127, 4294967295]) assert.equal((await job({ full: false, verify: ends({ exitCode }) })).error.environment, "linux host");
 });
 
