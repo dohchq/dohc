@@ -234,4 +234,20 @@ describe("a Collection change during an engine run", () => {
       await closing;
     } finally { await sessions.closeAll(); }
   });
+
+  it("refuses once the open deadline passes when the open's preparation never settles", async () => {
+    const first = await open(), f = fixture(), revision = await activate(first.host, f);
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
+    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+    // The open's own preparation stalls, before the daemon deadline starts. Nothing closes these sessions: a close would wait for that open.
+    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockReturnValue(new Promise<void>(() => {}));
+    readLocalStateFrom(sessions);
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
+      attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
+    hosts.push(host);
+    void sessions.run(workspace, async () => undefined).catch(() => undefined);
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    await expect(host.query(call(revision, id(5)))).rejects.toThrow("dohc did not open this Collection's records because the workspace has not finished opening.");
+  });
 });

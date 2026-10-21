@@ -126,6 +126,45 @@ it("gives the open under way to wait on, without a run, and nothing while closin
   await sessions.closeAll();
 });
 
+it("gives nothing to wait on while the workspace rebuilds", async () => {
+  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebuild") };
+  const client = new MockClient("rebuild", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  sessions.beginRebuild(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  sessions.endRebuild(workspace);
+  held.resolve();
+  await opening;
+  await sessions.closeAll();
+});
+
+it("ends the wait for an open under way at the open deadline, even when its preparation never settles", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("stalled", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  // The workspace's own preparation, which runs before the daemon deadline starts.
+  vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
+    .mockReturnValue(new Promise<void>(() => {}));
+  vi.useFakeTimers();
+  try {
+    void sessions.run(workspace, async () => undefined).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(over).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+    expect(sessions.currentBinding(workspace)).toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });

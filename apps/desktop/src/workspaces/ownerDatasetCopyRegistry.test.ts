@@ -176,3 +176,13 @@ it("removes old copies in a workspace whose copy never opened",async()=>{
   await f.registry.credentialsChanged(null);
   expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual([]);
 });
+
+it("still raises at quit a copy an account change could not close, beside a folder it could not remove",async()=>{
+  const f=await fixture(),other={...f.input,datasetId:"00000000-0000-4000-8000-000000000002"};
+  const stuck=await f.registry.get(f.input);vi.mocked(stuck.close).mockRejectedValueOnce(new Error("The copy's worker did not stop."));
+  await f.registry.get(other);const {directory}=mocks.open.mock.calls[1]![0];
+  const outside=await mkdtemp(join(tmpdir(),"dohc-copy-registry-outside-"));cleanups.push(()=>rm(outside,{recursive:true,force:true}));
+  await rm(directory,{recursive:true});await symlink(outside,directory,"dir");
+  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("The copy's worker did not stop.");
+  await expect(f.registry.closeAll()).rejects.toThrow("The copy's worker did not stop.");
+});

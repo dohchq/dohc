@@ -472,15 +472,23 @@ export class EngineWorkspaceSessions {
   }
 
   /**
-   * The open of this workspace already under way, settled either way, or null
-   * when none is or the session is closing. Never opens, and never counts as a
-   * run, so a caller inside a run can wait on it: a close waits for runs.
+   * The open of this workspace already under way, or null when none is, or
+   * the session is closing or rebuilding. Settles when the open does, with its
+   * binding published, or once the open deadline passes, whichever is first:
+   * the open's preparation runs before the daemon deadline starts. Never
+   * opens, and never counts as a run, so a caller inside a run can wait on it:
+   * a close waits for runs.
    */
   openInProgress(workspace: EngineWorkspace): Promise<void> | null {
-    const entry = this.entries.get(this.sessionKey(workspace));
-    if (!this.acceptingRuns || !entry?.opening || entry.closing || entry.retiring ||
+    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry?.opening || entry.closing || entry.retiring ||
       entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
-    return entry.opening.settled;
+    const settled = entry.opening.settled;
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, this.workspaceOpenDeadlineMs);
+      timer.unref?.();
+      void settled.then(() => { clearTimeout(timer); resolve(); });
+    });
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */

@@ -34,6 +34,8 @@ export function createOwnerDatasetCopyRegistry() {
   const entries = new Map<string, Entry>(), failed = new Set<Entry>();
   // Every workspace a copy was asked for since the last account change, opened or not.
   const requested = new Set<string>();
+  // A copy an account change could not close. That change dropped it, so quit raises it again.
+  let unclosed: { reason: unknown } | null = null;
   let ownerKey: string | null = null, stopped = false, barrier: Promise<void> = Promise.resolve();
   function close(entry: Entry): Promise<void> {
     entry.closed = true; entry.stop.abort(); entry.detach();
@@ -66,6 +68,8 @@ export function createOwnerDatasetCopyRegistry() {
   // keeps its folder. Each removal runs whatever another one did.
   async function removeAll(prior: Entry[], roots: string[]) {
     const closed = await Promise.allSettled(prior.map(close));
+    const closeFailure = closed.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (closeFailure && !unclosed) unclosed = { reason: closeFailure.reason };
     const open = new Set(prior.filter((_, index) => closed[index]!.status === "rejected").map(entry => entry.directory));
     const folders = new Set(prior.flatMap(entry => entry.directory && !open.has(entry.directory) ? [entry.directory] : []));
     const removed = await Promise.allSettled([...[...folders].map(removeFolder), ...roots.map(removeOldCopies)]);
@@ -133,10 +137,16 @@ export function createOwnerDatasetCopyRegistry() {
     },
     async closeAll() {
       stopped = true;
-      // A failed cleanup was reported by the account change that ran it; the copies still close.
+      // An account change reported its own failures. A folder it could not
+      // remove stays set aside; a copy it could not close is raised below.
       await barrier.catch(() => undefined);
-      await Promise.all([...entries.values()].map(close));
+      const closed = await Promise.allSettled([...entries.values()].map(close));
       entries.clear();
+      const failure = closed.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      const earlier = unclosed;
+      unclosed = null;
+      if (failure) throw failure.reason;
+      if (earlier) throw earlier.reason;
     },
   };
 }
