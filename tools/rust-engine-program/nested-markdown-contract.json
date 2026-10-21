@@ -401,6 +401,52 @@
       "note": "CommonMark 0.31.2: <ul> <li> <h2>a</h2> </li> </ul>",
       "rustBase64": "AQi4gp6MtYXCCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC4gp6MtYXCCQEDCGxpc3RJdGVtBwC4gp6MtYXCCQIDB2hlYWRpbmcoALiCnoy1hcIJAwVsZXZlbAF9AgcAuIKejLWFwgkDBgQAuIKejLWFwgkFAWFHuIKejLWFwgkDAwlwYXJhZ3JhcGgA"
     },
+    { "name": "item-setext-trailing-space", "source": "- a \n  --",
+      "canonical": "- \n  ## a",
+      "exactSource": true,
+      "foldRefuse": true,
+      "note": "marked trims the heading text.",
+      "rustBase64": "AQjF9Jy+85GyBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDF9Jy+85GyBgEDCGxpc3RJdGVtBwDF9Jy+85GyBgIDB2hlYWRpbmcoAMX0nL7zkbIGAwVsZXZlbAF9AgcAxfScvvORsgYDBgQAxfScvvORsgYFAWFHxfScvvORsgYDAwlwYXJhZ3JhcGgA",
+      "stableTree": true
+    },
+    { "name": "item-setext-trailing-nbsp", "source": "- a\u00a0\n  --",
+      "canonical": "- \n  ## a",
+      "exactSource": true,
+      "foldRefuse": true,
+      "note": "marked's trim also removes a no-break space.",
+      "rustBase64": "AQj60LaBtey/CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD60LaBtey/CQEDCGxpc3RJdGVtBwD60LaBtey/CQIDB2hlYWRpbmcoAPrQtoG17L8JAwVsZXZlbAF9AgcA+tC2gbXsvwkDBgQA+tC2gbXsvwkFAWFH+tC2gbXsvwkDAwlwYXJhZ3JhcGgA",
+      "stableTree": true
+    },
+    { "name": "item-setext-trailing-tab", "source": "- a\t\n  --",
+      "canonical": "- \n  ## a",
+      "foldRefuse": true,
+      "note": "Both readers keep the item's tab in the heading, and both writers drop it.",
+      "rustBase64": "AQiouM6VpvDMDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCouM6VpvDMDAEDCGxpc3RJdGVtBwCouM6VpvDMDAIDB2hlYWRpbmcoAKi4zpWm8MwMAwVsZXZlbAF9AgcAqLjOlabwzAwDBgQAqLjOlabwzAwFAmEJR6i4zpWm8MwMAwMJcGFyYWdyYXBoAA=="
+    },
+    { "name": "item-setext-lt-text", "source": "- <3\n  --",
+      "canonical": "- \n  ## &lt;3",
+      "exactSource": true,
+      "foldRefuse": true,
+      "nativeRereadCanonical": "- \n  ## &amp;lt;3",
+      "note": "marked keeps HTML-shaped lines out of a heading, and `<3` is not one.",
+      "rustBase64": "AQjBkcj69In2DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDBkcj69In2DwEDCGxpc3RJdGVtBwDBkcj69In2DwIDB2hlYWRpbmcoAMGRyPr0ifYPAwVsZXZlbAF9AgcAwZHI+vSJ9g8DBgQAwZHI+vSJ9g8FAjwzR8GRyPr0ifYPAwMJcGFyYWdyYXBoAA=="
+    },
+    { "name": "item-setext-lt-before-divider", "source": "- <3\n  --\n  -:",
+      "canonical": "- \n  ## &lt;3\n\n  -:",
+      "exactSource": true,
+      "foldRefuse": true,
+      "nativeRereadCanonical": "- \n  ## &amp;lt;3\n\n  -:",
+      "note": "The underline makes the heading, and the next line is a paragraph, not a table divider.",
+      "rustBase64": "AQvih9en0prvBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDih9en0prvBQEDCGxpc3RJdGVtBwDih9en0prvBQIDCXBhcmFncmFwaAcA4ofXp9Ka7wUDBgQA4ofXp9Ka7wUEAi06R+KH16fSmu8FAwMHaGVhZGluZygA4ofXp9Ka7wUHBWxldmVsAX0CBwDih9en0prvBQcGBADih9en0prvBQkCPDNH4ofXp9Ka7wUHAwlwYXJhZ3JhcGgA"
+    },
+    { "name": "item-setext-two-lines", "source": "- a\n  b\n  --",
+      "canonical": "- \n  ## a\n\n  b",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "note": "marked reads one heading over both lines, which both writers spell as a heading and then a paragraph, so Rust refuses it.",
+      "rustBase64": "AQvAmKOd0pjDBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDAmKOd0pjDBAEDCGxpc3RJdGVtBwDAmKOd0pjDBAIDCXBhcmFncmFwaAcAwJijndKYwwQDBgQAwJijndKYwwQEAWJHwJijndKYwwQDAwdoZWFkaW5nKADAmKOd0pjDBAYFbGV2ZWwBfQIHAMCYo53SmMMEBgYEAMCYo53SmMMECAFhR8CYo53SmMMEBgMJcGFyYWdyYXBoAA==",
+      "sourceCanonical": "- \n  ## a\n  b"
+    },
     { "name": "item-rule-blank", "source": "- a\n\n  ---",
       "canonical": "- a\n\n  ---",
       "foldRefuse": true,
@@ -803,6 +849,13 @@
       "foldRefuse": true,
       "note": "marked keeps the two spaces past the indent of a whitespace line inside the block.",
       "rustBase64": "AQTVwvfAzPrjAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHANXC98DM+uMBAQYEANXC98DM+uMBAgRhCiAgAA=="
+    },
+    { "name": "root-indented-quoted-list-tab", "source": "    > - a\n    > \tcode",
+      "canonical": "```\n> - a\n> \tcode\n```",
+      "exactSource": true,
+      "foldRefuse": true,
+      "note": "The indented block's quote markers and tab are its text, so list tab normalization leaves them alone.",
+      "rustBase64": "AQTMrb/92pi7BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAMytv/3amLsFAQYEAMytv/3amLsFAg0+IC0gYQo+IAljb2RlAA=="
     },
     { "name": "root-space-tab-code", "source": "  \tcode",
       "canonical": "```\n\tcode\n```",
@@ -1820,12 +1873,12 @@
     {
       "name": "r25-bare-reread",
       "source": "- a\n  b\n  -\n\n x",
-      "canonical": "- \n  ## a\n  b\n\n&#32;x",
+      "canonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "sourceCanonical": "- \n  ## a\n  b\n\n&#32;x",
       "projectedCanonical": "- \n  ## a\n  b\n\n&#32;x",
-      "rereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
-      "nativeRereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "nativeSourceRefuse": true,
       "foldRefuse": true,
-      "rustBase64": "AQuvhLvZw9zmDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCvhLvZw9zmDwEDCGxpc3RJdGVtBwCvhLvZw9zmDwIDCXBhcmFncmFwaIevhLvZw9zmDwMDB2hlYWRpbmcoAK+Eu9nD3OYPBAVsZXZlbAF9AgcAr4S72cPc5g8EBgQAr4S72cPc5g8GA2EKYoevhLvZw9zmDwEDCXBhcmFncmFwaAcAr4S72cPc5g8KBgQAr4S72cPc5g8LAiB4AA=="
+      "rustBase64": "AQ7M4t+a1ongDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAMzi35rWieAOAQYEAMzi35rWieAOAgIgeEfM4t+a1ongDgEDCmJ1bGxldExpc3QHAMzi35rWieAOBQMIbGlzdEl0ZW0HAMzi35rWieAOBgMJcGFyYWdyYXBoBwDM4t+a1ongDgcGBADM4t+a1ongDggBYkfM4t+a1ongDgcDB2hlYWRpbmcoAMzi35rWieAOCgVsZXZlbAF9AgcAzOLfmtaJ4A4KBgQAzOLfmtaJ4A4MAWFHzOLfmtaJ4A4KAwlwYXJhZ3JhcGgA"
     },
     {
       "name": "r25-bare-empty-parent",

@@ -2621,16 +2621,40 @@ fn setext_underline(line: &str) -> Option<i64> {
     .then_some(level)
 }
 
-/// Whether marked keeps this paragraph line in a setext heading. Its heading
-/// stops before a line that could start another block, `#` and `<` included.
-fn setext_text(line: &str) -> bool {
+/// How marked reads the line above a setext underline: as heading text, as
+/// text when the line could start another block, or, for raw HTML and an
+/// empty heading, in a way this reader does not follow (`None`).
+fn setext_text(line: &str) -> Option<bool> {
     let rest = line.trim_start_matches(' ');
-    !rest.starts_with(['\t', '#', '<'])
-        && block_start(line, true, true).is_none()
-        && !(rest.contains('|')
-            && rest
-                .bytes()
-                .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t')))
+    if let Some(tag) = rest.strip_prefix('<') {
+        // marked keeps a `<...>` that ends the line out of a heading.
+        if tag
+            .find('>')
+            .is_some_and(|end| end > 0 && end + 1 == tag.len())
+        {
+            return Some(false);
+        }
+        if tag.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) {
+            return None;
+        }
+    }
+    if setext_heading_text(line).is_empty() {
+        return None;
+    }
+    Some(
+        !rest.starts_with(['\t', '#'])
+            && block_start(line, true, true).is_none()
+            && !(rest.contains('|')
+                && rest
+                    .bytes()
+                    .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'))),
+    )
+}
+
+/// The heading text marked keeps: the line without the whitespace it trims.
+/// The importer protects a list item's tabs, so they stay.
+fn setext_heading_text(line: &str) -> &str {
+    line.trim_matches(|character| character != '\t' && is_js_whitespace(character))
 }
 
 #[inline(never)]
@@ -2732,7 +2756,11 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
         let mut quoted = line;
         let mut quotes = 0;
         while fence.is_none() || quotes < quote_depth {
-            let Some(rest) = quoted.trim_start_matches(' ').strip_prefix('>') else {
+            let text = quoted.trim_start_matches(' ');
+            if fence.is_none() && !in_list && quoted.len() - text.len() >= 4 {
+                break;
+            }
+            let Some(rest) = text.strip_prefix('>') else {
                 break;
             };
             quoted = rest.strip_prefix(' ').unwrap_or(rest);
@@ -2743,6 +2771,17 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
             in_list = false;
             fence = None;
             quote_depth = quotes;
+        }
+        // Outside a list, a line indented four columns is indented code or
+        // a lazy line, so its quote markers and tabs are its text.
+        if fence.is_none()
+            && !in_list
+            && !quoted.trim().is_empty()
+            && indented_code_line(quoted.trim_end_matches('\n'))
+        {
+            output.push_str(line);
+            blank = false;
+            continue;
         }
         if let Some((character, width, list)) = fence {
             let rest = quoted.trim_start_matches([' ', '\t']);
@@ -3558,17 +3597,27 @@ fn parse_markdown_blocks_at<'src>(
             MarkdownReading::Source
         };
         let mut para = vec![line];
+        let mut underline = None;
         index += 1;
         while index < lines.len() {
             let next = lines[index];
+            if let Some(level) = setext_underline(next).filter(|_| in_list) {
+                // marked reads every line above the underline as one heading,
+                // which the projector cannot write back as one.
+                match setext_text(para[0]) {
+                    Some(true) if para.len() == 1 => {
+                        underline = Some(level);
+                        break;
+                    }
+                    Some(false) => {}
+                    _ => *refused = true,
+                }
+            }
             if blank_line(next)
                 || thematic_break(next)
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
-                || (in_list
-                    && setext_underline(next).is_some()
-                    && para.iter().all(|line| setext_text(line)))
                 || list_marker(next, paragraph_reading).is_some_and(|marker| {
                     (!marker.text.trim().is_empty() || matches!(marker.kind, ListKind::Task(_)))
                         && (!matches!(marker.kind, ListKind::Ordered(_))
@@ -3583,15 +3632,10 @@ fn parse_markdown_blocks_at<'src>(
             para.push(next);
             index += 1;
         }
-        // The loop stops at an underline only when it makes the paragraph a heading.
-        if let Some(level) = lines
-            .get(index)
-            .filter(|_| in_list)
-            .and_then(|line| setext_underline(line))
-        {
+        if let Some(level) = underline {
             blocks.push(MdBlock::Heading {
                 level,
-                text: para.join("\n"),
+                text: setext_heading_text(line).to_owned(),
             });
             index += 1;
             continue;
