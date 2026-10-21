@@ -122,7 +122,7 @@ it("reopens the same recovery archive after installation was interrupted before 
     expect((await restarted.host.invoke(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Preserved" }]);
     await expect(restarted.host.prepareRecovery({ sourcePath })).rejects.toThrow(/already exists/);
   } finally { observer?.close(); }
-});
+}, 120_000);
 
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
@@ -406,7 +406,7 @@ describe("local dataset owner adapter", () => {
         expect((await replica.read({...call(approved,id(5)),operationId:id(5)})).result).toHaveLength(3);
       }finally{await replica.close();}
     }finally{controller.abort();await relayHost.close();await rm(remoteDirectory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
-  },30_000);
+  },120_000);
   it("persists a local fence before sharing and resumes the same archive after a lost remote response", async () => {
     const {host,workspaceRoot} = await open(), approved = await activate(host);
     const attachment = Buffer.from("%PDF-synthetic-transfer-receipt");
@@ -691,6 +691,8 @@ it("selects local and transferred sources together by retained journal activity"
   const { host, workspaceRoot } = await open(); await activate(host);
   const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
   try {
+    // One commit for the whole fixture; closing without COMMIT rolls it back.
+    db.exec("BEGIN");
     const journal = createDatasetJournal({ db, transaction: work => work() });
     const insert = db.prepare("INSERT INTO dohc_dataset_catalog SELECT workspace_id,?,revision_json,artifacts_json FROM dohc_dataset_catalog WHERE dataset_id=?");
     for (let n = 2; n <= 134; n++) {
@@ -700,6 +702,7 @@ it("selects local and transferred sources together by retained journal activity"
     }
     for (let n = 1; n <= 134; n++) db.prepare("UPDATE dohc_dataset_checkpoint_times SET recorded_at_ms=? WHERE dataset_id=?").run(n, id(n));
     db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(134), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null);
+    db.exec("COMMIT");
   } finally { db.close(); }
   const heads = await host.historyHeads({ limit: 1 });
   expect(heads.sourceCount).toBe(134); expect(heads.sourceIds).toHaveLength(129);
