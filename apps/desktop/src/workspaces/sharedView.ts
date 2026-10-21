@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { isInside } from "../security/pathContainment";
@@ -242,6 +242,29 @@ async function withCaptureMutationLock<T>(
       );
 }
 
+// Whether the disk might reach `path`'s file through another spelling, as the
+// engine's `reaches_other_spelling` decides. A path with other than ASCII
+// characters can differ in Unicode case or normalization, which this can't
+// test, so it counts. An ASCII segment has two other spellings: its letters in
+// the other case, and its `;`, `` ` `` and `K` as the only other characters
+// Unicode normalizes to them. A disk that keeps every spelling apart needs no
+// owner lookup.
+async function reachesOtherSpelling(rootDir: string, path: string): Promise<boolean> {
+  if (!/^[\x00-\x7f]*$/u.test(path)) return true;
+  const segments = path.split("/");
+  const normalizesTo: Record<string, string> = { ";": ";", "`": "`", K: "K" };
+  for (const [index, segment] of segments.entries()) {
+    const swapped = [...segment].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
+    const composed = [...segment].map((c) => normalizesTo[c] ?? c).join("");
+    for (const spelling of [swapped, composed]) {
+      if (spelling === segment) continue;
+      const probe = [...segments.slice(0, index), spelling, ...segments.slice(index + 1)];
+      if (await lstat(join(rootDir, ...probe)).then(() => true, () => false)) return true;
+    }
+  }
+  return false;
+}
+
 async function materializeSharedViewPaths(
   rootDir: string,
   workspaceId: string,
@@ -277,37 +300,51 @@ async function materializeSharedViewPaths(
   }
   const main = await store.ensureMainVersion({ workspaceId });
   // The view's live paths, grouped by how a disk that ignores case or Unicode
-  // normalization names them. Read once, at the first delete of a file.
+  // normalization names them. Read once, at the first delete that needs them.
   let aliases: Map<string, string[]> | undefined;
-  // A missing entry is an answer; any other failure stops the refresh before it deletes.
-  const missingAsNull = (error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
+  // A missing entry is an answer; any other failure at the delete's own target
+  // stops the refresh before it deletes.
+  const absentAsNull = (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   };
-  const regularFile = async (path: string) => (await lstat(path).catch(missingAsNull))?.isFile() ?? false;
-  // Whether another live path reaches the regular file at `target`, as
-  // `Notes.md` reaches `notes.md` on a disk that ignores case. That path's head
-  // owns the file, so the delete leaves it (#2294). The disk decides, not the
-  // names: a folder that keeps case apart holds two files. A link or folder at
-  // the target is never evidence of an owner; the delete repairs it.
-  async function ownedByAlias(path: string, target: string): Promise<boolean> {
-    if (!(await regularFile(target))) return false;
+  // The first other live path, by path, that reaches the regular file at
+  // `target`, as `Notes.md` reaches `notes.md` on a disk that ignores case: that
+  // path's head owns the file, as the engine decides for workspace peers
+  // (#2157). The disk decides, not the names, so a folder that keeps case apart
+  // holds two files. A link or folder at the target has no owner; the delete
+  // repairs it. Trouble reading another spelling only means it is no owner.
+  async function aliasOwner(path: string, target: string): Promise<string | null> {
+    if (!(await lstat(target).catch(absentAsNull))?.isFile()) return null;
+    if (!(await reachesOtherSpelling(rootDir, path))) return null;
     if (!aliases) {
       aliases = new Map();
       for (const file of await store.listTextFileMetadata({ workspaceId, versionId: main.id })) {
         const key = pathCollisionKey(file.path);
-        aliases.set(key, [...(aliases.get(key) ?? []), file.path]);
+        const group = aliases.get(key);
+        if (group) group.push(file.path);
+        else aliases.set(key, [file.path]);
       }
     }
-    const others = (aliases.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path);
-    if (others.length === 0) return false;
-    const file = await realpath(target).catch(missingAsNull);
-    if (file === null) return false;
+    const others = (aliases.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path).sort();
+    if (others.length === 0) return null;
+    const file = await realpath(target).catch(absentAsNull);
+    if (file === null) return null;
     for (const other of others) {
       const otherTarget = containedTarget(rootDir, other);
-      if ((await regularFile(otherTarget)) && (await realpath(otherTarget).catch(missingAsNull)) === file) return true;
+      const otherFile = await lstat(otherTarget).then((entry) => entry.isFile() ? realpath(otherTarget) : null).catch(() => null);
+      if (otherFile === file) return other;
     }
-    return false;
+    return null;
+  }
+  // Nothing when `target` already holds `owner`'s head under `owner`'s
+  // spelling; otherwise the write of that head that replaces the file.
+  async function ownerWrite(owner: string, target: string): Promise<ShareViewChangedPath | null> {
+    const head = await store.readTextFile({ workspaceId, versionId: main.id, path: owner });
+    if (head === null) return null;
+    if (diskMatchesSnapshot(await readDiskContent(target), head)
+      && basename(await realpath(target)) === basename(owner)) return null;
+    return { path: owner, operation: "write", contentKind: head.contentKind === "binary" ? "binary" : "text" };
   }
   // Every delete before every write. On a disk that ignores case or Unicode
   // normalization, writing `notes.md` opens the `Notes.md` that a delete then
@@ -358,7 +395,15 @@ async function materializeSharedViewPaths(
       if (!isInside(realRoot, realParent)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
       }
-      if (await ownedByAlias(change.path, resolvedTarget)) continue;
+      // Another live spelling owns this file. The delete leaves it when it holds
+      // that head, and otherwise writes that head there, under that spelling,
+      // so capture never reads the deleted path's bytes as that file's (#2294).
+      const owner = await aliasOwner(change.path, resolvedTarget);
+      if (owner !== null) {
+        const write = await ownerWrite(owner, resolvedTarget);
+        if (write && !ordered.some((other) => other.path === owner && other.operation !== "delete")) ordered.push(write);
+        continue;
+      }
       // recursive: a locally tampered DIRECTORY at the target must not
       // wedge the refresh with EISDIR. Node's rm removes a symlink as a
       // link either way — it never recurses through one.

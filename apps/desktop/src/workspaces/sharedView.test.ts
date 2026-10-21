@@ -1797,6 +1797,81 @@ describe("shared view refresh", () => {
     expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
   });
 
+  // The same sequence the way dohc refreshes a view, capturing first: the
+  // second spelling arrives while the first's file is there, so it is held back
+  // as a collision and never written. Deleting the first then writes the live
+  // spelling's head into the file, which settles the collision.
+  it("writes the live spelling's head when a later refresh deletes the spelling the disk holds", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("docs/notes.md", "old\n");
+      await reconcile();
+      relay.addWrite("Docs/Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "docs", "notes.md"), "utf8")).toBe("old\n");
+      relay.addDelete("docs/notes.md");
+      await reconcile();
+
+      expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+      expect((await reconcile()).unjournalablePaths).toEqual([]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+    } finally {
+      await store.close();
+    }
+  });
+
+  // Both spellings arrive in one refresh, so the disk's one file holds the
+  // later one's bytes. Deleting that one writes the other's head there.
+  it("writes the other spelling's head when a refresh deletes the spelling whose bytes the disk holds", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("notes.md", "old\n");
+      relay.addWrite("Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("live\n");
+      relay.addDelete("Notes.md");
+      await reconcile();
+
+      expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("old\n");
+    } finally {
+      await store.close();
+    }
+  });
+
   // A rename only by capitals in one refresh leaves the old spelling to the
   // new one's write, which recreates the file under the new spelling.
   it("ends a rename only by capitals with the new spelling on a disk that ignores case", async (context) => {
