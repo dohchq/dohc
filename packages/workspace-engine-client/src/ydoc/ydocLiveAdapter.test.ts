@@ -2705,6 +2705,52 @@ describe("YdocLiveAdapter", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  // Native owner delivery holds the live settlement capacity while it reads or
+  // applies a frame, and an owner draft's resync needs the same capacity. The
+  // engine refuses the resync at once, and the slot frees without any action.
+  it("waits out occupied live capacity before a settle without surfacing a settle error", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine("seed");
+      const capacity = { held: true };
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+          ? { ...event, payload: { sessionId: (event.payload as { sessionId: string }).sessionId, resyncRequired: true } }
+          : event)),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.resync && capacity.held) throw refusal;
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, provider.initialUpdate);
+      const vector = Y.encodeStateVector(peer);
+      peer.getText("plainText").insert(0, "remote ");
+      // The invalidation's own resync is refused, which leaves the session stale.
+      engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+      await vi.advanceTimersByTimeAsync(0);
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      capacity.held = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "remote seed" })]);
+      expect(settleErrors).toEqual([]);
+      expect(provider.doc.getText("plainText").toString()).toBe("remote seed");
+      peer.destroy();
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
   it("surfaces a persistent store refusal when its total budget expires", async () => {
     vi.useFakeTimers();
     try {
