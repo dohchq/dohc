@@ -1303,8 +1303,9 @@ describe("importDroppedPaths", () => {
     await mkdir(join(trip, "sub"), { recursive: true });
     await writeFile(join(trip, "sub", "a.md"), "a");
     const screened = await screenDroppedPaths([trip], [root], "");
-    await rm(join(trip, "sub", "a.md"));
-    await writeFile(join(trip, "sub", "a.md"), "replaced");
+    // Written beside it first, so the replacement can't reuse a.md's inode.
+    await writeFile(join(trip, "sub", "a.md.new"), "replaced");
+    await rename(join(trip, "sub", "a.md.new"), join(trip, "sub", "a.md"));
 
     expect(await copyIntoWorkspace(root, screened.usable)).toMatchObject({
       imported: [],
