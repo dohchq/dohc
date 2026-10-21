@@ -1,9 +1,10 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
-import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
+import { recordNeverSynced, recordSynced, runSchedulesOn } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
+import { MAX_TIMER_MS } from "@dohc/automation-executor/automation-scheduler";
 import {
   computerLabel,
   computersOfAnswer,
@@ -14,7 +15,7 @@ import {
   hostOfAnswer,
   refusalOfAnswer,
   automationHostGeneration,
-  isAutomationHost,
+  createWorkspaceHosts,
   relayUnreachable,
   type HostAnswer,
   type HostRequest,
@@ -505,21 +506,159 @@ describe("automation hosts", () => {
 });
 
 describe("the automation host", () => {
-  it("is the synced workspace's host as read, or this computer when the workspace never synced", async () => {
+  const laptop = { installId: "install-laptop", label: "Laptop" };
+  const desk = { installId: "install-desk", label: "Desk" };
+
+  it("is the synced workspace's host as read, or the computer that made a workspace that never synced", async () => {
     const root = await createTestScratch("dohc-automation-host-");
     await mkdir(join(root, ".dohc"), { recursive: true });
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, () => true)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, remote: {} }, () => false)).toBe(false);
-    expect(await isAutomationHost({ rootPath: root }, () => true), "no record of whether it synced").toBe(false);
-    await recordNeverSynced(root);
-    expect(await isAutomationHost({ rootPath: root }, () => false)).toBe(true);
-    expect(await isAutomationHost({ rootPath: root, shareView: {} }, () => true), "shared with this person").toBe(false);
-    expect(await isAutomationHost(null, () => true)).toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, () => 7), "its only computer runs at 0").toBe(0);
-    expect(await automationHostGeneration({ rootPath: root, remote: {} }, () => 7)).toBe(7);
+    const at = (workspace: Parameters<typeof automationHostGeneration>[0], relay: number | null) =>
+      automationHostGeneration(workspace, laptop, () => relay);
+    expect(await at({ rootPath: root, remote: {} }, 7)).toBe(7);
+    expect(await at({ rootPath: root, remote: {} }, null)).toBeNull();
+    expect(await at({ rootPath: root }, 7), "no record of whether it synced").toBeNull();
+    await recordNeverSynced(root, laptop);
+    expect(await at({ rootPath: root }, null), "its one computer runs at 0").toBe(0);
+    expect(await at({ rootPath: root, shareView: {} }, 7), "shared with this person").toBeNull();
+    expect(await at(null, 7)).toBeNull();
     await recordSynced(root);
-    expect(await isAutomationHost({ rootPath: root }, () => true), "synced before, so another computer may be the host").toBe(false);
-    expect(await automationHostGeneration({ rootPath: root }, () => 7)).toBeNull();
+    expect(await at({ rootPath: root }, 7), "synced before, so another computer may be the host").toBeNull();
+  });
+
+  it("is one computer of two that read a copied folder that never synced, until the other takes over", async () => {
+    const root = await createTestScratch("dohc-automation-host-copied-");
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await recordNeverSynced(root, laptop);
+    // iCloud Drive or a copy carries the same folder to the desk.
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => null)).toBe(0);
+    expect(await automationHostGeneration({ rootPath: root }, desk, () => null), "the desk did not make it").toBeNull();
+    expect(await runSchedulesOn(root, desk)).toBe(true);
+    expect(await automationHostGeneration({ rootPath: root }, desk, () => null)).toBe(0);
+    expect(await automationHostGeneration({ rootPath: root }, laptop, () => null), "the laptop stops at its next read").toBeNull();
+  });
+
+  describe("for a workspace that never synced", () => {
+    const relay = { runsHere: async () => false, stillRuns: () => false, runsAt: () => null };
+    async function copied() {
+      const root = await createTestScratch("dohc-automation-host-reads-");
+      await mkdir(join(root, ".dohc"), { recursive: true });
+      await recordNeverSynced(root, laptop);
+      const changes: string[] = [];
+      const workspace: { rootPath: string; remote?: unknown; shareView?: unknown } = { rootPath: root };
+      const triggers = { here: true };
+      const timers: Array<{ wake: () => Promise<void>; delayMs: number }> = [];
+      const hosts = createWorkspaceHosts({
+        here: () => laptop,
+        workspace: () => workspace,
+        relay,
+        hasHostTriggers: () => triggers.here,
+        hostChanged: (id) => changes.push(`host ${id}`),
+        elsewhereChanged: (id) => changes.push(`elsewhere ${id}`),
+        logError: (_id, error) => { throw error; },
+        setTimer: (wake, delayMs) => {
+          const timer = { wake, delayMs };
+          timers.push(timer);
+          return timer;
+        },
+        clearTimer: (cleared) => { timers.splice(timers.findIndex((timer) => timer === cleared), 1); },
+      });
+      // The next 15-minute read, as its timer fires.
+      const recheck = async () => {
+        const timer = timers.shift();
+        expect(timer?.delayMs).toBe(MAX_TIMER_MS);
+        await timer?.wake();
+      };
+      return { root, changes, workspace, triggers, timers, hosts, recheck };
+    }
+
+    it("tells this computer's automations when another computer takes over, and when it is chosen again", async () => {
+      const { root, changes, hosts } = await copied();
+      const schedules = hosts.open("ws");
+      expect(await schedules.runsHere()).toBe(true);
+      expect(await hosts.groupHost("ws")).toBe(0);
+      expect(changes).toEqual([]);
+      await runSchedulesOn(root, desk);
+      // A Group read finds it first, so the Group subscriptions go too.
+      expect(await hosts.groupHost("ws")).toBeNull();
+      expect(changes).toEqual(["host ws", "elsewhere ws"]);
+      expect(await schedules.runsHere()).toBe(false);
+      expect(schedules.stillRuns(), "a step that started before stops at its claim").toBe(false);
+      expect(hosts.waitsElsewhere("ws"), "this computer has automations the desk runs").toBe(true);
+      await runSchedulesOn(root, laptop);
+      expect(await schedules.runsHere()).toBe(true);
+      expect(schedules.stillRuns()).toBe(true);
+      expect(hosts.waitsElsewhere("ws")).toBe(false);
+      expect(changes).toEqual(["host ws", "elsewhere ws", "host ws", "elsewhere ws"]);
+    });
+
+    it("stops saying automations wait on another computer once none here would run there", async () => {
+      const { root, changes, triggers, hosts } = await copied();
+      hosts.open("ws");
+      await runSchedulesOn(root, desk);
+      expect(await hosts.groupHost("ws")).toBeNull();
+      expect(hosts.waitsElsewhere("ws")).toBe(true);
+      // The last schedule was removed: the scheduler asks no more.
+      triggers.here = false;
+      hosts.automationsChanged("ws");
+      expect(hosts.waitsElsewhere("ws")).toBe(false);
+      expect(changes).toEqual(["elsewhere ws", "elsewhere ws"]);
+      triggers.here = true;
+      hosts.automationsChanged("ws");
+      expect(hosts.waitsElsewhere("ws"), "a Group trigger alone waits too").toBe(true);
+    });
+
+    it("reads the folder again every 15 minutes, so a read that works again restores this computer", async () => {
+      const { root, changes, triggers, hosts, recheck } = await copied();
+      // Group triggers only: the scheduler never asks for this workspace.
+      triggers.here = true;
+      hosts.open("ws");
+      expect(await hosts.groupHost("ws")).toBe(0);
+      // The record is out of reach for a while, as when the folder is evicted offline.
+      const record = join(root, ".dohc", "sync-history.json");
+      await rename(record, `${record}.away`);
+      expect(await hosts.groupHost("ws")).toBeNull();
+      expect(changes).toEqual(["host ws", "elsewhere ws"]);
+      await rename(`${record}.away`, record);
+      await recheck();
+      expect(changes, "nothing else asked").toEqual(["host ws", "elsewhere ws", "host ws", "elsewhere ws"]);
+      expect(hosts.waitsElsewhere("ws")).toBe(false);
+      await recheck();
+      expect(changes, "an unchanged read changes nothing").toHaveLength(4);
+      hosts.close("ws");
+    });
+
+    it("asks again while another computer runs its schedules, as it does for a synced one", async () => {
+      const { workspace, hosts } = await copied();
+      const schedules = hosts.open("ws");
+      expect(schedules.asksAgain(), "the folder can name this computer at any time").toBe(true);
+      workspace.remote = {};
+      expect(schedules.asksAgain()).toBe(true);
+      workspace.shareView = {};
+      expect(schedules.asksAgain(), "a shared view never runs schedules").toBe(false);
+    });
+  });
+
+  it("passes a synced workspace's relay answers through unchanged", async () => {
+    const changes: string[] = [];
+    let asked = 0;
+    const hosts = createWorkspaceHosts({
+      here: () => laptop,
+      workspace: () => ({ rootPath: "/nowhere", remote: {} }),
+      relay: { runsHere: async () => { asked += 1; return true; }, stillRuns: () => true, runsAt: () => 7 },
+      hasHostTriggers: () => true,
+      hostChanged: (id) => changes.push(id),
+      elsewhereChanged: (id) => changes.push(id),
+      logError: (_id, error) => { throw error; },
+      setTimer: () => ({}),
+      clearTimer: () => undefined,
+    });
+    const schedules = hosts.open("ws");
+    expect(await hosts.groupHost("ws")).toBe(7);
+    expect(await schedules.runsHere()).toBe(true);
+    expect(asked).toBe(1);
+    expect(schedules.stillRuns()).toBe(true);
+    expect(hosts.waitsElsewhere("ws")).toBe(false);
+    expect(changes).toEqual([]);
   });
 
   it("answers the generation it runs at only while it runs", async () => {

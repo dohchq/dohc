@@ -8,6 +8,7 @@ import type {
   createWorkspaceFolderWithFreshness,
   FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
+import type { Computer } from "../workspaces/syncHistory";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -84,6 +85,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[], event: Event): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolderWithFreshness;
+  // This installation, which runs a new workspace's schedules.
+  thisComputer(): Computer;
   // Retires every open binding for the workspace, then removes its registry
   // row. The folder on disk is left alone.
   forgetWorkspace(workspaceId: string): Promise<void>;
@@ -112,6 +115,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    thisComputer,
     forgetWorkspace,
     showItemInFolder,
     openWorkspaceWindow,
@@ -176,6 +180,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: created, fresh } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      computer: thisComputer(),
       kind: input.kind,
     });
     desktopMarks.measureSince("workspace-create", "workspace-create-start");
@@ -203,6 +208,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: attached } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      computer: thisComputer(),
       kind: "personal",
     });
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's

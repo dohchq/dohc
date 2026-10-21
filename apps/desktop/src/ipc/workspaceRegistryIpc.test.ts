@@ -10,6 +10,7 @@ import {
   registerWorkspaceRegistryIpcHandlers,
 } from "./workspaceRegistryIpc";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
+import type { Computer } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -25,9 +26,10 @@ async function registryHarness() {
   const steps: string[] = [];
   const emptyFolders = new Set<string>();
   const trusted: Array<{ workspaceId: string; folder: string | null }> = [];
-  const createFolder = vi.fn(async ({ homeDir, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared" }) => {
+  const createFolder = vi.fn(async ({ homeDir, computer, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared"; computer: Computer }) => {
     steps.push("create");
     expect(homeDir).toBe(home);
+    expect(computer, "a new workspace runs its schedules on this computer").toEqual({ installId: "install-here", label: "This Mac" });
     // The real creation reports a folder it made from nothing.
     const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
     return { workspace: { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) }, fresh };
@@ -43,7 +45,7 @@ async function registryHarness() {
     app: { isPackaged: false }, dialog: { showOpenDialog: pick }, roots,
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
-    createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
     trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,

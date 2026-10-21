@@ -176,7 +176,7 @@ describe("desktop workspace windows", () => {
       workspaceSummaries: () => rows,
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: () => undefined,
+      createWorkspaceFolder, registerPhysicalWorkspace: () => undefined, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
@@ -539,7 +539,7 @@ describe("desktop native menus", () => {
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
       roots, effectiveHome: () => home, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
+      createWorkspaceFolder, registerPhysicalWorkspace: registry.register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
@@ -564,7 +564,7 @@ describe("desktop native menus", () => {
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const { workspace: attached } = await createWorkspaceFolder({
-      rootPath: attachedPath, homeDir: home, kind: "shared",
+      rootPath: attachedPath, homeDir: home, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
       workspaceId: "attached-workspace",
     });
     await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);

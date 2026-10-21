@@ -1,3 +1,4 @@
+import { normalizeRootPath } from "@dohc/workspace-core";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
@@ -144,7 +145,7 @@ export function createAgentRunsIpc<
       // A shared view hands out the MCP profile for its level, so the user's AI
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
-      return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
+      return McpConfigResult.parse(mcpConfigFor(normalizeRootPath(workspace.rootPath, process.platform), shareAccess));
     }));
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {

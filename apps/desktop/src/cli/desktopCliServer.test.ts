@@ -773,7 +773,7 @@ describe("raw fileWrite socket requests", () => {
     const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
     await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
     const registered = await createWorkspaceFolder({
-      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal",
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
     });
     // The authority resolves roots the way main does.
     const f = fixture(registered.rootPath, (root) => realpathSync.native(root));
