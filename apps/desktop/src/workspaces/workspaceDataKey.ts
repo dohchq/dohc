@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, lstat, realpath, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
 export const SECRET_FILE_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
@@ -49,6 +49,28 @@ function parseKeyFile(content: string): Buffer {
   return key;
 }
 
+// Match the Rust key directory check: aliases above the workspace are allowed,
+// but the key folder must be the workspace's own real .dohc/engine.
+async function verifyKeyDir(rootDir: string, path: string): Promise<void> {
+  let realParent: string;
+  let expected: string;
+  try {
+    realParent = await realpath(dirname(path));
+    expected = join(await realpath(rootDir), ".dohc", "engine");
+  } catch {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+    );
+  }
+  if (realParent !== expected) {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Replace .dohc and .dohc/engine with real folders inside this workspace.",
+    );
+  }
+}
+
 // Windows can follow a dangling file link even with "wx". Only an absent
 // entry is a missing key; inspect before every read, including an EEXIST retry.
 async function fileExists(path: string): Promise<boolean> {
@@ -57,7 +79,7 @@ async function fileExists(path: string): Promise<boolean> {
     if (!stats.isFile()) {
       throw new SecretFileStoreError(
         "key-corrupt",
-        "The workspace secret key file could not be read; refusing to touch protected files.",
+        "dohc didn't use .dohc/engine/secret.key because it isn't a regular file. Replace it with this workspace's key file.",
       );
     }
     return true;
@@ -73,6 +95,7 @@ export async function loadSecretDataKey(
 ): Promise<Buffer> {
   const path = keyFilePath(rootDir);
   try {
+    await verifyKeyDir(rootDir, path);
     if (await fileExists(path)) {
       const content = await readFile(path, "utf8");
       await chmod(path, 0o600).catch(() => undefined);
@@ -119,6 +142,7 @@ export async function installWorkspaceDataKey(
   }
   const path = keyFilePath(rootDir);
   try {
+    await verifyKeyDir(rootDir, path);
     if (await fileExists(path)) {
       const existing = parseKeyFile(await readFile(path, "utf8"));
       await chmod(path, 0o600).catch(() => undefined);

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
-import { dirname, join, parse } from "node:path";
+import { basename, dirname, join, parse } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DISK_ROOT_REFUSAL, FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
 import { canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
@@ -239,7 +239,7 @@ describe("createWorkspaceFolder", () => {
       // Each replacement has a .dohc folder, so a write that followed the path would land.
       const replaced = replacement === "another folder" ? root : homeDir;
       vi.mocked(lstat).mockImplementation((async (...args: Parameters<typeof lstat>) => {
-        if (String(args[0]) === join(root, ".dohc", "manifest.json")) {
+        if (basename(String(args[0])) === "manifest.json") {
           await rename(root, moved);
           await mkdir(join(replaced, ".dohc"), { recursive: true });
           if (replacement === "a link to the home folder") await symlink(homeDir, root, linkType);
@@ -385,6 +385,10 @@ describe("manifest entry custody", () => {
     if (exists) expect(await readFile(target, "utf8")).toBe(content);
     else await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
-    expect(error).toMatchObject({ name: "WorkspaceManifestError", code: "unreadable" });
+    expect(error).toMatchObject({
+      name: "WorkspaceManifestError",
+      code: "unreadable",
+      message: "dohc didn't open .dohc/manifest.json because it isn't a regular file. Replace it with this workspace's manifest file.",
+    });
   });
 });

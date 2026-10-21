@@ -69,7 +69,7 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   });
   if (entry === null) return { kind: "absent" };
   if (!entry.isFile()) {
-    throw new WorkspaceManifestError("unreadable", "this folder has a corrupt .dohc/manifest.json");
+    throw new WorkspaceManifestError("unreadable", "dohc didn't open .dohc/manifest.json because it isn't a regular file. Replace it with this workspace's manifest file.");
   }
   const raw = await readFile(path, "utf8");
   let parsed: unknown;
