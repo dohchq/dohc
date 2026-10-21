@@ -122,7 +122,9 @@ it("cancels the in-flight pass and waits for its last committed member before fl
   const f = await fixture(rewrite); await f.write("old.md");
   const moved = await f.move("old.md", "new.md"); await started.promise;
   f.history.readHistoryPage.mockClear();
+  const lock = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
   const undoing = f.undo(); await cancelled.promise; await nextTurn();
+  expect(lock).not.toHaveBeenCalled();
   expect(f.history.readHistoryPage).not.toHaveBeenCalled();
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   f.members.push({path: "last.md", beforePath: "last.md", operation: "write", momentId: "last"});

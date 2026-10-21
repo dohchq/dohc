@@ -166,7 +166,9 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
   const result: z.infer<typeof HistoryOperationUndoResult.options[1]> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
     restored: record.progress?.restored ?? [], remaining: (record.engine.notRestored ?? []).map(path => ({ path,
-      retry: false, reason: `dohc could not restore links in ${path}. Update those links yourself.` })) };
+      retry: false, reason: path === record.from || path === record.to
+        ? "dohc could not restore this file. Restore it from History."
+        : `dohc could not restore links in ${path}. Update those links yourself.` })) };
   for (const path of [...(record.pending ?? record.entries)]) {
     assertCurrent();
     if (record.engine.notRestored?.some(skipped => skipped === path || skipped === record.to)) {
