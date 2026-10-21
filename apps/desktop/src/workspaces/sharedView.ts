@@ -265,11 +265,14 @@ async function reachesOtherSpelling(rootDir: string, path: string): Promise<bool
   return false;
 }
 
+// `protectedPaths` are the paths this refresh or capture keeps its hands off,
+// such as preserved paths and ones whose capture failed.
 async function materializeSharedViewPaths(
   rootDir: string,
   workspaceId: string,
   changedPaths: readonly ShareViewChangedPath[],
   store: CaptureVersionedTextStore,
+  protectedPaths: ReadonlySet<string> = new Set(),
 ): Promise<void> {
   if (changedPaths.length === 0) return;
   const realRoot = await realpath(rootDir);
@@ -400,6 +403,9 @@ async function materializeSharedViewPaths(
       // so capture never reads the deleted path's bytes as that file's (#2294).
       const owner = await aliasOwner(change.path, resolvedTarget);
       if (owner !== null) {
+        // A protected owner, such as one whose local edits capture could not
+        // save, keeps its file untouched, and its debt waits for capture.
+        if (protectedPaths.has(owner)) continue;
         const write = await ownerWrite(owner, resolvedTarget);
         if (write && !ordered.some((other) => other.path === owner && other.operation !== "delete")) ordered.push(write);
         continue;
@@ -1600,6 +1606,14 @@ async function captureSharedViewLocalDivergence(input: {
     resolvedCollisionPaths: [] as string[],
     failedPaths: [] as string[],
   };
+  // The paths capture keeps its hands off so far: preserved ones, and ones it
+  // could not capture or journal for a reason other than a local collision,
+  // whose file is another spelling's.
+  const captureProtected = () => new Set([
+    ...preserved,
+    ...settlement.failedPaths,
+    ...settlement.unjournalablePaths.filter((path) => path.reason !== "local-collision").map((path) => path.path),
+  ]);
 
   const currentEntry = (
     current: Awaited<ReturnType<CaptureVersionedTextStore["readTextFile"]>>,
@@ -1781,6 +1795,7 @@ async function captureSharedViewLocalDivergence(input: {
           workspaceId,
           [{ path, operation: "write", contentKind: action.contentKind }],
           store,
+          captureProtected(),
         );
         return;
       case "materialize-delete":
@@ -1789,6 +1804,7 @@ async function captureSharedViewLocalDivergence(input: {
           workspaceId,
           [{ path, operation: "delete", contentKind: "text" }],
           store,
+          captureProtected(),
         );
         return;
       default:
@@ -2035,6 +2051,10 @@ async function refreshSharedViewOnce(input: {
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
   onCursorCommitted?: (cursor: number) => void;
   excludeFromMaterialization?: ReadonlySet<string>;
+  // Excluded paths whose files hold local work capture keeps aside, such as
+  // preserved paths and ones it could not capture. Nothing removes or rewrites
+  // their files, even to settle another spelling.
+  protectedPaths?: ReadonlySet<string>;
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
   preTrackedPaths?: ReadonlySet<string>;
@@ -2181,6 +2201,7 @@ async function refreshSharedViewOnce(input: {
     input.workspaceId,
     pathsToMaterialize,
     input.store,
+    input.protectedPaths,
   );
   if (input.trackPendingMaterialization) {
     // The latest canonical value discharges every earlier attempt recorded
@@ -2246,6 +2267,13 @@ async function refreshCapturedShareView(
       ...(preservedPaths ?? preTrackedPaths),
       ...(captured.failedPaths ?? []),
       ...captured.unjournalablePaths.map((path) => path.path),
+      ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
+    ]),
+    // A local collision is the one exclusion whose file is not its own.
+    protectedPaths: new Set([
+      ...(preservedPaths ?? preTrackedPaths),
+      ...(captured.failedPaths ?? []),
+      ...captured.unjournalablePaths.filter((path) => path.reason !== "local-collision").map((path) => path.path),
       ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
     ]),
     unjournalablePaths: captured.unjournalablePaths,

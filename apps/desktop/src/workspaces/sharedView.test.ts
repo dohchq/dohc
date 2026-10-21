@@ -1872,6 +1872,38 @@ describe("shared view refresh", () => {
     }
   });
 
+  // A spelling the refresh protects, here a preserved path holding local
+  // edits, keeps its file: deleting another spelling neither removes the file
+  // nor writes the protected spelling's head over those edits.
+  it("leaves a protected spelling's file alone when a refresh deletes another spelling of it", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("Notes.md", "N\n");
+    relay.addWrite("notes.md", "n\n");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    await writeFile(join(rootDir, "notes.md"), "local bytes\n");
+    relay.addDelete("Notes.md");
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    try {
+      const notes = new Set(["notes.md"]);
+      await refreshSharedViewOnceWithPull({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, store,
+        excludeFromMaterialization: notes, protectedPaths: notes,
+      });
+
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("local bytes\n");
+    } finally {
+      await store.close();
+    }
+  });
+
   // A rename only by capitals in one refresh leaves the old spelling to the
   // new one's write, which recreates the file under the new spelling.
   it("ends a rename only by capitals with the new spelling on a disk that ignores case", async (context) => {
