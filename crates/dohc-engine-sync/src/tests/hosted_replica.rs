@@ -4025,8 +4025,8 @@ fn documents_shared_together_at_spellings_of_one_path_hold_the_later_one() {
 
 /// A ready document renamed to another spelling of a path another document
 /// holds would share that document's file on a disk that ignores case
-/// (#2036). The rename is retained while the document stays ready, as work
-/// behind a live session is, and the other document and the main cursor go
+/// (#2036). The owner's scope moves with it. The document is held at the
+/// rename, naming the holder, and the other document and the main cursor go
 /// on. Once the holder moves, the rename applies.
 #[test]
 fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_frees() {
@@ -4050,6 +4050,7 @@ fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_fr
         "hosted b",
         "moment-owner-2",
     );
+    feed.share("doc-b", "A.md");
     feed.replace(
         "owner",
         4,
@@ -4059,8 +4060,8 @@ fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_fr
         ("doc-a", "hosted a", "moment-owner-1"),
     );
     sync(&client, &mut store);
-    assert!(ready(&store, "doc-b"));
-    assert_eq!(retained(&store), 1, "the rename waits");
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+    assert_eq!(retained(&store), 0);
     let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
     assert_eq!(
         paths(&store).0,

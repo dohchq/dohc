@@ -64,7 +64,8 @@ pub(crate) const BACKFILL_PATH_HELD: &str = "hosted-backfill-path-held";
 
 /// A moment of a ready document that would move it to another spelling of a
 /// path another document in the scope holds here ([`wait_for_occupant_in_tx`]).
-/// It waits until that one moves.
+/// The pass holds its document there, as [`BACKFILL_PATH_HELD`] does, until
+/// that one moves.
 pub(crate) const PATH_HELD_IN_SCOPE: &str = "hosted-path-held-in-scope";
 
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
@@ -538,7 +539,8 @@ pub(crate) fn backfill_path_held(
 /// `version_id` collides with `path` as capture holds match paths, by another
 /// spelling or as a folder above or inside it, when `object_id` would move
 /// to `path`. A document already there meets no new collision, so two that
-/// already collide hold neither, and an edit reads nothing more.
+/// already collide hold neither, and an edit reads nothing more. An ordinary
+/// replica has none.
 fn spelling_holder(
     conn: &Connection,
     workspace_id: &str,
@@ -546,6 +548,9 @@ fn spelling_holder(
     object_id: &str,
     path: &str,
 ) -> Result<Option<String>, SyncError> {
+    if !is_hosted(conn, workspace_id)? {
+        return Ok(None);
+    }
     let at: Option<String> = conn
         .query_row(
             "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",

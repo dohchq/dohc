@@ -2534,7 +2534,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         retryable_refusals.push((op, reason));
-                        holding.stop_at_withheld_parent(op, reason);
+                        holding.stop_where_it_can_wait(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
                                 durable.insert(key.clone());
@@ -4563,13 +4563,12 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, a hosted moment or Y.Doc row whose path
-/// waits for a departed document to park, and a hosted moment that waits for
-/// another document of the scope to leave another spelling of its path. A
-/// hosted document that is not ready retains nothing.
+/// it: work behind a live session, and a hosted moment or Y.Doc row whose
+/// path waits for a departed document to park. A hosted document that is not
+/// ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
-        crate::hosted::PATH_HELD_BY_DEPARTED | crate::hosted::PATH_HELD_IN_SCOPE => true,
+        crate::hosted::PATH_HELD_BY_DEPARTED => true,
         "ydoc-session-live" => {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
@@ -4624,12 +4623,16 @@ impl Holding {
         crate::hosted::hosted_document(op).filter(|object_id| unready.contains(*object_id))
     }
 
-    /// Stop a ready hosted document at `op`, whose conflict parent the feed
-    /// withholds: it can wait indefinitely, so the document is held there
-    /// and retains nothing, as one that is not ready.
-    fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
+    /// Stop a ready hosted document at `op` when it can wait indefinitely:
+    /// the feed withholds its conflict parent, or it would move onto another
+    /// spelling of a path another document holds. The document is held there,
+    /// naming why, and retains nothing, as one that is not ready.
+    fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
-            && reason == crate::hosted::CONFLICT_PARENT_WITHHELD
+            && matches!(
+                reason,
+                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::PATH_HELD_IN_SCOPE
+            )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {
             unready.insert(object_id.to_owned());
