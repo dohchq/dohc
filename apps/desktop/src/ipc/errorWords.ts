@@ -54,6 +54,9 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
 ]);
+// What `sudo` makes in a folder is another user's too, so a folder's fix
+// covers everything in it.
+const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then try again.";
 
 /** What keeps a workspace's History from being private, and what to do. */
 function engineFolderNotPrivateWords(message: string): string | null {
@@ -61,7 +64,9 @@ function engineFolderNotPrivateWords(message: string): string | null {
   const words = NOT_PRIVATE_WORDS.get(reason);
   if (words === undefined) return null;
   const [fact, fix] = words;
-  return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ${fix}`;
+  const folder = path === ".dohc" || path === ".dohc/engine";
+  const fixed = reason === "other-owner" && folder ? OTHER_OWNER_FOLDER_FIX : fix;
+  return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ${fixed}`;
 }
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
