@@ -149,14 +149,17 @@ async function waitForDaemonCaptureDeferral(
 ): Promise<void> {
   const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
   while (performance.now() < deadline) {
-    const outcome = await sessions.run(
+    const status = await sessions.run(
       workspace,
-      async ({ client, workspace: handle }) =>
-        await new VersionedLiveAdapter(client, handle, {
+      async ({ client, workspace: handle }) => {
+        const engine = new VersionedLiveAdapter(client, handle, {
           workspaceId: workspace.workspaceId,
-        }).flushCapture(),
+        });
+        expect(await engine.flushCapture()).toMatchObject({ settled: true, degraded: false });
+        return engine.watcherStatus();
+      },
     );
-    if (!outcome.settled) return;
+    if (status.deferredWrites.length > 0) return;
     await delay(25);
   }
   throw new Error("Daemon capture did not report its live-session deferral.");
@@ -757,7 +760,7 @@ it.skipIf(engine.missing)(
 );
 
 // #496 under the live-session capture gate: the daemon observes the outside
-// edit but cannot ingest it while the Y.Doc lease is live. The unsettled flush
+// edit but cannot ingest it while the Y.Doc lease is live. The deferred path
 // is the ordering proof. A clean close releases the lease, after which the
 // queued disk edit becomes a capture moment.
 it.skipIf(engine.missing)(
