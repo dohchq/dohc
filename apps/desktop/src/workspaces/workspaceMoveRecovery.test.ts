@@ -271,6 +271,17 @@ it.each(["link changed after rename", "linking document removed", "capture hold"
   expect(await readMoveRecovery(f.rootPath, moved.operationId!)).not.toHaveProperty("engine");
 });
 
+it.each([false, true])("preserves operation-scoped wire refusals, agent=%s", async byAgent => {
+  for (const reason of ["Operation already undone", "Undo in progress", "operation unavailable", "active version changed"]) {
+    const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
+    const message = `domain error: Undo refused: ${reason}: ${moved.operationId}`;
+    expect(moved.operationId).toMatch(/^dohc-operation:/u);
+    f.history.undoHistoryOperation.mockRejectedValue(new Error(message));
+    expect(await f.undo(undefined, byAgent)).toEqual({ok: false, reason: message});
+    expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  }
+});
+
 it.each([false, true])("filters unchecked paths using the reader's floor, agent=%s", async agent => {
   const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
   await f.write(".dohc/files.toml", '[[rule]]\npath = "excluded/**"\ntracked = false\n');

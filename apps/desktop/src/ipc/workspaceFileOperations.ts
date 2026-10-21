@@ -11,6 +11,8 @@ import {
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
   UndoHistoryOperationResult,
+  ReadHistoryOperationPayload,
+  ReadHistoryOperationResult,
   ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
   ExportDocumentFilePayload,
@@ -76,6 +78,15 @@ export const workspaceFileOperations = {
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
     payload: DeleteWorkspacePathPayload, result: DeleteWorkspacePathResult,
+  },
+  readHistoryOperation: {
+    capabilityId: "history.operation.read", channel: "desktop:read-history-operation",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {
+      check: "workspaceFileMutationOwner.runAdmittedMutation + readWorkspaceHistoryOperation/withSharedWorkspaceOperation",
+      reason: "The workspace owner admits the renderer read and applies the person's path floor under a shared lease.",
+    },
+    payload: ReadHistoryOperationPayload, result: ReadHistoryOperationResult,
   },
   undoHistoryOperation: {
     capabilityId: "history.operation.undo", channel: "desktop:undo-history-operation",

@@ -218,7 +218,9 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         let result;
         try { result = await options.history.undoHistoryOperation(input); }
         catch (error) {
-          const path = linkUndoRefusal(error)?.[2];
+          const refusal = linkUndoRefusal(error);
+          // These reasons name the operation; the other Undo refusals name workspace paths.
+          const path = refusal && !["Operation already undone", "Undo in progress", "operation unavailable", "active version changed"].includes(refusal[1]!) ? refusal[2] : undefined;
           if (path && floor) try { await floor(path); }
           catch (denied) { throw new Error(denied instanceof Error ? denied.message : "Cannot undo this operation.", {cause: error}); }
           throw error;
