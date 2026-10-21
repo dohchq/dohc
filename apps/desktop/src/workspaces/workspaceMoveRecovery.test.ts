@@ -114,6 +114,16 @@ it.each([false, true])("returns a rename before its pass, reads updating without
   f.retirement.abort();
 });
 
+it("keeps the History adapter receiver when IPC schedules its rewrite", async () => {
+  const seen = deferred<unknown>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async function (this: unknown) {
+    seen.resolve(this); return linkReceipt;
+  });
+  const f = await fixture(rewrite); await f.write("old.md"); await f.move("old.md", "new.md");
+  expect(await seen.promise === f.history).toBe(true);
+  f.retirement.abort();
+});
+
 it.each([false, true])("cancels the in-flight pass and waits for its last committed member before floors and Undo, receipt=%s", async completed => {
   const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<typeof linkReceipt>();
   const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {

@@ -217,7 +217,7 @@ export function createDesktopCliServer<State>(
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
           linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
-            history: {rewriteHistoryLinks: operationHistory.rewriteHistoryLinks!}},
+            history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
       });

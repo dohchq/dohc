@@ -320,11 +320,12 @@ export function createWorkspaceFileMutationOwner<
       const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
         if (!receivedShare) {
           assertWritableWorkspace(workspace);
+          const history = dependencies.historyFor(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
-            linkRewrites: dependencies.historyFor(workspace).rewriteHistoryLinks ? {
+            linkRewrites: history.rewriteHistoryLinks ? {
               workspaceId: workspace.workspaceId, signal,
-              history: {rewriteHistoryLinks: dependencies.historyFor(workspace).rewriteHistoryLinks!},
+              history: {rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history)},
             } : undefined,
             onRecorded: (path, operationId) => {
               const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });

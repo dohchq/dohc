@@ -238,7 +238,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       await withExclusiveWorkspaceOperation(operation.workspace.rootPath, async () => {
         const record = await readMoveRecovery(operation.workspace.rootPath, input.operationId);
         if (record && !("noUndo" in record)) scheduleLinkRewrite(operation.workspace.rootPath, record, {
-          workspaceId: operation.workspace.workspaceId, signal: operation.signal, history: {rewriteHistoryLinks: options.history.rewriteHistoryLinks!},
+          workspaceId: operation.workspace.workspaceId, signal: operation.signal, history: {rewriteHistoryLinks: input => options.history.rewriteHistoryLinks!(input)},
         });
       }, {markOnSuccess: false}).catch(() => undefined);
     }

@@ -224,7 +224,7 @@ async function fixture(runDir, documentCase) {
       }));
     }
     for (const [name, paragraphs] of [['small', 100], ['large', 5000]]) {
-      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n` + (scenario === 'link-rename' && name === 'large' && options.links ? '[[link-target#part|label]]\n' : '');
+      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n` + (scenario === 'link-rename' && name === 'large' && options.links ? '\n[[link-target#part|label]]' : '');
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
