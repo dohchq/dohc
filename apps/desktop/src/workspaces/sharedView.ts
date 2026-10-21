@@ -396,7 +396,9 @@ async function writeDiskContentToStore(input: {
 // `.dohc/local/share-refresh`, beside their temporary files and the
 // `.invalid-<time>` copies of damaged ones. They describe what this computer
 // did to its copy of the shared files, so they stay out of iCloud Drive. dohc
-// neither reads nor moves the old copies at the top of `.dohc`.
+// neither reads nor moves the old copies at the top of `.dohc`, but an old
+// collision record stops a refresh until the person moves it (see
+// refuseOlderCollisionRecord).
 //
 // Only this computer's engine open makes `.dohc/local`, so every write waits
 // for it, and a refused write stops the refresh or change before it touches
@@ -862,17 +864,61 @@ function untrustedCollisionRecordRefusal(
   error: UntrustedCollisionRecordError,
 ): Error {
   const { read } = error;
+  const file = posix.join(records.shown, COLLISION_RECORD_FILE);
+  const keeps = "a refresh from replacing your own files.";
+  let words: string;
   if (read.words !== undefined) {
-    return new Error(`${NOT_UPDATED} ${read.words}`, { cause: error });
+    words = `${NOT_UPDATED} ${read.words}`;
+  } else if (read.place === "folder") {
+    words =
+      `dohc did not update these shared files because it can't trust ${records.shown}. ` +
+      `Its records keep ${keeps} Make it a folder only you can change, then try again.`;
+  } else if (read.reason === "linked") {
+    // Changing the mode can't take away a second name.
+    words =
+      `dohc did not update these shared files because ${file} has a second name elsewhere. ` +
+      `It keeps ${keeps} Remove the other name, or replace this file with a copy of it, then try again.`;
+  } else {
+    words =
+      `dohc did not update these shared files because it can't trust ${file}. ` +
+      `It keeps ${keeps} Make it a file only you can change, then try again.`;
   }
-  const [what, keeps, kind] =
-    read.place === "folder"
-      ? [records.shown, "Its records keep", "folder"]
-      : [posix.join(records.shown, COLLISION_RECORD_FILE), "It keeps", "file"];
+  return new Error(words, { cause: error });
+}
+
+// Before #2372 the collision record lived at the top of `.dohc`. A view
+// updated from then may have one there still keeping a person's files apart,
+// and reading no new record as "no collisions" would let the next capture
+// replace them. So a view with no new record refuses while the old one is
+// there. Only its presence is checked, never what it says. Remove this check
+// once no view can still have the old record.
+class OlderCollisionRecordError extends Error {
+  constructor() {
+    super("An older share collision record is still in .dohc.");
+    this.name = "OlderCollisionRecordError";
+  }
+}
+
+async function refuseOlderCollisionRecord(rootDir: string): Promise<void> {
+  const there = await lstat(join(rootDir, ".dohc", COLLISION_RECORD_FILE)).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => error.code !== "ENOENT",
+  );
+  if (there) throw new OlderCollisionRecordError();
+}
+
+function olderCollisionRecordRefusal(
+  records: ShareViewRecords,
+  error: OlderCollisionRecordError,
+): Error {
+  const older = posix.join(
+    posix.dirname(posix.dirname(records.shown)),
+    COLLISION_RECORD_FILE,
+  );
   return new Error(
-    `dohc did not update these shared files because it can't trust ${what}. ` +
-      `${keeps} a refresh from replacing your own files. ` +
-      `Make it a ${kind} only you can change, then try again.`,
+    `dohc did not update these shared files because an older record at ${older} may be keeping your own files apart from the share. ` +
+      "Move the files it lists out of the shared folder, then remove the record and try again. " +
+      "Files you leave in place are no longer kept apart.",
     { cause: error },
   );
 }
@@ -882,7 +928,10 @@ async function readCollisionRecordUnlocked(
   shareId: string,
 ): Promise<{ shareId: string; paths: Set<string> }> {
   const read = await readRecord(rootDir, COLLISION_RECORD_FILE);
-  if (read.status === "missing") return { shareId, paths: new Set() };
+  if (read.status === "missing") {
+    await refuseOlderCollisionRecord(rootDir);
+    return { shareId, paths: new Set() };
+  }
   if (read.status === "untrusted") throw new UntrustedCollisionRecordError(read);
   let parsed: unknown;
   try {
@@ -947,7 +996,8 @@ async function writeCollisionRecordUnlocked(
 // did not mean to share unless they review it out first.
 //
 // A record dohc can't trust or read is not quarantined. It refuses, and
-// changes nothing, until the person makes it trustworthy again.
+// changes nothing, until the person makes it trustworthy again. So does an
+// older record left at the top of `.dohc`.
 async function readCollisionRecordLocked(
   records: ShareViewRecords,
   shareId: string,
@@ -960,6 +1010,9 @@ async function readCollisionRecordLocked(
   } catch (error) {
     if (error instanceof UntrustedCollisionRecordError) {
       throw untrustedCollisionRecordRefusal(records, error);
+    }
+    if (error instanceof OlderCollisionRecordError) {
+      throw olderCollisionRecordRefusal(records, error);
     }
     console.error(
       `[desktop] share collision record at ${target} is unreadable; quarantining it. ` +

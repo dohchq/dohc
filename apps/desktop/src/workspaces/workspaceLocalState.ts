@@ -88,7 +88,7 @@ export async function existingLocalStateDir(rootPath: string): Promise<string | 
 }
 
 /** What keeps dohc from trusting `.dohc` or `.dohc/local` itself. */
-export type LocalFolderProblem = "link" | "not-folder" | "other-owner";
+export type LocalFolderProblem = "link" | "not-folder" | "other-owner" | "unreadable";
 
 // In the words the engine's open refuses the workspace with. Each names its
 // own way out, because replacing a file in the folder can't fix the folder.
@@ -96,6 +96,7 @@ export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: stri
   link: ["is a link", "Put what it links to in its place, then try again."],
   "not-folder": ["is not a folder", "Rename or move it, then try again."],
   "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
+  unreadable: ["can't be read", "Make sure you can open it, then try again."],
 };
 
 /** `.dohc` or `.dohc/local` is not a folder this user owns, so dohc trusts nothing in it. */
@@ -107,10 +108,15 @@ export class LocalStateFolderError extends Error {
   }
 }
 
-// Null for a folder of this user's.
+// Null for a folder of this user's. Only a path that is not there is missing:
+// a folder dohc can't look at may still hold what protects a person's work.
 async function folderProblem(path: string): Promise<LocalFolderProblem | "missing" | null> {
-  const stats = await lstat(path).catch(() => null);
-  if (stats === null) return "missing";
+  let stats: Stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
   if (stats.isSymbolicLink()) return "link";
   if (!stats.isDirectory()) return "not-folder";
   const uid = process.getuid?.();
@@ -119,10 +125,11 @@ async function folderProblem(path: string): Promise<LocalFolderProblem | "missin
 
 /**
  * The workspace's `.dohc/local` for a reader of state that changes what dohc
- * does, such as settings, or null when it or `.dohc` is missing. Both folders
- * are checked on every read, before any file in them: a link at either one
- * would be followed by the file's open. Throws LocalStateFolderError when
- * either is not a folder this user owns, and the metadata resolver's refusal
+ * does, such as settings, or null when it or `.dohc` is not there. Both
+ * folders are checked on every read, before any file in them: a link at
+ * either one would be followed by the file's open. Throws
+ * LocalStateFolderError when either is not a folder this user owns or can't
+ * be looked at, and the metadata resolver's refusal
  * when `.dohc` leads out of the workspace, which only a mount can do. Does
  * not wait for the engine, and creates nothing.
  */
@@ -131,7 +138,8 @@ export async function ownedLocalStateDir(rootPath: string): Promise<string | nul
   if (dohc === "missing") return null;
   if (dohc) throw new LocalStateFolderError(".dohc", dohc);
   const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
-  if (metadata === null) return null;
+  // `.dohc` was just there, so the resolver lost sight of it.
+  if (metadata === null) throw new LocalStateFolderError(".dohc", "unreadable");
   const dir = join(metadata, "local");
   const local = await folderProblem(dir);
   if (local === "missing") return null;

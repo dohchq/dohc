@@ -7250,13 +7250,15 @@ describe("share-refresh records in .dohc/local", () => {
     const refresh = (
       pull: Parameters<typeof refreshSharedViewOnceWithPull>[0]["pull"] =
         harness.pullFor(target),
+      access: "view" | "edit" = "view",
     ) =>
       withShareViewRefreshLifecycleLock(rootDir, async () => {
+        const pinnedSelector = { ...PINNED_SELECTOR, access };
         const captured = await captureStandaloneShareViewRefresh({
           rootDir,
           workspaceId: WORKSPACE,
           store,
-          pinnedSelector: PINNED_SELECTOR,
+          pinnedSelector,
           shareId: SHARE_ID,
           ended: false,
         });
@@ -7268,7 +7270,7 @@ describe("share-refresh records in .dohc/local", () => {
           shareId: SHARE_ID,
           store,
           pull,
-          pinnedSelector: PINNED_SELECTOR,
+          pinnedSelector,
           recordRefusals: async () => undefined,
           captured: captured.captured,
         });
@@ -7320,7 +7322,8 @@ describe("share-refresh records in .dohc/local", () => {
     }
   });
 
-  it("ignores records left at the top of .dohc, and leaves them there", async () => {
+  // An old collision record is the exception: see the test after this one.
+  it("ignores a pull marker and pending record left at the top of .dohc, and leaves them there", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-records-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -7334,7 +7337,6 @@ describe("share-refresh records in .dohc/local", () => {
     const old = {
       "pull-in-flight.marker": "",
       "pending-materialization.json": JSON.stringify({ counts: { "docs/seed.md": 1 } }),
-      "share-collision-record.json": JSON.stringify({ shareId: SHARE_ID, paths: ["docs/seed.md"] }),
     };
     for (const [name, content] of Object.entries(old)) {
       await writeFile(join(rootDir, ".dohc", name), content, { mode: 0o600 });
@@ -7364,12 +7366,82 @@ describe("share-refresh records in .dohc/local", () => {
     } finally {
       await store.close();
     }
-    // The old collision record protected nothing, and nothing touched it.
+    // The old records changed nothing, and nothing touched them.
     expect(await readFile(join(rootDir, "docs/seed.md"), "utf8")).toBe("seed two");
     for (const [name, content] of Object.entries(old)) {
       expect(await readFile(join(rootDir, ".dohc", name), "utf8")).toBe(content);
     }
   });
+
+  // A view updated from before #2372 may have its collision record at the top
+  // of `.dohc`. With no new record, ordinary rules would replace the files it
+  // kept apart, so the refresh refuses until the person moves the old one.
+  it.each(["view", "edit"] as const)(
+    "refuses a %s share's refresh while an older collision record is in .dohc, and keeps the person's file",
+    async (access) => {
+      const view = await collidedView();
+      try {
+        const older = join(view.rootDir, ".dohc", "share-collision-record.json");
+        await rename(view.collisionRecord, older);
+        view.relay.addWrite(view.path, "granter file two");
+        const logRequests = view.relay.logRequests;
+        const moments = await momentIds(view.store);
+        const refusal = {
+          ok: false,
+          changedPaths: 0,
+          errorMessage:
+            "dohc did not update these shared files because an older record at .dohc/share-collision-record.json may be keeping your own files apart from the share. " +
+            "Move the files it lists out of the shared folder, then remove the record and try again. " +
+            "Files you leave in place are no longer kept apart.",
+        };
+
+        await expect(view.refresh(undefined, access)).resolves.toEqual(refusal);
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await momentIds(view.store)).toEqual(moments);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        await expect(readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).rejects.toThrow("older share collision record");
+
+        // Once the person moves their file out and removes the record, the share's file lands.
+        await rename(join(view.rootDir, view.path), join(await createTestScratch("dohc-moved-out-"), "mine.md"));
+        await rm(older);
+        await expect(view.refresh(undefined, access)).resolves.toMatchObject({ ok: true, unjournalablePaths: [] });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("granter file two");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  // Sol's case: a folder dohc can't look into is not a folder with no records.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "refuses a refresh while it can't look into .dohc, and keeps the person's file",
+    async () => {
+      const view = await collidedView();
+      const dohc = join(view.rootDir, ".dohc");
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        const logRequests = view.relay.logRequests;
+        await chmod(dohc, 0o600);
+        try {
+          await expect(view.refresh()).resolves.toEqual({
+            ok: false,
+            changedPaths: 0,
+            errorMessage:
+              "dohc did not update these shared files. This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+          });
+        } finally {
+          await chmod(dohc, 0o700);
+        }
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+      } finally {
+        errorLog.mockRestore();
+        await view.store.close();
+      }
+    },
+  );
 
   it("writes nothing before the view's open prepares .dohc/local, and creates nothing", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-records-");
@@ -7502,7 +7574,7 @@ describe("share-refresh records in .dohc/local", () => {
   // would replace the person's file with the granter's.
   it.skipIf(process.platform === "win32").each([
     ["writable by others", "dohc did not update these shared files because it can't trust .dohc/local/share-refresh/share-collision-record.json. It keeps a refresh from replacing your own files. Make it a file only you can change, then try again."],
-    ["hard-linked", "dohc did not update these shared files because it can't trust .dohc/local/share-refresh/share-collision-record.json. It keeps a refresh from replacing your own files. Make it a file only you can change, then try again."],
+    ["hard-linked", "dohc did not update these shared files because .dohc/local/share-refresh/share-collision-record.json has a second name elsewhere. It keeps a refresh from replacing your own files. Remove the other name, or replace this file with a copy of it, then try again."],
     ["another user's", "dohc did not update these shared files. This workspace's .dohc belongs to another user. Make it and everything in it yours again, then try again."],
     ["under a linked .dohc/local", "dohc did not update these shared files. This workspace's .dohc/local is a link. Put what it links to in its place, then try again."],
     ["under a linked records folder", "dohc did not update these shared files because it can't trust .dohc/local/share-refresh. Its records keep a refresh from replacing your own files. Make it a folder only you can change, then try again."],
