@@ -1,4 +1,5 @@
 import {
+  databaseFolderName,
   databaseOpLogPath,
   mediaTypeForPath,
   validateUserMaterializePath,
@@ -19,12 +20,17 @@ import {
   prepareWorkspaceFileRead,
   type PreparedWorkspaceFileRead,
 } from "./workspaceAssets";
+import {
+  localStateFolder,
+  ownedLocalStateDir,
+  ownedSqliteFiles,
+  type LocalStateWorkspace,
+} from "./workspaceLocalState";
 import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type {
   DatabaseEdit,
-  DatabaseEditResult,
   DatabasePageView,
   DatabaseSnapshotView,
 } from "./workspaceDatabaseTypes";
@@ -32,6 +38,7 @@ import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabaseWorker";
+import { UNCOUNTABLE_LOG_VERSION } from "./workspaceDatabaseProtocol";
 
 export type {
   DatabaseColumnView,
@@ -47,6 +54,8 @@ export {
 } from "./workspaceDatabaseWorker";
 
 export const workspaceDatabaseWorker = createWorkspaceDatabaseWorkerOwner();
+
+const OPERATION_COUNTER = "state.sqlite";
 
 interface DatabaseWorkerCallOptions {
   signal?: AbortSignal;
@@ -137,45 +146,6 @@ export function readDatabasePageFromBytes(
   });
 }
 
-export async function applyDatabaseEdit(
-  rootPath: string,
-  relativePath: string,
-  edit: DatabaseEdit,
-  author: ChangeAuthor,
-  nowMs: number,
-  options: DatabaseWorkerCallOptions & {
-    createId?: () => string;
-    pageOffset?: number;
-  } = {},
-): Promise<DatabaseEditResult> {
-  if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
-  const { realTarget, normalized } = await resolveWorkspaceFile(
-    rootPath,
-    relativePath,
-  );
-  if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
-  const logPath = join(rootPath, databaseOpLogPath(normalized));
-  return (options.worker ?? workspaceDatabaseWorker).editPath({
-    absolutePath: realTarget,
-    path: normalized,
-    logPath,
-    statePath: join(dirname(logPath), "state.sqlite"),
-    edit,
-    operation: {
-      operationId: options.createId?.() ?? randomUUID(),
-      databasePath: normalized,
-      table: edit.table,
-      op: edit.op,
-      rowId: String(edit.rowId),
-      payload: edit.payload ?? {},
-      appliedAt: nowMs,
-      author,
-    },
-    pageOffset: options.pageOffset,
-    signal: options.signal,
-  });
-}
-
 // Atomically writes bytes to a new workspace-relative path, enforcing
 // path-safety and real-path containment (no traversal, no symlink escape).
 // Containment is checked against the deepest existing ancestor before mkdir —
@@ -262,6 +232,28 @@ export async function importToDatabase(
     sha256: createHash("sha256").update(result.bytes).digest("hex"), size: result.bytes.byteLength };
 }
 
+// This computer numbers each visible database's operations with its own
+// counter in `.dohc/local`, which iCloud Drive skips. The operations log stays
+// in `.dohc/databases`, which syncs. Each number comes after both the counter
+// and the highest number in the log, which another computer may have raised.
+// A counter dohc can't trust could make it give a number out again, so the
+// edit refuses and leaves it in place. Once the person removes its folder, the
+// next edit starts after the log.
+async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
+  const name = `databases/${databaseFolderName(databasePath)}`;
+  // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
+  await ownedLocalStateDir(workspace.rootPath);
+  // Refuses until the engine's open has prepared `.dohc/local`. The desktop
+  // waits for an open under way before it takes the workspace lease.
+  const counterFolder = await localStateFolder(workspace, name, {
+    path: `.dohc/local/${name}`, lead: "dohc could not use this database's folder in .dohc/local.",
+  });
+  if (!(await ownedSqliteFiles(counterFolder, OPERATION_COUNTER))) {
+    throw new Error(`dohc can't trust a file in .dohc/local/${name}. Remove that folder, then try again.`);
+  }
+  return join(counterFolder, OPERATION_COUNTER);
+}
+
 export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: WorkspaceDatabaseWorkerOwner) {
   function workerDatabaseReader(
     signal?: AbortSignal,
@@ -295,7 +287,7 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
   }
 
   async function editWorkspaceDatabaseInWorker(input: {
-    rootPath: string;
+    workspace: LocalStateWorkspace;
     relativePath: string;
     edit: DatabaseEdit;
     author: ChangeAuthor;
@@ -303,25 +295,19 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     operationId?: string;
     signal?: AbortSignal;
   }) {
-    const resolved = await resolveWorkspaceFile(
-      input.rootPath,
-      input.relativePath,
-    );
+    const { rootPath } = input.workspace;
+    const resolved = await resolveWorkspaceFile(rootPath, input.relativePath);
     if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
-    const source = await prepareWorkspaceFileRead(
-      input.rootPath,
-      resolved.resolvedPath,
-    );
-    const logPath = join(
-      input.rootPath,
-      databaseOpLogPath(resolved.normalized),
-    );
+    const statePath = await operationCounterPath(input.workspace, resolved.normalized);
+    if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
+    const source = await prepareWorkspaceFileRead(rootPath, resolved.resolvedPath);
+    const logPath = databaseOpLogPath(resolved.normalized);
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
         absolutePath,
         path: resolved.normalized,
-        logPath,
-        statePath: join(dirname(logPath), "state.sqlite"),
+        logPath: join(rootPath, logPath),
+        statePath,
         edit: input.edit,
         operation: {
           operationId: input.operationId ?? randomUUID(),
@@ -335,7 +321,10 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
         },
         signal: input.signal,
       }),
-    );
+    ).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== UNCOUNTABLE_LOG_VERSION) throw error;
+      throw new Error(`A line in ${logPath} has a version dohc can't count past. Remove that line, then try again.`);
+    });
   }
 
   return { workerDatabaseReader, editWorkspaceDatabaseInWorker };
