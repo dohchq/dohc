@@ -139,13 +139,13 @@ impl std::fmt::Debug for OwnerOutputGuard {
     }
 }
 impl OutputGuard for OwnerOutputGuard {
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let Some(service) = self.service.upgrade() else {
             return false;
         };
         let handles = crate::lock(&service.handles);
         if !self.connection.is_current()
-            || self.cancel.is_cancelled()
+            || (cancellable && self.cancel.is_cancelled())
             || self.deadline.is_some_and(|d| Instant::now() >= d)
             || !handles
                 .get(&self.workspace)
@@ -165,9 +165,8 @@ impl OutputGuard for OwnerOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.connection.is_current()
-            && !self.cancel.is_cancelled()
             && self.deadline.is_none_or(|d| Instant::now() < d)
             && self.service.upgrade().is_some_and(|service| {
                 service

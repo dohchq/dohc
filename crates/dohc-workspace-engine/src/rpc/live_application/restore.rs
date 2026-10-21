@@ -80,11 +80,11 @@ impl OutputGuard for RestoreOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.fence.deadline()
     }
-    fn is_current(&self) -> bool {
-        self.fence.is_current()
+    fn is_current_ignoring_cancel(&self) -> bool {
+        self.fence.is_current_ignoring_cancel()
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
-        self.fence.with_current(action)
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
+        self.fence.with_current(cancellable, action)
     }
 }
 
