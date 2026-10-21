@@ -3923,6 +3923,173 @@ fn a_ydoc_base_at_a_held_path_holds_its_document_until_the_path_frees() {
     );
 }
 
+/// Two shared documents whose paths differ only in case, or where one path is
+/// a folder of the other, cannot both be files on a disk that ignores case
+/// (#2036). The later one is held, naming the document that holds its path,
+/// while the first and the main cursor go on. Once the first moves, the later
+/// one applies.
+#[test]
+fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() {
+    for (held, path) in [
+        ("a.md", "A.md"),
+        ("A.md", "a.md/c.md"),
+        ("a.md/c.md", "A.md"),
+    ] {
+        let (_scratch, _path, mut store) = hosted_store();
+        let client = RelaySyncClient::new(HostedFeed::new());
+        let feed = client.transport();
+        feed.append(envelope("owner", 0, "workspace.init", json!({})));
+        feed.create("owner", 1, "doc-a", held, "hosted a");
+        feed.create("owner", 2, "doc-b", path, "hosted b");
+        feed.share("doc-a", held);
+        sync(&client, &mut store);
+
+        feed.share("doc-b", path);
+        sync(&client, &mut store);
+        assert_eq!(
+            hold(&store, "doc-b"),
+            Some(path_held(path, "doc-a")),
+            "{path} against {held}"
+        );
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "hosted a")]),
+            "{path} against {held}"
+        );
+        feed.replace(
+            "owner",
+            3,
+            "doc-a",
+            held,
+            "edited a",
+            ("doc-a", "hosted a", "moment-owner-1"),
+        );
+        sync(&client, &mut store);
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a")]),
+            "{path} against {held}"
+        );
+
+        feed.rename(
+            "owner",
+            4,
+            "doc-a",
+            held,
+            "z.md",
+            "edited a",
+            "moment-owner-3",
+        );
+        sync(&client, &mut store);
+        assert!(ready(&store, "doc-b"), "{path} against {held}");
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")]),
+            "{path} against {held}"
+        );
+        assert_eq!(retained(&store), 0, "{path} against {held}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM conflicts"),
+            0,
+            "{path} against {held}"
+        );
+    }
+}
+
+/// Documents shared together, at two spellings of one path, hold the later
+/// one by the feed's order, and a document beside them keeps syncing (#2036).
+#[test]
+fn documents_shared_together_at_spellings_of_one_path_hold_the_later_one() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "notes.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "Notes.md", "hosted b");
+    feed.create("owner", 3, "doc-c", "c.md", "hosted c");
+    feed.share("doc-a", "notes.md");
+    feed.share("doc-b", "Notes.md");
+    feed.share("doc-c", "c.md");
+    sync(&client, &mut store);
+
+    assert!(ready(&store, "doc-a"));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("Notes.md", "doc-a")));
+    assert!(ready(&store, "doc-c"));
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-c", "hosted c")])
+    );
+    assert_eq!(retained(&store), 0);
+}
+
+/// A ready document renamed to another spelling of a path another document
+/// holds would share that document's file on a disk that ignores case
+/// (#2036). The rename is retained while the document stays ready, as work
+/// behind a live session is, and the other document and the main cursor go
+/// on. Once the holder moves, the rename applies.
+#[test]
+fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_frees() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.replace(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-1"),
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(retained(&store), 1, "the rename waits");
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
+        "the rename waits"
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+
+    feed.rename(
+        "owner",
+        5,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "edited a",
+        "moment-owner-4",
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(retained(&store), 0);
+}
+
 /// Reports one document's live session.
 struct LiveSession(&'static str);
 

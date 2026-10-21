@@ -4563,12 +4563,13 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to park. A hosted document that is
-/// not ready retains nothing.
+/// it: work behind a live session, a hosted moment or Y.Doc row whose path
+/// waits for a departed document to park, and a hosted moment that waits for
+/// another document of the scope to leave another spelling of its path. A
+/// hosted document that is not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
-        crate::hosted::PATH_HELD_BY_DEPARTED => true,
+        crate::hosted::PATH_HELD_BY_DEPARTED | crate::hosted::PATH_HELD_IN_SCOPE => true,
         "ydoc-session-live" => {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
