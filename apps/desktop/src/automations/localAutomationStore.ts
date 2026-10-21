@@ -18,10 +18,10 @@ function notSaved(refusal: LocalStateRefusal): string {
 }
 
 /**
- * The run store's folder for a workspace. A write waits for the engine's open
- * to prepare `.dohc/local`, and a refused write changes nothing already
- * saved. A read needs only `.dohc` and `.dohc/local` to be this user's own
- * folders.
+ * The run store's folder for a workspace. A write is refused at once, with
+ * these words, unless the engine's current open has prepared `.dohc/local`;
+ * it does not wait, and a refused write changes nothing already saved. A read
+ * needs only `.dohc` and `.dohc/local` to be this user's own folders.
  */
 export function localAutomationStoreFolder(workspace: LocalStateWorkspace): AutomationStoreFolder {
   return {

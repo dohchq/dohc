@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFile, chmod, link, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTestScratch, storeFolderAt, testStoreFolder } from "./testScratch";
 import { createAutomationRunStore, EXPIRE_BATCH_RUNS, MAX_RUN_FILE_BYTES, RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type ClaimStanding, type ExpiringClaim, type StoredReach, type StoredRun } from "./automationRunStore";
@@ -828,6 +828,31 @@ describe("files the run store does not trust", () => {
     } finally {
       process.umask(umask);
     }
+  });
+
+  it.skipIf(process.platform === "win32")("makes its folders so only this user can change them, and reads nothing in one others can write", async () => {
+    const umask = process.umask(0);
+    let made: Awaited<ReturnType<typeof savedEverything>>;
+    try {
+      made = await savedEverything();
+    } finally {
+      process.umask(umask);
+    }
+    const { root, folder, runFile, saved } = made;
+    const runs = dirname(runFile);
+    for (const path of [folder, join(folder, "runs"), runs]) {
+      expect({ path, mode: (await lstat(path)).mode & 0o777 }).toEqual({ path, mode: 0o700 });
+    }
+    // Another user in the group could delete a run, and its claim would start over.
+    await chmod(runs, 0o770);
+    const store = createAutomationRunStore(testStoreFolder(root));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    await expect(store.appendStep(saved, { ordinal: 1, effects: [] })).rejects.toThrow("must be a folder in this workspace that only you can change.");
+    // Or delete the steps a person allowed, so a step that should wait for a current editor runs.
+    await chmod(runs, 0o700);
+    await chmod(folder, 0o707);
+    for (const [name, read, , untrusted] of files) expect(await read(createAutomationRunStore(testStoreFolder(root))), name).toEqual(untrusted);
+    await expect(store.saveReachVerdicts(reach)).rejects.toThrow("must be a folder in this workspace that only you can change.");
   });
 
   it.skipIf(process.platform === "win32")("replaces a reach file it does not trust when holds are reset", async () => {

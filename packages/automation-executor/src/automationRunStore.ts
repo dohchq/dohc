@@ -640,24 +640,28 @@ async function syncFolder(folder: string): Promise<void> {
   }
 }
 
-// Something other than a real folder of this user's: a planted link could
-// send run records outside the workspace, and another user's folder holds
-// files they can swap.
+// Something other than a real folder only this user can change: a planted
+// link could send run records outside the workspace, and another user who
+// can write the folder can delete or replace a file in it. No check on the
+// file sees a deletion, and a deleted run starts its claim over, repeating
+// its effects. Windows reports no owner or mode.
 function unusableFolder(stats: Stats): boolean {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return true;
   const uid = process.getuid?.();
-  return stats.isSymbolicLink() || !stats.isDirectory() || (uid !== undefined && stats.uid !== uid);
+  return uid !== undefined && (stats.uid !== uid || (stats.mode & 0o022) !== 0);
 }
 
 // A folder inside the store's folder, made when missing.
 async function realFolder(path: string): Promise<string> {
   let stats = await lstat(path).catch(() => null);
   if (stats === null) {
-    // Two writers can both find it missing; the second finds the first's folder.
-    await mkdir(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    // Two writers can both find it missing; the second finds the first's
+    // folder. 0700 whatever the umask, as each file in it is 0600.
+    await mkdir(path, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await syncFolder(dirname(path));
     stats = await lstat(path);
   }
-  if (unusableFolder(stats)) throw new Error(`${path} must be a folder of yours inside this workspace.`);
+  if (unusableFolder(stats)) throw new Error(`${path} must be a folder in this workspace that only you can change.`);
   return path;
 }
 
@@ -938,7 +942,7 @@ export function createAutomationRunStore(
   const base = async () => realFolder(join(await home.forWrite(), "automations"));
   // The store's folder at `segments` for a read: null when it does not exist,
   // and "unusable" when the host refuses its folder or something other than a
-  // real folder of this user's is there. Makes nothing.
+  // folder only this user can change is there. Makes nothing.
   const existingStoreFolder = async (...segments: string[]): Promise<string | null | "unusable"> => {
     let found: string | null | "unusable";
     try {
@@ -1404,8 +1408,9 @@ export function createAutomationRunStore(
     },
     async expire(now, standing, from) {
       const runs = await serial(async () => {
-        // Expiry removes and rewrites, so it waits for the host's folder as
-        // any write does, and makes nothing.
+        // Expiry removes and rewrites, so the host refuses it as it refuses
+        // any write until its folder is ready. A refused pass ends here, and
+        // the next pass tries again. It makes nothing.
         let found: string | null;
         try {
           found = await home.forWrite();
