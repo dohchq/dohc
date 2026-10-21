@@ -218,12 +218,14 @@ export function AboutConversationLinksView(props: {
             }} />
           ) : null}
           {/* Under the list, what it may still be missing. Files the reader
-              cannot open never reach it, so they are never counted here. */}
+              cannot open never reach it, so they are never counted here. A
+              page main emptied of such files can still have more after it:
+              then Show more is the next step, and nothing says it is empty. */}
           {view.building ? (
             <AboutGathering testId="about-conversation-links-gathering" />
           ) : view.partial ? (
             <AboutNote testId="about-conversation-links-partial">This list may not include every file mentioned here.</AboutNote>
-          ) : view.files.length === 0 ? (
+          ) : view.files.length === 0 && !view.more ? (
             <AboutNote testId="about-conversation-links-empty">
               No files mentioned here yet. Type{" "}
               <kbd className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">/</kbd> in a message
@@ -251,7 +253,9 @@ const MentionedFileList = memo(function MentionedFileList(props: {
   );
 });
 
-// A file the conversation mentions: the file, then who mentioned it.
+// A file the conversation mentions: the file, then who mentioned it. The
+// avatars are hidden from screen readers, so an agent or an automation is
+// named as one in words, as a sentence elsewhere says "Paused by agent".
 function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
   const { file } = props;
   return (
@@ -276,6 +280,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
+                {author.kind === "human" ? null : <span className="sr-only">{author.kind} </span>}
                 <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
               </Fragment>
             ))}

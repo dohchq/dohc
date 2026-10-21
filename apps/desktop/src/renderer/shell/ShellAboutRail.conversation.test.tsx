@@ -386,7 +386,7 @@ describe("Links for an open conversation", () => {
     publish("workspace-a", tabPath, entry);
     render(<Rail focusedTabPath={tabPath} openPathWithHeading={openPath} />);
     await waitFor(() => expect(linkRows()).toEqual([
-      ["data/funnel.csv", "Mentioned by Nova, Sam Rivera"],
+      ["data/funnel.csv", "Mentioned by agent Nova, Sam Rivera"],
       ["notes/plan.md", "Mentioned by Sam Rivera"],
     ]));
     expect(bridgeMock.chatLinks).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelWireId: entry.channelWireId });
@@ -401,22 +401,59 @@ describe("Links for an open conversation", () => {
     expect(openPath).toHaveBeenCalledWith("notes/plan.md");
   });
 
-  it("keeps a file split across pages on one row, and adds who mentioned it there", async () => {
+  it("keeps a file split across pages on one row, adds who mentioned it there, and hands focus to the first row added", async () => {
     bridgeMock.chatLinks
       .mockResolvedValueOnce(linksPage([mention("data/funnel.csv", NOVA, 3)], { nextCursor: "next" }))
       .mockResolvedValueOnce(linksPage([mention("data/funnel.csv", SAM, 2), mention("notes/plan.md", SAM, 1)]));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
-    await waitFor(() => expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by Nova"]]));
+    await waitFor(() => expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by agent Nova"]]));
     expect(count()).toBe("1+");
-    await userEvent.setup().click(screen.getByTestId("about-conversation-links-more"));
+    // Pressed from the keyboard, Show more leaves with the last page, so
+    // focus goes on to the row that page added.
+    screen.getByTestId("about-conversation-links-more").focus();
+    await userEvent.setup().keyboard("{Enter}");
     await waitFor(() => expect(linkRows()).toEqual([
-      ["data/funnel.csv", "Mentioned by Nova, Sam Rivera"],
+      ["data/funnel.csv", "Mentioned by agent Nova, Sam Rivera"],
       ["notes/plan.md", "Mentioned by Sam Rivera"],
     ]));
     expect(bridgeMock.chatLinks).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelWireId: "wire-general", cursor: "next" });
     expect(count()).toBe("2");
     expect(screen.queryByTestId("about-conversation-links-more")).toBeNull();
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-path")).toBe("notes/plan.md"));
+  });
+
+  it("offers only Show more for a page with no files it may show, and says the list is empty once the pages end", async () => {
+    bridgeMock.chatLinks
+      .mockResolvedValueOnce(linksPage([], { nextCursor: "next" }))
+      .mockResolvedValueOnce(linksPage([]));
+    publish("workspace-a", GENERAL, conversation({}));
+    render(<Rail />);
+    const more = await screen.findByTestId("about-conversation-links-more");
+    expect(count()).toBe("0+");
+    expect(screen.queryByTestId("about-conversation-links-empty")).toBeNull();
+    await userEvent.setup().click(more);
+    expect((await screen.findByTestId("about-conversation-links-empty")).textContent).toBe(
+      "No files mentioned here yet. Type / in a message to add one.",
+    );
+    expect(count()).toBe("0");
+    expect(screen.queryByTestId("about-conversation-links-more")).toBeNull();
+  });
+
+  it("names an agent or an automation as one to a screen reader, as the avatar shows it", async () => {
+    const automation = { kind: "automation", displayName: "Stamp the date", presentation: { group: "stamp", hue: null, self: false } } as const;
+    bridgeMock.chatLinks.mockResolvedValue(linksPage([
+      mention("data/funnel.csv", NOVA, 3), mention("notes/plan.md", automation, 2), mention("notes/brief.md", SAM, 1),
+    ]));
+    publish("workspace-a", GENERAL, conversation({}));
+    render(<Rail />);
+    const rows = await screen.findAllByRole("button", { name: /Mentioned by/ });
+    expect(rows.map((row) => row.textContent?.slice(row.textContent.indexOf("Mentioned by")))).toEqual([
+      "Mentioned by agent Nova", "Mentioned by automation Stamp the date", "Mentioned by Sam Rivera",
+    ]);
+    // The words are for screen readers; the avatar's shape shows the kind.
+    const words = screen.getAllByText(/^(agent|automation)$/);
+    expect(words.map((word) => [word.textContent, word.className])).toEqual([["agent ", "sr-only"], ["automation ", "sr-only"]]);
   });
 
   it("says how to mention a file when the conversation mentions none, and never names a file it did not list", async () => {
@@ -487,7 +524,7 @@ describe("Links for an open conversation", () => {
     act(() => void window.dispatchEvent(new Event("focus")));
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
     expect(bridgeMock.chatLinks).toHaveBeenCalledTimes(2);
-    expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by Nova"]]);
+    expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by agent Nova"]]);
     expect(screen.queryByTestId("about-conversation-links-failed")).toBeNull();
     // Notices' Try again reads the conversation again.
     bridgeMock.chatLinks.mockResolvedValueOnce(linksPage([]));
