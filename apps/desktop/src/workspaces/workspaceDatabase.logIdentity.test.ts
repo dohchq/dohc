@@ -120,3 +120,21 @@ it("accepts a log on a volume that reports zero links", async () => {
   });
   await expect(editDatabaseAtPath(input)).resolves.toMatchObject({ version: 1 });
 });
+
+it.each([false, true])("preserves rollback and the edit error when log close fails (invalid edit: %s)", async (invalid) => {
+  const { input } = await editFixture();
+  const open = fs.open;
+  vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    const close = handle.close.bind(handle);
+    vi.spyOn(handle, "close").mockImplementationOnce(async () => {
+      await close();
+      throw new Error("log close failed");
+    });
+    return handle;
+  });
+  await expect(editDatabaseAtPath({
+    ...input, edit: { ...input.edit, table: invalid ? "missing" : "items" },
+  })).rejects.toThrow(invalid ? /no such table: missing/ : /log close failed/);
+  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+});

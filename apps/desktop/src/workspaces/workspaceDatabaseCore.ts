@@ -391,6 +391,12 @@ async function withOperationLog<T>(
   });
   if (before) checkFile(before);
   const handle = await open(logPath, before ? "a" : "ax", 0o600);
+  let closed = false;
+  const closeLog = async () => {
+    if (closed) return;
+    closed = true;
+    await handle.close();
+  };
   try {
     const checkLog = async () => {
       const opened = await handle.stat({ bigint: true });
@@ -409,9 +415,17 @@ async function withOperationLog<T>(
       await checkLog();
       await handle.appendFile(`${JSON.stringify(operation)}\n`, "utf8");
       await handle.sync();
+      await closeLog();
     });
+  } catch (error) {
+    try {
+      await closeLog();
+    } catch {
+      // Preserve the edit or append error through cleanup.
+    }
+    throw error;
   } finally {
-    await handle.close();
+    await closeLog();
   }
 }
 
