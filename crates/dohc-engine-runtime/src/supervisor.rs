@@ -528,13 +528,13 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
             .create(parent)
             .and_then(|()| open_store_folder(parent))
     };
+    #[cfg_attr(not(unix), allow(clippy::let_unit_value))]
     let folder = folder.map_err(|err| RuntimeError::Identity {
         reason: "could not create engine.db parent directory",
         source: Some(err),
-    });
+    })?;
     #[cfg(unix)]
     {
-        let folder = folder?;
         #[cfg(target_vendor = "apple")]
         let local = dohc_macos_files::is_local(std::os::fd::AsFd::as_fd(&folder));
         #[cfg(not(target_vendor = "apple"))]
@@ -547,10 +547,7 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
             })?;
     }
     #[cfg(not(unix))]
-    {
-        folder?;
-        let _ = name;
-    }
+    let _ = (folder, name);
     Ok(())
 }
 
