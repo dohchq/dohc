@@ -202,7 +202,8 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
       movePath: async (input, origin, requestId) => (await prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin),
         { capture, requestId, trashItem: async () => { throw new Error("No trash expected"); }, markDeleted: () => undefined }))(),
     };
-    server = await startCliServer({ stateDir: join(rootPath, ".dohc/socket-test"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
+    // A Unix socket path must fit in 107 bytes, so the socket gets its own short folder.
+    server = await startCliServer({ stateDir: await createTestScratch("cli-"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
       agentRunDepth: () => 0, dispatchedAgentRun: () => false });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
