@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -30,6 +31,8 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-migration-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra });
   hosts.push(host); return { host, workspaceRoot };
 }

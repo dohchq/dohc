@@ -70,6 +70,7 @@ import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
+import { LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
@@ -4672,7 +4673,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, localPersonId: localUserId,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -6485,14 +6486,17 @@ function registerIpcHandlers(): void {
           const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent();
             if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
-            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
+            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
               },
               runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath(), "persistent-child.mjs") },
-            });
+            }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
           });
+          // The server holds the Collection, so until the workspace's open
+          // prepares `.dohc/local` it works online without an offline copy.
+          if (copy === null) return data;
           const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
             ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayResponse: relayShareResponseWithCredentials,

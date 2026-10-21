@@ -1,15 +1,17 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
-async function fixture() {
+async function fixture({ opened = true } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-copy-registry-")), lifetime = new AbortController();
+  if (opened) await openedLocalState({ workspaceId: "w", rootPath });
   const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" }), registry = createOwnerDatasetCopyRegistry();
   cleanups.push(async () => { await registry.closeAll(); await rm(rootPath, { recursive: true, force: true }); });
   await registry.credentialsChanged(ownerKey);
@@ -32,7 +34,7 @@ it("invalidates access before logout cleanup and removes copies from closed work
   const f=await fixture();const copy=await f.registry.get(f.input);const options=mocks.open.mock.calls[0]![0];
   f.lifetime.abort();await copy.close();
   const removal=f.registry.credentialsChanged(null);expect(()=>options.assertOwner()).toThrow();await removal;
-  expect(await readdir(join(f.input.rootPath,".dohc","dataset-copies"))).toEqual([]);
+  expect(await readdir(join(f.input.rootPath,".dohc","local","dataset-copies"))).toEqual([]);
   await expect(f.registry.get({...f.input,lifetime:new AbortController().signal})).rejects.toThrow(/owner changed/);
 });
 it("changes owner identity only with the account server or user",()=>{
@@ -56,4 +58,49 @@ it("waits for an opening copy to close before the previous account can reopen it
   expect(mocks.open).toHaveBeenCalledOnce();opening.resolve({close});
   await refused;await switching;await back;await reopened;
   expect(close).toHaveBeenCalledOnce();expect(mocks.open).toHaveBeenCalledTimes(2);
+});
+
+it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old folder",async()=>{
+  const f=await fixture();
+  const old=join(f.input.rootPath,".dohc","dataset-copies");await mkdir(old,{recursive:true});await writeFile(join(old,"replica.sqlite"),"old");
+  await f.registry.get(f.input);
+  const {directory}=mocks.open.mock.calls[0]![0];
+  expect(dirname(directory)).toBe(join(f.input.rootPath,".dohc","local","dataset-copies"));
+  for(const folder of [dirname(directory),directory])expect((await lstat(folder)).mode&0o777).toBe(0o700);
+  expect(await readdir(old)).toEqual(["replica.sqlite"]);expect(await readFile(join(old,"replica.sqlite"),"utf8")).toBe("old");
+  // Signing out removes the copy at its new path and leaves the old one alone.
+  await f.registry.credentialsChanged(null);
+  expect(await readdir(dirname(directory))).toEqual([]);expect(await readdir(old)).toEqual(["replica.sqlite"]);
+});
+it.each([["not opened",false,"the workspace has not finished opening. Try again when it opens."],
+  ["not kept out of iCloud Drive",true,"it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(
+  "makes no copy and creates nothing while .dohc/local is %s, then opens one once it is ready",async(_state,opened,why)=>{
+  const f=await fixture({opened:false}),workspace={workspaceId:"w",rootPath:f.input.rootPath},opens=fakeLocalStateOpens();
+  if(opened){await opens.open(workspace,false);await rm(join(f.input.rootPath,".dohc","local"),{recursive:true});}
+  await expect(f.registry.get(f.input)).rejects.toThrow(`dohc did not open this Collection's offline copy because ${why}`);
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(await readdir(f.input.rootPath)).toEqual(opened?[".dohc"]:[]);
+  if(opened)expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual([]);
+  // The refused request leaves nothing behind that keeps the next one from opening.
+  await opens.open(workspace);
+  await f.registry.get(f.input);expect(mocks.open).toHaveBeenCalledOnce();
+});
+it.skipIf(process.platform==="win32").each(["writable by others","hard-linked"])("does not open a replica database that is %s",async kind=>{
+  const f=await fixture(),first=new AbortController();
+  const copy=await f.registry.get({...f.input,lifetime:first.signal});const {directory}=mocks.open.mock.calls[0]![0];
+  first.abort();await copy.close();
+  const planted=join(directory,"replica.sqlite");await writeFile(planted,"planted");
+  if(kind==="writable by others")await chmod(planted,0o666);else await link(planted,join(f.input.rootPath,"elsewhere.sqlite"));
+  await expect(f.registry.get(f.input)).rejects.toThrow(`dohc did not open this Collection's offline copy because it can't trust a file in .dohc/local/dataset-copies/${basename(directory)}. Remove that folder, then try again.`);
+  expect(mocks.open).toHaveBeenCalledOnce();expect(await readFile(planted,"utf8")).toBe("planted");
+  // Once the folder is gone, the next request opens a copy.
+  await rm(directory,{recursive:true});await f.registry.get(f.input);expect(mocks.open).toHaveBeenCalledTimes(2);
+});
+it("removes a copy that did not open when the account changes",async()=>{
+  const f=await fixture();
+  mocks.open.mockImplementationOnce(async options=>{await writeFile(join(options.directory,"replica.sqlite"),"downloaded");throw new Error("The Collection copy is damaged. Download it again.");});
+  await expect(f.registry.get(f.input)).rejects.toThrow("damaged");
+  const copies=join(f.input.rootPath,".dohc","local","dataset-copies");expect(await readdir(copies)).toHaveLength(1);
+  await f.registry.credentialsChanged(null);
+  expect(await readdir(copies)).toEqual([]);
 });

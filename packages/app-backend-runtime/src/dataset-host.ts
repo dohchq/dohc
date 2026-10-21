@@ -113,7 +113,12 @@ export interface DatasetHostOptions<Context> {
    */
   wakeAutomations?(scope: DatasetScope, failed: boolean): void;
   recovery?: {
-    directory: string;
+    /**
+     * The host's private folder for staging recovery files. Asked for before
+     * each one, so a host can refuse with words a person reads until it has
+     * prepared the folder. It must exist; staging creates only folders in it.
+     */
+    directory(): Promise<string>;
     limits: RecoveryLimits;
     captureAttachments?(context: Context, scope: DatasetScope, cursor: DatasetCursor): RecoveryAttachment[];
     openAttachment?(context: Context, scope: DatasetScope, file: RecoveryAttachment): AsyncIterable<Uint8Array>;
@@ -529,7 +534,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (!recovery?.install?.allowOwnerRecoveryClaim) throw new DatasetHostError("invalid", "This host cannot restore Collections from a recovery file.");
       const ownerToken = JSON.stringify(owner(context, { workspaceId: raw.workspaceId }));
       const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, { workspaceId: raw.workspaceId })) !== ownerToken) denied(); };
-      const staged = await stageDatasetRecovery({ ...raw, stagingParent: recovery.directory, expectedManifestSha256: raw.manifestSha256, limits: recovery.limits, authorize });
+      const staged = await stageDatasetRecovery({ ...raw, stagingParent: await recovery.directory(), expectedManifestSha256: raw.manifestSha256, limits: recovery.limits, authorize });
       const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.persistentRuntime, compileOperations: options.compileOperations });
       try {
         const key = scope(validated.manifest.cursor);
@@ -575,7 +580,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         if (prior.manifestSha256 !== manifestSha256 || !equalRecoveryCursor(prior.sourceCursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file differs from the one you started restoring. Choose the same file, or cancel the recovery.");
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : prior;
       }
-      const staged = await stageDatasetRecovery({ stream: raw.stream, stagingParent: recovery.directory, expectedManifestSha256: manifestSha256, limits: recovery.limits, signal: raw.signal, authorize });
+      const staged = await stageDatasetRecovery({ stream: raw.stream, stagingParent: await recovery.directory(), expectedManifestSha256: manifestSha256, limits: recovery.limits, signal: raw.signal, authorize });
       const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.persistentRuntime, compileOperations: options.compileOperations });
       try {
         if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file is from a different point in the Collection's history.");
@@ -590,7 +595,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if(!recovery)throw new DatasetHostError("invalid","This host cannot export Collections.");
       if(Boolean(recovery.captureAttachments)!==Boolean(recovery.openAttachment))throw new Error("Dataset recovery attachments require capture and read callbacks.");
       const ownerToken=JSON.stringify(owner(context,key)),authorize=()=>{if(JSON.stringify(owner(context,key))!==ownerToken)denied();};
-      return prepareDatasetRecoveryExport({db,journal,scope:key,directory:recovery.directory,limits:recovery.limits,signal:raw.signal,authorize,
+      return prepareDatasetRecoveryExport({db,journal,scope:key,directory:await recovery.directory(),limits:recovery.limits,signal:raw.signal,authorize,
         attachments:recovery.captureAttachments&&recovery.openAttachment?{
           capture:cursor=>recovery.captureAttachments!(context,key,cursor),open:file=>recovery.openAttachment!(context,key,file),
         }:undefined});

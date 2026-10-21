@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +64,8 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: extra.workspaceId ?? "w", rootPath: workspaceRoot });
   const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture, ...extra});
   hosts.push(host); return {host, workspaceRoot};
 }
@@ -112,7 +115,7 @@ it("reopens the same recovery archive after installation was interrupted before 
     // This is the normal UI action after restart, with no saved transfer id.
     const rebound = await restarted.host.prepareRecovery({ sourcePath });
     expect(rebound.transferId).toBe(prepared.transferId);
-    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "datasets", "exports");
+    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "local", "datasets", "exports");
     const stagedBefore = await readdir(stagingDirectory);
     expect(await restarted.host.prepareRecovery({ sourcePath })).toEqual(rebound);
     expect(await readdir(stagingDirectory)).toEqual(stagedBefore);
@@ -286,14 +289,14 @@ describe("local dataset owner adapter", () => {
     const target = await open(), prepared = await target.host.prepareRecovery({sourcePath});
     await target.host.discardRecovery(prepared.transferId);
     expect(target.host.list().datasets).toEqual([]);
-    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
     await expect(target.host.claimRecovery({...prepared,oldHostStopped:true})).rejects.toThrow(/not installed/);
     const foreign = await open({workspaceId:"other"});
     await expect(foreign.host.prepareRecovery({sourcePath})).rejects.toThrow(/another workspace/);
     const bytes = await readFile(sourcePath); await writeFile(sourcePath,bytes.subarray(0,bytes.length-5));
     await expect(target.host.prepareRecovery({sourcePath})).rejects.toThrow(/truncated/);
     expect(target.host.list().datasets).toEqual([]);
-    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
   });
 
   it("exports an actual committed dataset and receipt to a streamed recovery file", async () => {
@@ -390,6 +393,7 @@ describe("local dataset owner adapter", () => {
       const cancelled=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/export`,{headers:{authorization:"Bearer token"}}));
       const cancelledReader=cancelled.body!.getReader();await cancelledReader.read();await cancelledReader.cancel();
       expect(await readdir(join(remoteDirectory,"recovery"))).toEqual([]);
+      await mkdir(join(local.workspaceRoot,"replica"));
       const replica=await createDatasetReplica({directory:join(local.workspaceRoot,"replica"),scope:{workspaceId:"w",datasetId:id(1)},ownerKey:"owner",origin:"https://relay",assertOwner(){}});
       const replicaRequest=async(action:string,body?:unknown)=>{
         if(offline)throw Error("offline");
@@ -443,7 +447,7 @@ describe("local dataset owner adapter", () => {
     expect(completed.state).toBe("imported");expect(completed.receipt).toEqual(saved);
     expect(restarted.approvedArtifacts(id(1)).active).toBe(false);
     await expect(restarted.action(call(approved,id(6),"after-import",{name:"Forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
-    expect(await readdir(join(workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
     await expect(restarted.transferToShared({datasetId:id(1),targetOrigin:"https://other.example",target:resumedTarget})).rejects.toThrow("another server");
   },30_000);
 
@@ -478,7 +482,7 @@ describe("local dataset owner adapter", () => {
     expect(await readdir(workspaceRoot)).toEqual([".dohc"]);
     await restarted.close();
     // Persistent coordination files keep later supervisor sessions on the same lock inode.
-    expect((await readdir(join(workspaceRoot,".dohc","datasets","workers"))).sort()).toEqual([
+    expect((await readdir(join(workspaceRoot,".dohc","local","datasets","workers"))).sort()).toEqual([
       ".dohc-worker-lock.sqlite", ".dohc-worker-session.json",
     ]);
   });
@@ -757,4 +761,47 @@ it("reports a worker startup failure for one page and succeeds on the next reque
     db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("w");
     await expect(host.historyHeads()).resolves.toMatchObject({ sourceCount: 1, pages: [{ datasetId: id(1) }] });
   } finally { db.close(); }
+});
+
+describe("this computer's Collection folders", () => {
+  it("keeps workers and exports in .dohc/local, ignores the old folders, and leaves the Collections in .dohc/datasets", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(workspaceRoot);
+    // What an earlier build left: a worker folder its startup would refuse to remove, and a staged export.
+    const old = join(workspaceRoot, ".dohc", "datasets"), oldWorker = join(old, "workers", `worker-${id(9)}`);
+    await mkdir(oldWorker, { recursive: true }); await writeFile(join(oldWorker, ".dohc-worker.json"), "{}");
+    await mkdir(join(old, "exports", "export-old"), { recursive: true });
+    const { host } = await open({ workspaceRoot }), approved = await activate(host);
+    await host.action(call(approved, id(6), "add", { name: "Camera" }));
+    const archive = await host.prepareExport(id(1));
+    const local = join(workspaceRoot, ".dohc", "local", "datasets");
+    expect(await readdir(local)).toEqual(["exports", "workers"]);
+    expect(await readdir(join(local, "workers"))).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite", ".dohc-worker-session.json"]));
+    expect((await readdir(join(local, "exports"))).filter(name => name.startsWith("export-"))).toHaveLength(1);
+    if (process.platform !== "win32") for (const folder of [local, join(local, "workers"), join(local, "exports")]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
+    await archive.dispose(); await host.close();
+    expect((await lstat(join(old, "state.sqlite"))).isFile()).toBe(true);
+    expect(await readdir(join(old, "workers"))).toEqual([`worker-${id(9)}`]);
+    expect(await readFile(join(oldWorker, ".dohc-worker.json"), "utf8")).toBe("{}");
+    expect(await readdir(join(old, "exports"))).toEqual(["export-old"]);
+  });
+
+  it.each([["not opened", false, "the workspace has not finished opening. Try again when it opens."],
+    ["not kept out of iCloud Drive", true, "it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(
+    "reads Collections while .dohc/local is %s, but starts no worker or export and creates nothing", async (_state, made, why) => {
+    const first = await open(), approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
+    if (made) await opens.open(workspace, false);
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    hosts.push(host);
+    expect(host.list().datasets).toHaveLength(1);
+    expect(host.describe(id(1))).toMatchObject({ name: "Items", revision: 1 });
+    await expect(host.query(call(approved, id(5)))).rejects.toThrow(`dohc did not open this Collection's records because ${why}`);
+    await expect(host.prepareExport(id(1))).rejects.toThrow(`dohc did not prepare this Collection's recovery file because ${why}`);
+    expect(await readdir(join(first.workspaceRoot, ".dohc"))).not.toContain("local");
+    await opens.open(workspace);
+    expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+  });
 });

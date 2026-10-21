@@ -2,7 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createDatasetAutomations, createDatasetAutomationAuthority } from "./datasetAutomations";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
@@ -69,7 +69,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,grant_id TEXT NOT NULL,principal_key TEXT NOT NULL,
     PRIMARY KEY(workspace_id,dataset_id,grant_id,principal_key),
     FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`));
-  const supervisor = await createDatasetSupervisor({journal, directory: options.directory, runtime: options.runtime,
+  // The relay's own private folder, which it keeps at the path it was given.
+  await mkdir(options.directory, {recursive: true});
+  const workers = await realpath(options.directory);
+  const supervisor = await createDatasetSupervisor({journal, directory: async () => workers, runtime: options.runtime,
     maxWorkers: options.maxWorkers, nowMs,onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
     maintenanceStorage:{authorize:current,account:allocation=>account(allocation.scope.workspaceId,allocation.scope.datasetId,allocation.bytes)}});
   let closing: Promise<void> | undefined;
@@ -223,7 +226,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     }
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations, persistentRuntime: options.runtime,
       recovery: {
-        directory: recoveryDirectory, limits: {maxTotalBytes: storage.options.workspaceQuotaBytes},
+        directory: async () => recoveryDirectory, limits: {maxTotalBytes: storage.options.workspaceQuotaBytes},
         captureAttachments(auth, key, cursor) {owner(auth, key.workspaceId); return recoveryFiles.capture(key, cursor);},
         openAttachment(auth, key, file) {owner(auth, key.workspaceId); return recoveryFiles.open(key, file);},
         install: {
