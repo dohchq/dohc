@@ -16,8 +16,18 @@ pnpm --filter @dohc/site dev
 
 ## Deploy
 
-Build with `pnpm --filter @dohc/site build`, then point any static host
-(Cloudflare Pages, Netlify, GitHub Pages, S3) at `apps/site/dist`.
+The site is a Cloudflare Worker, `dohc-site`, that serves `dist` as static
+files (`wrangler.jsonc`). The [Site deploy workflow](../../.github/workflows/site-deploy.yml)
+tests, builds and deploys it after a change on `main` reaches the site, the
+desktop source its demo imports, or a shared package.
+
+The workflow runs only while the repository variable `SITE_DEPLOY_ENABLED` is
+`true`. It reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the
+`site` environment. The token needs Workers Scripts: Edit on the dohc account.
+
+To deploy by hand, run `pnpm --filter @dohc/site build`, then run
+`pnpm dlx wrangler@<version> deploy` from `apps/site` with the version the
+workflow pins.
 
 ## Design
 
