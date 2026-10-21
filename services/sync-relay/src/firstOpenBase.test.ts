@@ -335,6 +335,7 @@ const FOCUSED: [string, string][] = [
 // a spelling both agree on. The final newline makes each base carry a witness.
 const PARITY: [string, string][] = [
   ["table-inline-code", "| Event | Sent when |\n| --- | --- |\n| `app_launched` | dohc starts. |\n"],
+  ["table-escapes", "| Code | Meaning |\n| --- | --- |\n| `a\\|b` | x \\| y \\*not\\* |\n"],
   ["table-plain", "| Event | Sent when |\n| --- | --- |\n| launched | dohc starts. |\n"],
   ["fence-tilde", "# Title\n\n~~~sh\nfoo\n~~~\n"],
   ["fence-tilde-setext", "Title\n=====\n\n~~~sh\nfoo\n~~~\n"],

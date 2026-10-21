@@ -21,6 +21,7 @@ import {
   MarkdownParagraph,
   MarkdownTaskList,
   markdownListParseState,
+  measureTableCellsAs,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -1084,19 +1085,11 @@ export function serializeRichdocBody(root: JSONContent): string {
   }
 
   const prepared = visit(root)
-  let markdown = markdownManager.serialize(prepared)
-  if (prepared.content?.[0]?.type === 'horizontalRule') {
-    markdown = '***' + markdown.slice(3)
-  }
-  markdown = restoreCharacterSentinels(
-    markdown,
+  const restorations = [
     new Map(Array.from(
       characterSentinels,
       ([character, sentinel]) => [sentinel, character] as const,
     )),
-  )
-  markdown = restoreCharacterSentinels(
-    markdown,
     new Map(Array.from(
       blockEscapeSentinels,
       ([character, sentinel]) => [
@@ -1104,9 +1097,6 @@ export function serializeRichdocBody(root: JSONContent): string {
         `&#${character.codePointAt(0)};`,
       ] as const,
     )),
-  )
-  markdown = restoreCharacterSentinels(
-    markdown,
     new Map(Array.from(
       leadingWhitespaceSentinels,
       ([whitespace, sentinel]) => [
@@ -1114,8 +1104,19 @@ export function serializeRichdocBody(root: JSONContent): string {
         whitespace === ' ' ? '&#32;' : '&#9;',
       ] as const,
     )),
+  ]
+  const restore = (markdown: string): string =>
+    restorations.reduce(restoreCharacterSentinels, markdown)
+  // Table cells still hold sentinels while they render, so each is padded
+  // to the width it has once they are restored.
+  let markdown = measureTableCellsAs(
+    text => restore(text).length,
+    () => markdownManager.serialize(prepared),
   )
-  return rewriteCodeBlockFences(markdown, codeBlocks)
+  if (prepared.content?.[0]?.type === 'horizontalRule') {
+    markdown = '***' + markdown.slice(3)
+  }
+  return rewriteCodeBlockFences(restore(markdown), codeBlocks)
 }
 
 function escapeLeadingIndentedCode(

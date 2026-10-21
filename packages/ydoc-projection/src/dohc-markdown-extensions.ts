@@ -4,7 +4,7 @@
 import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
 import { getDefaults, Lexer, Tokenizer, type Tokens } from 'marked'
-import { preprocessTablePipes, renderTableToMarkdown, Table } from '@tiptap/extension-table'
+import { preprocessTablePipes, Table } from '@tiptap/extension-table'
 import { ListItem, OrderedList, TaskItem, TaskList } from '@tiptap/extension-list'
 import { Paragraph } from '@tiptap/extension-paragraph'
 import { sanitizeImageSrc } from './image-src.js'
@@ -1105,6 +1105,57 @@ function prepareRenderedTableCell(markdown: string): string {
   return output
 }
 
+let tableCellWidth = (text: string): number => text.length
+/** Renders with table cells measured by `width`, for text that is written differently than it renders. */
+export function measureTableCellsAs<T>(width: (text: string) => number, render: () => T): T {
+  const previous = tableCellWidth
+  tableCellWidth = width
+  try {
+    return render()
+  } finally {
+    tableCellWidth = previous
+  }
+}
+
+// Tiptap's `renderTableToMarkdown`, with each cell measured by `tableCellWidth`.
+function renderTableToMarkdown(node: JSONContent, helpers: MarkdownRendererHelpers): string {
+  const rows = (node.content ?? []).map(row => (row.content ?? []).map(cell => {
+    const raw = cell.content && cell.content.length > 1
+      ? cell.content.map(child => helpers.renderChildren(child)).join(GFM_TABLE_CELL_BLOCK_SEPARATOR)
+      : cell.content ? helpers.renderChildren(cell.content) : ''
+    const text = raw.split(GFM_TABLE_CELL_BLOCK_SEPARATOR).join('\n')
+      .replace(/[ \t]*\r?\n[ \t]*/g, GFM_TABLE_CELL_BLOCK_SEPARATOR)
+      .replace(/\s+/g, ' ')
+      .trim()
+    const align: unknown = cell.attrs?.align
+    return {
+      text,
+      width: tableCellWidth(text),
+      isHeader: cell.type === 'tableHeader',
+      align: align === 'left' || align === 'right' || align === 'center' ? align : null,
+    }
+  }))
+  const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0)
+  if (columnCount === 0) return ''
+  const columns = Array.from({ length: columnCount }, (_, index) => index)
+  const widths = columns.map(index => rows.reduce((width, row) => Math.max(width, row[index]?.width ?? 0), 3))
+  const alignments = columns.map(index => rows.find(row => row[index]?.align)?.[index]?.align ?? null)
+  const hasHeader = rows[0].some(cell => cell.isHeader)
+  const line = (row: typeof rows[number] | undefined) => `| ${columns.map(index => {
+    const cell = row?.[index]
+    return (cell?.text ?? '') + ' '.repeat(Math.max(0, widths[index] - (cell?.width ?? 0)))
+  }).join(' | ')} |\n`
+  const delimiter = `| ${columns.map(index => {
+    const dashes = '-'.repeat(widths[index])
+    const alignment = alignments[index]
+    if (alignment === 'left') return `:${dashes}`
+    if (alignment === 'right') return `${dashes}:`
+    if (alignment === 'center') return `:${dashes}:`
+    return dashes
+  }).join(' | ')} |\n`
+  return `\n${line(hasHeader ? rows[0] : undefined)}${delimiter}${(hasHeader ? rows.slice(1) : rows).map(line).join('')}`
+}
+
 function firstLine(source: string): string {
   const newline = source.indexOf('\n')
   return newline < 0 ? source : source.slice(0, newline)
@@ -1332,14 +1383,10 @@ export const DohcMarkdownTable = Table.extend({
       renderChildren: (nodes, separator) =>
         prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
     }
-    // Tiptap's table renderer includes its own trailing newline, while the
+    // The table renderer includes its own trailing newline, while the
     // document renderer also joins sibling blocks with `\n\n`. Returning both
     // would put two blank lines between a table and its next sibling.
-    const table = renderTableToMarkdown(
-      node,
-      tableHelpers,
-      { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-    ).replace(/\n$/u, '')
+    const table = renderTableToMarkdown(node, tableHelpers).replace(/\n$/u, '')
     return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
   },
 })

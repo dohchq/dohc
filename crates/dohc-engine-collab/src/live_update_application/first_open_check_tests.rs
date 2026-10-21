@@ -557,11 +557,9 @@ const NEWLY_CHECKED: [&str; 17] = [
     "html-comment-multiline",
 ];
 /// The old guard built these; the engine does not settle them to the file.
-const NEWLY_REFUSED: [&str; 9] = [
+const NEWLY_REFUSED: [&str; 7] = [
     "corpus:SECURITY.md",
     "corpus:docs/README.md",
-    "corpus:docs/reference/workspace-file-versions.md",
-    "table-inline-code",
     "fence-tilde-setext",
     "fence-tilde-table",
     "emphasis-underscore",
@@ -703,12 +701,13 @@ fn parity(candidate: &[u8], markdown: &str) -> Parity {
 }
 
 /// The construction-parity regressions, and the real note only TypeScript's
-/// table writing refuses.
-const PARITY: [(&str, Parity); 21] = [
-    ("table-inline-code", Parity::Serializer),
+/// table writing used to refuse.
+const PARITY: [(&str, Parity); 22] = [
+    ("table-inline-code", Parity::Agrees),
+    ("table-escapes", Parity::Agrees),
     (
         "corpus:docs/reference/workspace-file-versions.md",
-        Parity::Serializer,
+        Parity::Agrees,
     ),
     ("table-plain", Parity::Agrees),
     ("fence-tilde", Parity::Agrees),

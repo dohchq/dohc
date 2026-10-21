@@ -522,6 +522,36 @@ describe("literal link source in a browser", () => {
   });
 });
 
+// The engine pads a table column to the width its cells are written at, so a
+// save writes the table it opened byte for byte.
+describe("a table holding inline code and escapes", () => {
+  const TABLE = [
+    "Codes:",
+    "",
+    "",
+    "| Code           | Meaning                        |",
+    "| -------------- | ------------------------------ |",
+    "| `app_launched` | dohc starts.                   |",
+    "| `a\\|b`         | x \\| y \\*not\\* &amp; &lt;b&gt; |",
+  ].join("\n");
+
+  it.each(["local", "live"] as const)("opens in the %s editor and saves the same bytes", async mode => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const ydoc = mode === "live" ? markdownToYDoc(TABLE) : undefined;
+    const view = render(createElement(MarkdownEditor, {
+      ref, value: ydoc ? "" : TABLE, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/table.md", knownFiles: [],
+      ...(ydoc ? { collab: { ydoc, status: "connected" as const, peerCount: 0, synced: true } } : {}),
+    }));
+    try {
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(ref.current!.getMarkdown()).toBe(TABLE));
+    } finally {
+      view.unmount();
+      ydoc?.destroy();
+    }
+  });
+});
+
 describe("desktop editor schema parity", () => {
   it.each(nestedMarkdown.cases.filter(item => !('refuse' in item)))("opens and edits the shared $name contract", async item => {
     const ref = createRef<MarkdownEditorHandle>();

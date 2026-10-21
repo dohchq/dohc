@@ -2883,6 +2883,21 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  // The engine pads each column to the width its cells are written at.
+  it('pads a table column holding inline code or escapes to its written width', () => {
+    const markdown = [
+      'Codes:',
+      '',
+      '',
+      '| Code           | Meaning                        |',
+      '| -------------- | ------------------------------ |',
+      '| `app_launched` | dohc starts.                   |',
+      '| `a\\|b`         | x \\| y \\*not\\* &amp; &lt;b&gt; |',
+    ].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    expect(yDocToMarkdown(markdownToYDoc(markdown.replaceAll(/ {2,}\|/g, ' |')))).toBe(markdown)
+  })
+
   describe('table row heights', () => {
     const table = [
       '| Metric | Value |',
