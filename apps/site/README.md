@@ -22,8 +22,17 @@ tests, builds and deploys it after a change on `main` reaches the site, the
 desktop source its demo imports, or a shared package.
 
 The workflow runs only while the repository variable `SITE_DEPLOY_ENABLED` is
-`true`. It reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the
-`site` environment. The token needs Workers Scripts: Edit on the dohc account.
+`true`. A build job without secrets tests and builds the site. A deploy job
+receives only the built files and runs wrangler with `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` from the `site` environment. The token needs Workers
+Scripts: Edit on the dohc account, which can change every Worker in that
+account.
+
+Anyone with write access can push a workflow on another branch, so only the
+`site` environment keeps the token from it. The environment must allow
+deployments from `main` alone, and both values must be environment secrets,
+never repository secrets. A merge to `main` deploys, so `main` must stay
+protected. `SITE_DEPLOY_ENABLED` turns deploys on and off; it protects nothing.
 
 To deploy by hand, run `pnpm --filter @dohc/site build`, then run
 `pnpm dlx wrangler@<version> deploy` from `apps/site` with the version the
