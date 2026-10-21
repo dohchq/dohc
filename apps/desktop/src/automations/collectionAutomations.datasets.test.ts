@@ -29,12 +29,12 @@ import { createPressWindows, registerAutomationButtonsIpc } from "../ipc/automat
 import { retryAutomationRun, sendFailureNotices } from "./automationNotices";
 import { createNoticeStore } from "../notices/noticeStore";
 import { createTestScratch } from "../workspaces/testTemp";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import type { AutomationFailure } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationRunStore, type AutomationRunStore, type StoredRun } from "@dohc/automation-executor/automation-run-store";
+import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
 import {
   CollectionAutomations,
   type AutomationFailureReport,
@@ -527,7 +527,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   // Runs once after the next run is saved, as when its plan is on disk.
   let afterSave: (() => void) | null = null;
   const store = ((): AutomationRunStore => {
-    const base = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
+    const base = createAutomationRunStore(preparedAutomationStoreFolder(root));
     return {
       ...base,
       save: async (run) => {
@@ -716,7 +716,7 @@ describe("Collection automations on a dataset", () => {
     let definitions = [definition];
     await mkdir(join(f.root, "Aux"));
     await writeFile(join(f.root, "Aux/dataset.json"), JSON.stringify({ datasetId: auxiliary.datasetId }));
-    const base = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const base = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const executor = f.makeExecutor({
       store: { ...base, runsOf: async (...args) => {
         if (!paused && f.claims().some(c => c.state === "running")) { paused = true; reached.resolve(); await resume.promise; }
@@ -845,7 +845,7 @@ describe("Collection automations on a dataset", () => {
     await f.executor.open();
     await f.until(() => f.failureReports.length === 1);
     expect(f.failureReports[0]?.failure).toMatchObject({ chainStopped: true, generation: 1 });
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     await f.until(async () => (await store.readReportedFailures()).some((entry) => entry.generation === 1 && entry.open));
     // After a restart, only the next stop sends a notice.
     await f.executor.dispose();
@@ -890,7 +890,7 @@ describe("Collection automations on a dataset", () => {
     expect(f.claims()).toHaveLength(1);
     // The automation's own write claims nothing more for it.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: AUTOMATION, depth: 1 } });
-    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    const [run] = (await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.applied).toEqual([expect.objectContaining({ ordinal: 0, writes: [expect.objectContaining({
       kind: "dataset-edit", operationId: STATUS_ONLY, recordId: invoice, fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }],
     })] })]);
@@ -1025,7 +1025,7 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "done");
     // Status was still as the run read it, so it was sent again; Notes keeps their change.
     expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open and paid", [NOTES]: "someone else" });
-    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    const [run] = (await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.replans).toEqual([expect.objectContaining({ effect: 0, replan: 1, fields: [expect.objectContaining({ fieldId: STATUS })] })]);
     expect(run!.applied[0]!.writes).toEqual([
       { kind: "dataset-kept", datasetId: definition.datasetId, tableId: TABLE, recordId: invoice, fieldId: NOTES, field: "Notes", planned: "Closed by automation", current: "someone else" },
@@ -1457,7 +1457,7 @@ describe("Collection automations on a dataset", () => {
       status: "confirm", preview: { deletes: 1, unchecked: 0, kept: 0, keptChanged: 0, gone: 0, reverts: 2, irreversible: 0, reverses: 0, actions: 0, choices: [], token: expect.any(String) },
     });
     if (asked.status !== "confirm") throw new Error("Undo should ask first.");
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     expect((await store.runsOf(AUTOMATION, claimId)).runs.map((run) => [run.undo, run.undoCalls])).toEqual([[null, []]]);
     expect((await f.records()).some((row) => row.values[NOTES] === "Log")).toBe(true);
     expect(await f.executor.undo({ automationId: AUTOMATION, claimId, deletes: { token: asked.preview.token, chosen: [] } }, trash)).toEqual({
@@ -1561,7 +1561,7 @@ describe("Collection automations on a dataset", () => {
       .toEqual({ status: "refused", reason: DATASET_UNDO_RULES_CHANGED });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
     // Nothing marks the run undone, so it still reads as a run that can be undone later.
-    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId);
+    const { runs } = await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, claimId);
     expect(runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
   });
@@ -1636,7 +1636,7 @@ describe("undoing the records a dataset automation added", () => {
     expect(await f.executor.undo({ automationId: AUTOMATION, claimId, deletes: { token: asked.preview.token, chosen: [] } }, trash))
       .toEqual({ status: "confirm", preview: { ...shown, deletes: 1 } });
     expect(await logs(f)).toHaveLength(1);
-    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId);
+    const { runs } = await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, claimId);
     expect(runs.map((run) => [run.undo, run.undoCalls])).toEqual([[null, []]]);
     await f.executor.dispose();
   });
@@ -1660,7 +1660,7 @@ describe("undoing the records a dataset automation added", () => {
     f.crashAfterOwnerInvoke(REMOVE);
     await expect(f.executor.undo({ automationId: AUTOMATION, claimId, deletes: { token: asked.preview.token, chosen: [] } }, trash)).rejects.toThrow("dohc stopped.");
     expect(await logs(f)).toEqual([]);
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [saved] = (await store.runsOf(AUTOMATION, claimId)).runs;
     expect(saved).toMatchObject({ undo: "started", undoCalls: [expect.objectContaining({ kind: "delete", operationId: REMOVE, expectedVersion: 1 })] });
     // The retry chooses nothing again: it sends the saved request, whose receipt replays.
@@ -1699,7 +1699,7 @@ describe("undoing the records a dataset automation added", () => {
     const hash = definitionHash(summary.automations[0].automation);
     await expect(f.executor.undoRunsOf([{ collectionPath: "Budget", id: "close-paid", definitionHash: hash }], trash)).resolves.toMatchObject({ undone: 0, left: 1 });
     // Deletes are sent only once saved, so none was sent.
-    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId);
+    const { runs } = await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, claimId);
     expect(runs.map((run) => [run.undo, run.undoCalls])).toEqual([[null, []]]);
     await f.executor.dispose();
   });
@@ -1862,7 +1862,7 @@ ${step}`;
     // A second run of the same claim under another definition held another invoice, as a start-over would.
     const { id: second } = await f.create({ [STATUS]: "Open" });
     const held = await f.host.action({ ...f.rules, operationId: HOLD, input: { id: second }, idempotencyKey: "owner-hold" });
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [run] = (await store.runsOf(BUTTON_AUTOMATION, pressed.claimId)).runs;
     await store.save({ ...run!, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef-2", startedAtMs: run!.startedAtMs + 1, applied: [{ ordinal: 0, writes: [
       { kind: "dataset-action", rules: f.rules, operationId: HOLD, tableId: TABLE, name: "Hold", revision: held.revision, undo: { id: second, status: "Open" }, reverseOperationId: RELEASE },
@@ -1891,7 +1891,7 @@ ${step}`;
     // A second run of the same claim under another definition held another invoice, as a start-over would.
     const { id: second } = await f.create({ [STATUS]: "Open" });
     const held = await f.host.action({ ...f.rules, operationId: HOLD, input: { id: second }, idempotencyKey: "owner-hold" });
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [run] = (await store.runsOf(BUTTON_AUTOMATION, pressed.claimId)).runs;
     await store.save({ ...run!, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef-2", startedAtMs: run!.startedAtMs + 1, applied: [{ ordinal: 0, writes: [
       { kind: "dataset-action", rules: f.rules, operationId: HOLD, tableId: TABLE, name: "Hold", revision: held.revision, undo: { id: second, status: "Open" }, reverseOperationId: RELEASE },
@@ -1919,7 +1919,7 @@ ${step}`;
     if (pressed.busy) throw new Error("The press ran.");
     await f.until(() => f.settled.length === 1);
     // A saved list holds the reverse of a Hold whose run is no longer saved.
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [run] = (await store.runsOf(BUTTON_AUTOMATION, pressed.claimId)).runs;
     await store.recordUndoCalls(run!, ["gone"], [
       { kind: "reverse", rules: f.rules, operationId: RELEASE, action: HOLD, revision: 999, input: { id: "gone", status: "Open" }, idempotencyKey: "u.gone" },
@@ -1947,7 +1947,7 @@ ${step}`;
       .toEqual({ status: "undone", reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 1 });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
     // The reverse was saved with the run before it was sent, as a delete is.
-    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(BUTTON_AUTOMATION, pressed.claimId);
+    const { runs } = await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(BUTTON_AUTOMATION, pressed.claimId);
     expect(runs.flatMap((run) => run.undoCalls)).toEqual([expect.objectContaining({ kind: "reverse", operationId: RELEASE, action: HOLD })]);
     const releases = () => f.host.history({ datasetId: definition.datasetId }).entries.filter((entry) => entry.operation === "invoices.release").length;
     expect(releases()).toBe(1);
@@ -2234,7 +2234,7 @@ describe("dataset automation claims in both ledgers", () => {
     await f.until(() => f.claims()[0]?.state === "done");
     const ledgerClaim = f.claims()[0]!;
     // The automation then ran on a schedule, and its run changed the same record.
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [ledgerRun] = (await store.runsOf(AUTOMATION, ledgerClaim.claimId)).runs;
     await store.save({ ...ledgerRun!, claimId: "atc_schedule" });
     f.engineClaims.push(engineClaim("atc_schedule", "done", ledgerClaim.createdAtMs + 1), engineClaim("atc_failed", "failed", ledgerClaim.createdAtMs - 1));
@@ -2278,7 +2278,7 @@ describe("dataset automation claims in both ledgers", () => {
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "done");
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const [ledgerRun] = (await store.runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     // An engine run from when Budget kept its records in documents.
     await store.save({ ...ledgerRun!, claimId: "atc_document", rules: null, steps: [{ ordinal: 0, effects: [{
@@ -2328,7 +2328,7 @@ describe("dataset automation claims in both ledgers", () => {
   it("expires saved runs 30 days after they ended, and keeps a failure a ledger may still try again or cannot answer for", async () => {
     // The dataset host stays closed: another process holds its store.
     const f = await world({ hostOpen: false, storeFails: true });
-    const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(f.root));
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
       durableEffects: 0, version: 13, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
@@ -2450,7 +2450,7 @@ ${steps}`;
     expect(await f.executor.undo({ automationId: SWEEP, claimId: "atc_due", deletes: null }, async () => undefined))
       .toMatchObject({ status: "undone", actionsReversed: 1, actions: 0 });
     expect((await f.record("inv-1"))?.values[STATUS]).toBe("Open");
-    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(SWEEP, "atc_due");
+    const { runs } = await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(SWEEP, "atc_due");
     expect(runs.flatMap((run) => run.undoCalls)).toEqual([expect.objectContaining({ kind: "reverse", operationId: RELEASE, action: HOLD })]);
     await f.executor.dispose();
   });
@@ -3076,7 +3076,7 @@ describe("code steps on a dataset", () => {
     expect(rows.find((row) => row.id === other.id)?.values[NOTES]).toBe("touched");
     expect(rows.filter((row) => String(row.values[NOTES]).startsWith("log")).map((row) => row.values[NOTES]).sort()).toEqual(["log 1", "log 2"]);
     const claimId = f.claims()[0]!.claimId;
-    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId)).runs;
+    const [run] = (await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, claimId)).runs;
     // Status alone goes through the edit of Status alone; Notes needs the wider edit.
     expect(run!.applied[0]!.writes.map((write) => "operationId" in write ? write.operationId : write.kind)).toEqual([STATUS_ONLY]);
     expect(run!.applied.slice(1, 4).map(({ writes }) => writes.map((write) => "operationId" in write ? write.operationId : write.kind))).toEqual([[EDIT], [CREATE], [CREATE]]);
@@ -3264,7 +3264,7 @@ describe("code steps on a dataset", () => {
     f.afterNextSave(() => f.dropRules());
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "failed");
-    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    const [run] = (await createAutomationRunStore(preparedAutomationStoreFolder(f.root)).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.steps.map(({ effects }) => effects.map((effect) => effect.kind === "dataset-edit" ? effect.fields.map(({ field, before }) => [field, before]) : null)))
       .toEqual([[[["Status", "Open"]]]]);
     await f.executor.dispose();

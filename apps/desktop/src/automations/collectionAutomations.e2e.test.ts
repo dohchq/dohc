@@ -13,7 +13,6 @@ import { createRecordByHand, desktopRecordEditContext, type LocalPersonAuthor } 
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { createTestScratch } from "../workspaces/testTemp";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
@@ -22,6 +21,7 @@ import { applyDocumentEffect, newRun, type CollectionAutomationRunDependencies }
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { collectionAutomationId, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
 import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
 
 // A person's change claims an automation in the real engine, and the
@@ -108,7 +108,7 @@ async function harness(automations: string, run: (context: {
     roster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
     cachedRoster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
     evaluator,
-    store: createAutomationRunStore(root, resolveWorkspaceMetadataDir),
+    store: createAutomationRunStore(preparedAutomationStoreFolder(root)),
     onRunsChanged: () => undefined,
     reportFailure: async () => undefined,
     withdrawFailure: async () => undefined,
@@ -315,7 +315,7 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
       const signal = new AbortController().signal;
       const run = newRun({ claimId: "creation-replay", automationId: "collection:Tasks#replay" }, automation, "key", 1);
       const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
-      const store = createAutomationRunStore(await createTestScratch("dohc-creation-replay-runs-"), resolveWorkspaceMetadataDir);
+      const store = createAutomationRunStore(preparedAutomationStoreFolder(await createTestScratch("dohc-creation-replay-runs-")));
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
         work(collectionRecordWrites(ctx.recordContext(ctx.person, signal))) } as CollectionAutomationRunDependencies;
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId: derivedRecordId(run.claimId), fields: [] };
@@ -373,7 +373,7 @@ it.skipIf(engine.missing)("finishes a written but unadopted creation on native d
         adopting = ctx.capture.flush();
         return unsubscribe;
       };
-      const store = createAutomationRunStore(await createTestScratch("dohc-unadopted-replay-runs-"), resolveWorkspaceMetadataDir);
+      const store = createAutomationRunStore(preparedAutomationStoreFolder(await createTestScratch("dohc-unadopted-replay-runs-")));
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId, fields: [{ field: "Status", value: "New" }] };
       run.steps = [{ ordinal: 0, effects: [effect] }]; await store.save(run);
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>

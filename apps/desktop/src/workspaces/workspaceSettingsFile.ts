@@ -16,12 +16,14 @@ import {
   type WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import { readOwnedFile, type OwnedFileRead } from "@dohc/workspace-core/owned-file";
 import {
+  LOCAL_FOLDER_WORDS,
   localStateDir,
+  LocalStateFolderError,
   LocalStateUnavailableError,
-  readOwnedFile,
+  ownedLocalStateDir,
   type LocalStateRefusal,
-  type OwnedFileRead,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -91,27 +93,10 @@ const NO_SETTINGS_FILE: WorkspaceSettingsOnDisk = {
   result: { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" },
 };
 
-// What keeps dohc from using `.dohc` or `.dohc/local` itself. Reset replaces
-// only the settings file, so these name their own way out, in the words the
-// engine's open refuses the workspace with.
-type FolderProblem = "link" | "not-folder" | "other-owner";
-const FOLDER_PROBLEM_WORDS: Record<FolderProblem, readonly [fact: string, fix: string]> = {
-  link: ["is a link", "Put what it links to in its place, then try again."],
-  "not-folder": ["is not a folder", "Rename or move it, then try again."],
-  "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
-};
-
-async function folderProblem(path: string): Promise<FolderProblem | null> {
-  const stats = await lstat(path).catch(() => null);
-  if (stats === null) return null;
-  if (stats.isSymbolicLink()) return "link";
-  if (!stats.isDirectory()) return "not-folder";
-  const uid = process.getuid?.();
-  return uid !== undefined && stats.uid !== uid ? "other-owner" : null;
-}
-
-function unusableFolder(shown: ".dohc" | ".dohc/local", problem: FolderProblem): WorkspaceSettingsOnDisk {
-  const [fact, fix] = FOLDER_PROBLEM_WORDS[problem];
+// A problem with `.dohc` or `.dohc/local` itself. Reset replaces only the
+// settings file, so these name the folder's own way out.
+function unusableFolder({ shown, problem }: LocalStateFolderError): WorkspaceSettingsOnDisk {
+  const [fact, fix] = LOCAL_FOLDER_WORDS[problem];
   return {
     raw: null,
     result: {
@@ -126,18 +111,12 @@ function unusableFolder(shown: ".dohc" | ".dohc/local", problem: FolderProblem):
 async function loadWorkspaceSettings(
   workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsOnDisk> {
-  const rootPath = workspace.rootPath;
-  // A problem with .dohc or .dohc/local is checked on every read, before the
-  // file: a link at either one is followed by the file's open, and Reset
-  // can't fix the folder. Reads then agree with saves, which refuse it.
-  const dohcProblem = await folderProblem(join(rootPath, ".dohc"));
-  if (dohcProblem) return unusableFolder(".dohc", dohcProblem);
-  // The metadata resolver also refuses a .dohc that leads out of the
-  // workspace, which only a mount can do.
-  let metadata: string | null;
+  // Reads then agree with saves, which refuse the same folders.
+  let folder: string | null;
   try {
-    metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+    folder = await ownedLocalStateDir(workspace.rootPath);
   } catch (error) {
+    if (error instanceof LocalStateFolderError) return unusableFolder(error);
     const refused = (error as Error).message;
     return {
       raw: null,
@@ -149,10 +128,7 @@ async function loadWorkspaceSettings(
       folderRefusal: `dohc did not save workspace settings. ${refused}`,
     };
   }
-  if (metadata === null) return NO_SETTINGS_FILE;
-  const folder = join(metadata, "local");
-  const localProblem = await folderProblem(folder);
-  if (localProblem) return unusableFolder(".dohc/local", localProblem);
+  if (folder === null) return NO_SETTINGS_FILE;
   // These settings change what dohc does, such as whether a link opens
   // without asking, so dohc uses only a file this user owns and alone can
   // change, read through one handle. The read does not wait for the engine to

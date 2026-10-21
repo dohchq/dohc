@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { readLocalStateFrom, type LocalStateWorkspace } from "../workspaces/workspaceLocalState";
+import type { AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
+import { ownedLocalStateDir, readLocalStateFrom, type LocalStateWorkspace } from "../workspaces/workspaceLocalState";
 
 // Stands in for the engine sessions: each workspace's current open, by id and
 // root, with what it said about `.dohc/local`.
@@ -17,5 +18,20 @@ export function fakeLocalStateOpens() {
     close(workspace: LocalStateWorkspace) {
       opens.delete(key(workspace));
     },
+  };
+}
+
+/**
+ * A workspace's run store folder as an engine open leaves it for a test that
+ * is not about the open: a write finds `.dohc/local` made, and a read finds
+ * it as the desktop does.
+ */
+export function preparedAutomationStoreFolder(rootPath: string): AutomationStoreFolder {
+  return {
+    async forWrite() {
+      await mkdir(join(rootPath, ".dohc", "local"), { recursive: true });
+      return (await ownedLocalStateDir(rootPath))!;
+    },
+    forRead: () => ownedLocalStateDir(rootPath),
   };
 }

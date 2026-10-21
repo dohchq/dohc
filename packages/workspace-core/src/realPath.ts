@@ -4,9 +4,9 @@
 // process) asks the same two questions of the same code, so no surface can
 // hold a stale copy of the rule.
 //
-// This is the only module in workspace-core that touches node:fs, so it is a
-// subpath export ("@dohc/workspace-core/realPath") and stays out of the barrel
-// the renderer bundles.
+// It touches node:fs, so it is a subpath export
+// ("@dohc/workspace-core/realPath") and stays out of the barrel the renderer
+// bundles.
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { hasIgnoredSegment, isDohcMetadataPath, isSharedWithMePath } from "./paths";
