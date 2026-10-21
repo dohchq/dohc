@@ -6605,6 +6605,8 @@ struct HostedFeed {
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     /// Rows an earlier feed placed, which the relay still knows.
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
+    /// The relay position of the feed's first row.
+    first: i64,
 }
 
 impl HostedFeed {
@@ -6620,6 +6622,7 @@ impl HostedFeed {
             rows: Default::default(),
             blobs: Default::default(),
             placed: Vec::new(),
+            first: 10,
         }
     }
 
@@ -6629,7 +6632,7 @@ impl HostedFeed {
         bytes: Vec<u8>,
     ) -> dohc_engine_sync::ReplicationEnvelope {
         let mut rows = self.rows.lock().unwrap();
-        op.relay_seq = Some(10 + rows.len() as i64);
+        op.relay_seq = Some(self.first + rows.len() as i64);
         rows.push(op.clone());
         self.blobs.lock().unwrap().insert(hex_sha256(&bytes), bytes);
         op
@@ -7729,6 +7732,24 @@ fn measured_protection(
     store
         .read_with(|conn| protection(conn, key, tails))
         .unwrap()
+}
+
+/// The commit that completes a pass of [`released_window_measure`], with
+/// the tails the actor keeps, as the actor commits it.
+fn measured_commit(
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    store: &mut EngineStore,
+    cache: &dohc_engine_collab::WriterDocCache,
+    cursor: &dohc_engine_sync::HostedCursor,
+) -> dohc_engine_sync::HostedCommit {
+    let tails = cache.released_tails(store);
+    let dohc_engine_storage::TxnOutcome::Committed(commit) = client
+        .commit_hosted_cursor(store, "workspace", cursor, &tails, &NoFaults)
+        .unwrap()
+    else {
+        panic!("crashed");
+    };
+    commit
 }
 
 /// Sol's tails-cache ruling: the actor keeps a released lineage's validated
