@@ -257,17 +257,19 @@ export function createSettingsIpc<
 
     getWorkspaceSettings: async (_input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await readWorkspaceSettingsFile(operation.workspace.rootPath),
+        await readWorkspaceSettingsFile(operation.workspace),
       ),
 
+    // A save or reset before the engine prepared .dohc/local is refused with
+    // words that say why, and writes nothing. Reads never wait for it.
     setWorkspaceSettings: async (input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await saveWorkspaceSettingsFile(operation.workspace.rootPath, input.patch),
+        await saveWorkspaceSettingsFile(operation.workspace, input.patch),
       ),
 
     resetWorkspaceSettings: async (_input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await resetWorkspaceSettingsFile(operation.workspace.rootPath),
+        await resetWorkspaceSettingsFile(operation.workspace),
       ),
 
     // Per-workspace workbench UI state (.dohc/local/ui-state.json). The
