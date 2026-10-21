@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DISK_ROOT_REFUSAL, FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
@@ -10,7 +10,7 @@ import { createTestScratch } from "./testTemp";
 // Seams for a folder swapped mid-open and for a mounted disk.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, mkdir: vi.fn(actual.mkdir), readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat) };
+  return { ...actual, lstat: vi.fn(actual.lstat), mkdir: vi.fn(actual.mkdir), readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat) };
 });
 const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
 
@@ -25,7 +25,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  for (const seam of [mkdir, readFile, stat]) vi.mocked(seam).mockReset();
+  for (const seam of [lstat, mkdir, readFile, stat]) vi.mocked(seam).mockReset();
 });
 
 // stat answers as the filesystem does, except a bigint stat of `path` reports `answer`'s.
@@ -231,19 +231,21 @@ describe("createWorkspaceFolder", () => {
   });
 
   it.each(["a link to the home folder", "another folder"] as const)(
-    "writes nothing when %s replaces the folder while its manifest is read",
+    "writes nothing when %s replaces the folder while its manifest is inspected",
     async (replacement) => {
       const root = join(base, "swapped");
       const moved = join(base, "moved");
       await mkdir(root);
       // Each replacement has a .dohc folder, so a write that followed the path would land.
       const replaced = replacement === "another folder" ? root : homeDir;
-      vi.mocked(readFile).mockImplementationOnce((async (...args: Parameters<typeof readFile>) => {
-        await rename(root, moved);
-        await mkdir(join(replaced, ".dohc"), { recursive: true });
-        if (replacement === "a link to the home folder") await symlink(homeDir, root, linkType);
-        return actualFs.readFile(...args);
-      }) as typeof readFile);
+      vi.mocked(lstat).mockImplementation((async (...args: Parameters<typeof lstat>) => {
+        if (String(args[0]) === join(root, ".dohc", "manifest.json")) {
+          await rename(root, moved);
+          await mkdir(join(replaced, ".dohc"), { recursive: true });
+          if (replacement === "a link to the home folder") await symlink(homeDir, root, linkType);
+        }
+        return actualFs.lstat(...args);
+      }) as typeof lstat);
 
       await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" }))
         .rejects.toThrow("The folder changed while dohc was opening it. Open it again.");
@@ -364,5 +366,25 @@ describe("createWorkspaceFolder", () => {
     await expect(
       createWorkspaceFolder({ rootPath: "relative/place", homeDir, computer, kind: "personal" }),
     ).rejects.toThrow(/absolute/i);
+  });
+});
+
+describe("manifest entry custody", () => {
+  it.each([false, true])("refuses a linked manifest without changing its target (target exists: %s)", async (exists) => {
+    const root = join(base, "workspace"), path = join(root, ".dohc", "manifest.json");
+    const target = join(base, "outside.json");
+    const content = JSON.stringify({ version: 1, workspaceId: "outside", kind: "personal", mode: "local-first" });
+    await mkdir(dirname(path), { recursive: true });
+    if (exists) await writeFile(target, content);
+    await symlink(target, path, "file");
+    const link = await readlink(path);
+    const error = await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" })
+      .then(() => null, (error: unknown) => error);
+    expect((await lstat(path)).isSymbolicLink()).toBe(true);
+    expect(await readlink(path)).toBe(link);
+    if (exists) expect(await readFile(target, "utf8")).toBe(content);
+    else await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
+    expect(error).toMatchObject({ name: "WorkspaceManifestError", code: "unreadable" });
   });
 });

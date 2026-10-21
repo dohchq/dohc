@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
@@ -49,23 +49,41 @@ function parseKeyFile(content: string): Buffer {
   return key;
 }
 
+// Windows can follow a dangling file link even with "wx". Only an absent
+// entry is a missing key; inspect before every read, including an EEXIST retry.
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isFile()) {
+      throw new SecretFileStoreError(
+        "key-corrupt",
+        "The workspace secret key file could not be read; refusing to touch protected files.",
+      );
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export async function loadSecretDataKey(
   rootDir: string,
   options: { createIfMissing: boolean },
 ): Promise<Buffer> {
   const path = keyFilePath(rootDir);
   try {
-    const content = await readFile(path, "utf8");
-    await chmod(path, 0o600).catch(() => undefined);
-    return parseKeyFile(content);
+    if (await fileExists(path)) {
+      const content = await readFile(path, "utf8");
+      await chmod(path, 0o600).catch(() => undefined);
+      return parseKeyFile(content);
+    }
   } catch (error) {
     if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new SecretFileStoreError(
-        "key-corrupt",
-        "The workspace secret key file could not be read; refusing to touch protected files.",
-      );
-    }
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to touch protected files.",
+    );
   }
   if (!options.createIfMissing) {
     throw new SecretFileStoreError(
@@ -82,9 +100,7 @@ export async function loadSecretDataKey(
     return key;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      const content = await readFile(path, "utf8");
-      await chmod(path, 0o600).catch(() => undefined);
-      return parseKeyFile(content);
+      return loadSecretDataKey(rootDir, { createIfMissing: false });
     }
     throw new SecretFileStoreError(
       "key-corrupt",
@@ -103,21 +119,21 @@ export async function installWorkspaceDataKey(
   }
   const path = keyFilePath(rootDir);
   try {
-    const existing = parseKeyFile(await readFile(path, "utf8"));
-    await chmod(path, 0o600).catch(() => undefined);
-    if (existing.equals(key)) return;
-    throw new SecretFileStoreError(
-      "key-corrupt",
-      "A different workspace secret key already exists locally; refusing to overwrite protected state.",
-    );
-  } catch (error) {
-    if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (await fileExists(path)) {
+      const existing = parseKeyFile(await readFile(path, "utf8"));
+      await chmod(path, 0o600).catch(() => undefined);
+      if (existing.equals(key)) return;
       throw new SecretFileStoreError(
         "key-corrupt",
-        "The workspace secret key file could not be read; refusing to install a replacement.",
+        "A different workspace secret key already exists locally; refusing to overwrite protected state.",
       );
     }
+  } catch (error) {
+    if (error instanceof SecretFileStoreError) throw error;
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to install a replacement.",
+    );
   }
   // As above, the engine has already created `.dohc/engine`.
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;

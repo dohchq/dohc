@@ -62,13 +62,16 @@ type ManifestState =
   | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] };
 
 async function inspectManifest(metadataDir: string): Promise<ManifestState> {
-  let raw: string;
-  try {
-    raw = await readFile(join(metadataDir, "manifest.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+  const path = join(metadataDir, "manifest.json");
+  const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
     throw error;
+  });
+  if (entry === null) return { kind: "absent" };
+  if (!entry.isFile()) {
+    throw new WorkspaceManifestError("unreadable", "this folder has a corrupt .dohc/manifest.json");
   }
+  const raw = await readFile(path, "utf8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -244,8 +247,8 @@ export async function createWorkspaceFolderWithFreshness(input: {
     kind: input.kind,
   });
 
-  // wx: manifest is absent (inspectManifest returned "absent"); never clobber
-  // an unexpected file, or follow a link, that appeared since the check.
+  // inspectManifest checked the entry itself: Windows "wx" can follow a
+  // dangling link. "wx" keeps a competing regular file from being replaced.
   await writeFile(
     join(metadataDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
