@@ -39,22 +39,27 @@ async fn rpc(
     key: &str,
 ) -> Value {
     let request = Request {
-            id: 100,
-            method: method.into(),
-            workspace: Some(handle.clone()),
-            deadline_ms: None,
-            idempotency_key: Some(key.into()),
-            progress: false,
-            params: json!({"operationId":OP}),
-        };
+        id: 100,
+        method: method.into(),
+        workspace: Some(handle.clone()),
+        deadline_ms: None,
+        idempotency_key: Some(key.into()),
+        progress: false,
+        params: json!({"operationId":OP}),
+    };
     let mut attempts = 0;
     let result = common::retry_engine_store_busy(|| {
         attempts += 1;
         transport.call(RequestContext::unbounded(), request.clone())
     })
     .await;
-    eprintln!("LINK_REWRITE_RPC_RETRIES method={method} key={key} retries={}", attempts - 1);
-    result.unwrap_or_else(|error| panic!("{method}: {error:?}")).result
+    eprintln!(
+        "LINK_REWRITE_RPC_RETRIES method={method} key={key} retries={}",
+        attempts - 1
+    );
+    result
+        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
+        .result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

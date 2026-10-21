@@ -795,9 +795,15 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
     ] {
         let mut f = Fixture::new(3, 3);
         let faults = Arc::new(CrashAfterDocuments {
-            store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
+            store: Mutex::new(
+                EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap(),
+            ),
             request: "crash-rewrite".into(),
-            documents: if point == FaultPoint::StorageBeforePersist { 1 } else { 2 },
+            documents: if point == FaultPoint::StorageBeforePersist {
+                1
+            } else {
+                2
+            },
             point,
         });
         let result = f.pass("crash-rewrite", faults).await;
