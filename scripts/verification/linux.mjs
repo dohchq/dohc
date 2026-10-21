@@ -114,20 +114,27 @@ awk '$1 == "Cached:" {print "cached", $2}' /proc/meminfo
 }
 
 /**
- * Runs the job in a user scope: with `full`, it installs dependencies, as the queue prepares a Windows lane,
- * then runs the verifier's Rust job; otherwise it runs the gate's clippy command, then the compiler owner's tests.
+ * Runs the job in a user scope. It first downloads the crates the build needs. Then, with `full`, it installs dependencies,
+ * as the queue prepares a Windows lane, and runs the verifier's Rust job; otherwise it runs the gate's clippy command,
+ * then the compiler owner's tests.
  * A watchdog in the scope stops it when the launcher ends, so a run whose Windows side was killed leaves nothing behind.
- * Afterwards the scope's peak memory and out-of-memory kills go to `scope.json`.
+ * Afterwards the scope's peak memory, out-of-memory kills, and whether the download worked go to `scope.json`.
  */
 export function runScript({ unit, base, grant, output, jobs, full }) {
   const verify = `launcher=$$
 setsid bash -c "while kill -0 $launcher 2>/dev/null; do sleep 5; done; systemctl --user stop ${unit}.scope" </dev/null >/dev/null 2>&1 &
-${full ? `pnpm install --frozen-lockfile --config.confirm-modules-purge=false && node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")} && cargo ${linuxTests.join(" ")}`}
-status=$?
+if cargo fetch --locked --target "$(rustc --print host-tuple)"; then
+  fetched=true
+  ${full ? `pnpm install --frozen-lockfile --config.confirm-modules-purge=false && node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")} && cargo ${linuxTests.join(" ")}`}
+  status=$?
+else
+  status=$?
+  fetched=false
+fi
 cgroup=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
 peak=$(cat "$cgroup/memory.peak" 2>/dev/null || true)
 kills=$(awk '$1 == "oom_kill" {print $2}' "$cgroup/memory.events" 2>/dev/null || true)
-printf '{"memoryPeak":%s,"oomKills":%s}\\n' "\${peak:-null}" "\${kills:-null}" > "$DOHC_VERIFICATION_OUTPUT/scope.json"
+printf '{"memoryPeak":%s,"oomKills":%s,"fetched":%s}\\n' "\${peak:-null}" "\${kills:-null}" "$fetched" > "$DOHC_VERIFICATION_OUTPUT/scope.json"
 exit $status`;
   return `set -euo pipefail
 cd "${home}/linux"
@@ -218,6 +225,8 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
     // The scope writes this after its command, so without it the command never ran.
     const scope = readJson(join(output, "scope.json"));
     if (!scope) throw exit ?? new Error("The Linux scope recorded nothing.");
+    // Before a PR queues, the verifier builds it on Windows with the same lockfile, so here the fetch fails only to download.
+    if (scope.fetched === false) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${join(output, "wsl-run.log")}.`), { environment: "linux network" });
     let receipt;
     if (full) {
       receipt = readJson(join(output, "result.json"));
