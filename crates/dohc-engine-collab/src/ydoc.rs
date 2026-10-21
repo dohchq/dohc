@@ -50,6 +50,7 @@ mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
 mod restore_copy;
+mod wikilinks;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
