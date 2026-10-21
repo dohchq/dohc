@@ -2,8 +2,9 @@ name: Desktop Release
 # The scheduled nightly job finds its run by the commit it requested.
 run-name: Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
 
-# Releases start only by dispatch and run only on self-hosted runners.
-# Cloud runners stay off (AGENTS.md). This workflow builds Windows and Linux.
+# Releases start only by dispatch. The scheduled nightly runs on the
+# self-hosted runners. Until the repository is public, runners=github is only
+# for the trial dry runs Ice approved. This workflow builds Windows and Linux.
 # The release owner adds the macOS files to the published release with
 # `pnpm release:macos` on a Mac (docs/engineering/desktop-release.md).
 on:
@@ -35,6 +36,14 @@ on:
         required: true
         default: true
         type: boolean
+      runners:
+        description: Where every job runs. github is only for approved trial dry runs.
+        required: false
+        default: self-hosted
+        type: choice
+        options:
+          - self-hosted
+          - github
       commit:
         description: Build only if main is at this commit. The scheduled nightly job sets it.
         required: false
@@ -53,7 +62,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     # On the Windows release PC, the steps before the desktop tests took 29
     # minutes, and those tests had not finished 12 minutes later. On Linux
     # the whole job takes about 16 minutes.
@@ -80,6 +89,14 @@ jobs:
             echo "::error::main is at $GITHUB_SHA, not the requested commit $REQUESTED_COMMIT. Nothing builds."
             exit 1
           fi
+
+      # Until the repository is public, GitHub's runners only run trial dry runs.
+      - name: Refuse a publish on GitHub's runners
+        if: inputs.runners == 'github' && !inputs.dry_run
+        shell: bash
+        run: |
+          echo "::error::runners=github runs only dry runs until the repository is public. Nothing builds."
+          exit 1
 
       # A desktop build on Linux leaves the staged Markdown reader folder
       # read-only, so checkout could not clean this runner's workspace.
@@ -114,6 +131,16 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
 
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        if: inputs.runners == 'github'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -124,6 +151,7 @@ jobs:
           DISPATCH_CHANNEL: ${{ inputs.channel }}
           DISPATCH_VERSION: ${{ inputs.version }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms }}
+          DISPATCH_RUNNERS: ${{ inputs.runners || 'self-hosted' }}
         run: |
           set -euo pipefail
           version_arg=()
@@ -135,6 +163,7 @@ jobs:
           node scripts/resolve-desktop-release.mjs \
             --channel "$DISPATCH_CHANNEL" \
             --platforms "$DISPATCH_PLATFORMS" \
+            --runners "$DISPATCH_RUNNERS" \
             "${version_arg[@]}" \
             --date "$nightly_date" \
             --run-number "$GITHUB_RUN_NUMBER" \
@@ -180,7 +209,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
@@ -270,8 +299,9 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Windows and WSL share the same PC for this selection.
-      max-parallel: ${{ inputs.platforms == 'windows-linux' && 1 || 4 }}
+      # On the self-hosted runners, Windows and WSL share the same PC for this
+      # selection. GitHub's runners are separate machines.
+      max-parallel: ${{ inputs.platforms == 'windows-linux' && inputs.runners != 'github' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
@@ -307,6 +337,16 @@ jobs:
         run: |
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
+
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        if: inputs.runners == 'github'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -485,7 +525,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
