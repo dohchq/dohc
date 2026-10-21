@@ -13,8 +13,6 @@ import {
   GetChatThreadRevisionResult,
   ListChatThreadDecisionsPayload,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionPayload,
-  ResolveChatDecisionResult,
   ListChatThreadAttachmentsPayload,
   ListChatThreadAttachmentsResult,
   ListChatChannelsPayload,
@@ -90,12 +88,6 @@ export const chatOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "This workspace is no longer active.",
     payload: ListChatThreadDecisionsPayload, result: ListChatThreadDecisionsResult,
-  },
-  resolveChatDecision: {
-    capabilityId: "chat.decision.resolve", channel: "desktop:resolve-chat-decision",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "This workspace is no longer active.",
-    payload: ResolveChatDecisionPayload, result: ResolveChatDecisionResult,
   },
   listChatThreadAttachments: {
     capabilityId: "chat.attachments.list", channel: "desktop:list-chat-thread-attachments",

@@ -455,6 +455,7 @@ describe("CLI socket server", () => {
           writeTargets.push(target);
         },
         scanChatDispatch: async () => undefined,
+        betweenDispatchScans: (_workspaceId, write) => write(),
         notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",

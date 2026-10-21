@@ -165,6 +165,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
     localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
+    betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
   });
   const sender = { trusted: true };
@@ -243,7 +244,7 @@ it("received file chats use tokens after a rename, so clicking the listed path f
 const mutations = [
   { name: "create", channel: chatOperations.createFileChat.channel, payload: { workspaceId: "workspace", path: "notes/a.md", title: "Notes" }, method: "createThread" },
   { name: "send", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Hello" }, method: "sendMessage" },
-  { name: "decision", channel: chatOperations.resolveChatDecision.channel, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", resolvedByMessageId: "reply" }, method: "resolveChatDecision" },
+  { name: "answer", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "message", chosenOption: "Monday" } }, method: "resolveChatDecision" },
   { name: "reaction", channel: chatOperations.setChatReaction.channel, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added" }, method: "setReaction" },
 ] as const;
 
@@ -729,6 +730,25 @@ describe("poll IPC writes", () => {
       .rejects.toThrow(name === "send" ? "Chats are read-only in this shared view." : "A shared view has no capture.");
     for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+  const answer = { workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" } };
+  it("resolves the question a reply answers in the same send", async () => {
+    const test = fixture();
+    const result = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer));
+    expect(test.storeMethods.resolveChatDecision).toHaveBeenCalledWith({
+      workspaceId: "workspace", threadId: "thread", messageId: "question",
+      resolvedByMessageId: result.message.id, chosenOption: "Monday",
+    });
+    expect(result.resolved).toMatchObject({ messageId: "question", state: "resolved", chosenOption: "Monday" });
+    expect(result).not.toHaveProperty("resolveFailure");
+  });
+  it("returns the landed reply and why its answer failed", async () => {
+    const test = fixture();
+    test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
+    const result = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer));
+    expect(result.message.body).toBe("Monday");
+    expect(result).not.toHaveProperty("resolved");
+    expect(result.resolveFailure).toBe("Error: Pick one of the poll's choices.");
   });
 });
 
