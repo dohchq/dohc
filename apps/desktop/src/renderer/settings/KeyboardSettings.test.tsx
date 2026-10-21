@@ -8,7 +8,11 @@ import { KeyboardSettings, keyboardGroups } from "./KeyboardSettings";
 afterEach(cleanup);
 
 const IDS = Object.keys(SHORTCUTS) as ShortcutId[];
-const MAC_ONLY = IDS.filter((id) => "platform" in SHORTCUTS[id]);
+const answers = (platform: string) => IDS.filter((id) => {
+  const row = SHORTCUTS[id];
+  return !("platforms" in row) || (row.platforms as readonly string[]).includes(platform);
+});
+const MAC_ONLY = IDS.filter((id) => !answers("win32").includes(id) && !answers("linux").includes(id));
 const chordText = (keys: readonly string[]) => keys.join(" ");
 const listed = (platform: string, devTools = true) =>
   keyboardGroups(platform, devTools).flatMap(({ heading, rows }) =>
@@ -20,14 +24,19 @@ const meaning = (platform: string, chord: string) =>
 describe("keyboard settings", () => {
   it.each(["win32", "darwin", "linux"])("lists every shortcut %s answers, by its name, with each of its chords", (platform) => {
     const rows = listed(platform);
-    for (const id of IDS.filter((id) => platform === "darwin" || !MAC_ONLY.includes(id))) {
+    for (const id of answers(platform)) {
       expect(shortcutName(id), id).not.toBe("");
       for (const keys of shortcutChords(id, platform)) {
         expect(rows.filter((row) => row.endsWith(` | ${shortcutName(id)} | ${chordText(keys)}`)), id).toHaveLength(1);
       }
     }
-    expect(rows).toHaveLength(IDS.filter((id) => platform === "darwin" || !MAC_ONLY.includes(id))
-      .reduce((count, id) => count + shortcutChords(id, platform).length, 0));
+    expect(rows).toHaveLength(answers(platform).reduce((count, id) => count + shortcutChords(id, platform).length, 0));
+  });
+
+  it("lists Quit where a menu answers it: macOS and Linux, not Windows", () => {
+    expect(meaning("darwin", "⌘ Q")).toEqual(["Workbench: Quit"]);
+    expect(meaning("linux", "Ctrl Q")).toEqual(["Workbench: Quit"]);
+    expect(meaning("win32", "Ctrl Q")).toEqual([]);
   });
 
   it.each(["win32", "darwin", "linux"])("keeps each %s row's keys to one place, and each chord to one row under its heading", (platform) => {
