@@ -1,15 +1,42 @@
 //! The one encoding of a [`ReleasedLineageBinding`]: the bytes a hold
 //! persists and the wire carries, and the digest that names them. Keys sort
 //! at every depth, an absent value is an explicit null, tails stay in
-//! namespace order and contributions in their canonical order. Decoding
-//! accepts only those bytes, so a duplicate key, a dropped null or an integer
-//! outside the wire range never names a binding. TypeScript reads and writes
-//! the same contract; `releasedLineageBindingVectors.json` pins both.
+//! namespace order, and each tail names its unproven work by an
+//! [`UnprovenCommitment`]. Decoding accepts only those bytes, so a duplicate
+//! key, a dropped null or an integer outside the wire range never names a
+//! binding. TypeScript reads and writes the same contract;
+//! `releasedLineageBindingVectors.json` pins both.
 use super::*;
 use serde_json::{Map, Value};
 
-const VERSION: i64 = 1;
-const DIGEST_DOMAIN: &[u8] = b"dohc:released-lineage-binding:v1\0";
+const VERSION: i64 = 2;
+const DIGEST_DOMAIN: &[u8] = b"dohc:released-lineage-binding:v2\0";
+const CONTRIBUTIONS_DOMAIN: &[u8] = b"dohc:released-tail-contributions:v1\0";
+
+impl UnprovenCommitment {
+    /// The commitment to `contributions`, none when there are none: their
+    /// count, and `SHA256(UTF8("dohc:released-tail-contributions:v1\0") ||
+    /// canonical JSON of all of them in canonical order)` in lowercase hex.
+    pub fn of(mut contributions: Vec<RetainedContribution>) -> Option<Self> {
+        if contributions.is_empty() {
+            return None;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        COMMITMENTS_HERE.with(|commitments| commitments.set(commitments.get() + 1));
+        contributions.sort();
+        let mut out = String::new();
+        write_canonical(
+            &Value::Array(contributions.iter().map(contribution_value).collect()),
+            &mut out,
+        );
+        let mut input = CONTRIBUTIONS_DOMAIN.to_vec();
+        input.extend_from_slice(out.as_bytes());
+        Some(Self {
+            count: contributions.len() as i64,
+            digest: hex_sha256(&input),
+        })
+    }
+}
 
 impl ReleasedLineageBinding {
     /// The binding's canonical JSON.
@@ -19,7 +46,7 @@ impl ReleasedLineageBinding {
         out
     }
 
-    /// `SHA256(UTF8("dohc:released-lineage-binding:v1\0") || canonical bytes)`,
+    /// `SHA256(UTF8("dohc:released-lineage-binding:v2\0") || canonical bytes)`,
     /// in lowercase hex.
     pub fn digest(&self) -> String {
         let mut input = DIGEST_DOMAIN.to_vec();
@@ -138,9 +165,10 @@ fn tail_value(tail: &ProtectedTail) -> Value {
             "restoreGeneration": release.restore_generation,
         })),
         "unproven": match &tail.coverage {
-            RetainedCoverage::Unproven(unproven) => {
-                Value::Array(unproven.iter().map(contribution_value).collect())
-            }
+            RetainedCoverage::Unproven(unproven) => serde_json::json!({
+                "count": unproven.count,
+                "digest": unproven.digest,
+            }),
             RetainedCoverage::Invalid => Value::Null,
         },
     })
@@ -156,19 +184,21 @@ fn tail_from(value: &Value) -> Option<ProtectedTail> {
             restore_generation: integer(restore_generation, 0)?,
         })
     })?;
-    let coverage = match unproven {
-        Value::Null => RetainedCoverage::Invalid,
-        Value::Array(unproven) if !unproven.is_empty() => {
-            let unproven = unproven
-                .iter()
-                .map(contribution_from)
-                .collect::<Option<Vec<_>>>()?;
-            if !unproven.is_sorted() {
-                return None;
-            }
-            RetainedCoverage::Unproven(unproven)
-        }
-        _ => return None,
+    let coverage = match nullable(unproven, |unproven| {
+        let [count, digest] = fields(unproven, ["count", "digest"])?;
+        let digest = digest.as_str().filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })?;
+        Some(UnprovenCommitment {
+            count: integer(count, 1)?,
+            digest: digest.to_owned(),
+        })
+    })? {
+        Some(unproven) => RetainedCoverage::Unproven(unproven),
+        None => RetainedCoverage::Invalid,
     };
     Some(ProtectedTail {
         namespace: text(namespace)?,
@@ -202,35 +232,6 @@ fn contribution_value(contribution: &RetainedContribution) -> Value {
             "deliveryId": delivery_id,
             "updateDigest": update_digest,
         }),
-    }
-}
-
-fn contribution_from(value: &Value) -> Option<RetainedContribution> {
-    match value.get("kind")?.as_str()? {
-        "carried" => {
-            let [delivery_id, journal_cursor, _, update_digest] = fields(
-                value,
-                ["deliveryId", "journalCursor", "kind", "updateDigest"],
-            )?;
-            Some(RetainedContribution::Carried {
-                delivery_id: text(delivery_id)?,
-                update_digest: text(update_digest)?,
-                journal_cursor: integer(journal_cursor, 0)?,
-            })
-        }
-        "outbox" => {
-            let [delivery_id, _, outbox_id, sequence, update_digest] = fields(
-                value,
-                ["deliveryId", "kind", "outboxId", "sequence", "updateDigest"],
-            )?;
-            Some(RetainedContribution::Outbox {
-                outbox_id: text(outbox_id)?,
-                sequence: integer(sequence, 0)?,
-                delivery_id: text(delivery_id)?,
-                update_digest: text(update_digest)?,
-            })
-        }
-        _ => None,
     }
 }
 
@@ -309,6 +310,214 @@ mod tests {
         serde_json::from_str(VECTORS).unwrap()
     }
 
+    fn contribution(value: &Value) -> RetainedContribution {
+        let text = |key: &str| value[key].as_str().unwrap().to_owned();
+        let integer = |key: &str| value[key].as_i64().unwrap();
+        match value["kind"].as_str().unwrap() {
+            "carried" => RetainedContribution::Carried {
+                delivery_id: text("deliveryId"),
+                update_digest: text("updateDigest"),
+                journal_cursor: integer("journalCursor"),
+            },
+            "outbox" => RetainedContribution::Outbox {
+                outbox_id: text("outboxId"),
+                sequence: integer("sequence"),
+                delivery_id: text("deliveryId"),
+                update_digest: text("updateDigest"),
+            },
+            kind => panic!("{kind}"),
+        }
+    }
+
+    /// The first commitment vector's contributions, built here rather than
+    /// read.
+    fn carried_and_outbox() -> Vec<RetainedContribution> {
+        vec![
+            RetainedContribution::Carried {
+                delivery_id: "delivery-1".into(),
+                update_digest: "c".repeat(64),
+                journal_cursor: 7,
+            },
+            RetainedContribution::Outbox {
+                outbox_id: "outbox".into(),
+                sequence: 3,
+                delivery_id: "delivery-2".into(),
+                update_digest: "d".repeat(64),
+            },
+        ]
+    }
+
+    fn digest(contributions: Vec<RetainedContribution>) -> String {
+        UnprovenCommitment::of(contributions).unwrap().digest
+    }
+
+    /// Both languages commit to the shared vectors' contributions alike, in
+    /// any order they are listed in.
+    #[test]
+    fn the_shared_vectors_commit_as_typescript_does() {
+        let vectors = vectors();
+        let commitments = vectors["commitments"].as_array().unwrap();
+        assert_eq!(
+            commitments[0]["digest"],
+            digest(carried_and_outbox()),
+            "built here"
+        );
+        for vector in commitments {
+            let mut contributions: Vec<_> = vector["contributions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(contribution)
+                .collect();
+            let expected = UnprovenCommitment {
+                count: vector["count"].as_i64().unwrap(),
+                digest: vector["digest"].as_str().unwrap().to_owned(),
+            };
+            assert_eq!(
+                UnprovenCommitment::of(contributions.clone()).as_ref(),
+                Some(&expected),
+                "{}",
+                vector["name"]
+            );
+            contributions.reverse();
+            assert_eq!(
+                UnprovenCommitment::of(contributions),
+                Some(expected),
+                "{} reversed",
+                vector["name"]
+            );
+        }
+        assert_eq!(UnprovenCommitment::of(Vec::new()), None);
+    }
+
+    /// A commitment names every field, kind and repetition of the work: a
+    /// changed identity, digest, sequence or cursor, an addition and a
+    /// removal each name other work. Its domain is its own.
+    #[test]
+    fn a_commitment_changes_with_any_contribution() {
+        let [carried, outbox]: [RetainedContribution; 2] = carried_and_outbox().try_into().unwrap();
+        let committed = digest(vec![carried.clone(), outbox.clone()]);
+        let RetainedContribution::Carried {
+            delivery_id,
+            update_digest,
+            journal_cursor,
+        } = carried.clone()
+        else {
+            unreachable!()
+        };
+        let RetainedContribution::Outbox {
+            outbox_id,
+            sequence,
+            delivery_id: outbox_delivery,
+            update_digest: outbox_digest,
+        } = outbox.clone()
+        else {
+            unreachable!()
+        };
+        let carried_as = |delivery_id: &str, update_digest: &str, journal_cursor: i64| {
+            RetainedContribution::Carried {
+                delivery_id: delivery_id.into(),
+                update_digest: update_digest.into(),
+                journal_cursor,
+            }
+        };
+        let outbox_as = |outbox_id: &str, sequence: i64, delivery_id: &str, update_digest: &str| {
+            RetainedContribution::Outbox {
+                outbox_id: outbox_id.into(),
+                sequence,
+                delivery_id: delivery_id.into(),
+                update_digest: update_digest.into(),
+            }
+        };
+        let other = "e".repeat(64);
+        let changed = [
+            (
+                "a Carried delivery's identity",
+                vec![
+                    carried_as("delivery-9", &update_digest, journal_cursor),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "a Carried delivery's digest",
+                vec![
+                    carried_as(&delivery_id, &other, journal_cursor),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "a Carried delivery's cursor",
+                vec![
+                    carried_as(&delivery_id, &update_digest, journal_cursor + 1),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "an outbox entry's outbox",
+                vec![
+                    carried.clone(),
+                    outbox_as("outbox-9", sequence, &outbox_delivery, &outbox_digest),
+                ],
+            ),
+            (
+                "an outbox entry's sequence",
+                vec![
+                    carried.clone(),
+                    outbox_as(&outbox_id, sequence + 1, &outbox_delivery, &outbox_digest),
+                ],
+            ),
+            (
+                "an outbox entry's delivery",
+                vec![
+                    carried.clone(),
+                    outbox_as(&outbox_id, sequence, "delivery-9", &outbox_digest),
+                ],
+            ),
+            (
+                "an outbox entry's digest",
+                vec![
+                    carried.clone(),
+                    outbox_as(&outbox_id, sequence, &outbox_delivery, &other),
+                ],
+            ),
+            (
+                "the kind of the same identity",
+                vec![
+                    carried.clone(),
+                    carried_as(&outbox_delivery, &outbox_digest, sequence),
+                ],
+            ),
+            (
+                "an addition",
+                vec![
+                    carried.clone(),
+                    outbox.clone(),
+                    carried_as("delivery-3", &other, 8),
+                ],
+            ),
+            (
+                "a repetition",
+                vec![carried.clone(), outbox.clone(), carried.clone()],
+            ),
+            ("a removal", vec![outbox.clone()]),
+        ];
+        for (case, contributions) in changed {
+            assert_ne!(digest(contributions), committed, "{case}");
+        }
+        assert_eq!(digest(vec![outbox, carried]), committed, "order");
+        let mut undomained = String::new();
+        write_canonical(
+            &Value::Array(
+                carried_and_outbox()
+                    .iter()
+                    .map(contribution_value)
+                    .collect(),
+            ),
+            &mut undomained,
+        );
+        assert_ne!(hex_sha256(undomained.as_bytes()), committed, "its domain");
+    }
+
     /// The first vector, built here rather than read.
     fn listed() -> ReleasedLineageBinding {
         ReleasedLineageBinding {
@@ -335,19 +544,9 @@ mod tests {
                         path: "notes/plan.md".into(),
                         restore_generation: 2,
                     }),
-                    coverage: RetainedCoverage::Unproven(vec![
-                        RetainedContribution::Carried {
-                            delivery_id: "delivery-1".into(),
-                            update_digest: "c".repeat(64),
-                            journal_cursor: 7,
-                        },
-                        RetainedContribution::Outbox {
-                            outbox_id: "outbox".into(),
-                            sequence: 3,
-                            delivery_id: "delivery-2".into(),
-                            update_digest: "d".repeat(64),
-                        },
-                    ]),
+                    coverage: RetainedCoverage::Unproven(
+                        UnprovenCommitment::of(carried_and_outbox()).unwrap(),
+                    ),
                 },
                 ProtectedTail {
                     namespace: "relay-b".into(),

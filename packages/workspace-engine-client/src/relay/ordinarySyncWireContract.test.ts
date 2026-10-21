@@ -119,8 +119,10 @@ describe("hosted native sync contract", () => {
   });
 
   const binding = JSON.parse(vectors.valid[1]!.canonical);
+  const v1 = vectors.invalid.find(vector => vector.name === "a version 1 binding")!;
   it.each([
     { held: [{ ...holds[5], binding: undefined }] }, { held: [{ ...holds[5], binding: { ...binding, extra: 1 } }] },
+    { held: [{ ...holds[5], binding: JSON.parse(v1.text) }] },
     { held: [{ ...holds[5], binding: { ...binding, currentPath: undefined } }] },
     { held: [{ ...holds[5], binding: { ...binding, incoming: { ...binding.incoming, relaySeq: 0 } } }] },
     { held: [{ ...holds[5], continuation: "thawed" }] }, { held: [{ ...holds[5], continuation: undefined }] },

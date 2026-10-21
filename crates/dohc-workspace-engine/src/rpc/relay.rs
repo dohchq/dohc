@@ -1988,6 +1988,7 @@ mod tests {
             })
         );
         assert_eq!(held["binding"]["incoming"]["relayNamespace"], "relay");
+        assert_eq!(held["binding"]["version"], 2);
     }
 
     #[tokio::test]

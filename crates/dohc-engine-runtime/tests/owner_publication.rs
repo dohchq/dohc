@@ -6020,6 +6020,8 @@ struct RetainedWindow {
     base: Vec<u8>,
     /// The digest of the delivery that retains [`RETAINED`].
     retained_digest: String,
+    /// That delivery's ID.
+    retained_delivery: String,
     /// What ordinary sync brought the host before its lineage adopted.
     synced: Vec<Vec<u8>>,
     root: ScratchDir,
@@ -6128,7 +6130,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         assert_eq!(retained_digest, hex_sha256(&first.full_state), "the seed");
     }
     let accepted = LiveUpdateReceipt {
-        delivery_id,
+        delivery_id: delivery_id.clone(),
         update_digest: retained_digest.clone(),
         journal_cursor: 2,
         accepting_host_epoch: 1,
@@ -6208,6 +6210,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         lineage,
         base,
         retained_digest,
+        retained_delivery: delivery_id,
         synced,
         root,
     }
@@ -6988,11 +6991,17 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
             ("relay", w.first.activation_id.as_str()),
             "{case}"
         );
-        assert!(
-            matches!(&tail.coverage, RetainedCoverage::Unproven(unproven)
-                if matches!(unproven.as_slice(), [RetainedContribution::Carried { update_digest, .. }] if *update_digest == w.retained_digest)),
-            "{case}: {:?}",
-            tail.coverage
+        assert_eq!(
+            tail.coverage,
+            RetainedCoverage::Unproven(
+                UnprovenCommitment::of(vec![RetainedContribution::Carried {
+                    delivery_id: w.retained_delivery.clone(),
+                    update_digest: w.retained_digest.clone(),
+                    journal_cursor: 2,
+                }])
+                .unwrap()
+            ),
+            "{case}"
         );
         assert_eq!(w.native(), native, "{case}");
         desktop.close().await;
@@ -7324,8 +7333,10 @@ fn restored(w: &RetainedWindow) {
 /// A pass whose hold names what its row would change commits nothing once
 /// that moved before its commit: neither its cursor nor its hold. The
 /// document's head, path or restore generation, the replica's feed, or the
-/// tail's retained work moves it. The next pass derives the binding again
-/// from the same row, and its commit holds the document with it.
+/// tail's retained work moves it, whether the commit validates its tails
+/// itself, decides on the tails the pass kept, or decides after a reopen of
+/// the store forgot them. The next pass derives the binding again from the
+/// same row, and its commit holds the document with it.
 #[tokio::test]
 async fn a_pass_whose_released_binding_went_stale_commits_nothing() {
     type Change = fn(&mut RetainedWindow);
@@ -7389,33 +7400,52 @@ async fn a_pass_whose_released_binding_went_stale_commits_nothing() {
                 .unwrap()
         };
         let before = replica(&w.store);
+        // Another open of the store, whose tails keep nothing the pass's
+        // did; the changes below are made past the store's checks, so it
+        // opens before them.
+        let mut reopened = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
         change(&mut w);
-        let commit = |w: &mut RetainedWindow, pass: &dohc_engine_sync::HostedPassOutcome| {
-            client
-                .commit_hosted_cursor(
-                    &mut w.store,
-                    "workspace",
-                    pass.pending_cursor.as_ref().unwrap(),
-                    &ReleasedTails::uncached(),
-                    &NoFaults,
-                )
-                .unwrap()
+        let commit = |store: &mut EngineStore,
+                      pass: &dohc_engine_sync::HostedPassOutcome,
+                      tails: &ReleasedTails| loop {
+            match client.commit_hosted_cursor(
+                store,
+                "workspace",
+                pass.pending_cursor.as_ref().unwrap(),
+                tails,
+                &NoFaults,
+            ) {
+                Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                    pending.validate().wait().unwrap();
+                }
+                committed => break committed.unwrap(),
+            }
         };
-        assert_eq!(
-            commit(&mut w, &pass),
-            dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
-                committed: false,
-                has_more: false,
-            }),
-            "{case}"
-        );
-        assert_eq!(replica(&w.store), before, "{case}: nothing committed");
+        let kept = cache.released_tails(&w.store);
+        let reopened_tails = ReleasedTails::default().bound_to(&reopened);
+        for mode in ["uncached", "kept", "reopened"] {
+            let (store, tails) = match mode {
+                "uncached" => (&mut w.store, ReleasedTails::uncached()),
+                "kept" => (&mut w.store, kept.clone()),
+                _ => (&mut reopened, reopened_tails.clone()),
+            };
+            assert_eq!(
+                commit(store, &pass, &tails),
+                dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
+                    committed: false,
+                    has_more: false,
+                }),
+                "{case}, {mode}"
+            );
+            assert_eq!(replica(store), before, "{case}, {mode}: nothing committed");
+        }
+        drop(reopened);
         let next = hosted_pass(&mut w.store, &client, &mut cache);
         let fresh = held_binding(&next, &fold).expect(case);
         assert_ne!(fresh, stale, "{case}");
         assert!(
             matches!(
-                commit(&mut w, &next),
+                commit(&mut w.store, &next, &kept),
                 dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
                     committed: true,
                     ..
@@ -8163,6 +8193,96 @@ async fn a_pass_waiting_for_validation_goes_on_from_the_row_that_waited() {
         scans,
         "no decision scanned"
     );
+    desktop.close().await;
+    w.close().await;
+}
+
+/// The released-lineage binding `pass` holds the window document with.
+fn held_object(pass: &dohc_engine_sync::HostedPassOutcome) -> ReleasedLineageBinding {
+    match pass.held.get("object") {
+        Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { binding, .. }) => {
+            (**binding).clone()
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// How many contributions each tail of `binding` commits to.
+fn committed_counts(binding: &ReleasedLineageBinding) -> Vec<i64> {
+    let ProtectedTails::Listed(tails) = &*binding.tails else {
+        panic!("{:?}", binding.tails);
+    };
+    tails
+        .iter()
+        .map(|tail| match &tail.coverage {
+            RetainedCoverage::Unproven(unproven) => unproven.count,
+            RetainedCoverage::Invalid => panic!("readable"),
+        })
+        .collect()
+}
+
+/// Sol's binding-cost ruling: a protected tail's binding names its unproven
+/// work by count and digest, so a hold over 50,000 retained entries is the
+/// size of a hold over one. The worker commits to the work once, as it
+/// validates. Warm passes and their cursor commits scan nothing and commit to
+/// nothing again, and the hold stores the binding's own canonical bytes.
+#[tokio::test]
+async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
+    let (mut w, desktop, client, pass) = held_pass().await;
+    let one = held_object(&pass);
+    assert_eq!(committed_counts(&one), [1]);
+    released_window_measure::retained_history(&w, 50_000, false);
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let tails = cache.released_tails(&w.store);
+    let many = held_object(&hosted_pass(&mut w.store, &client, &mut cache));
+    assert_eq!(committed_counts(&many), [50_001]);
+    assert_eq!(
+        many.canonical_json().len(),
+        one.canonical_json().len() + "50001".len() - "1".len(),
+        "only the count's digits differ in size"
+    );
+    assert_eq!(tails.validations(), 1);
+    let (scans, commitments) = (
+        released_tail_scans_on_this_thread(),
+        released_tail_commitments_on_this_thread(),
+    );
+    for _ in 0..3 {
+        let pass = hosted_pass(&mut w.store, &client, &mut cache);
+        assert_eq!(held_object(&pass), many);
+        let commit = client
+            .commit_hosted_cursor(
+                &mut w.store,
+                "workspace",
+                pass.pending_cursor.as_ref().unwrap(),
+                &tails,
+                &NoFaults,
+            )
+            .unwrap();
+        assert!(
+            matches!(&commit, dohc_engine_storage::TxnOutcome::Committed(commit) if commit.committed),
+            "{commit:?}"
+        );
+    }
+    assert_eq!(
+        (
+            released_tail_scans_on_this_thread(),
+            released_tail_commitments_on_this_thread(),
+            tails.validations(),
+        ),
+        (scans, commitments, 1),
+        "warm passes and commits scan and commit to nothing"
+    );
+    let stored: String = w
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT released_hold_binding_json FROM hosted_documents WHERE object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(stored, many.canonical_json());
     desktop.close().await;
     w.close().await;
 }

@@ -82,12 +82,23 @@ pub struct TailRelease {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RetainedCoverage {
-    /// This work, in canonical order, lacks proof of application or terminal
+    /// The work this commitment names lacks proof of application or terminal
     /// coverage.
-    Unproven(Vec<RetainedContribution>),
+    Unproven(UnprovenCommitment),
     /// Its evidence, or the release that bound it, is missing, conflicting
     /// or corrupt.
     Invalid,
+}
+
+/// The retained work a tail's validation found without proof, named once,
+/// when it validates, by how many contributions there are and a digest of
+/// all of them, every field, kind and repetition included. A binding never
+/// lists the work itself, so its size and every comparison of it stay the
+/// same however much a tail retains.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnprovenCommitment {
+    pub count: i64,
+    pub digest: String,
 }
 
 /// One piece of retained work no proof covers.
@@ -922,13 +933,23 @@ pub fn released_tail_scans_on_this_thread() -> u64 {
     SCANS_HERE.with(std::cell::Cell::get)
 }
 
+/// How many times the calling thread committed to a tail's unproven work:
+/// a thread that decides on a worker's validations commits to none.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn released_tail_commitments_on_this_thread() -> u64 {
+    COMMITMENTS_HERE.with(std::cell::Cell::get)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SCANS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COMMITMENTS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The tails of the released window that protect the document's lineage, or
-/// none while nothing does.
+/// none while nothing does. This is the one place a tail's unproven work is
+/// enumerated and committed to; decisions on kept tails reuse the commitment.
 fn protected_tails(
     conn: &Connection,
     doc: &DocKey,
@@ -965,9 +986,9 @@ fn protected_tails(
             ))?,
             None => None,
         };
-        let coverage = match unproven {
-            Some(unproven) if unproven.is_empty() => continue,
-            Some(unproven) => RetainedCoverage::Unproven(unproven),
+        let coverage = match unproven.map(UnprovenCommitment::of) {
+            Some(Some(unproven)) => RetainedCoverage::Unproven(unproven),
+            Some(None) => continue,
             None => RetainedCoverage::Invalid,
         };
         tails.push(ProtectedTail {

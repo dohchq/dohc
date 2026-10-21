@@ -25,7 +25,7 @@ const UNRELATED_DOCUMENTS: usize = 4;
 /// the retained one. Applied here, they are the proven history a long-lived
 /// lineage keeps; never applied, each is retained work that protects it.
 /// Written past the store's checks, each still reads as valid.
-fn retained_history(w: &RetainedWindow, count: usize, applied: bool) {
+pub(super) fn retained_history(w: &RetainedWindow, count: usize, applied: bool) {
     use dohc_engine_collab::owner_outbox::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
     let mut raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
     raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
@@ -574,7 +574,7 @@ async fn measure_released_window_protection() {
                 let listed: usize = tails
                     .iter()
                     .map(|tail| match &tail.coverage {
-                        RetainedCoverage::Unproven(unproven) => unproven.len(),
+                        RetainedCoverage::Unproven(unproven) => unproven.count as usize,
                         RetainedCoverage::Invalid => panic!("readable"),
                     })
                     .sum();

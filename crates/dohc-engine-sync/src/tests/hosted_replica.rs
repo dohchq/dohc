@@ -6080,3 +6080,49 @@ fn a_released_hold_outside_a_commit_invalidates_a_pending_pass() {
         }
     );
 }
+
+/// Binding version 2 replaced version 1, which nothing reads: a hold that
+/// stored a version 1 binding reads as damage, never as no hold, and stays
+/// stored.
+#[test]
+fn a_stored_version_1_binding_reads_as_damage() {
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json"
+    ))
+    .unwrap();
+    let v1 = vectors["invalid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vector| vector["name"] == "a version 1 binding")
+        .unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_scratch, _path, mut store) = hosted_store();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("UPDATE hosted_replicas SET scope_generation=1")
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation, \
+                   held_reason,released_hold_binding_json,released_hold_continuation) \
+                 VALUES ('ws','doc','doc.md','held',1,'released-lineage-unsettled',?1,'frozen')",
+                [&v1],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    let read = read_hosted_replica(&store, "ws");
+    assert!(read.is_err(), "{read:?}");
+    let stored: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT released_hold_binding_json FROM hosted_documents WHERE object_id='doc'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(stored, v1);
+}

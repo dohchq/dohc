@@ -69,10 +69,28 @@ fn coverage(f: &Fixture) -> Vec<RetainedCoverage> {
     listed(protected(f).expect("protected")).into_iter().map(|tail| tail.coverage).collect()
 }
 
+/// The coverage a binding names for exactly `unproven`.
+fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
+    RetainedCoverage::Unproven(UnprovenCommitment::of(unproven).expect("unproven work"))
+}
+
+/// The work `tail` retains without proof, as its validation reads it, which
+/// its binding names by commitment.
+fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
+    let unproven = f
+        .store
+        .read_with(|conn| {
+            retirement::unproven_retained(conn, &tail.namespace, &f.key, &f.binding.lineage_claim_id, &tail.activation_id)
+        })
+        .unwrap();
+    assert_eq!(tail.coverage, committed(unproven.clone()), "{}: the binding commits to all of it", tail.namespace);
+    unproven
+}
+
 /// The unproven work of the one tail that protects the lineage.
 fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
-    match <[RetainedCoverage; 1]>::try_from(coverage(f)) {
-        Ok([RetainedCoverage::Unproven(unproven)]) => unproven,
+    match <[ProtectedTail; 1]>::try_from(listed(protected(f).expect("protected"))) {
+        Ok([tail]) if matches!(tail.coverage, RetainedCoverage::Unproven(_)) => unproven_of(f, &tail),
         other => panic!("one tail with readable evidence: {other:?}"),
     }
 }
@@ -117,7 +135,7 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
                 namespace: "namespace".into(),
                 activation_id: "adoption".into(),
                 release: owner_release(),
-                coverage: RetainedCoverage::Unproven(unproven),
+                coverage: committed(unproven),
             }])),
         }
     );
@@ -275,17 +293,22 @@ fn tail_generation_of(f: &Fixture) -> Option<i64> {
 /// Sol's tails-cache ruling: the actor keeps a lineage's validated tails
 /// while the document's generation stands. Later decisions share the same
 /// tails, with no copy of their lists, and each reads its own path. A changed
-/// tail input, here both Carried deliveries applied, validates again.
+/// tail input, here both Carried deliveries applied, validates again. Sol's
+/// binding-cost ruling: the worker commits to the unproven work as it
+/// validates, and no decision commits to it again.
 #[test]
 fn validated_tails_stand_until_their_generation_moves() {
     let (mut f, _, c1, c2) = released_at_b();
     let tails = ReleasedTails::default();
+    let commitments = released_tail_commitments_on_this_thread();
     let first = protected_in(&f, &incoming(), &tails).expect("protected");
     assert_eq!(tails.validations(), 1);
     write_unchecked(&mut f, "UPDATE path_aliases SET path='renamed.md' WHERE path='owner.md'");
     let later = protected_in(&f, &incoming(), &tails).expect("kept");
     assert!(std::sync::Arc::ptr_eq(&later.tails, &first.tails), "shared, never copied");
     assert_eq!(tails.validations(), 1, "a path is no tail input");
+    assert_eq!(released_tail_commitments_on_this_thread(), commitments, "committed to on the worker only");
+    assert_eq!(coverage_of(later.clone()), [committed(vec![carried(&c1), carried(&c2)])]);
     assert_eq!(later.current_path.as_deref(), Some("renamed.md"), "the path is each decision's own");
     applied_exactly(&mut f, &c1.receipt);
     applied_exactly(&mut f, &c2.receipt);
@@ -366,7 +389,7 @@ fn changed_provenance_invalidates_kept_tails() {
     applied_exactly(&mut f, &c1.receipt);
     let tails = ReleasedTails::default();
     let binding = kept_matches_fresh(&f, &tails).expect("protected");
-    assert_eq!(coverage_of(binding), [RetainedCoverage::Unproven(vec![carried(&c2)])]);
+    assert_eq!(coverage_of(binding), [committed(vec![carried(&c2)])]);
     let generation = tail_generation_of(&f);
     write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
         CREATE TEMP TABLE elsewhere AS SELECT * FROM live_device_update_applications WHERE journal_cursor=3;
@@ -692,9 +715,8 @@ fn a_binding_lists_every_protected_namespace() {
     let named: Vec<(&str, &str)> = tails.iter().map(|tail| (tail.namespace.as_str(), tail.activation_id.as_str())).collect();
     assert_eq!(named, [("namespace", "adoption"), ("other", "adoption")]);
     for tail in &tails {
-        let RetainedCoverage::Unproven(unproven) = &tail.coverage else {
-            panic!("{}: readable", tail.namespace);
-        };
+        assert!(matches!(tail.coverage, RetainedCoverage::Unproven(_)), "{}: readable", tail.namespace);
+        let unproven = unproven_of(&f, tail);
         assert!(unproven.contains(&carried(&c1)) && unproven.contains(&carried(&c2)), "{}: {unproven:?}", tail.namespace);
     }
 }

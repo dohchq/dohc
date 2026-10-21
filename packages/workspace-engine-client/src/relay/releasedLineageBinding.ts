@@ -2,12 +2,19 @@ import { createHash } from "node:crypto";
 
 // What a held released-lineage update binds, as the engine's
 // `ReleasedLineageBinding` encodes it: keys sorted at every depth, every absent
-// value an explicit null, tails in namespace order and contributions in their
-// canonical order. `releasedLineageBindingVectors.json` pins both languages.
+// value an explicit null, tails in namespace order, and each tail's unproven
+// work as a commitment to its contributions in their canonical order.
+// `releasedLineageBindingVectors.json` pins both languages.
 
 export type RetainedContribution =
   | { kind: "carried"; deliveryId: string; updateDigest: string; journalCursor: number }
   | { kind: "outbox"; outboxId: string; sequence: number; deliveryId: string; updateDigest: string };
+
+/** How many contributions a tail retains without proof, and the digest of all of them. */
+export interface UnprovenCommitment {
+  count: number;
+  digest: string;
+}
 
 export interface ProtectedTail {
   namespace: string;
@@ -15,11 +22,11 @@ export interface ProtectedTail {
   /** What the tail's release bound; null when it does not read. */
   release: { path: string; restoreGeneration: number } | null;
   /** The tail's retained work no proof covers; null when its evidence is invalid. */
-  unproven: RetainedContribution[] | null;
+  unproven: UnprovenCommitment | null;
 }
 
 export interface ReleasedLineageBinding {
-  version: 1;
+  version: 2;
   workspaceId: string;
   mainVersionId: string;
   objectId: string;
@@ -39,7 +46,8 @@ export interface ReleasedLineageBinding {
   tails: ProtectedTail[] | null;
 }
 
-const DIGEST_DOMAIN = "dohc:released-lineage-binding:v1\0";
+const DIGEST_DOMAIN = "dohc:released-lineage-binding:v2\0";
+const CONTRIBUTIONS_DOMAIN = "dohc:released-tail-contributions:v1\0";
 
 const invalid = (field: string) => new TypeError(`Invalid released-lineage binding: ${field}.`);
 
@@ -94,26 +102,27 @@ function contribution(value: unknown): RetainedContribution {
   throw invalid("contribution kind");
 }
 
+function commitment(value: unknown): UnprovenCommitment {
+  const row = fields(value, ["count", "digest"], "unproven");
+  if (typeof row.digest !== "string" || !/^[0-9a-f]{64}$/.test(row.digest)) throw invalid("unproven digest");
+  return {count: integer(row.count, 1, "unproven count"), digest: row.digest};
+}
+
 function tail(value: unknown): ProtectedTail {
   const row = fields(value, ["activationId", "namespace", "release", "unproven"], "tail");
   const release = nullable(row.release, value => {
     const bound = fields(value, ["path", "restoreGeneration"], "release");
     return {path: text(bound.path, "release path"), restoreGeneration: integer(bound.restoreGeneration, 0, "release restoreGeneration")};
   });
-  const unproven = nullable(row.unproven, value => {
-    if (!Array.isArray(value) || value.length === 0) throw invalid("unproven");
-    const list = value.map(contribution);
-    if (list.some((item, index) => index > 0 && compareContribution(list[index - 1]!, item) > 0)) throw invalid("contribution order");
-    return list;
-  });
-  return {namespace: text(row.namespace, "namespace"), activationId: text(row.activationId, "activationId"), release, unproven};
+  return {namespace: text(row.namespace, "namespace"), activationId: text(row.activationId, "activationId"), release,
+    unproven: nullable(row.unproven, commitment)};
 }
 
 /** The binding `value` holds, with exactly the contract's fields. */
 export function decodeReleasedLineageBinding(value: unknown): ReleasedLineageBinding {
   const row = fields(value, ["currentPath", "headDigest", "incoming", "lineageClaimId", "mainVersionId", "objectId",
     "restoreGeneration", "tails", "version", "workspaceId"], "binding");
-  if (row.version !== 1) throw invalid("version");
+  if (row.version !== 2) throw invalid("version");
   const incoming = fields(row.incoming, ["originId", "originSeq", "relayNamespace", "relaySeq", "replicationEpoch", "streamIdentity"], "incoming");
   const tails = nullable(row.tails, value => {
     if (!Array.isArray(value) || value.length === 0) throw invalid("tails");
@@ -122,7 +131,7 @@ export function decodeReleasedLineageBinding(value: unknown): ReleasedLineageBin
     return list;
   });
   return {
-    version: 1,
+    version: 2,
     workspaceId: text(row.workspaceId, "workspaceId"),
     mainVersionId: text(row.mainVersionId, "mainVersionId"),
     objectId: text(row.objectId, "objectId"),
@@ -151,6 +160,17 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * The commitment a tail's unproven work names: how many contributions there
+ * are, and `SHA256(UTF8("dohc:released-tail-contributions:v1\0") || canonical
+ * JSON of all of them in canonical order)`, in lowercase hex.
+ */
+export function releasedTailContributionsCommitment(contributions: readonly unknown[]): UnprovenCommitment {
+  if (contributions.length === 0) throw invalid("unproven");
+  const list = contributions.map(contribution).sort(compareContribution);
+  return {count: list.length, digest: createHash("sha256").update(CONTRIBUTIONS_DOMAIN, "utf8").update(canonical(list), "utf8").digest("hex")};
+}
+
 /** The binding's canonical JSON. */
 export function canonicalReleasedLineageBinding(binding: ReleasedLineageBinding): string {
   return canonical(decodeReleasedLineageBinding(binding));
@@ -165,7 +185,7 @@ export function releasedLineageBindingFromCanonical(text: string): ReleasedLinea
   return binding;
 }
 
-/** `SHA256(UTF8("dohc:released-lineage-binding:v1\0") || canonical bytes)`, in lowercase hex. */
+/** `SHA256(UTF8("dohc:released-lineage-binding:v2\0") || canonical bytes)`, in lowercase hex. */
 export function releasedLineageBindingDigest(binding: ReleasedLineageBinding): string {
   return createHash("sha256").update(DIGEST_DOMAIN, "utf8").update(canonicalReleasedLineageBinding(binding), "utf8").digest("hex");
 }
