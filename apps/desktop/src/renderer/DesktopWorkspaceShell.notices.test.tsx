@@ -941,7 +941,7 @@ describe("workspace shell errors", () => {
     const recovery = await screen.findByTestId("workspace-open-failed");
     const words =
       "This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. " +
-      "Rename or move it, and dohc makes a new one when you try again.";
+      "Rename or move it, then try again. Earlier History stays in what you moved.";
     expect(recovery.textContent).toContain(words);
     expect(recovery.textContent).not.toMatch(/DaemonRefusalError|INTERNAL|other-owner/);
     await user.click(within(recovery).getByRole("button", { name: "Copy details" }));

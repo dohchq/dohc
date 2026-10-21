@@ -202,7 +202,7 @@ describe("error words", () => {
     ["not-file .dohc/engine/engine.db-wal", "This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private."],
   ])("names what keeps a workspace's History from being private, and where: %s", (detail, fact) => {
     const message = `engine-folder-not-private: ${detail}`;
-    const words = `${fact} Rename or move it, and dohc makes a new one when you try again.`;
+    const words = `${fact} Rename or move it, then try again. Earlier History stays in what you moved.`;
     expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
       words,
       mapped: true,

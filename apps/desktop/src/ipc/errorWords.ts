@@ -57,7 +57,7 @@ function engineFolderNotPrivateWords(message: string): string | null {
   const fact = NOT_PRIVATE_FACTS.get(reason);
   if (fact === undefined) return null;
   return `This workspace's ${path} ${fact}, so dohc can't keep its History private. ` +
-    "Rename or move it, and dohc makes a new one when you try again.";
+    "Rename or move it, then try again. Earlier History stays in what you moved.";
 }
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
