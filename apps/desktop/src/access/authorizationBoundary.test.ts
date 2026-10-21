@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync, statSync, realpathSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { expect, it } from "vitest";
 
@@ -28,13 +29,13 @@ function workspaceSource(specifier: string, file: string): string {
   const exported = JSON.parse(readFileSync(manifest, "utf8")).exports[subpath.length ? `./${subpath.join("/")}` : "."];
   const types = typeof exported === "object" ? exported?.types : undefined;
   let found: string;
-  if (typeof types === "string" && /\.tsx?$/.test(types)) found = resolve(packageRoot, types);
+  if (typeof types === "string" && /(?<!\.d)\.tsx?$/.test(types)) found = resolve(packageRoot, types);
   else if (packageName === "@dohc/app-backend-runtime" && typeof exported === "string" && runtimeBuildSources[exported]) {
     found = resolve(packageRoot, runtimeBuildSources[exported]);
   } else {
     try { found = require.resolve(specifier); } catch { throw new Error(`Unresolved import ${specifier} in ${file}`); }
   }
-  if (!found.endsWith(".ts") && !found.endsWith(".tsx")) throw new Error(`Non-TypeScript import ${specifier} in ${file} resolved to ${found}`);
+  if (!/(?<!\.d)\.tsx?$/.test(found)) throw new Error(`Non-TypeScript import ${specifier} in ${file} resolved to ${found}`);
   if (!existsSync(found)) throw new Error(`Unresolved import ${specifier} in ${file}`);
   return found;
 }
@@ -106,4 +107,26 @@ it("follows typed and build-only runtime package exports into their dependencies
     [runtime, 'import "@dohc/app-backend-runtime/persistent-child";'],
     [child, 'import "../../../apps/desktop/src/access/accessQuery";'],
   ]))).toEqual([blocked]);
+});
+
+it.each(["types", "runtime"])("rejects declaration files reached through a package's %s export", target => {
+  const fixture = mkdtempSync(resolve(tmpdir(), "dohc-authorization-declaration-"));
+  const entry = resolve(fixture, "authorization.ts");
+  const packageRoot = resolve(fixture, "node_modules/@dohc/sdk");
+  try {
+    mkdirSync(resolve(packageRoot, "dist"), { recursive: true });
+    writeFileSync(resolve(packageRoot, "package.json"), JSON.stringify({
+      name: "@dohc/sdk",
+      exports: { ".": target === "types"
+        ? { types: "./dist/index.d.ts", default: "./dist/index.js" }
+        : "./dist/index.d.ts" },
+    }));
+    writeFileSync(resolve(packageRoot, "dist/index.d.ts"), 'export * from "./authorization.js";');
+    writeFileSync(resolve(packageRoot, "dist/index.js"), 'export * from "./authorization.js";');
+    const resolved = resolve(packageRoot, target === "types" ? "dist/index.js" : "dist/index.d.ts");
+    expect(() => imports(entry, 'import { authorize } from "@dohc/sdk";'))
+      .toThrow(`Non-TypeScript import @dohc/sdk in ${entry} resolved to ${resolved}`);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
