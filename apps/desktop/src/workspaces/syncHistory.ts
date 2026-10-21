@@ -95,8 +95,6 @@ export function recordReceivedShare(rootPath: string): Promise<void> {
 async function mark(rootPath: string, name: Mark): Promise<void> {
   const path = join(await marksFolder(rootPath), name);
   await createOnce(path, `.dohc/sync-history/${name}`, "");
-  const stats = await lstat(path);
-  if (!stats.isFile()) throw new Error(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: `${DOHC_SYNC_HISTORY_GUARD.path}/${name}` }, stats));
 }
 
 // .dohc/sync-history, made when it is missing. A workspace folder that is
@@ -134,6 +132,7 @@ async function createOnce(path: string, relativePath: string, text: string): Pro
     await writeFile(path, text, { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    await fileExists(path, relativePath);
   }
 }
 
@@ -282,6 +281,7 @@ function scheduleComputerOf(read: Exclude<FileRead, { kind: "absent" }>): Schedu
 export async function runSchedulesOn(rootPath: string, here: Computer): Promise<boolean> {
   if ((await readHistory(rootPath)).record === null) return false;
   const path = join(await marksFolder(rootPath), "schedules.json");
+  // Refuse a non-file entry before replacing the schedules record.
   await fileExists(path, ".dohc/sync-history/schedules.json");
   await atomicWriteFile(path, computerText(here));
   return true;
