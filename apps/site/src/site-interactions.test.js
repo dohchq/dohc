@@ -80,8 +80,7 @@ describe('download architecture', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(card.href).toBe('https://github.com/dohchq/dohc/releases');
     card.dispatchEvent(new Event('pointerenter'));
-    if (preferred) await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-    else expect(fetch).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(card.href).toBe(href));
     expect(card.href).toBe(href);
     expect(card.classList.contains('is-preferred')).toBe(preferred);
@@ -119,6 +118,40 @@ it('keeps a usable releases link when fresh asset resolution fails', async () =>
   expect(document.querySelector('.download-card-action').textContent.trim()).toBe('Download');
 });
 
+it.each([
+  ['the repository is not public', () => new Response(null, { status: 404 })],
+  ['nothing is published', () => Response.json([])],
+])('says no build is published, without leaving the page, when %s', async (_case, answer) => {
+  const navigate = vi.fn();
+  vi.stubGlobal('location', { assign: navigate });
+  vi.mocked(fetch).mockImplementation(async () => answer());
+  await mount('#downloads');
+  const card = document.querySelector('[data-download-card="windows-x64"]');
+  card.click();
+  await vi.waitFor(() => expect(document.querySelector('[role="status"]')?.textContent).toBe('No Windows build is published yet.'));
+  expect(navigate).not.toHaveBeenCalled();
+  expect(card.hasAttribute('data-unavailable')).toBe(true);
+  expect(card.querySelector('.download-card-action').textContent.trim()).toBe('No build yet');
+  expect(document.querySelector('[data-download-asset="linux-appimage"]').textContent).toBe('No Linux AppImage yet');
+  expect(document.querySelector('[data-download-card="mac"] .download-card-action').textContent.trim()).toBe('No build yet');
+  card.click();
+  await vi.waitFor(() => expect(document.querySelectorAll('[role="status"]')).toHaveLength(1));
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it('sends an unrecognized device to the platform list, not to GitHub', async () => {
+  const navigate = vi.fn();
+  vi.stubGlobal('location', { assign: navigate });
+  vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone)', platform: 'iPhone', maxTouchPoints: 5 });
+  await mount('.hero');
+  const primary = document.querySelector('[data-download-primary]');
+  await vi.waitFor(() => expect(primary.getAttribute('href')).toBe('#downloads'));
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+  primary.dispatchEvent(click);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
 it('shows progress for a slow download lookup and navigates only once after repeated activation', async () => {
   const navigate = vi.fn();
   vi.stubGlobal('location', { assign: navigate });
@@ -149,15 +182,15 @@ it('shows progress for a slow download lookup and navigates only once after repe
   expect(document.querySelector('[role="status"]')).toBeNull();
 });
 
-it('opens unknown-architecture Mac releases immediately without an asset request', async () => {
+it('opens the releases page for a Mac of unknown architecture once a Mac build exists', async () => {
   const navigate = vi.fn();
   vi.stubGlobal('location', { assign: navigate });
   vi.stubGlobal('navigator', { userAgent: 'Macintosh; Intel Mac OS X', platform: 'MacIntel', maxTouchPoints: 0 });
   await mount('#downloads');
   const card = document.querySelector('[data-download-card="mac"]');
   card.click();
-  expect(navigate).toHaveBeenCalledWith('https://github.com/dohchq/dohc/releases');
-  expect(fetch).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('https://github.com/dohchq/dohc/releases'));
+  expect(fetch).toHaveBeenCalledOnce();
   expect(card.hasAttribute('aria-busy')).toBe(false);
 });
 
