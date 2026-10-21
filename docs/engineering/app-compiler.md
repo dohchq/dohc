@@ -158,5 +158,6 @@ On Linux, dohc builds apps on x64 only. Staging for Linux arm64 ships only esbui
   The owner cases run on Apple silicon Macs and Linux x64. Each macOS case fails without its mechanism.
 - `node --test scripts/stage-app-compiler.test.mjs` checks staging, the pins and a relocated packaged compile.
 - `cargo nextest run -p dohc-compiler-owner` checks path encoding and argument parsing, the libproc and Seatbelt calls on macOS, and the `/proc` reads and the Landlock and seccomp rules on Linux.
-- The verification queues run these tests on the shared Windows host and Mac. Their Linux job runs only clippy, so run the Linux cases in a Linux x64 checkout.
+- The verification queues run these tests on the shared Windows host and Mac. The Windows host's Linux job also runs the owner's cargo tests in WSL for every PR that selects Rust.
+  No queue runs the two Node test files on Linux, so run their Linux cases in a Linux x64 checkout.
 - The macOS release command's packaged smoke builds one app through the signed arm64 package's compiler.

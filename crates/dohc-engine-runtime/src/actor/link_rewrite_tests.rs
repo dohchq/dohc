@@ -173,6 +173,7 @@ impl Fixture {
         request: &str,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Value, RuntimeError> {
+        // A pass can still return FileLocked after its one-second checkpoint cap.
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut backoff = Duration::from_millis(100);
         let mut retries = 0;
@@ -188,6 +189,14 @@ impl Fixture {
                     self.leases.clone(),
                     self.serial.clone(),
                     faults.clone(),
+                    (
+                        {
+                            let leases = self.leases.clone();
+                            Arc::new(move |key| leases.is_held_by_session(key))
+                        },
+                        Arc::new(|_| {}),
+                    ),
+                    Arc::new(()),
                     CancellationToken::new(),
                 )
                 .await;
@@ -247,6 +256,7 @@ impl Fixture {
                 10,
                 [Arc::default(), self.serial.clone()],
                 Arc::new(()),
+                None,
                 CancellationToken::new(),
             )
             .await
@@ -323,6 +333,14 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
             f.leases.clone(),
             f.serial.clone(),
             Arc::new(NoFaults),
+            (
+                {
+                    let leases = f.leases.clone();
+                    Arc::new(move |key| leases.is_held_by_session(key))
+                },
+                Arc::new(|_| {}),
+            ),
+            Arc::new(()),
             CancellationToken::new(),
         )
         .await;
@@ -430,6 +448,8 @@ async fn a_passive_handle_cannot_originate_link_rewrites() {
             LeaseRegistry::new().scoped(&root),
             Arc::default(),
             Arc::new(NoFaults),
+            (Arc::new(|_| false), Arc::new(|_| {})),
+            Arc::new(()),
             CancellationToken::new(),
         )
         .await;
@@ -775,6 +795,14 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
+                    (
+                        {
+                            let leases = f.leases.clone();
+                            Arc::new(move |key| leases.is_held_by_session(key))
+                        },
+                        Arc::new(|_| {})
+                    ),
+                    Arc::new(()),
                     CancellationToken::new()
                 )
                 .await,
@@ -893,6 +921,7 @@ async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
                 10,
                 [Arc::default(), f.serial.clone()],
                 Arc::new(()),
+                None,
                 CancellationToken::new(),
             )
             .await,
@@ -1024,6 +1053,14 @@ async fn case_only_and_delete_only_operations_refuse() {
                     f.leases.clone(),
                     f.serial.clone(),
                     Arc::new(NoFaults),
+                    (
+                        {
+                            let leases = f.leases.clone();
+                            Arc::new(move |key| leases.is_held_by_session(key))
+                        },
+                        Arc::new(|_| {})
+                    ),
+                    Arc::new(()),
                     CancellationToken::new()
                 )
                 .await,
@@ -1397,6 +1434,7 @@ async fn unrelated_undo_and_file_creation_do_not_stop_the_pass() {
             10,
             [Arc::default(), f.serial.clone()],
             Arc::new(()),
+            None,
             CancellationToken::new(),
         );
         tokio::pin!(undo);
@@ -1564,6 +1602,7 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
             10,
             [Arc::default(), f.serial.clone()],
             Arc::new(()),
+            None,
             CancellationToken::new(),
         ),
     )
@@ -1670,3 +1709,6 @@ async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
     );
     f.close().await;
 }
+
+#[path = "link_rewrite_open_tests.rs"]
+mod open_documents;

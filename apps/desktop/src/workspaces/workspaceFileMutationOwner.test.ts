@@ -54,7 +54,10 @@ const CONTENT_HASH = "a".repeat(64);
 
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    roots.splice(0).map(async (root) => {
+      await withExclusiveWorkspaceOperation(root, async () => undefined);
+      await rm(root, { recursive: true, force: true });
+    }),
   );
 });
 

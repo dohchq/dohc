@@ -645,8 +645,8 @@ impl EngineService {
                 self.history_operation(&ctx, request.workspace, request.params)
                     .await?
             }
-            "history.undo" => self.history_undo(&ctx, request).await?,
-            "history.rewriteLinks" => self.history_rewrite_links(&ctx, request).await?,
+            "history.undo" => Box::pin(self.history_undo(&ctx, request)).await?,
+            "history.rewriteLinks" => Box::pin(self.history_rewrite_links(&ctx, request)).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?

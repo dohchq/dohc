@@ -242,25 +242,19 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         "final placement is paused; RPC never wrote the forward bytes"
     );
     probe.release_undo_placement();
-    // Rejoin the placement continuation through its serialization gate.
-    let replay = open
-        .actor
-        .preflight_history_undo(WS.into(), OP.into(), "undo".into(), None)
-        .await
-        .unwrap()
-        .unwrap();
-    let placed = open
-        .actor
-        .history_undo_place(
-            WS.into(),
-            replay,
-            root.to_path_buf(),
-            Arc::new(service.self_writes.scoped(&open.root)),
-            now_ms().unwrap(),
-            |_| {},
-        )
-        .await;
-    assert!(placed.materialized);
+    // A committed Undo can defer placement after a lock refusal.
+    let placed = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let result = rpc(&transport, &handle, "history.undo", "undo").await;
+            if result["materialized"] == true {
+                break result;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("committed Undo placement must finish");
+    assert_eq!(placed["materialized"], true);
     assert_eq!(
         std::fs::read_to_string(root.join("source-0000.md")).unwrap(),
         restored
@@ -277,3 +271,6 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     }
     service.workspace_close(Some(handle)).await.unwrap();
 }
+
+#[path = "link_rewrite_open_rpc_tests.rs"]
+mod open_documents;

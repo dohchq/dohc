@@ -145,6 +145,7 @@ impl ActorHandle {
                     progress: progress.as_deref(),
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -178,6 +179,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -219,6 +221,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -446,6 +449,9 @@ pub(super) struct MaterializationReplayScope<'a> {
     /// Preserve unseen stale relay writes only when this capture released a hold.
     /// Paths are keyed by `dohc_engine_files::floor::path_collision_key`.
     pub(super) released_hold_paths: Option<&'a std::collections::HashSet<String>>,
+    /// The caller planned every selected job just now against the active
+    /// heads, so its deletes already account for heads at other spellings.
+    pub(super) planned_against_active_heads: bool,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -686,10 +692,7 @@ pub(super) fn replay_pending_materializations(
     // Filter small replays in SQL; cache the full version only for larger batches.
     let cache_all_paths = jobs
         .iter()
-        .filter(|job| {
-            job.operation == MaterializationOperation::Delete
-                && job.job_id.starts_with("secret-mat_")
-        })
+        .filter(|job| job.operation == MaterializationOperation::Delete)
         .take(9)
         .count()
         > 8;
@@ -704,8 +707,14 @@ pub(super) fn replay_pending_materializations(
         // Replay changes disk and the job ledger, never active tips.
         let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut paths_loaded = false;
+        // A delete planned earlier must not remove a file that an active head
+        // at another spelling now reaches, as on a disk that ignores case or
+        // normalization. That head owns the file, so the delete completes
+        // without removing it, unless the head's own write is still pending.
         let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
-            if std::fs::canonicalize(root_dir.join(&job.target_path)).is_err() {
+            if scope.planned_against_active_heads
+                || std::fs::canonicalize(root_dir.join(&job.target_path)).is_err()
+            {
                 return Ok::<_, RuntimeError>(false);
             }
             let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
@@ -804,7 +813,7 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
-                    if ordinary_secret && retire_delete(store, &job)? {
+                    if retire_delete(store, &job)? {
                         summary.completed += 1;
                         continue;
                     }
@@ -990,6 +999,10 @@ pub(super) fn replay_pending_materializations(
                         continue;
                     }
                 }
+            }
+            if job.operation == MaterializationOperation::Delete && retire_delete(store, &job)? {
+                summary.completed += 1;
+                continue;
             }
             let outcome = if let Some(self_writes) = scope.self_writes {
                 let (materialized, reported) = materialize_pending_job(

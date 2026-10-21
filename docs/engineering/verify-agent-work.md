@@ -252,6 +252,7 @@ The dashboard refuses the lane switch there. Do not write `verification-lanes` o
 
 On the shared Windows host, a run that selects Rust also checks Rust in WSL. A change that breaks only the Linux build then fails before merge.
 A PR run runs the gate's clippy command there, which builds every target, tests included, without running them.
+It then runs the app compiler owner's tests, which check its Landlock and seccomp rules. Those compile only on Linux.
 A full run, such as the nightly, runs the whole Rust job there, tests included.
 A full Rust job on every PR would take as long as the Windows one, and the host runs one Linux job at a time for every lane.
 

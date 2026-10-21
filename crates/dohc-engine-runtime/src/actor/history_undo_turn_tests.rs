@@ -137,6 +137,7 @@ struct Probe {
     actor_totals: Option<dohc_engine_storage::capture_phase::Snapshot>,
     hook: Option<Hook>,
     notify: Option<Arc<tokio::sync::Notify>>,
+    checkpoint: Option<[Arc<tokio::sync::Notify>; 2]>,
 }
 fn probes() -> &'static Mutex<std::collections::HashMap<String, Probe>> {
     static PROBES: OnceLock<Mutex<std::collections::HashMap<String, Probe>>> = OnceLock::new();
@@ -387,6 +388,7 @@ async fn run(
             10,
             [Arc::default(), Arc::default()],
             Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await
@@ -502,6 +504,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
                 30,
                 [Arc::default(), Arc::default()],
                 Arc::new(()),
+                None,
                 crate::CancellationToken::new(),
             )
             .await,
@@ -651,6 +654,7 @@ async fn pending_undo_refuses_version_switch_and_changed_payload() {
             8,
             [Arc::default(), Arc::default()],
             Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await;
@@ -832,6 +836,7 @@ async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
                 10,
                 [Arc::default(), Arc::default()],
                 Arc::new(()),
+                None,
                 task_token,
             )
             .await
@@ -1352,6 +1357,7 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
             10,
             gates,
             Arc::new(()),
+            None,
             crate::CancellationToken::new(),
         )
         .await
@@ -1585,6 +1591,20 @@ pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::N
         .notify = Some(notify);
 }
 
+pub(in crate::actor) fn pause_inverse(
+    request: &str,
+) -> (std::sync::mpsc::Receiver<()>, Arc<Barrier>) {
+    let (send, receive) = std::sync::mpsc::channel();
+    let barrier = Arc::new(Barrier::new(2));
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .hook = Some((send, barrier.clone()));
+    (receive, barrier)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ydoc_update_retries_a_locked_writer() {
     let (root, supervisor, actor) = setup(1);
@@ -1644,4 +1664,27 @@ async fn ydoc_update_retries_a_locked_writer() {
     assert_eq!(timing.retries, 1);
     assert_eq!(update.outcome.seq, 1);
     close(supervisor).await;
+}
+
+pub(in crate::actor) fn pause_checkpoint(request: &str) -> [Arc<tokio::sync::Notify>; 2] {
+    let hook = [Arc::default(), Arc::default()];
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .checkpoint = Some(hook.clone());
+    hook
+}
+
+pub(in crate::actor) async fn checkpoint_wait(request: &str) {
+    let hook = probes()
+        .lock()
+        .unwrap()
+        .get_mut(request)
+        .and_then(|p| p.checkpoint.take());
+    if let Some([entered, release]) = hook {
+        entered.notify_one();
+        release.notified().await;
+    }
 }

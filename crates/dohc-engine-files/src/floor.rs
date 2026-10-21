@@ -282,6 +282,20 @@ mod tests {
     }
 
     #[test]
+    fn shared_collision_key_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            path: String,
+            key: String,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("pathCollisionFixtures.json")).unwrap();
+        for case in cases {
+            assert_eq!(path_collision_key(&case.path), case.key, "{}", case.path);
+        }
+    }
+
+    #[test]
     fn removes_every_default_ignorable() {
         for &(start, end) in &fold_data().ignorables {
             for code in start..=end {

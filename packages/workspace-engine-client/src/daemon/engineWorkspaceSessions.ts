@@ -1306,9 +1306,10 @@ export class EngineWorkspaceSessions {
         const engineDirectory = join(dohcDirectory, "engine");
         // The daemon binds the root to its database on first open; this only
         // makes sure the directories it writes into are real folders inside
-        // the workspace.
-        await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD);
-        await this.ensureRealDirectory(engineDirectory, realRoot, DOHC_ENGINE_GUARD);
+        // the workspace. The daemon creates its own folder, so on a Mac the
+        // folder takes none of the workspace folder's ACL entries.
+        await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD, true);
+        await this.ensureRealDirectory(engineDirectory, realRoot, DOHC_ENGINE_GUARD, false);
       })();
       this.preparations.set(rootPath, preparation);
       const release = () => {
@@ -1328,18 +1329,24 @@ export class EngineWorkspaceSessions {
   //
   // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
   // dangling symlink squat raises ENOENT. When something is at the path, the
-  // checks below name it; when nothing is, the mkdir itself failed.
+  // checks below name it; when nothing is, the mkdir itself failed. With
+  // `create` false, a missing directory passes.
   private async ensureRealDirectory(
     directory: string,
     realRoot: string,
     guard: DohcPathGuard,
+    create: boolean,
   ): Promise<void> {
-    try {
-      await mkdir(directory);
-    } catch (error) {
-      if (!(await lstat(directory).catch(() => null))) throw error;
+    let info = await lstat(directory).catch(() => null);
+    if (!info) {
+      if (!create) return;
+      try {
+        await mkdir(directory);
+      } catch (error) {
+        if (!(await lstat(directory).catch(() => null))) throw error;
+      }
+      info = await lstat(directory);
     }
-    const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) {
       throw new Error(notARealFolderRefusal(guard, info));
     }

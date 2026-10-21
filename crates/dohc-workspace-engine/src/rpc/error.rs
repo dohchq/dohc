@@ -123,7 +123,29 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
     (wire, line)
 }
 
+/// Whether an io error in `error`'s chain is
+/// [`dohc_macos_files::VolumeSharesNewFiles`].
+#[cfg(target_os = "macos")]
+fn shares_new_files(error: &RuntimeError) -> bool {
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = next {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(dohc_macos_files::volume_shares_new_files)
+        {
+            return true;
+        }
+        next = error.source();
+    }
+    false
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    // The volume keeps ACL entries on the engine's folder or store.
+    #[cfg(target_os = "macos")]
+    if shares_new_files(error) {
+        return WireError::new(ErrorCode::Internal, "volume-shares-new-files");
+    }
     if matches!(
         error,
         RuntimeError::ChatMentionAccessChanged
@@ -613,7 +635,13 @@ fn map_search_code(error: &SearchError) -> ErrorCode {
 }
 
 pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
-    WireError::new(ErrorCode::InvalidParams, error.to_string())
+    let code = match error {
+        // The code every other path sends this refusal with, which the
+        // desktop matches.
+        root_binding::RootBindingError::VolumeSharesNewFiles => ErrorCode::Internal,
+        _ => ErrorCode::InvalidParams,
+    };
+    WireError::new(code, error.to_string())
 }
 
 pub(super) fn initial_capture_updating() -> WireError {
@@ -866,6 +894,25 @@ mod tests {
         ));
         assert_eq!(write.code, dohc_engine_protocol::ErrorCode::Internal);
         assert_eq!(write.message, "volume-shares-new-files");
+        let root =
+            super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
+        assert_eq!(root.code, dohc_engine_protocol::ErrorCode::Internal);
+        assert_eq!(root.message, "volume-shares-new-files");
+        #[cfg(target_os = "macos")]
+        {
+            let refused = || std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+            let folder = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+                reason: "could not create engine.db parent directory",
+                source: Some(refused()),
+            });
+            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Storage(
+                dohc_engine_storage::StorageError::persist_public(refused()),
+            ));
+            for wire in [folder, store] {
+                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+                assert_eq!(wire.message, "volume-shares-new-files");
+            }
+        }
     }
 
     #[test]

@@ -991,6 +991,7 @@ test("path folding data and fixtures select Rust and their TypeScript drift chec
   for (const file of [
     "crates/dohc-engine-files/src/pathFoldData.json",
     "crates/dohc-engine-files/src/pathFoldFixtures.json",
+    "crates/dohc-engine-files/src/pathCollisionFixtures.json",
     "packages/workspace-contracts/src/pathFoldData.json",
   ]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
