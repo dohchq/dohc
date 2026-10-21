@@ -58,8 +58,10 @@ const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 // A record lists each untracked path a delete took, so a large folder makes a large record.
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
-const invalidRecovery = "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash.";
-export const missingDeleteRecoveryReason = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
+// Where deleted files can be when dohc does not know which.
+const restoreByHand = `Restore files from History, the system trash, or ${WORKSPACE_TRASH}.`;
+const invalidRecovery = `Cannot undo the delete. Its recovery record is invalid. ${restoreByHand}`;
+export const missingDeleteRecoveryReason = `Cannot undo the delete. Its recovery record is missing or expired. ${restoreByHand}`;
 
 // Only recovery metadata expires. Fallback trash contents keep their lifetime.
 const pruned = new Set<string>();
@@ -124,7 +126,7 @@ export async function readRecoveryRecordText(root: string, id: string, kind: "de
 }
 export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
   const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);
-  const invalidRecord = `Its recovery record is invalid.${action === "undo" ? " Restore files from History or the trash." : ""}`;
+  const invalidRecord = `Its recovery record is invalid.${action === "undo" ? ` ${restoreByHand}` : ""}`;
   const read = await readRecoveryRecordText(root, id, "delete");
   if (read.status === "missing") return undefined;
   if (read.status === "refused") throw refusal(read.reason);
@@ -191,7 +193,7 @@ export async function finishDeleteRecovery(workspace: LocalStateWorkspace, plan:
     return { operationId, undo: { available: true } };
   } catch {
     return { operationId, undo: { available: false, paths: record?.paths ?? [],
-      reason: "Delete finished. dohc could not save Undo information. Restore files from History or the trash." } };
+      reason: `Delete finished. dohc could not save Undo information. Restore files from History or ${trashed ? "the system trash" : WORKSPACE_TRASH}.` } };
   }
 }
 const validPath = (path: string, base: string) => {
@@ -294,8 +296,10 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
     remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
     requestId: `delete-undo:${record.operationId}`, author });
+  // Undo saves its progress in the trash, so it asks History only where it can.
   if (record.result) {
     if (record.result.tracked.state === "restoring") {
+      await workspaceTrashForWrite(workspace, "undo the delete");
       try {
         const current = await engineUndo();
         if (current.materialized) { record.result.tracked.state = "restored"; await saveRecoveryRecord(workspace, record); }
@@ -303,7 +307,6 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
     }
     return expose(record.result);
   }
-  // Undo saves its progress in the trash, so it starts only where it can.
   const trash = await workspaceTrashForWrite(workspace, "undo the delete");
   const resuming = record.engine !== undefined;
   if (!record.engine) {
@@ -313,7 +316,7 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
         const source = await sourcePath(trash, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it. Check the ${systemTrash}.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in ${WORKSPACE_TRASH}, and History has no copy of it. Check the ${systemTrash}.` };
       }
     }
     assertCurrent();

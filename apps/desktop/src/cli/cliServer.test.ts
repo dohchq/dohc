@@ -954,7 +954,7 @@ describe("CLI socket server", () => {
     const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
-    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." };
+    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." };
     expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
     const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
     expect(await undoOperation({ root: workspaceRoot, home: stateDir, request }, { operationId })).toEqual(refusal);

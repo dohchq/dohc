@@ -6,7 +6,7 @@ import { HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-
 import type { OperationRecovery } from "./workspaceDeleteRecovery";
 import { readRecoveryRecordText, saveRecoveryRecord, scheduleRecoveryPrune, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
-import { workspaceTrashForWrite } from "./workspaceTrash";
+import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 
 const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: z.string() });
 const FileRecord = Roots.extend({
@@ -69,7 +69,7 @@ export async function finishMoveRecovery(workspace: LocalStateWorkspace, plan: D
 }
 export function replacedMoveReason(record: FileMoveRecoveryRecord): string {
   const word = moveWord(record.from, record.to);
-  return `Cannot undo the ${word}. It replaced the old ${record.to}. ${moveBack(word)} Restore the old ${record.to} from History or the trash.`;
+  return `Cannot undo the ${word}. It replaced the old ${record.to}. ${moveBack(word)} Restore the old ${record.to} from History, the system trash, or ${WORKSPACE_TRASH}.`;
 }
 
 const info = (path: string) => lstat(path).catch(error => { if (absent(error)) return null; throw error; });
@@ -88,8 +88,10 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
   };
   assertCurrent();
   if (record.replaced) throw new Error(replacedMoveReason(record));
+  // Undo saves its progress in the trash, so it asks History only where it can.
   if (record.result) {
     if (record.result.tracked.state === "restoring") {
+      await workspaceTrashForWrite(workspace, `undo the ${word}`);
       try {
         if ((await engineUndo()).materialized) {
           record.result.tracked.state = "restored";
@@ -99,7 +101,6 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
     }
     return record.result;
   }
-  // Undo saves its progress in the trash, so it starts only where it can.
   await workspaceTrashForWrite(workspace, `undo the ${word}`);
   if (!record.engine) {
     const destination = await info(join(root, record.to));

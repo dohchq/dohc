@@ -208,7 +208,9 @@ describe("delete recovery failures", () => {
     faults.failRecord = true;
     try {
       const result = await f.remove(hand);
-      expect(result).toMatchObject({ trashed: false, undo: { available: false, reason: expect.stringContaining("Delete finished") } });
+      // The files stayed in the workspace trash, so the words name it.
+      expect(result).toMatchObject({ trashed: false, undo: { available: false,
+        reason: "Delete finished. dohc could not save Undo information. Restore files from History or .dohc/local/trash." } });
       if (!hand) expect(result).toMatchObject({ ok: true, trashPath: expect.stringContaining(".dohc/local/trash/") });
       expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
       expect(existsSync(join(f.root, "folder"))).toBe(false);
@@ -221,7 +223,8 @@ describe("delete recovery failures", () => {
     f.options.trashItem = async path => { await trash(path); faults.failRecord = true; };
     try {
       const result = await f.remove(hand);
-      expect(result).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringContaining("could not save Undo information") } });
+      expect(result).toMatchObject({ trashed: true, undo: { available: false,
+        reason: "Delete finished. dohc could not save Undo information. Restore files from History or the system trash." } });
       if (!hand) expect(result).toMatchObject({ ok: true });
       expect(faults.recordSaves - saves).toBe(hand ? 1 : 2);
       expect(faults.failRecord).toBe(false);
@@ -250,7 +253,7 @@ describe("delete recovery failures", () => {
       expect(existsSync(join(f.root, ".dohc/local/trash", record!.staged!))).toBe(false);
       expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
-        reason: `Cannot undo the delete. folder is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
+        reason: `Cannot undo the delete. folder is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { faults.failRecord = false; }
   });
@@ -646,7 +649,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("expires metadata without deleting fallback bytes", async () => {
@@ -657,7 +660,7 @@ describe("delete recovery placement and receipts", () => {
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await vi.waitFor(() => expect(faults.visited).toContain(join(trash, record)));
     await utimes(join(trash, record), new Date(0), new Date(0));
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
     await f.write("folder/tracked.txt", "new");
     await f.write("folder/rowless.txt", "new");
     await f.remove();

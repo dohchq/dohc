@@ -1,7 +1,7 @@
 import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles";
 import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -1017,7 +1017,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      await expect(f.removeByHand("tasks/hand.md")).rejects.toThrow("tasks/hand.md is in the trash.");
+      await expect(f.removeByHand("tasks/hand.md")).rejects.toThrow("tasks/hand.md is in the system trash.");
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
@@ -1191,6 +1191,26 @@ describe("before the workspace's open prepares .dohc/local", () => {
     await f.engine().stop();
   });
 
+  // iCloud Drive can leave a file with a size and no blocks on disk. An
+  // agent's delete stages in .dohc/local/trash, which iCloud Drive skips, so
+  // it moves nothing that might be only in iCloud. A sparse file stands in.
+  it.runIf(process.platform === "darwin")("refuses an agent's delete of a file or folder only in iCloud Drive, and moves nothing", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "notes/kept.md", "here");
+    for (const path of ["evicted.bin", "notes/evicted.bin"]) { await write(f.rootPath, path, ""); await truncate(join(f.rootPath, path), 4096); }
+    await f.start();
+    expect(await f.remove("evicted.bin")).toEqual({ ok: false, deleted: [], path: "evicted.bin",
+      reason: "dohc did not move evicted.bin to the workspace trash because it is only in iCloud Drive. Download it, then try again." });
+    expect(await f.remove("notes")).toEqual({ ok: false, deleted: [], path: "notes",
+      reason: "dohc did not move notes to the workspace trash because some of it is only in iCloud Drive. Download it, then try again." });
+    expect((await lstat(join(f.rootPath, "evicted.bin"))).size).toBe(4096);
+    expect((await lstat(join(f.rootPath, "notes/evicted.bin"))).size).toBe(4096);
+    expect(await readFile(join(f.rootPath, "notes/kept.md"), "utf8")).toBe("here");
+    expect(await f.workspaceTrash()).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    await f.engine().stop();
+  });
+
   it("lets a person's delete and a plain move finish without Undo, and say so", async () => {
     const f = await fixture();
     await write(f.rootPath, "a.txt", "a");
@@ -1200,7 +1220,7 @@ describe("before the workspace's open prepares .dohc/local", () => {
     readLocalStateFrom(null);
     // The system trash is the reverse path.
     expect(await f.removeByHand("a.txt")).toMatchObject({ trashed: true, undo: { available: false,
-      reason: "Delete finished. dohc could not save Undo information. Restore files from History or the trash." } });
+      reason: "Delete finished. dohc could not save Undo information. Restore files from History or the system trash." } });
     expect(await readFile(join(f.systemTrash, "a.txt"), "utf8")).toBe("a");
     // Without the system trash there is none, so nothing moves.
     f.trashItem.mockRejectedValueOnce(new Error("no system trash on this volume"));

@@ -13,6 +13,7 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -215,6 +216,22 @@ it("replays one compensation across person and agent doors, and refreshes restor
   expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } }); expect(f.compensationCount()).toBe(1);
   expect(f.history.undoHistoryOperation.mock.calls.every(([input]) => input.requestId.startsWith("move-undo:dohc-operation:"))).toBe(true);
 });
+// A retry of a saved Undo still restoring saves what History says, so it
+// waits for the open as a first Undo does.
+it("checks readiness before a retried move Undo asks History to finish restoring", async () => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.restoring(true); expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restoring" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  f.restoring(false);
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  expect(await f.undo()).toEqual({ ok: false,
+    reason: "dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toMatchObject({ result: { tracked: { state: "restored" } } });
+});
 it("resumes a rowless file after the engine receipt was saved before a crash", async () => {
   const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
   const actual = recovery.saveRecoveryRecord;
@@ -227,7 +244,7 @@ it("resumes a rowless file after the engine receipt was saved before a crash", a
 it("returns no Undo for an overwrite and refuses it with the replaced words", async () => {
   const f = await fixture(); await f.write("a.txt"); await f.write("b.txt");
   const result = await (await prepareMoveWorkspacePathAs(f.operation, { fromPath: "a.txt", toPath: "b.txt", overwrite: true }, agent, f.options))();
-  expect(result).toMatchObject({ ok: true, undo: { available: false, reason: "Cannot undo the rename. It replaced the old b.txt. Rename it back yourself. Restore the old b.txt from History or the trash." } });
+  expect(result).toMatchObject({ ok: true, undo: { available: false, reason: "Cannot undo the rename. It replaced the old b.txt. Rename it back yourself. Restore the old b.txt from History, the system trash, or .dohc/local/trash." } });
   expect(await f.undo()).toMatchObject({ ok: false, reason: expect.stringContaining("It replaced the old b.txt") });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });

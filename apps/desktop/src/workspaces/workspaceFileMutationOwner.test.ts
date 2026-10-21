@@ -1676,7 +1676,7 @@ it("admits operation Undo through the mutation owner and refuses missing recover
   expect(h.history.readHistoryPage).not.toHaveBeenCalled();
   expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself." });
   h.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null } as never);
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   expect(h.history.undoHistoryOperation).not.toHaveBeenCalled();
   h.workspace.readOnly = true;
   expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });

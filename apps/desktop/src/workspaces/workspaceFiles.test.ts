@@ -10,8 +10,10 @@ import {
   rm,
   readdir,
   readFile,
+  realpath,
   stat,
   symlink,
+  truncate,
   utimes,
   writeFile,
   type FileHandle,
@@ -769,6 +771,32 @@ describe("deletePath", () => {
     expect(existsSync(join(root, ".dohc", "local", "trash"))).toBe(false);
     // The OS trash needs nothing from `.dohc/local`.
     expect(await deletePath(workspace(), "junk.md", async () => undefined)).toEqual({ trashed: true });
+  });
+
+  // With Optimize Mac Storage, iCloud Drive leaves a file with a size and no
+  // blocks on disk. Moved into .dohc/local, which iCloud Drive skips, its
+  // bytes could be lost. A sparse file looks the same, so it stands in.
+  it.runIf(process.platform === "darwin")("moves nothing into the workspace trash that is only in iCloud Drive", async () => {
+    const sparse = async (path: string) => { await writeFile(join(root, path), ""); await truncate(join(root, path), 4096); };
+    await sparse("evicted.md");
+    await mkdir(join(root, "folder", "inner"), { recursive: true });
+    await writeFile(join(root, "folder", "kept.md"), "here");
+    await sparse("folder/inner/evicted.md");
+    await expect(deletePath(workspace(), "evicted.md", rejectingTrash)).rejects.toThrow(
+      "dohc did not move evicted.md to the workspace trash because it is only in iCloud Drive. Download it, then try again.",
+    );
+    await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
+      "dohc did not move folder to the workspace trash because some of it is only in iCloud Drive. Download it, then try again.",
+    );
+    expect((await stat(join(root, "evicted.md"))).size).toBe(4096);
+    expect(await readFile(join(root, "folder", "kept.md"), "utf8")).toBe("here");
+    expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+    // An empty file has no bytes to lose, and the system trash takes the rest.
+    await writeFile(join(root, "empty.md"), "");
+    expect(await deletePath(workspace(), "empty.md", rejectingTrash)).toEqual({ trashed: false });
+    const system: string[] = [];
+    expect(await deletePath(workspace(), "folder", async (path) => { system.push(path); })).toEqual({ trashed: true });
+    expect(system).toEqual([join(await realpath(root), "folder")]);
   });
 
   it("rejects traversal, reserved paths, the root, and symlinked-ancestor escapes", async () => {

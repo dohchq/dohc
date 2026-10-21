@@ -1536,6 +1536,23 @@ export async function deletePath(
   }
 }
 
+// With Optimize Mac Storage, iCloud Drive can keep a file's bytes only in
+// iCloud. Moved into .dohc/local, which iCloud Drive skips, such a file could
+// leave iCloud with nothing on disk behind it. Node does not expose the
+// dataless flag, so a regular file with a size and no blocks counts. A fully
+// sparse file does too; refusing one costs a retry. dohc never downloads one.
+// Only a Mac has the iCloud Drive mark on .dohc/local.
+async function onlyInICloud(path: string): Promise<"whole" | "part" | null> {
+  if (process.platform !== "darwin") return null;
+  const entry = await lstat(path);
+  if (entry.isFile()) return entry.size > 0 && entry.blocks === 0 ? "whole" : null;
+  if (!entry.isDirectory()) return null;
+  for (const name of await readdir(path)) {
+    if (await onlyInICloud(join(path, name))) return "part";
+  }
+  return null;
+}
+
 // The workspace's own recovery location. Moves an absolute path already proven
 // to be inside the workspace into <root>/.dohc/local/trash and answers where it
 // landed. Nothing here deletes: the recovery story is opening
@@ -1549,6 +1566,10 @@ export async function moveIntoWorkspaceTrash(
   // symlink into .dohc between the check and the rename is the accepted
   // residual (Node has no renameat dirfd).
   const trashDir = await workspaceTrashForWrite(workspace, `move ${basename(target)} to the workspace trash`);
+  const inICloud = await onlyInICloud(target);
+  if (inICloud) {
+    throw new Error(`dohc did not move ${basename(target)} to the workspace trash because ${inICloud === "whole" ? "it" : "some of it"} is only in iCloud Drive. Download it, then try again.`);
+  }
   // Collision-resistant name: back-to-back deletes (multi-select) share a
   // Date.now() tick, and POSIX rename silently clobbers an existing
   // destination — two same-basename deletes would destroy the first file's

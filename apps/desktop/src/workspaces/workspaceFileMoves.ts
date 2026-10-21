@@ -504,7 +504,7 @@ async function undoMove(workspace: PathChangeWorkspace, engine: AuthoredPathChan
     const now = where(file);
     if (now === "source" && renamed) await recordOrNote(engine!.rename(rebase(file), file), `History still shows ${file} at ${rebase(file)}.`);
     if (now === "target" && !renamed) await recordOrNote(engine!.rename(file, rebase(file)), `History still shows ${rebase(file)} at ${file}.`);
-    if (now === "trash" && await recordOrNote(engine!.delete(renamed ? rebase(file) : file), `History still shows ${file}; its file is in the workspace trash.`)) {
+    if (now === "trash" && await recordOrNote(engine!.delete(renamed ? rebase(file) : file), `History still shows ${file}; its file is in ${workspaceTrashPath(trashed!)}.`)) {
       sourceDeleted.push(file);
     }
   }
@@ -711,7 +711,7 @@ export async function deleteWorkspacePathByHand(
   };
   const outcome = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));
   if (outcome.refused !== undefined) {
-    const where = outcome.trashed ? "the trash" : `the workspace trash, ${WORKSPACE_TRASH}`;
+    const where = outcome.trashed ? "the system trash" : `the workspace trash, ${WORKSPACE_TRASH}`;
     throw new Error(`${path} is in ${where}. ${outcome.refused}`);
   }
   return { trashed: outcome.trashed, ...("recovery" in outcome ? outcome.recovery : {}) };

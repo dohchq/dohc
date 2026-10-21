@@ -149,7 +149,7 @@ it.each(["{", "null", "{}", "directory", "wrong id", "invalid staged"])("never e
     const record = JSON.parse(await readFile(sidecar, "utf8"));
     await writeFile(sidecar, JSON.stringify({ ...record, ...(body === "wrong id" ? { operationId: otherId } : { staged: "nested/staged" }) }));
   } else await writeFile(sidecar, body);
-  const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." };
+  const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash." };
   expect(await f.undo(id, true)).toEqual(refusal);
   expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery record is invalid." });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -180,7 +180,7 @@ it.each([SyntaxError, TypeError])("does not expose %s messages from History deco
 });
 it("reports missing recovery for a delete and unsupported for another operation", async () => {
   const f = await fixture();
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "rename", path: "folder/a.txt", beforePath: "folder/b.txt" }], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -269,7 +269,7 @@ it.each(["delete", "rename"])("uses the settled person refusal without checking 
   await symlink(outside, join(f.rootPath, "folder"), process.platform === "win32" ? "junction" : "dir");
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: kind, path: "folder/tracked.txt" }], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: kind === "delete"
-    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." : missingMove });
+    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." : missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
@@ -290,13 +290,13 @@ it.each([".", "..", "/root", "nested/name", "nested\\name"])("refuses a staged n
   const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const record = JSON.parse(await readFile(sidecar, "utf8"));
   await writeFile(sidecar, JSON.stringify({ ...record, staged }));
-  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." });
+  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash." });
 });
 
 it("stops a person missing-record lookup at the first delete page", async () => {
   const f = await fixture();
   f.history.readHistoryPage.mockResolvedValueOnce({ moments: [{ operation: "delete", path: "folder/tracked.txt" }], nextCursor: { workspaceId: "owner", operationId: otherId, objectId: null, versionId: "main" } } as never);
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
@@ -332,11 +332,11 @@ it("does not treat an unrelated single write as Duplicate", async () => {
 // that no one else can change. Anything else reads as an invalid record or a
 // folder to fix: Undo refuses with words and changes nothing.
 const untrustedRecords = [
-  ["writable by others", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
-  ["hard-linked", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
+  ["writable by others", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
+  ["hard-linked", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
   ["another user's", "Cannot undo the delete. This workspace's .dohc belongs to another user. Make it and everything in it yours again, then try again."],
   ["under a linked .dohc/local", "Cannot undo the delete. This workspace's .dohc/local is a link. Put what it links to in its place, then try again."],
-  ["under a linked trash", "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash."],
+  ["under a linked trash", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
 ] as const;
 it.skipIf(process.platform === "win32").each(untrustedRecords)("refuses a recovery record %s and changes nothing", async (kind, reason) => {
   const f = await fixture(), id = await f.remove();
@@ -356,7 +356,7 @@ it.skipIf(process.platform === "win32").each(untrustedRecords)("refuses a recove
   try {
     expect(await f.undo(id)).toEqual({ ok: false, reason });
     expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history))
-      .toEqual({ ok: false, reason: reason.replace("Cannot undo the delete.", "Cannot read this operation.").replace(" Restore files from History or the trash.", "") });
+      .toEqual({ ok: false, reason: reason.replace("Cannot undo the delete.", "Cannot read this operation.").replace(" Restore files from History, the system trash, or .dohc/local/trash.", "") });
   } finally { uid?.mockRestore(); }
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -372,7 +372,7 @@ it("reads delete and move records only from .dohc/local/trash, never an old .doh
   await rename(join(f.rootPath, ".dohc/local/trash"), join(f.rootPath, ".dohc/trash"));
   expect(await readDeleteRecovery(f.rootPath, id)).toBeUndefined();
   expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toBeUndefined();
-  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
 });
@@ -396,4 +396,22 @@ it("refuses Undo of a delete or rename before the workspace's open prepares .doh
   expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/assets"], remaining: [] });
   expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
   expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
+});
+
+// A saved Undo still restoring asks History again on each retry, and saves
+// what it learns, so the retry waits for the open as a first Undo does.
+it("checks readiness before a retried delete Undo asks History to finish restoring", async () => {
+  const f = await fixture(), id = await f.remove();
+  f.history.undoHistoryOperation.mockImplementationOnce(async input => ({ operationId: input.operationId, versionId: "main", momentCount: 1,
+    notRestored: [], compensationOperationId: otherId, deduped: false, materialized: false }));
+  expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restoring" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  expect(await f.undo(id)).toEqual({ ok: false,
+    reason: "dohc did not undo the delete because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restored" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
+  expect(await readDeleteRecovery(f.rootPath, id)).toMatchObject({ result: { tracked: { state: "restored" } } });
 });
