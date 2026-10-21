@@ -54,7 +54,10 @@ jobs:
     name: Preflight
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
-    timeout-minutes: 40
+    # On the Windows release PC, the steps before the desktop tests took 29
+    # minutes, and those tests had not finished 12 minutes later. On Linux
+    # the whole job takes about 16 minutes.
+    timeout-minutes: 90
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
       version: ${{ steps.release.outputs.version }}
@@ -260,7 +263,9 @@ jobs:
       - unused-version
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    # A Windows build compiles the release engine. Preparing the test engine
+    # from an empty target folder took 12 minutes on the Windows release PC.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       # Windows and WSL share the same PC for this selection.

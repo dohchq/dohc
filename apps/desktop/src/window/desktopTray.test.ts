@@ -29,6 +29,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   await configure(true);
   const service = createChatDispatchService({
     workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
+    assertMayStartAgent: async () => () => undefined,
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
     readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,

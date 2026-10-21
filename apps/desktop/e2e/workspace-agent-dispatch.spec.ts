@@ -11,6 +11,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
+  trustOpenWorkspace,
   seedWorkspaceManifest,
   type TempWorkspace,
 } from "./helpers/workspace";
@@ -26,6 +27,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     const env = await installFakeAgentTools(temp);
     desktop = await launchDesktopApp({ workspace: temp, env });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     // No runner is set up yet, so there is no agent channel: adding the
     // agent is the opt-in that creates it.
@@ -114,6 +116,7 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await seedRunnerSettings(temp, "report");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await openMyAgent(page);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
@@ -144,6 +147,7 @@ test("My agent dispatches a fresh successful run for each human message", async 
     const command = await seedRunnerSettings(temp, "report");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await openMyAgent(page);
 
@@ -194,6 +198,7 @@ test("an agent's question with choices is a poll; picking one answers it and the
     await seedRunnerSettings(temp, "ask");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await openMyAgent(page);
 
@@ -239,6 +244,7 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
     await seedRunnerSettings(temp, "silent-fail");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await openMyAgent(page);
 
@@ -289,6 +295,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
+    await trustOpenWorkspace(desktop);
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("agents")).click();
     await page.getByTestId("runner-self-test-button").click();
