@@ -1345,3 +1345,19 @@ it("holds no folder until its host gives one, then takes it once for every worke
   expect(startups).toBe(1);expect(asked).toBe(4);
   expect(await readdir(root)).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite",".dohc-worker-session.json"]));
 });
+
+it("holds its folder, and runs startup maintenance, before a first preview reserves anything",async()=>{
+  const f=await fixture(),root=join(f.directory,"later");let ready=false,balance=0;
+  const storage={authorize(){},account({bytes}:{bytes:number}){balance+=bytes;}};
+  const supervisor=await createDatasetSupervisor({journal:f.journal,maintenanceStorage:storage,
+    directory:async()=>{if(!ready)throw new Error("The host has not prepared this folder.");await mkdir(root,{recursive:true});return root;},
+    // What a host's exclusive startup does: reclaim every stage nothing retains.
+    startup(){f.journal.reclaimCheckpointStages({authorize:f.authorize,account:storage.account,retain:()=>false});}});
+  cleanups.push(()=>supervisor.close());
+  ready=true;
+  const candidate=await supervisor.prepareMigration({...migration(f),authorityKey:"owner"});
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(2);
+  await supervisor.discardMigration({scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize});
+  expect(balance).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+});

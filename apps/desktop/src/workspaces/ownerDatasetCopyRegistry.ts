@@ -11,7 +11,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 export const datasetCopyOwnerKey = (credentials: Pick<CloudCredentials, "serverUrl" | "userId">) =>
   hash([new URL(credentials.serverUrl).href.replace(/\/+$/, ""), credentials.userId]);
 type Copy = Awaited<ReturnType<typeof createOwnerDatasetCopy>>;
-type Entry = { lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
+type Entry = { rootPath: string; lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
 
 // A copy's database decides what the copy holds, so dohc opens only one that
 // is a file this user owns, that no other user can write, with one name. The
@@ -37,13 +37,39 @@ export function createOwnerDatasetCopyRegistry() {
     entry.closed = true; entry.stop.abort(); entry.detach();
     return entry.closing ??= entry.opening.then(copy => copy.close(), () => undefined);
   }
-  async function remove(entry: Entry) {
-    await close(entry);
-    if (!entry.directory) return;
-    const info = await lstat(entry.directory).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
+  async function removeFolder(directory: string) {
+    const info = await lstat(directory).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
     if (!info) return;
-    if (!info.isDirectory() || info.isSymbolicLink() || resolve(await realpath(entry.directory)) !== resolve(entry.directory)) throw Error("Collection copy storage changed. Its files were not removed.");
-    await rm(entry.directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+    if (!info.isDirectory() || info.isSymbolicLink() || resolve(await realpath(directory)) !== resolve(directory)) throw Error("Collection copy storage changed. Its files were not removed.");
+    await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  }
+  // Copies lived in `.dohc/dataset-copies` before `.dohc/local`, and that
+  // folder syncs and holds the account's Collection data. So an account
+  // change removes it too, as it removed those copies before. dohc never
+  // wrote a copy through a link, so anything but a real folder in the
+  // workspace is left alone. Remove this once no workspace has the folder.
+  async function removeOldCopies(rootPath: string) {
+    const root = await realpath(rootPath).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
+    if (root === null) return;
+    const dohc = join(resolve(root), ".dohc"), old = join(dohc, "dataset-copies");
+    for (const path of [dohc, old]) {
+      const info = await lstat(path).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
+      if (!info || !info.isDirectory() || info.isSymbolicLink()) return;
+    }
+    if (resolve(await realpath(old)) !== old) return;
+    await rm(old, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  }
+  // Every copy closes before any folder goes: a copy that opened on a retry
+  // uses the folder of the attempt that failed. A copy that did not close
+  // keeps its folder.
+  async function removeAll(prior: Entry[]) {
+    const closed = await Promise.allSettled(prior.map(close));
+    const open = new Set(prior.filter((_, index) => closed[index]!.status === "rejected").map(entry => entry.directory));
+    const folders = new Set(prior.flatMap(entry => entry.directory && !open.has(entry.directory) ? [entry.directory] : []));
+    await Promise.all([...folders].map(removeFolder));
+    await Promise.all([...new Set(prior.map(entry => entry.rootPath))].map(removeOldCopies));
+    const failure = closed.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
   }
   return {
     credentialsChanged(nextOwner: string | null): Promise<void> {
@@ -52,7 +78,7 @@ export function createOwnerDatasetCopyRegistry() {
       const prior = [...entries.values(), ...failed];
       for (const entry of prior) { entry.closed = true; entry.stop.abort(); entry.detach(); }
       entries.clear(); failed.clear();
-      barrier = barrier.then(async () => { await Promise.all(prior.map(remove)); });
+      barrier = barrier.then(() => removeAll(prior));
       return barrier;
     },
     async get(input: {
@@ -85,7 +111,7 @@ export function createOwnerDatasetCopyRegistry() {
           const scoped: Copy = { ...copy, data: (remote, source, signal) => copy.data(remote, source, AbortSignal.any([signal, next.stop.signal])) };
           return scoped;
         });
-        const next: Entry = { lifetime: input.lifetime, stop: new AbortController(), closed: false, opening,
+        const next: Entry = { rootPath: input.rootPath, lifetime: input.lifetime, stop: new AbortController(), closed: false, opening,
           detach: () => input.lifetime.removeEventListener("abort", abort) };
         entries.set(key, next);
         input.lifetime.addEventListener("abort", abort, { once: true });

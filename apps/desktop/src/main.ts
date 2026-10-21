@@ -4674,6 +4674,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
       pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+        engineOpened: async () => { await withEngineAdapter({ ...workspace, attachmentId: attachment.attachmentId }, async () => undefined); },
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -6483,7 +6484,7 @@ function registerIpcHandlers(): void {
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+          const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent();
             if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
             return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
@@ -6492,10 +6493,17 @@ function registerIpcHandlers(): void {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
               },
               runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath(), "persistent-child.mjs") },
-            }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
+            });
           });
-          // The server holds the Collection, so until the workspace's open
-          // prepares `.dohc/local` it works online without an offline copy.
+          // Right after launch the engine's open may still be preparing
+          // `.dohc/local`, so a copy waits for it once. If the folder still
+          // isn't ready, the server holds the Collection, so it works online
+          // without an offline copy.
+          const copy = await openCopy().catch(async (error: unknown) => {
+            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+            await withEngineAdapter(workspace, async () => undefined).catch(() => null);
+            return openCopy();
+          }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
           if (copy === null) return data;
           const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
             ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,

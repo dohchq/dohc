@@ -1,4 +1,4 @@
-import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -68,9 +68,40 @@ it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old 
   expect(dirname(directory)).toBe(join(f.input.rootPath,".dohc","local","dataset-copies"));
   for(const folder of [dirname(directory),directory])expect((await lstat(folder)).mode&0o777).toBe(0o700);
   expect(await readdir(old)).toEqual(["replica.sqlite"]);expect(await readFile(join(old,"replica.sqlite"),"utf8")).toBe("old");
-  // Signing out removes the copy at its new path and leaves the old one alone.
+  // Signing out removes the copy at its new path, and the old folder with the account's data.
   await f.registry.credentialsChanged(null);
-  expect(await readdir(dirname(directory))).toEqual([]);expect(await readdir(old)).toEqual(["replica.sqlite"]);
+  expect(await readdir(dirname(directory))).toEqual([]);
+  expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual(["local"]);
+});
+it("removes old offline copies in .dohc/dataset-copies when the account changes",async()=>{
+  const f=await fixture(),old=join(f.input.rootPath,".dohc","dataset-copies","0".repeat(64));
+  await mkdir(old,{recursive:true});await writeFile(join(old,"replica.sqlite"),"account data");await writeFile(join(old,"archived.json"),"{}");
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged("other");
+  expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual(["local"]);
+});
+it.skipIf(process.platform==="win32")("does not follow a link at .dohc/dataset-copies when the account changes",async()=>{
+  const f=await fixture(),outside=await mkdtemp(join(tmpdir(),"dohc-copy-registry-outside-"));
+  cleanups.push(()=>rm(outside,{recursive:true,force:true}));
+  await writeFile(join(outside,"keep.txt"),"not dohc's");
+  await symlink(outside,join(f.input.rootPath,".dohc","dataset-copies"),"dir");
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged(null);
+  expect(await readFile(join(outside,"keep.txt"),"utf8")).toBe("not dohc's");
+  expect((await lstat(join(f.input.rootPath,".dohc","dataset-copies"))).isSymbolicLink()).toBe(true);
+});
+it("closes a copy that opened on a retry before it removes the folder the failed attempt shared",async()=>{
+  const f=await fixture(),closing=deferred<void>();
+  mocks.open.mockImplementationOnce(async()=>{throw new Error("The Collection copy is damaged. Download it again.");});
+  await expect(f.registry.get(f.input)).rejects.toThrow("damaged");
+  const copy=await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[1]![0];
+  vi.mocked(copy.close).mockImplementationOnce(()=>closing.promise);
+  const removal=f.registry.credentialsChanged(null);
+  // Time for a removal that did not wait for the close to finish; the folder must still be there.
+  await new Promise<void>(resolve=>setTimeout(resolve,50));
+  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
+  closing.resolve();await removal;
+  expect(await readdir(dirname(directory))).toEqual([]);
 });
 it.each([["not opened",false,"the workspace has not finished opening. Try again when it opens."],
   ["not kept out of iCloud Drive",true,"it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(

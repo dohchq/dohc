@@ -27,7 +27,8 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
-import { existingLocalDatasetExports, localDatasetFolder } from "./localDatasetFolders";
+import { existingLocalDatasetExports, localDatasetFolder, type LocalDatasetFolder } from "./localDatasetFolders";
+import { LocalStateUnavailableError } from "./workspaceLocalState";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
@@ -57,6 +58,8 @@ export interface LocalDatasetHostOptions {
   workspaceRoot: string;
   /** The attachment whose engine open prepares `.dohc/local`, where workers and exports live. */
   attachmentId?: symbol;
+  /** Waits for that engine open to finish. A worker or export asked for before it waits, then asks once more. */
+  engineOpened?(): Promise<void>;
   /** The main process checks that this workspace session still belongs to the caller. */
   assertCurrent?(): void;
   runtime?: AppBackendRuntimeOptions;
@@ -234,12 +237,21 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const attempts = createDatasetAttempts({ db, transaction, account: (scope, bytes) => charge(scope.datasetId,bytes) });
     // Workers and exports are this computer's, in `.dohc/local`, which only
     // the engine's open prepares. Until it has, a Collection's history and
-    // rules still read from state.sqlite, and anything that needs a worker or
-    // a staged file refuses.
+    // rules still read from state.sqlite. Anything that needs a worker or a
+    // staged file waits for that open, and refuses if the folder still isn't ready.
     const localState = { workspaceId, rootPath: options.workspaceRoot, attachmentId: options.attachmentId };
+    async function folderOnceOpened(folder: LocalDatasetFolder): Promise<string> {
+      try { return await localDatasetFolder(localState, folder); }
+      catch (error) {
+        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened" || !options.engineOpened) throw error;
+        await options.engineOpened().catch(() => undefined);
+        return await localDatasetFolder(localState, folder);
+      }
+    }
     const resources: Resources | undefined = options.resources?.({ db, transaction });
     createRecoveryInstaller({ db, transaction, journal });
-    supervisor = await createDatasetSupervisor({ journal, directory: () => localDatasetFolder(localState, "workers"), runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
+    // While the host opens, it takes the worker folder only if it is ready, so reads never wait for the engine.
+    supervisor = await createDatasetSupervisor({ journal, directory: () => supervisor ? folderOnceOpened("workers") : localDatasetFolder(localState, "workers"), runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}},
       // Holding the worker folder makes this the only dohc staging work here.
@@ -256,7 +268,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     let apps: ReturnType<typeof createLocalDatasetApps>;
     let appStore: LocalAppStore;
     let localApps: ReturnType<typeof createLocalApps>;
-    const exportDirectory = () => localDatasetFolder(localState, "exports");
+    const exportDirectory = () => folderOnceOpened("exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
       wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
       recovery: {

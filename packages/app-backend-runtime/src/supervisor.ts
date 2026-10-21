@@ -630,6 +630,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
 
   async function prepareMigration(lane:Lane,input:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
+    // Its reservations come before its worker, so the folder, and the startup
+    // maintenance that reclaims stages nothing holds, must come before both.
+    await owned();
     for(const previous of candidates.values())if(previous.result.expected.workspaceId===input.scope.workspaceId&&previous.result.expected.datasetId===input.scope.datasetId)await dropCandidate(previous);
     if(candidates.size+preparingCandidates>=4)throw new Error("Too many Collection changes are waiting for review. Discard one. Then try again.");
     if([...candidates.values()].some(candidate=>candidate.result.expected.workspaceId===input.scope.workspaceId&&candidate.result.expected.datasetId===input.scope.datasetId))throw new Error("This Collection already has a change waiting for review. Discard it first.");

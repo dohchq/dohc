@@ -804,4 +804,22 @@ describe("this computer's Collection folders", () => {
     await opens.open(workspace);
     expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
   });
+
+  it("waits for the engine's open before a worker it was asked for, but not while the host opens", async () => {
+    const first = await open(), approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    let waits = 0;
+    const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture,
+      engineOpened: async () => { waits++; await opens.open(workspace); } });
+    hosts.push(host);
+    expect(host.list().datasets).toHaveLength(1);
+    expect(waits).toBe(0);
+    expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+    expect(waits).toBe(1);
+    await (await host.prepareExport(id(1))).dispose();
+    expect(waits).toBe(1);
+  });
 });
