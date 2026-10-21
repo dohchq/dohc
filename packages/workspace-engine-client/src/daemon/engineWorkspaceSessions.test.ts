@@ -142,7 +142,7 @@ it("gives nothing to wait on while the workspace rebuilds", async () => {
   await sessions.closeAll();
 });
 
-it("ends the wait for an open under way at the open deadline, even when its preparation never settles", async () => {
+it("ends the wait for an open under way when its preparation outlasts the open deadline", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("stalled", { localStateReady: true });
   const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
@@ -163,6 +163,34 @@ it("ends the wait for an open under way at the open deadline, even when its prep
     expect(over).toBe(true);
     expect(sessions.currentBinding(workspace)).toBeNull();
   } finally { vi.useRealTimers(); }
+});
+
+it("waits out an open whose daemon request starts late but finishes within its own deadline", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("cold", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  vi.useFakeTimers();
+  try {
+    // Preparation takes 40 of its 50 ms; the daemon then answers 45 ms after its request starts.
+    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
+      .mockImplementation(() => new Promise<void>((resolve) => setTimeout(() => {
+        client.holdOpen = new Promise<void>((answer) => setTimeout(answer, 45));
+        resolve();
+      }, 40)));
+    const opening = sessions.run(workspace, async () => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    await vi.advanceTimersByTimeAsync(84);
+    expect(over).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+    expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+    await opening;
+  } finally { vi.useRealTimers(); }
+  await sessions.closeAll();
 });
 
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {

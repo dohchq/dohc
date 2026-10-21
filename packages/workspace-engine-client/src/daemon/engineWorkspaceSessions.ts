@@ -101,6 +101,8 @@ interface SessionEntry {
     // Settles once this open's step is over: its binding is published, or it
     // failed or was superseded.
     settled: Promise<void>;
+    // Settles when its daemon request starts, after the workspace is prepared.
+    requested: Promise<void>;
   } | null;
   closing: Promise<void> | null;
   retiring: boolean;
@@ -474,20 +476,25 @@ export class EngineWorkspaceSessions {
   /**
    * The open of this workspace already under way, or null when none is, or
    * the session is closing or rebuilding. Settles when the open does, with its
-   * binding published, or once the open deadline passes, whichever is first:
-   * the open's preparation runs before the daemon deadline starts. Never
-   * opens, and never counts as a run, so a caller inside a run can wait on it:
-   * a close waits for runs.
+   * binding published. It also settles if the workspace's preparation outlasts
+   * the open deadline, or if the daemon request outlasts that deadline from
+   * when it started, so at most two deadlines in all. Never opens, and never
+   * counts as a run, so a caller inside a run can wait on it: a close waits
+   * for runs.
    */
   openInProgress(workspace: EngineWorkspace): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry?.opening || entry.closing || entry.retiring ||
       entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
-    const settled = entry.opening.settled;
+    const { settled, requested } = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
     return new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, this.workspaceOpenDeadlineMs);
-      timer.unref?.();
-      void settled.then(() => { clearTimeout(timer); resolve(); });
+      let done = false, timer: ReturnType<typeof setTimeout>;
+      const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+      const wait = () => { timer = setTimeout(finish, deadlineMs); timer.unref?.(); };
+      wait();
+      // The daemon request's own deadline starts with it, after preparation.
+      void requested.then(() => { if (done) return; clearTimeout(timer); wait(); });
+      void settled.then(finish);
     });
   }
 
@@ -1213,10 +1220,11 @@ export class EngineWorkspaceSessions {
       }
       if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
-      const promise = this.openWithClient(client, workspace);
-      let settle!: () => void;
+      let settle!: () => void, request!: () => void;
       const settled = new Promise<void>((resolve) => { settle = resolve; });
-      entry.opening = { client, promise, settled };
+      const requested = new Promise<void>((resolve) => { request = resolve; });
+      const promise = this.openWithClient(client, workspace, request);
+      entry.opening = { client, promise, settled, requested };
       let binding: EngineWorkspaceBinding;
       try {
         binding = await this.untilFirstOpenAbandoned(entry, promise);
@@ -1300,8 +1308,10 @@ export class EngineWorkspaceSessions {
   private async openWithClient(
     client: EngineDaemonClient,
     workspace: EngineWorkspace,
+    requested: () => void,
   ): Promise<EngineWorkspaceBinding> {
     await this.prepareWorkspace(workspace.rootPath);
+    requested();
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
     const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
