@@ -66,14 +66,12 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: site
-          path: |
-            apps/site/dist
-            apps/site/wrangler.jsonc
+          path: apps/site/dist
           if-no-files-found: error
           retention-days: 1
 
-  # The token reaches only this job, which runs wrangler on the built files
-  # and nothing from the workspace.
+  # The token reaches only this job. It runs wrangler with the commit's
+  # wrangler.jsonc on the built files, and nothing from the workspace.
   deploy:
     name: deploy site
     needs: build
@@ -81,13 +79,14 @@ jobs:
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 10
     steps:
-      # Only the pnpm and Node versions the repository pins.
+      # The pinned pnpm and Node versions, and the Worker's configuration.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
           sparse-checkout: |
             package.json
             .node-version
+            apps/site/wrangler.jsonc
           sparse-checkout-cone-mode: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
@@ -99,12 +98,12 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: site
-          path: site
+          path: apps/site/dist
 
-      # A fresh dlx cache for each run, so nothing an earlier job left on the
-      # runner reaches wrangler, and only versions published a day ago.
+      # A fresh dlx cache for each run, and only versions published a day ago.
+      # A shared runner can still reach this job; see the site README.
       - name: Deploy
-        working-directory: site
+        working-directory: apps/site
         run: >-
           pnpm dlx
           --config.cache-dir="$RUNNER_TEMP/pnpm-dlx"
