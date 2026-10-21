@@ -108,6 +108,23 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     let work = STORE_WORK.with(std::cell::Cell::get);
     assert_eq!(work.rows, 3, "keep phase SELECT and data_version rows");
     assert_eq!(work.checkpoint_rows, 4, "separate checkpoint bookkeeping");
+
+    let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&root).unwrap(), 1).unwrap();
+    enable_work_probe(&store);
+    store.read_with(|conn| conn.execute_batch(
+        "CREATE TABLE reservation_row_probe(body BLOB); INSERT INTO reservation_row_probe VALUES(zeroblob(32*1024*1024)); PRAGMA main.wal_checkpoint(PASSIVE);"
+    )).unwrap();
+    STORE_WORK.with(|cell| cell.set(StoreWork::default()));
+    trace_reserve_rows(true);
+    store.write_with(&NoFaults, |tx| tx.execute(
+        "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES('reservation-row-probe','[]',0,1,'history-link-rewrites')", []
+    ).map_err(StorageError::persist_public)).unwrap();
+    trace_reserve_rows(false);
+    let work = STORE_WORK.with(std::cell::Cell::get);
+    eprintln!("RESERVATION_ROW_PROBE {}", serde_json::to_string(&work).unwrap());
+    assert_eq!(work.rows, 0);
+    assert_eq!(work.checkpoint_rows, 9);
 }
 pub(in crate::actor) fn source() {
     STORE_WORK.with(|cell| {
