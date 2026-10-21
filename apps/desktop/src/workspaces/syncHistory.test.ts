@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
@@ -255,7 +255,8 @@ describe("a mark that a link stands in for", () => {
       expect(await readSyncHistory(root), "a stale never-synced record cannot undo it").toBe("synced");
       expect(await scheduleComputer(root, laptop), "so no schedules run here").toBeNull();
     }
-    await expect(readdir(join(root, "nowhere"))).rejects.toThrow();
+    expect((await lstat(join(root, ".dohc", "sync-history", name))).isSymbolicLink()).toBe(true);
+    await expect(lstat(join(root, "nowhere"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -286,11 +287,42 @@ describe("a schedules record that names no computer", () => {
     expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
   });
 
-  it("is unreadable when a link that leads nowhere is there, and never loops", async () => {
-    await writeFile(recordPath(), legacy);
+  it.each(["legacy", "named"])("is unreadable when a link that leads nowhere is there with a %s host, and never loops", async (host) => {
+    if (host === "legacy") await writeFile(recordPath(), legacy);
+    else await recordNeverSynced(root, laptop);
     await mkdir(join(root, ".dohc", "sync-history"));
-    await symlink(join(root, "nowhere.json"), join(root, ".dohc", "sync-history", "schedules.json"));
+    const target = join(root, "nowhere.json");
+    const path = join(root, ".dohc", "sync-history", "schedules.json");
+    await symlink(target, path);
+    const link = await readlink(path);
     expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
-    await expect(readdir(join(root, "nowhere.json"))).rejects.toThrow();
+    await expect(runSchedulesOn(root, desk)).rejects.toThrow("A link is at .dohc/sync-history/schedules.json");
+    expect(await readlink(path)).toBe(link);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never reads or replaces a link to an existing schedules record", async () => {
+    await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    const target = join(outside, "schedules.json");
+    const text = JSON.stringify({ version: 1, ...desk });
+    await writeFile(target, text);
+    const path = join(root, ".dohc", "sync-history", "schedules.json");
+    await symlink(target, path);
+    const link = await readlink(path);
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+    await expect(runSchedulesOn(root, laptop)).rejects.toThrow("A link is at .dohc/sync-history/schedules.json");
+    expect(await readlink(path)).toBe(link);
+    expect(await readFile(target, "utf8")).toBe(text);
+  });
+
+  it("never creates a history record through a dangling link", async () => {
+    const target = join(root, "nowhere.json");
+    await symlink(target, recordPath());
+    expect(await readSyncHistory(root)).toBe("unknown");
+    await expect(recordNeverSynced(root, laptop)).rejects.toThrow("A link is at .dohc/sync-history.json");
+    expect((await lstat(recordPath())).isSymbolicLink()).toBe(true);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
