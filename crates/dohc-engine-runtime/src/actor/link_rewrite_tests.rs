@@ -30,7 +30,6 @@ pub(super) struct Turn {
 }
 impl Turn {
     pub(super) fn start(ws: &str, phase: &'static str) -> Self {
-        undo_probe::trace_reserve_rows(phase == "reserve");
         if phase != "plan" {
             undo_probe::begin_turn(ws);
         }
@@ -43,7 +42,6 @@ impl Turn {
 }
 impl Drop for Turn {
     fn drop(&mut self) {
-        undo_probe::trace_reserve_rows(false);
         if self.phase != "plan" {
             undo_probe::record_phase(&self.ws, self.phase, None, self.start.elapsed(), true);
         }

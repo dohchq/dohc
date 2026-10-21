@@ -20,15 +20,11 @@ struct StoreWork {
     sources: usize,
 }
 thread_local! {
-    static TRACE_RESERVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static STORE_WORK: std::cell::Cell<StoreWork> = const { std::cell::Cell::new(StoreWork {
         reads: 0, writes: 0, rows: 0, checkpoint_rows: 0, inverses: 0, commits: 0, sources: 0,
     }) };
 }
 const INVERSE_PROBE: &str = "CREATE TEMP TRIGGER undo_proof_inverse AFTER INSERT ON moments WHEN NEW.metadata_origin='restore' BEGIN SELECT 'undo-proof-inverse'; END;";
-pub(in crate::actor) fn trace_reserve_rows(enabled: bool) {
-    TRACE_RESERVE.with(|cell| cell.set(enabled));
-}
 fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
     STORE_WORK.with(|cell| {
         let mut work = cell.get();
@@ -52,15 +48,16 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
                 }
             }
             rusqlite::trace::TraceEvent::Row(stmt) => {
-                if TRACE_RESERVE.with(std::cell::Cell::get) {
-                    eprintln!("RESERVE_ROW {}", stmt.sql());
-                }
-                let sql = stmt.sql().trim().to_ascii_uppercase();
+                let sql = stmt.sql();
+                let sql = sql.trim_start();
                 // Write admission and capture-phase WAL sampling are storage
                 // bookkeeping, not rows read by the phase's own statements.
-                if sql.starts_with("PRAGMA MAIN.WAL_CHECKPOINT(")
-                    || sql.starts_with("PRAGMA BUSY_TIMEOUT")
-                {
+                if ["PRAGMA main.wal_checkpoint(", "PRAGMA busy_timeout"]
+                    .iter()
+                    .any(|prefix| {
+                        sql.get(..prefix.len())
+                            .is_some_and(|sql| sql.eq_ignore_ascii_case(prefix))
+                    }) {
                     work.checkpoint_rows += 1;
                 } else {
                     work.rows += 1;
@@ -109,23 +106,6 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     assert_eq!(work.rows, 3, "keep phase SELECT and data_version rows");
     assert_eq!(work.checkpoint_rows, 4, "separate checkpoint bookkeeping");
 
-    let root = dohc_engine_testkit::ScratchDir::new().unwrap();
-    let mut store =
-        EngineStore::open_for_actor(&engine_db_path(&root).unwrap(), 1, None, None).unwrap();
-    enable_work_probe(&store);
-    store.read_with(|conn| conn.execute_batch(
-        "CREATE TABLE reservation_row_probe(body BLOB); INSERT INTO reservation_row_probe VALUES(zeroblob(32*1024*1024)); PRAGMA main.wal_checkpoint(PASSIVE);"
-    )).unwrap();
-    STORE_WORK.with(|cell| cell.set(StoreWork::default()));
-    trace_reserve_rows(true);
-    store.write_with(&NoFaults, |tx| tx.execute(
-        "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES('reservation-row-probe','[]',0,1,'history-link-rewrites')", []
-    ).map_err(StorageError::persist_public)).unwrap();
-    trace_reserve_rows(false);
-    let work = STORE_WORK.with(std::cell::Cell::get);
-    eprintln!("RESERVATION_ROW_PROBE {}", serde_json::to_string(&work).unwrap());
-    assert_eq!(work.rows, 0);
-    assert_eq!(work.checkpoint_rows, 9);
 }
 pub(in crate::actor) fn source() {
     STORE_WORK.with(|cell| {
@@ -1561,6 +1541,8 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
                     <= if forward {
                         (match p.phase.as_str() {
                             "admission" => 16,
+                            // Receipt reservation and reply return no phase rows.
+                            "reserve" | "reply" => 0,
                             _ => 8,
                         }) + 96 * w.sources
                     } else {
