@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { linuxDistro, linuxRustJob, neededMemoryGb, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
+import { linuxDistro, linuxRustJob, neededMemoryGb, networkFailed, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
 
 const head = "a".repeat(40);
 const base = "b".repeat(40);
@@ -56,14 +56,18 @@ test("a sync refuses a leftover scope, fetches only missing commits, prunes none
   assert.doesNotMatch(syncScript({ bundle: null, ref: "refs/verification-linux/r1", missing: [], head, base }), /git fetch/);
 });
 
-test("the run script runs clippy and the compiler owner's tests for a PR and installs then verifies for a full run, quotes the grant, and limits memory and time", () => {
+test("the run script downloads the crates first, then runs clippy and the compiler owner's tests for a PR and installs then verifies for a full run, quotes the grant, and limits memory and time", () => {
   const grant = { request: "it's", attempt: 1, head, base };
   const script = full => runScript({ unit: "dohc-verification-linux-r1", base, grant, output: "/mnt/c/o", jobs: 8, full });
   assert.match(script(true), /DOHC_VERIFICATION_GRANT='\{"request":"it'\\''s"/);
   assert.match(script(true), /CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 NEXTEST_TEST_THREADS=8 CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0/);
   assert.match(script(true), /--unit=dohc-verification-linux-r1 -p RuntimeMaxSec=7200 -p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue/);
-  assert.match(script(true), new RegExp(`\npnpm install --frozen-lockfile --config\\.confirm-modules-purge=false && node scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
-  assert.match(script(false), /\ncargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo nextest run --locked --package dohc-compiler-owner\n/);
+  for (const full of [true, false]) {
+    assert.match(script(full), /\nif cargo fetch --locked; then\n {2}fetched=true\n/);
+    assert.match(script(full), /,"fetched":%s\}/);
+  }
+  assert.match(script(true), new RegExp(`\n  pnpm install --frozen-lockfile --config\\.confirm-modules-purge=false && node scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
+  assert.match(script(false), /\n {2}cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo nextest run --locked --package dohc-compiler-owner\n/);
   assert.doesNotMatch(script(false), /verify\.mjs|pnpm/);
   // Tests bind Unix sockets under the temp folder, whose paths must stay under SUN_LEN, so the job keeps /tmp.
   assert.doesNotMatch(script(true), /TMPDIR/);
@@ -117,7 +121,7 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
 }
 
-const quiet = { memoryPeak: 1, oomKills: 0 };
+const quiet = { memoryPeak: 1, oomKills: 0, fetched: true };
 /** The scope's command as it ends: an optional receipt and log, the scope's record, then an optional failure. */
 const ends = ({ receipt, log, scope = quiet, exitCode } = {}) => output => {
   if (receipt) writeFileSync(join(output, "result.json"), JSON.stringify(receipt));
@@ -201,7 +205,7 @@ test("a PR's clippy and compiler owner's tests pass or fail the change by cargo'
   const pass = await job({ full: false, verify: ends() });
   assert.deepEqual(pass.receipt, { version: 1, mode: "pr", final: true, commit: head, baseCommit: base, verdict: "PASS", failed: [], flaky: [] });
   assert.deepEqual(pass.written, pass.receipt);
-  assert.match(pass.scripts.run, /\ncargo clippy .* && cargo nextest run /);
+  assert.match(pass.scripts.run, /\n {2}cargo clippy .* && cargo nextest run /);
   const fail = await job({ full: false, verify: ends({ exitCode: 101 }) });
   assert.equal(fail.error, undefined);
   assert.equal(fail.receipt.verdict, "FAIL");
@@ -233,6 +237,53 @@ test("a failed check comes back as the receipt; anything the scope or verifier d
     assert.equal(error.environment, "linux host");
     assert.match(calls.at(-1).args.at(-1), /wsl-stop\.sh$/);
     assert.deepEqual(slotsLeft, []);
+  }
+});
+
+// cargo's output in request 481, and for a lockfile that needs an update, with the pinned toolchain.
+const resolveHost = "[6] Could not resolve hostname (Could not resolve host: static.crates.io)";
+const offline = [3, 2, 1].map(left => `warning: spurious network error (${left} ${left === 1 ? "try" : "tries"} remaining): ${resolveHost}\n`).join("")
+  + `error: failed to download from \`https://static.crates.io/crates/rustls-webpki/0.103.16/download\`\n\nCaused by:\n  ${resolveHost}\n`;
+const stale = "    Updating crates.io index\nerror: cannot update the lock file /home/ice/.dohc-verification/linux/Cargo.lock because --locked was passed to prevent this\n"
+  + "help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.\n";
+
+test("cargo's last error decides a network failure: one cargo retries, not the warnings before it", () => {
+  assert.equal(networkFailed(offline), true);
+  const causedBy = cause => `error: failed to get \`itoa\` as a dependency of package \`probe v0.1.0\`\n\nCaused by:\n  ${cause}\n`;
+  const warned = cause => `warning: spurious network error (1 try remaining): ${cause}\n`;
+  // The last try can fail differently from the ones before it.
+  const timeout = "[28] Timeout was reached (Operation timed out after 30001 milliseconds with 0 bytes received)";
+  assert.equal(networkFailed(warned(resolveHost) + causedBy(timeout)), true);
+  const http = (code, ip = "18.65.3.12") => `failed to get successful HTTP response from \`https://index.crates.io/config.json\` (${ip}), got ${code}`;
+  assert.equal(networkFailed(`${warned(http(503))}body:\n\nerror: ${http(503, "18.65.3.71")}\nbody:\n`), true);
+  assert.equal(networkFailed(causedBy(http(429))), true);
+  assert.equal(networkFailed(causedBy("transfer too slow: failed to transfer more than 10 bytes in 30s (transferred 0 bytes)")), true);
+  // A retry that worked, then a missing crate or the lockfile.
+  assert.equal(networkFailed(warned(http(503)) + causedBy(http(404))), false);
+  assert.equal(networkFailed(warned(resolveHost) + stale), false);
+  assert.equal(networkFailed(stale), false);
+  assert.equal(networkFailed(causedBy("[60] SSL peer certificate or SSH remote key was not OK (SSL certificate problem: unable to get local issuer certificate)")), false);
+  assert.equal(networkFailed(""), false);
+});
+
+test("a fetch cargo gave up on after network errors is the host's failure in either mode; any other failed fetch fails the change", windowsOnly, async () => {
+  const unfetched = { ...quiet, fetched: false };
+  const recovered = `warning: spurious network error (3 tries remaining): ${resolveHost}\n${stale}`;
+  for (const full of [true, false]) {
+    const network = await job({ full, verify: ends({ log: offline, scope: unfetched, exitCode: 101 }) });
+    assert.equal(network.error.environment, "linux network");
+    assert.match(network.error.message, /could not download its crates/);
+    assert.equal(network.written, null);
+    assert.match(network.calls.at(-1).args.at(-1), /wsl-stop\.sh$/);
+    assert.deepEqual(network.slotsLeft, []);
+    for (const log of [stale, recovered]) {
+      const change = await job({ full, verify: ends({ log, scope: unfetched, exitCode: 101 }) });
+      assert.equal(change.error, undefined);
+      assert.equal(change.receipt.mode, full ? "gate" : "pr");
+      assert.equal(change.receipt.verdict, "FAIL");
+      assert.match(change.receipt.error, /^cargo fetch failed/);
+      assert.deepEqual(change.written, change.receipt);
+    }
   }
 });
 

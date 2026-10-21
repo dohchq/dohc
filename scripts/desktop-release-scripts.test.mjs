@@ -462,14 +462,14 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
     }
   }
 
-  // Desktop tests need the built runtime exports and the native engine.
+  // Desktop tests need the built runtime exports and the native engine. The
+  // PR gate's runner runs the package's unit and script tests with its retries.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);
-  const desktopTests = releaseStep(jobs.preflight, "test:unit --maxWorkers=4");
+  const desktopTests = releaseStep(jobs.preflight, "node scripts/verification/js-tests.mjs --prepared --package @dohc/desktop");
   for (const prepare of ["pnpm --filter @dohc/app-backend-runtime build", "pnpm qa:prepare -- --engine-only"]) {
     assert.ok(preflightOrder(releaseStep(jobs.preflight, prepare)) < preflightOrder(desktopTests), `desktop tests run after ${prepare}`);
   }
   assert.equal(desktopTests.env.DOHC_REQUIRE_ENGINE_E2E, "1");
-  releaseStep(jobs.preflight, "pnpm --filter @dohc/desktop test:scripts");
 
   // Draft and published versions must both be refused before packaging.
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));

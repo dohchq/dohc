@@ -74,7 +74,7 @@ const computerText = ({ installId, label }: Computer) => `${JSON.stringify({ ver
  */
 export async function recordNeverSynced(rootPath: string, computer: Computer): Promise<void> {
   const metadata = await resolveWorkspaceMetadataDir(rootPath);
-  await createOnce(join(metadata, "sync-history.json"), `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`);
+  await createOnce(join(metadata, "sync-history.json"), ".dohc/sync-history.json", `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`);
 }
 
 /** The workspace synced or opened as a share. Nothing undoes it. */
@@ -94,7 +94,7 @@ export function recordReceivedShare(rootPath: string): Promise<void> {
 // never make a workspace look never synced. Writing one refuses it.
 async function mark(rootPath: string, name: Mark): Promise<void> {
   const path = join(await marksFolder(rootPath), name);
-  await createOnce(path, "");
+  await createOnce(path, `.dohc/sync-history/${name}`, "");
   const stats = await lstat(path);
   if (!stats.isFile()) throw new Error(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: `${DOHC_SYNC_HISTORY_GUARD.path}/${name}` }, stats));
 }
@@ -115,7 +115,21 @@ async function marksFolder(rootPath: string): Promise<string> {
 }
 
 
-async function createOnce(path: string, text: string): Promise<void> {
+// Windows can follow a dangling file link even with "wx". Inspect the entry
+// itself before reading or writing; only an absent entry is a missing record.
+async function fileExists(path: string, relativePath: string): Promise<boolean> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isFile()) throw new Error(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: relativePath }, stats));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function createOnce(path: string, relativePath: string, text: string): Promise<void> {
+  if (await fileExists(path, relativePath)) return;
   try {
     await writeFile(path, text, { flag: "wx" });
   } catch (error) {
@@ -123,11 +137,12 @@ async function createOnce(path: string, text: string): Promise<void> {
   }
 }
 
-async function readAt(path: string): Promise<FileRead> {
+async function readAt(path: string, relativePath: string): Promise<FileRead> {
   try {
+    if (!await fileExists(path, relativePath)) return { kind: "absent" };
     return { kind: "text", text: await readFile(path, "utf8") };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "absent" } : { kind: "failed", error };
+    return { kind: "failed", error };
   }
 }
 
@@ -198,7 +213,7 @@ async function readHistory(rootPath: string): Promise<History> {
     return { history: "unknown", record: null, receivedShare: null, marks: null };
   }
   const [file, synced, shared] = await Promise.all([
-    readAt(join(metadata, "sync-history.json")), marked(marks, "synced"), marked(marks, "received-share"),
+    readAt(join(metadata, "sync-history.json"), ".dohc/sync-history.json"), marked(marks, "synced"), marked(marks, "received-share"),
   ]);
   const record = file.kind === "text" ? parseRecord(file.text) : null;
   const receivedShare = shared === false && record?.receivedShare === true ? await keep(rootPath, "received-share") : shared;
@@ -236,7 +251,7 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   const { record, marks } = await readHistory(rootPath);
   if (record === null || marks === null) return null;
   const path = join(marks, "schedules.json");
-  const read = await readAt(path);
+  const read = await readAt(path, ".dohc/sync-history/schedules.json");
   if (read.kind !== "absent") return scheduleComputerOf(read);
   if (record.host !== null) return { kind: "computer", computer: record.host };
   try {
@@ -245,7 +260,7 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { kind: "unreadable", error };
     // Another reader recorded one first: read it, once.
-    const again = await readAt(path);
+    const again = await readAt(path, ".dohc/sync-history/schedules.json");
     return again.kind === "absent" ? { kind: "unreadable", error } : scheduleComputerOf(again);
   }
 }
@@ -266,7 +281,9 @@ function scheduleComputerOf(read: Exclude<FileRead, { kind: "absent" }>): Schedu
  */
 export async function runSchedulesOn(rootPath: string, here: Computer): Promise<boolean> {
   if ((await readHistory(rootPath)).record === null) return false;
-  await atomicWriteFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here));
+  const path = join(await marksFolder(rootPath), "schedules.json");
+  await fileExists(path, ".dohc/sync-history/schedules.json");
+  await atomicWriteFile(path, computerText(here));
   return true;
 }
 

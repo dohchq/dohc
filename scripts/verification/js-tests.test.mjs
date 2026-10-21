@@ -305,7 +305,8 @@ function isolatedRetry(t) {
     import {calls} from './scripts/verification/process.mjs';
     const stop=cancellationScope('Fixture',{stopOnFailure:true});
     const repositoryTests=process.env.REPOSITORY_TESTS?{repositoryTests:process.env.REPOSITORY_TESTS}:{};
-    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'},...repositoryTests}).then(()=>null,error=>error);
+    const onlyPackage=process.env.ONLY_PACKAGE?{onlyPackage:process.env.ONLY_PACKAGE}:{};
+    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'},...repositoryTests,...onlyPackage}).then(()=>null,error=>error);
     await stop.dispose();
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
     const repository=calls.filter(call=>call.step==='repository'&&!call.alone);
@@ -315,11 +316,11 @@ function isolatedRetry(t) {
       repository:repository.length,repositoryArgs:repository.map(call=>call.args),recorded:report.steps.find(step=>step.name==='repository')?.args,
       alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
   `);
-  return (scenario, repositoryTests) => {
+  return (scenario, repositoryTests, onlyPackage) => {
     for (const file of ["ran", "sibling-started", "tail-alone-started", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
     writeFileSync(join(root, "package.json"), scenario === "node-bad-manifest" ? "{ not json" : manifest);
     const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "" } });
+      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "", ONLY_PACKAGE: onlyPackage ?? "" } });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
@@ -340,6 +341,25 @@ test("vitest files whose tests failed both tries pass alone, so the step passes 
     .map(file => `--filter @dohc/tail exec vitest run ${file} --maxWorkers=1 --no-file-parallelism --retry=0`), "each file runs once, whole, with one worker");
   assert.ok(passed.alone.every(call => call.require === "1"), "the files run alone with the step's env");
   assert.deepEqual(passed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "passed"), outcome("@dohc/tail", "src/c.test.ts", "passed")]);
+});
+
+test("one package's run retries and runs files alone as its step in a full run does, without the repository lane or other packages", t => {
+  const drive = isolatedRetry(t);
+  const full = drive("pass-alone");
+  const tail = drive("pass-alone", undefined, "@dohc/tail");
+  assert.equal(tail.error, null);
+  assert.equal(tail.verdict, "PASS");
+  assert.deepEqual(tail.steps, { "@dohc/tail": "PASS" });
+  assert.equal(tail.repository, 0, "the repository lane does not run");
+  assert.deepEqual(tail.flaky, full.flaky);
+  assert.deepEqual(tail.alone, full.alone);
+  const failed = drive("order", undefined, "@dohc/tail");
+  assert.equal(failed.verdict, "FAIL", "a test that fails alone still fails the package");
+  assert.deepEqual(failed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "failed")]);
+  const unknown = drive("pass-alone", undefined, "@dohc/missing");
+  assert.equal(unknown.verdict, "FAIL");
+  assert.equal(unknown.error, "No workspace package named @dohc/missing has tests.");
+  assert.deepEqual(unknown.alone, []);
 });
 
 test("a test that fails alone too fails its step, and only then stops the run", t => {
