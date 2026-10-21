@@ -155,8 +155,9 @@ fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, Applica
 /// seed captures, the journal rows native entries name, the document's head
 /// and lineage columns, and terminal blobs. The store's triggers move the
 /// generation with every change to those rows, whichever connection makes
-/// it, so a decision whose transaction reads the generation kept tails were
-/// validated at reuses them, and any other validates again, every entry as
+/// it, so a decision whose transaction reads the store identity and
+/// generation kept tails were validated at reuses them, and any other
+/// validates again, every entry as
 /// before. The path, restore generation and head stay each decision's own.
 ///
 /// Only committed state is kept. Validation runs in a read-only transaction
@@ -185,7 +186,9 @@ struct CachedStore {
     path: std::path::PathBuf,
 }
 
+/// Tails validated on the store `engine` names, at `generation`.
 struct Validated {
+    engine: String,
     generation: i64,
     tails: Option<Arc<ProtectedTails>>,
 }
@@ -254,7 +257,7 @@ impl ReleasedTails {
         if let Some(kept) = cache
             .validated
             .get(&key)
-            .filter(|kept| kept.generation == generation)
+            .filter(|kept| kept.generation == generation && kept.engine == engine)
         {
             return Ok(kept.tails.clone());
         }
@@ -296,6 +299,7 @@ impl TailsCache {
         self.validated.insert(
             key,
             Validated {
+                engine: engine.to_owned(),
                 generation,
                 tails: tails.clone(),
             },
@@ -390,6 +394,17 @@ pub fn protection(
     })
 }
 
+/// How many times this process read a released window's tails from a store,
+/// on any connection, for measurements that compare revisions.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn released_tail_scans() -> u64 {
+    SCANS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The tails of the released window that protect the document's lineage, or
 /// none while nothing does.
 fn protected_tails(
@@ -397,6 +412,8 @@ fn protected_tails(
     doc: &DocKey,
     lineage: &str,
 ) -> Result<Option<ProtectedTails>, ApplicationError> {
+    #[cfg(any(test, feature = "test-support"))]
+    SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(window) = readable(super::settled_base::released_window(conn, doc, lineage))? else {
         return Ok(Some(ProtectedTails::Invalid));
     };

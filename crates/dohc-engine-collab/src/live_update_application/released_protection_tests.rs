@@ -499,6 +499,27 @@ fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     assert_eq!(tails.validations(), 0);
 }
 
+/// Opus's 1a-2d finding 1: a kept verdict answers only the store it was
+/// validated on. Tails bound to one store, asked through another store's
+/// connection at the same document and generation, miss and decide on that
+/// connection's own state.
+#[test]
+fn kept_tails_answer_only_the_store_they_were_validated_on() {
+    let (mut first, _, _, _) = released_at_b();
+    let (mut second, _, c1, c2) = released_at_b();
+    applied_exactly(&mut second, &c1.receipt);
+    applied_exactly(&mut second, &c2.receipt);
+    same_generation(&mut first, &mut second);
+    assert_ne!(first.store.engine_uuid().unwrap(), second.store.engine_uuid().unwrap());
+    let tails = ReleasedTails::default();
+    kept_matches_fresh(&first, &tails).expect("protected");
+    let key = ProtectionKey { doc: &second.key, lineage_claim_id: &second.binding.lineage_claim_id, incoming: &incoming() };
+    let bound = tails.bound_to(&first.store);
+    let decided = second.store.read_with(|conn| protection(conn, &key, &bound)).unwrap();
+    assert!(matches!(decided, Protection::Unprotected), "the other store's own state");
+    assert_eq!(tails.validations(), 1, "nothing validated on the bound store answers it");
+}
+
 /// Opus's 1a-2b finding 3: a Carried delivery applied exactly is proven
 /// only while its accepted history agrees. History of it at another
 /// coordinate conflicts, and the tail protects as invalid.

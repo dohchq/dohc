@@ -48,6 +48,9 @@ pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use released_protection::released_tail_scans;
 pub use released_protection::{
     protection, IncomingCoordinate, ProtectedTail, ProtectedTails, Protection, ProtectionKey,
     ReleasedLineageBinding, ReleasedTails, RetainedContribution, RetainedCoverage, TailRelease,
