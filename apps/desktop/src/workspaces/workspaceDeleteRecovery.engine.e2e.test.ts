@@ -69,7 +69,7 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites three linking docum
     expect(moved).toMatchObject({undo: {available: true}});
     const operationId = moved.operationId!;
     const passStart = performance.now();
-    const read = () => readWorkspaceHistoryOperation(operation, {operationId}, history);
+    const read = () => readWorkspaceHistoryOperation(operation, {operationId}, history, {agent: true});
     await expect.poll(read, {timeout: REAL_DAEMON_DEADLINE_MS}).toMatchObject({ok: true, links: {state: "done", documents: 3, unchecked: [], uncheckedCount: 0}});
     await expect.poll(() => session.doc.getXmlFragment("body").toString(), {timeout: REAL_DAEMON_DEADLINE_MS}).toContain('target="new#part"');
     const passMs = performance.now() - passStart;
@@ -214,7 +214,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
       listMoments: async () => [], readMoment: async () => null,
       daemonReads: { queryChatMessagesGranular: async () => ({ results: [], saturated: false }), listUnreadFileThreads: async () => [], collectionsWaiting: async () => false },
       deletePath: async () => { throw new Error("No delete expected"); },
-      historyOperation: input => readWorkspaceHistoryOperation(operation, input, history),
+      historyOperation: input => readWorkspaceHistoryOperation(operation, input, history, {agent: true}),
       historyUndo: (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true }),
       movePath: async (input, origin, requestId) => (await prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin),
         { capture, requestId, linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal, history},

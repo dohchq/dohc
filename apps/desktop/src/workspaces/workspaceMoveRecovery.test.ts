@@ -1,3 +1,4 @@
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import * as assets from "./workspaceAssets";
 import { withSharedWorkspaceOperation, withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import * as filesystem from "node:fs/promises";
@@ -25,14 +26,14 @@ const agent = { kind: "agent", agentId: "move-agent", onBehalfOf: "local:move-ow
 const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
 const linkReceipt = {documents: 3, links: 3, unchecked: ["adopted.md"], uncheckedCount: 1, complete: true};
 const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
-const cancelledPassError = () => Object.assign(new Error("Cancelled"), {wireCode: "CANCELLED"});
+const cancelledPassError = () => new DaemonRefusalError({code: "CANCELLED", message: "Cancelled", retry: "no"}, undefined);
 async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewriteHistoryLinks"]>) {
   const rootPath = await createTestScratch("move-undo-");
   const write = async (path: string, text = path) => { await mkdir(dirname(join(rootPath, path)), { recursive: true }); await writeFile(join(rootPath, path), text); };
   const retirement = new AbortController();
   const operation = { workspace: { rootPath, workspaceId: "move-test", attachmentId: Symbol("move-test"), readOnly: false, shareView: undefined as unknown },
     signal: retirement.signal, state: {}, assertCurrent: vi.fn() };
-  const members: { path: string; beforePath: string; operation: "rename" | "write"; momentId: string }[] = [];
+  const members: { path: string; beforePath: string; operation: "rename" | "write"; momentId: string; objectId?: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
   const capture: PathChangeOptions["capture"] & Pick<import("./workspaceEngineCapture").WorkspaceEngineCapture, "beginFileRename"> = { beginFileRename: async () => async () => undefined, changePathsAs: async (_paths, authored, work) => {
@@ -61,7 +62,11 @@ async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewri
     }
     return { operationId: input.operationId, versionId: "main", notRestored: [], compensationOperationId: id, momentCount: members.length, deduped, materialized: !restoring };
   });
-  const history = { readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation, ...(rewriteHistoryLinks ? {rewriteHistoryLinks} : {}) };
+  const resolveFiles = vi.fn<OperationHistory["resolveFiles"]>(async input => ({versionId: "main", results: input.targets.map(target => {
+    const path = [...objects].find(([, id]) => "objectId" in target && id === target.objectId)?.[0];
+    return path ? {status: "found" as const, objectId: "objectId" in target ? target.objectId : "", path} : {status: "absent" as const};
+  })}));
+  const history = { resolveFiles, readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation, ...(rewriteHistoryLinks ? {rewriteHistoryLinks} : {}) };
   const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn(),
     ...(rewriteHistoryLinks ? {linkRewrites: {workspaceId: "move-test", signal: retirement.signal, history: {rewriteHistoryLinks}}} : {}) };
   const logError = vi.fn();
@@ -106,7 +111,7 @@ it.each([false, true])("returns a rename before its pass, reads updating without
   visible = true;
   expect(rewrite).not.toHaveBeenCalled();
   await started.promise;
-  const read = () => readWorkspaceHistoryOperation(f.operation, {operationId: result.operationId!}, f.history);
+  const read = () => readWorkspaceHistoryOperation(f.operation, {operationId: result.operationId!}, f.history, {agent: true});
   expect(await read()).toMatchObject({ok: true, links: {state: "updating"}});
   expect(rewrite.mock.calls[0]![0]).toMatchObject({requestId: `move-links:${result.operationId}`, author: byAgent ? agent : person});
   receipt.resolve(linkReceipt);
@@ -141,6 +146,7 @@ it.each([false, true])("cancels the in-flight pass and waits for its last commit
   f.members.push({path: "last.md", beforePath: "last.md", operation: "write", momentId: "last"});
   if (completed) ended.resolve(linkReceipt); else ended.reject(cancelledPassError());
   expect(await undoing).toMatchObject({ok: true, tracked: {momentCount: 2}});
+  expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: true})).not.toHaveProperty("links");
   expect(f.history.readHistoryPage).toHaveBeenCalled();
   expect(rewrite).toHaveBeenCalledTimes(1);
   await resumeWorkspaceLinkRewrites(f.rootPath, f.options.linkRewrites!);
@@ -182,7 +188,7 @@ it.each(["link changed after rename", "linking document removed"])("maps only th
     started.resolve(); return ended.promise;
   });
   const f = await fixture(rewrite); await f.write("old.md"); await f.move("old.md", "new.md"); await started.promise;
-  f.history.undoHistoryOperation.mockRejectedValue(new Error(`Undo refused: ${reason}: source.md`));
+  f.history.undoHistoryOperation.mockRejectedValue(new Error(`domain error: Undo refused: ${reason}: source.md`));
   const undoing = f.undo(); await cancelled.promise; ended.reject(cancelledPassError());
   expect(await undoing).toEqual({ok: false, reason: reason === "link changed after rename"
     ? "Cannot undo the rename. The link in source.md changed after the rename. Rename it back yourself."
@@ -220,11 +226,60 @@ it.each(["updating", "begun", "finished"])("resumes an open record only before U
   await resumeWorkspaceLinkRewrites(f.rootPath, {workspaceId: "move-test", signal: f.retirement.signal, history: {rewriteHistoryLinks: rewrite}});
   await nextTurn();
   expect(rewrite).toHaveBeenCalledTimes(phase === "updating" ? 1 : 0);
+  if (phase !== "updating") expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: true})).not.toHaveProperty("links");
   if (phase === "updating") {
     expect(rewrite.mock.calls[0]![0]).toMatchObject({requestId: "original-key", author: agent});
     await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "done"), {timeout: 30_000});
   }
   f.retirement.abort();
+});
+
+it.each([["OVERLOADED", "engine-store-busy"], ["OVERLOADED", "file-locked"], ["CONFLICT", "pass refused"]] as const)("continues Undo after the pass answers %s: %s", async (code, message) => {
+  const started = deferred<void>(), ended = deferred<never>(), cancelled = deferred<void>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
+    input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
+    started.resolve(); return ended.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md"); await f.moveAsAgent("old.md", "new.md"); await started.promise;
+  const undoing = f.undo(undefined, true); await cancelled.promise;
+  ended.reject(new DaemonRefusalError({code, message, retry: "no"}, undefined));
+  expect(await undoing).toMatchObject({ok: true});
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce(); f.retirement.abort();
+});
+
+it("floors a linking write's current path before an agent inverse", async () => {
+  const f = await fixture(); await f.write("old.md"); await f.moveAsAgent("old.md", "new.md");
+  await f.write(".dohc/files.toml", '[[rule]]\npath = "excluded/**"\ntracked = false\n');
+  f.members.push({path: "source.md", beforePath: "source.md", operation: "write", momentId: "link", objectId: "source-object"});
+  f.history.resolveFiles.mockResolvedValue({versionId: "main", results: [{status: "found", objectId: "source-object", path: "excluded/source.md"}]});
+  expect(await f.undo(undefined, true)).toMatchObject({ok: false, reason: expect.stringContaining("contains a link or a reserved, secret, or excluded path")});
+  expect(f.history.resolveFiles).toHaveBeenCalledWith(expect.objectContaining({targets: [{objectId: "source-object"}]}));
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  expect(await readFile(join(f.rootPath, "new.md"), "utf8")).toBe("old.md");
+});
+
+it.each(["link changed after rename", "linking document removed", "capture hold", "received share path"])("floors the real wire refusal path for %s and clears the Undo intent", async reason => {
+  const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
+  const record = await readMoveRecovery(f.rootPath, moved.operationId!);
+  if (!record || "noUndo" in record) throw new Error("missing record");
+  record.links = {state: "updating"}; record.linkRewrite = {requestId: "same-key", author: agent};
+  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
+  f.history.undoHistoryOperation.mockRejectedValue(new Error(`domain error: Undo refused: ${reason}: private/.env`));
+  const result = await f.undo(undefined, true);
+  expect(result).toMatchObject({ok: false, reason: expect.stringContaining("private contains a link or a reserved, secret, or excluded path")});
+  expect(JSON.stringify(result)).not.toContain("private/.env");
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).not.toHaveProperty("engine");
+});
+
+it.each([false, true])("filters unchecked paths using the reader's floor, agent=%s", async agent => {
+  const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
+  await f.write(".dohc/files.toml", '[[rule]]\npath = "excluded/**"\ntracked = false\n');
+  const record = await readMoveRecovery(f.rootPath, moved.operationId!);
+  if (!record || "noUndo" in record) throw new Error("missing record");
+  record.links = {state: "done", documents: 2, unchecked: ["visible.md", "excluded/source.md"], uncheckedCount: 2};
+  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
+  expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent})).toMatchObject({ok: true,
+    links: {state: "done", unchecked: agent ? ["visible.md"] : ["visible.md", "excluded/source.md"], uncheckedCount: 2}});
 });
 
 it.each(["folder", "case", "untracked", "replaced", "unsaved"])("does not dispatch a pass for a %s move", async kind => {
@@ -483,7 +538,7 @@ it("returns a committed person rename while its record saves, with read and Undo
   expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("a.txt");
   const shared = vi.spyOn(assets, "withSharedWorkspaceOperation"), exclusive = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
   const waiting = vi.spyOn(recovery, "waitForRecovery");
-  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history);
+  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history, {agent: true});
   const undoing = f.undo();
   expect(waiting).toHaveBeenCalledTimes(2); expect(shared).not.toHaveBeenCalled(); expect(exclusive).not.toHaveBeenCalled();
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -498,7 +553,7 @@ it("releases pending record waiters on retirement before they take the workspace
   vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new Error("retired"); });
   const moved = await f.move("a.txt", "b.txt"); await entered.promise;
   const shared = vi.spyOn(assets, "withSharedWorkspaceOperation"), exclusive = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
-  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history);
+  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history, {agent: true});
   const undoing = f.undo().catch(error => error.message);
   f.retirement.abort();
   expect(await reading).toEqual({ ok: false, reason: "This workspace was closed. Open it again." });

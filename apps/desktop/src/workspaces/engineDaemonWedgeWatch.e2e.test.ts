@@ -40,8 +40,8 @@ describe("engine.ping against a real daemon", () => {
       launch:async options => {
         const client = await createEngineClient(options);
         return {
-          sendRequest:async request => {
-            const pending = client.sendRequest(request);
+          sendRequest:async (request, signal, progress, cancelSignal) => {
+            const pending = client.sendRequest(request, signal, progress, cancelSignal);
             if (!stalled && request.method === "workspace.open") {
               stalled = true;
               // Freeze only this process after the pipe write. The lifecycle sends
@@ -53,7 +53,7 @@ describe("engine.ping against a real daemon", () => {
             if (request.method === "workspace.close") complete();
             return response;
           },
-          cancelRequest:id=>client.cancelRequest(id),onEvent:handler=>client.onEvent(handler),onBlob:handler=>client.onBlob(handler),
+          onEvent:handler=>client.onEvent(handler),onBlob:handler=>client.onBlob(handler),
           close:()=>client.close(),closeUnresponsive:()=>{refuse(new Error("Healthy engine killed after host stall."));client.closeUnresponsive();},
           inboundActivity:()=>client.inboundActivity(),waitForExit:()=>client.waitForExit(),
         };
@@ -84,17 +84,16 @@ describe("engine.ping against a real daemon", () => {
         launch: async (options): Promise<EngineDaemonClient> => {
           const client = await createEngineClient(options);
           return {
-            sendRequest: async (request) => {
+            sendRequest: async (request, signal, progress, cancelSignal) => {
               if (request.method !== "engine.ping") {
-                return await client.sendRequest(request);
+                return await client.sendRequest(request, signal, progress, cancelSignal);
               }
               const entry = { request, answered: false };
               probes.push(entry);
-              const response = await client.sendRequest(request);
+              const response = await client.sendRequest(request, signal, progress, cancelSignal);
               entry.answered = true;
               return response;
             },
-            cancelRequest: async (id) => await client.cancelRequest(id),
             onEvent: (handler) => client.onEvent(handler),
             onBlob: (handler) => client.onBlob(handler),
             close: () => client.close(),

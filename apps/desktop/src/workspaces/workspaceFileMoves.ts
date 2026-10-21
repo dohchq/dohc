@@ -15,7 +15,7 @@ import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, pre
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason, readMoveRecovery } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason } from "./workspaceMoveRecovery";
 import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
@@ -428,11 +428,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
       try {
         const saved = await finishMoveRecovery(rootPath, recovery, from, to, overwritten,
           options.linkRewrites ? {requestId: `move-links:${operationId}`, author} : undefined);
-        if (saved.undo.available && options.linkRewrites) {
-          const record = await readMoveRecovery(rootPath, operationId);
-          if (record && !("noUndo" in record)) scheduleLinkRewrite(rootPath, record, options.linkRewrites);
-        }
-        return { ...changed, done: { ...done, ...saved } };
+        if (saved.record && options.linkRewrites) scheduleLinkRewrite(rootPath, saved.record, options.linkRewrites);
+        return { ...changed, done: { ...done, ...saved.recovery } };
       } finally { release?.(); }
     };
     const changed = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));

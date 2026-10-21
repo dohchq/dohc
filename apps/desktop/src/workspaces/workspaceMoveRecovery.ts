@@ -29,7 +29,9 @@ export type FileMoveRecoveryRecord = z.infer<typeof FileRecord>;
 export type MoveRecoveryRecord = z.infer<typeof Record>;
 export const moveWord = (from: string, to: string) => dirname(from) === dirname(to) ? "rename" : "move";
 export const moveBack = (word: "move" | "rename") => word === "rename" ? "Rename it back yourself." : "Move it back yourself.";
-export const linkUndoRefusal = (error: unknown) => error instanceof Error ? /^Undo refused: ([^:]+): (.+)$/su.exec(error.message) : null;
+export const linkUndoRefusal = (error: unknown) => error instanceof Error ? /^domain error: Undo refused: ([^:]+): (.+)$/su.exec(error.message) : null;
+export const canRewriteMoveLinks = (record: FileMoveRecoveryRecord) => record.tracked && !record.replaced &&
+  record.from.toLowerCase() !== record.to.toLowerCase() && !!record.linkRewrite && !record.engine && !record.progress && !record.result;
 export const folderMoveReason = (from: string, to: string) => `Undo for a folder ${moveWord(from, to)} isn't available yet. ${moveBack(moveWord(from, to))}`;
 export const caseOnlyMoveReason = "Cannot undo the rename. It changed only the letter case. Rename it back yourself.";
 export const missingMoveRecoveryReason = (word: "move" | "rename") => `Cannot undo the ${word}. Its recovery record is missing or expired. ${moveBack(word)}`;
@@ -86,22 +88,22 @@ export async function finishFolderMoveRecovery(root: string, operationId: string
 }
 
 export async function finishMoveRecovery(root: string, plan: DeleteRecoveryPlan, from: string, to: string, replaced: boolean,
-  linkRewrite?: FileMoveRecoveryRecord["linkRewrite"]): Promise<OperationRecovery> {
+  linkRewrite?: FileMoveRecoveryRecord["linkRewrite"]): Promise<{ recovery: OperationRecovery; record?: FileMoveRecoveryRecord }> {
   const word = moveWord(from, to);
   try {
     if (!plan.record || plan.noUndo) throw new Error("Recovery collection failed");
     const record: FileMoveRecoveryRecord = { operationId: plan.operationId, from, to,
       entries: [...plan.record.paths, ...plan.record.emptyFolders], tracked: plan.record.tracked, ...(replaced ? { replaced } : {}),
-      ...(linkRewrite && plan.record.tracked && !replaced && from.toLowerCase() !== to.toLowerCase()
-        ? { links: { state: "updating" as const }, linkRewrite } : {}) };
+      ...(linkRewrite ? { linkRewrite } : {}) };
+    if (canRewriteMoveLinks(record)) record.links = {state: "updating"};
     await saveRecoveryRecord(root, record, "move");
     scheduleRecoveryPrune(root);
-    return { operationId: plan.operationId, undo: replaced
+    return { record, recovery: { operationId: plan.operationId, undo: replaced
       ? { available: false, paths: [], reason: replacedMoveReason(record) }
-      : { available: true } };
+      : { available: true } } };
   } catch {
-    return { operationId: plan.operationId, undo: { available: false, paths: [],
-      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information. ${moveBack(word)}` } };
+    return { recovery: { operationId: plan.operationId, undo: { available: false, paths: [],
+      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information. ${moveBack(word)}` } } };
   }
 }
 export function replacedMoveReason(record: FileMoveRecoveryRecord): string {

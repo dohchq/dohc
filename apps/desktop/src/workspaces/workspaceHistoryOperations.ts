@@ -1,4 +1,4 @@
-import { caseOnlyMoveReason, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
+import { caseOnlyMoveReason, linkUndoRefusal, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { placeBack } from "./workspaceFileMoves";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -16,7 +16,7 @@ import { waitForRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoD
 import { pauseLinkRewrite, scheduleLinkRewrite } from "./workspaceLinkRewrites";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; signal?: AbortSignal; assertCurrent(): void };
-export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation"> & Partial<Pick<VersionedLiveAdapter, "rewriteHistoryLinks">>;
+export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation" | "resolveFiles"> & Partial<Pick<VersionedLiveAdapter, "rewriteHistoryLinks">>;
 export function createOperationHistory(withAdapter: <T>(work: (adapter: OperationHistory) => Promise<T>) => Promise<T | null>): OperationHistory {
   const requireResult = <T>(result: T | null): T => {
     if (result === null) throw new Error("The workspace engine is not running.");
@@ -26,6 +26,7 @@ export function createOperationHistory(withAdapter: <T>(work: (adapter: Operatio
     readHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.readHistoryOperation(input))),
     readHistoryPage: async input => requireResult(await withAdapter(adapter => adapter.readHistoryPage(input))),
     undoHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.undoHistoryOperation(input))),
+    resolveFiles: async input => requireResult(await withAdapter(adapter => adapter.resolveFiles(input))),
     rewriteHistoryLinks: async input => requireResult(await withAdapter(adapter => {
       if (!adapter.rewriteHistoryLinks) throw new Error("The workspace engine cannot update links.");
       return adapter.rewriteHistoryLinks(input);
@@ -137,7 +138,7 @@ function decodeCursor(cursor: string, workspaceId: string, operationId: string):
 function operationId(id: string): void {
   if (!HistoryOperationId.safeParse(id).success) throw new Error("Use an operation id from history list: dohc-operation: followed by a UUID.");
 }
-export async function readWorkspaceHistoryOperation(operation: Operation, input: { operationId: string; cursor?: string }, history: OperationHistory): Promise<z.infer<typeof HistoryOperationReadResult>> {
+export async function readWorkspaceHistoryOperation(operation: Operation, input: { operationId: string; cursor?: string }, history: OperationHistory, options: {agent: boolean}): Promise<z.infer<typeof HistoryOperationReadResult>> {
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
@@ -148,16 +149,24 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
       writable(operation);
       const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
       const move = cursor ? undefined : await readMoveRecovery(rootPath, input.operationId);
-      const floor = await agentFloor(rootPath, !record?.result);
+      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : personFloor(rootPath);
       if (move) await moveRecoveryFloor(move, floor);
-      if (move && "links" in move && move.links?.state === "done") for (const path of move.links.unchecked) await floor(path);
+      let links = move && "links" in move && !move.engine && !move.progress && !move.result ? move.links : undefined;
+      if (links?.state === "done") {
+        const unchecked: string[] = [];
+        for (const path of links.unchecked) {
+          try { await floor(path); unchecked.push(path); }
+          catch { /* The count includes sources this caller cannot see. */ }
+        }
+        links = {...links, unchecked};
+      }
       if (record) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       const result = await history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
       for (const member of result.moments) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
       if (!record && !move && !result.moments.length && !input.cursor) throw new Error("This operation is not in History.");
       operation.assertCurrent();
       return { ok: true as const, operationId: input.operationId,
-        ...(move && "links" in move && move.links ? {links: move.links} : {}),
+        ...(links ? {links} : {}),
         members: result.moments.map(member => ({ momentId: member.momentId, operation: member.operation, path: member.path, ...(member.beforePath ? { beforePath: member.beforePath } : {}) })),
         ...(record ? { withoutHistory: record.paths } : move && !("noUndo" in move) ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
     });
@@ -195,13 +204,21 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
           deleted ||= member.operation === "delete";
           if (!floor && deleted) break;
         }
+        const writes = result.moments.filter(member => member.operation === "write");
+        if (floor && writes.length) {
+          const current = await options.history.resolveFiles({workspaceId, targets: writes.map(member => ({objectId: member.objectId})), signal: operation.signal});
+          for (const target of current.results) {
+            if (target.status === "invalid") throw new Error("Cannot undo this operation. dohc could not check its current paths.");
+            if (target.status === "found") await floor(target.path);
+          }
+        }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
         let result;
         try { result = await options.history.undoHistoryOperation(input); }
         catch (error) {
-          const path = error instanceof Error ? /^Undo refused: (?:link changed after rename|linking document removed): (.+)$/su.exec(error.message)?.[1] : undefined;
+          const path = linkUndoRefusal(error)?.[2];
           if (path && floor) try { await floor(path); }
           catch (denied) { throw new Error(denied instanceof Error ? denied.message : "Cannot undo this operation.", {cause: error}); }
           throw error;

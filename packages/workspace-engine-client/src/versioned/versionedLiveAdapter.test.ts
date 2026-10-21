@@ -32,13 +32,13 @@ import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
 
-it.each([false, true, "write-error"])("cancels a rewrite without dropping its answer or closing the shared client: %s", async outcome => {
+it.each([false, true])("forwards request cancellation without dropping its answer or closing the shared client: %s", async outcome => {
   let finish!: (response: Response) => void;
   let refuse!: (error: Error) => void;
   let request!: Request;
   const close = vi.fn();
-  const cancelRequest = vi.fn(async () => { if (outcome === "write-error") throw new Error("write failed"); });
-  const client = {close, cancelRequest, sendRequest: vi.fn((input: Request) => {
+  const client = {close, sendRequest: vi.fn((input: Request, _signal?: AbortSignal, _progress?: () => void, cancelSignal?: AbortSignal) => {
+    expect(cancelSignal).toBe(cancel.signal);
     request = input;
     return new Promise<Response>((resolve, reject) => {finish = resolve; refuse = reject;});
   })};
@@ -49,7 +49,7 @@ it.each([false, true, "write-error"])("cancels a rewrite without dropping its an
   void answer.then(() => {settled = true;}, () => {settled = true;});
   cancel.abort();
   await Promise.resolve();
-  expect(cancelRequest).toHaveBeenCalledWith(request.id);
+  expect(client.sendRequest.mock.calls[0]![3]?.aborted).toBe(true);
   expect(settled).toBe(false);
   expect(close).not.toHaveBeenCalled();
   expect(request).not.toHaveProperty("cancelSignal");

@@ -170,7 +170,6 @@ export class RelayTransportRouteGuard {
 
 class RelayConfiguredDaemonClient implements EngineDaemonClient {
   // Preserve the optional request and event capabilities used by workspace sessions.
-  readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
 
@@ -183,14 +182,13 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     private readonly routes: RelayTransportRouteGuard,
     private readonly hasNoOrdinarySync: (workspaceId: string) => boolean,
   ) {
-    if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
     if (client.onBlob) this.onBlob = client.onBlob.bind(client);
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
   }
 
-  async sendRequest(request: Request): Promise<Response> {
+  async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response> {
     if (request.method !== "workspace.open") {
-      return await this.client.sendRequest(request);
+      return await this.client.sendRequest(request, signal, onProgress, cancelSignal);
     }
     const params = resultRecord(request.params, "workspace.open params");
     const rootPath = stringField(params, "rootDir", "workspace.open params");
@@ -201,7 +199,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     );
     const relay = this.routes.relayForOpen(workspaceId, rootPath);
     if (relay) {
-      return await this.client.sendRequest({ ...request, params: { ...params, relay } });
+      return await this.client.sendRequest({ ...request, params: { ...params, relay } }, signal, onProgress, cancelSignal);
     }
     // A full owner open of a workspace with no ordinary sync makes what an
     // unfinished pull applied local truth. Capture-free and read-only opens
@@ -214,7 +212,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     return await this.client.sendRequest({
       ...request,
       params: abandonOrdinaryPull ? { ...params, abandonOrdinaryPull } : params,
-    });
+    }, signal, onProgress, cancelSignal);
   }
 
   close(): void {

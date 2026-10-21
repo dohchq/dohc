@@ -1,6 +1,6 @@
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { listMoveRecoveries, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
+import { canRewriteMoveLinks, listMoveRecoveries, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
 
 export type LinkRewriteContext = {
@@ -22,9 +22,7 @@ const stateFor = (root: string, id: string) => {
   if (!state) { state = { undo: 0 }; states.set(key, state); }
   return state;
 };
-const eligible = (record: FileMoveRecoveryRecord) => record.tracked && !record.replaced &&
-  record.from.toLowerCase() !== record.to.toLowerCase() && record.links?.state === "updating" &&
-  !!record.linkRewrite && !record.engine && !record.progress && !record.result;
+const eligible = (record: FileMoveRecoveryRecord) => canRewriteMoveLinks(record) && record.links?.state === "updating";
 
 // Register inside the move lock. The next event-loop turn is after the visible result.
 export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord, context: LinkRewriteContext): void {
@@ -73,7 +71,7 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
   pass?.cancel.abort();
   try { await pass?.answer; }
   catch (error) {
-    if (!error || typeof error !== "object" || !("wireCode" in error) || error.wireCode !== "CANCELLED") {
+    if (!(error instanceof DaemonRefusalError)) {
       state.undo--;
       retire(root, id, state);
       throw error;
