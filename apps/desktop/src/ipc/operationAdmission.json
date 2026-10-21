@@ -50,6 +50,7 @@
   "desktop:list-chat-reactions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:set-chat-reaction": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:chat-file-mentions-page": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:chat-links": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-messages": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:send-chat-message": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-personal-chat-feed": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

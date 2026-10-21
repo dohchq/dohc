@@ -33,10 +33,16 @@ pub enum RootBindingError {
     /// share can, so the store in it cannot be kept private.
     #[error("volume-shares-new-files")]
     VolumeSharesNewFiles,
+    /// `.dohc` or the engine's folder is a link, is not a folder, or is
+    /// another user's, so the store in it cannot be kept private.
+    #[cfg(target_os = "macos")]
+    #[error("{0}")]
+    NotPrivate(dohc_macos_files::NotPrivate),
 }
 
-/// A macOS privacy refusal at `path`, or a volume that shares new files,
-/// names itself; any other io failure is `otherwise`.
+/// A macOS privacy refusal at `path`, a volume that shares new files, or a
+/// folder dohc refuses to keep private names itself; any other io failure is
+/// `otherwise`.
 fn io_failure(
     path: &Path,
     otherwise: RootBindingError,
@@ -45,6 +51,10 @@ fn io_failure(
         #[cfg(target_os = "macos")]
         if dohc_macos_files::volume_shares_new_files(&error) {
             return RootBindingError::VolumeSharesNewFiles;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(refused) = dohc_macos_files::not_private(&error) {
+            return RootBindingError::NotPrivate(refused.clone());
         }
         if dohc_engine_files::privacy_denied(&error, path) {
             RootBindingError::PrivacyDenied
@@ -378,10 +388,10 @@ mod tests {
         let root = scratch.join("root");
         std::fs::create_dir(&root).expect("root");
         std::os::unix::fs::symlink(&elsewhere, root.join(".dohc")).expect("symlink");
-        assert!(matches!(
-            write_new_root_binding(&root),
-            Err(RootBindingError::Unwritable)
-        ));
+        assert_eq!(
+            not_private(write_new_root_binding(&root)),
+            (".dohc".into(), dohc_macos_files::NotPrivateReason::Link)
+        );
         let mode = std::fs::metadata(&engine)
             .expect("engine")
             .permissions()
@@ -427,11 +437,25 @@ mod tests {
         std::fs::create_dir_all(&target).expect("target");
         std::fs::create_dir_all(linked.join(".dohc")).expect("dohc");
         std::os::unix::fs::symlink(&target, linked.join(".dohc/engine")).expect("symlink");
-        assert!(matches!(
-            write_new_root_binding(linked.path()),
-            Err(RootBindingError::Unwritable)
-        ));
+        assert_eq!(
+            not_private(write_new_root_binding(linked.path())),
+            (
+                ".dohc/engine".into(),
+                dohc_macos_files::NotPrivateReason::Link
+            )
+        );
         assert!(!excluded_at(&target));
+    }
+
+    /// The path and reason a refused binding names.
+    #[cfg(target_os = "macos")]
+    fn not_private(
+        written: Result<String, RootBindingError>,
+    ) -> (std::path::PathBuf, dohc_macos_files::NotPrivateReason) {
+        match written {
+            Err(RootBindingError::NotPrivate(refused)) => (refused.path, refused.reason),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

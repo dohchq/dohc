@@ -123,28 +123,37 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
     (wire, line)
 }
 
-/// Whether an io error in `error`'s chain is
-/// [`dohc_macos_files::VolumeSharesNewFiles`].
+/// Each io error in `error`'s chain.
 #[cfg(target_os = "macos")]
-fn shares_new_files(error: &RuntimeError) -> bool {
-    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    while let Some(error) = next {
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(dohc_macos_files::volume_shares_new_files)
-        {
-            return true;
-        }
-        next = error.source();
-    }
-    false
+fn io_errors(error: &RuntimeError) -> impl Iterator<Item = &std::io::Error> {
+    let error: &(dyn std::error::Error + 'static) = error;
+    std::iter::successors(Some(error), |error| error.source())
+        .filter_map(|error| error.downcast_ref::<std::io::Error>())
+}
+
+/// What keeps the engine's folder or a store file from being private, and
+/// its path from the workspace's root, which the desktop shows. The path is
+/// `.dohc`, the engine's folder or a store file, never one of the person's.
+#[cfg(target_os = "macos")]
+fn engine_folder_not_private(refused: &dohc_macos_files::NotPrivate) -> WireError {
+    let (reason, path) = (refused.reason.code(), refused.path.display());
+    WireError::new(
+        ErrorCode::Internal,
+        format!("engine-folder-not-private: {reason} {path}"),
+    )
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
-    // The volume keeps ACL entries on the engine's folder or store.
+    // The volume keeps ACL entries on the engine's folder or store, or what is
+    // at one of their paths can't be kept private.
     #[cfg(target_os = "macos")]
-    if shares_new_files(error) {
-        return WireError::new(ErrorCode::Internal, "volume-shares-new-files");
+    for io in io_errors(error) {
+        if dohc_macos_files::volume_shares_new_files(io) {
+            return WireError::new(ErrorCode::Internal, "volume-shares-new-files");
+        }
+        if let Some(refused) = dohc_macos_files::not_private(io) {
+            return engine_folder_not_private(refused);
+        }
     }
     if matches!(
         error,
@@ -635,10 +644,14 @@ fn map_search_code(error: &SearchError) -> ErrorCode {
 }
 
 pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
-    let code = match error {
+    let code = match &error {
         // The code every other path sends this refusal with, which the
         // desktop matches.
         root_binding::RootBindingError::VolumeSharesNewFiles => ErrorCode::Internal,
+        #[cfg(target_os = "macos")]
+        root_binding::RootBindingError::NotPrivate(refused) => {
+            return engine_folder_not_private(refused);
+        }
         _ => ErrorCode::InvalidParams,
     };
     WireError::new(code, error.to_string())
@@ -911,6 +924,52 @@ mod tests {
             for wire in [folder, store] {
                 assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
                 assert_eq!(wire.message, "volume-shares-new-files");
+            }
+        }
+    }
+
+    /// The desktop names what keeps the engine's folder from being private,
+    /// and where, by this code, from the root binding and from the store.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_dohc_cant_keep_private_reaches_rpc_by_its_code() {
+        use dohc_macos_files::{NotPrivate, NotPrivateReason};
+        for (path, reason, message) in [
+            (
+                ".dohc",
+                NotPrivateReason::Link,
+                "engine-folder-not-private: link .dohc",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::NotFolder,
+                "engine-folder-not-private: not-folder .dohc/engine",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::OtherOwner,
+                "engine-folder-not-private: other-owner .dohc/engine",
+            ),
+            (
+                ".dohc/engine/engine.db-wal",
+                NotPrivateReason::NotFile,
+                "engine-folder-not-private: not-file .dohc/engine/engine.db-wal",
+            ),
+        ] {
+            let refused = NotPrivate {
+                path: path.into(),
+                reason,
+            };
+            let root = super::map_root_binding(crate::root_binding::RootBindingError::NotPrivate(
+                refused.clone(),
+            ));
+            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+                reason: "could not keep the engine store private",
+                source: Some(std::io::Error::other(refused)),
+            });
+            for wire in [root, store] {
+                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+                assert_eq!(wire.message, message);
             }
         }
     }

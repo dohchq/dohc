@@ -37,7 +37,7 @@ it("opens a share into a folder chosen through a link and refreshes it under the
   const homeDir = await createTestScratch("dohc-share-home-");
   const h = await harness({ rootPath: await createTestScratch("dohc-share-existing-"), canonicalizeRoot: canonicalWorkspaceRoot });
   h.roots.approveRoot(chosen);
-  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal" }));
+  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } }));
   // The real share files refuse a lease taken on another spelling of the root.
   h.reconcile.mockImplementation(async lease => {
     assertActiveWorkspaceOperationLease(canonicalWorkspaceRoot(real), lease);

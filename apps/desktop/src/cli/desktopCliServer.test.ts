@@ -118,6 +118,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
   });
   const dependencies: Dependencies = {
     chatFileMentions: vi.fn(async () => null),
+    chatLinks: vi.fn(async () => null),
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
@@ -772,7 +773,7 @@ describe("raw fileWrite socket requests", () => {
     const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
     await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
     const registered = await createWorkspaceFolder({
-      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal",
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
     });
     // The authority resolves roots the way main does.
     const f = fixture(registered.rootPath, (root) => realpathSync.native(root));

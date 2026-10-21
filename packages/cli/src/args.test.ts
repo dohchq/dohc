@@ -352,3 +352,11 @@ it("parses an optional chat mention subject and cursor without changing the chat
   expect(parseCliArguments(["chat","file-mentions","--subject",'{"path":"notes/a.md"}',"--cursor","sealed"],{})).toMatchObject({verb:"chatFileMentions",subject:{path:"notes/a.md"},cursor:"sealed"});
   expect(()=>parseCliArguments(["chat","file-mentions","--subject",'{"workspaceId":"other","objectId":"file"}'],{})).toThrow();
 });
+
+it("takes the usual group operand for Links and continues without a page-size option", () => {
+  expect(parseCliArguments(["chat", "links", "#general", "--cursor", "sealed"], {}))
+    .toMatchObject({ verb: "chatLinks", group: "#general", cursor: "sealed" });
+  for (const args of [[], ["general", "extra"], ["--channel-wire-id", "wire"], ["general", "--limit", "20"]]) {
+    expect(() => parseCliArguments(["chat", "links", ...args], {})).toThrow();
+  }
+});

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { createActorIssuer, deriveLocalActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import { chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
 
 // Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
@@ -300,4 +300,22 @@ it("resolves an in-flight chat and an unread History page against current settin
   expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBe("blue");
   choices = {};
   expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBeNull();
+});
+
+it.each(["human", "agent", "automation"] as const)("Links and Chat share %s keys and presentation across origins", async kind => {
+  const claim = kind === "agent" ? { kind, claimedName: "teammate-agent" } : { kind };
+  const input = { issuer, authorUserId: "sam", displayName: "teammate-agent", ...claim };
+  const key = serializeActorKey(deriveRelayChatActor(input).key);
+  for (const origin of ["renderer", "cli", "automation", "unknown"] as const) {
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, origin }).key)).toBe(key);
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null, origin }).key))
+      .toBe(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null }).key));
+  }
+  const cli = message({ author: { kind, displayName: input.displayName }, authorUserId: input.authorUserId, origin: "cli" });
+  const link = chatLinkMessageForPresentation({
+    authorKind: kind, authorDisplayName: input.displayName, authorUserId: input.authorUserId,
+  });
+  expect(chatActorForPresentation(link, issuer).key).toEqual(chatActorForPresentation(cli, issuer).key);
+  const present = request(true, "links-origin-" + kind).present;
+  expect(await present(link, "t")).toEqual(await present(cli, "t"));
 });

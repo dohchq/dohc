@@ -60,6 +60,7 @@ export type ShellErrorKind =
   | "record-history"
   | "record-history-run"
   | "reports"
+  | "schedule-host"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -550,6 +551,30 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // One row for where this workspace's schedules run, while that needs the
+  // person: a warning while another computer runs them, and an error, with
+  // Try again, while none does. A read that says the same keeps its toast's
+  // state; null clears the row.
+  const showScheduleHostNotice = useCallback((notice: {
+    message: string;
+    failed: boolean;
+    cause?: string;
+    retry: () => void;
+    takeOver: () => void;
+  } | null) => {
+    if (notice === null) {
+      clearKind("schedule-host");
+      return;
+    }
+    push({
+      message: notice.message,
+      ...(notice.failed ? {} : { tone: "warning" as const }),
+      ...(notice.cause ? { details: [["Cause", notice.cause]] } : {}),
+      retry: notice.failed ? notice.retry : null,
+      action: { label: "Take over now", run: notice.takeOver, ends: true },
+      kind: "schedule-host",
+    }, "repeat");
+  }, [clearKind, push]);
   const showWarningNotice = useCallback((message: string) => {
     push({message, retry: null, tone: "warning"});
   }, [push]);
@@ -731,6 +756,7 @@ export function useShellError(workspaceId: string) {
     showDirectWriteNotice,
     showSuccessNotice,
     showWarningNotice,
+    showScheduleHostNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,

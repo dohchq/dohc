@@ -150,6 +150,7 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
+  links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
@@ -172,6 +173,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_chat_links:{cli:"chatLinks"},
   dohc_chat_file_mentions: { cli: "chatFileMentions" },
   dohc_links_edges: { cli: "linksEdges" },
   dohc_links_in: { cli: "linksIn" },
@@ -448,7 +450,7 @@ function verbReturns(command: string, name: string): string {
   const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
     ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
     : command === "chat"
-    ? name === "file-mentions" ? "chatFileMentions" : name
+    ? name === "links" ? "chatLinks" : name === "file-mentions" ? "chatFileMentions" : name
     : command === "history"
       ? HISTORY_RESULTS[name]
       : command === "document"

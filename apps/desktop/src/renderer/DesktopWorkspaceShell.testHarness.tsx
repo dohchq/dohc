@@ -455,6 +455,8 @@ function makeBaseBridge(
     onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
+    onScheduleHostChanged: vi.fn(() => () => {}),
+    readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
     // This computer's agent is idle until a test pushes a run.
     readAgentRunState: vi.fn(
       async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({ workspaceId, revision: 0, active: false }),

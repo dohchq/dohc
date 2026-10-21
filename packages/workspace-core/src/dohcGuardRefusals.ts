@@ -46,6 +46,11 @@ export const DOHC_AGENT_RUNS_GUARD: DohcPathGuard = {
   lead: "dohc could not open this workspace's agent run history.",
 };
 
+export const DOHC_SYNC_HISTORY_GUARD: DohcPathGuard = {
+  path: ".dohc/sync-history",
+  lead: "dohc could not record this workspace's sync history.",
+};
+
 export const DOHC_ENGINE_GUARD: DohcPathGuard = {
   path: ".dohc/engine",
   lead: "dohc could not start the engine for this workspace.",
@@ -67,6 +72,16 @@ export function notARealFolderRefusal(
   const noun = squatterNoun(stats);
   const article = noun === "item" ? "An" : "A";
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a real folder. Remove or rename that ${noun}. Then retry.`;
+}
+
+// Something that is not a plain file sits at a path dohc writes as a file.
+export function notAFileRefusal(
+  guard: DohcPathGuard,
+  stats: SquattedPathStats,
+): string {
+  const noun = squatterNoun(stats);
+  const article = noun === "item" ? "An" : "A";
+  return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a file. Remove or rename that ${noun}. Then retry.`;
 }
 
 // The path is a real folder, but it leads out of the workspace. With the root
