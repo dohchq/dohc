@@ -567,7 +567,10 @@ AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
 asks once for an administrator password. If `dpkg` reports missing dependencies,
 `apt-get` adds them under the same password but never removes a package, then
 `dpkg` installs again (`patches/electron-updater@6.8.9.patch`). A cancelled
-prompt or any other failed install fails the update.
+prompt or any other failed install fails the update. Restart tries again.
+When the password prompt was not cancelled, the failure also shows the
+`sudo apt install` command for the downloaded `.deb`, with a copy control. That
+covers a desktop where no authentication agent can ask for the password.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
 Windows publisher checks depend on the packaged `app-update.yml` configuration.

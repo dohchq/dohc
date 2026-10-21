@@ -48,6 +48,8 @@ export type Notice = {
   copyText?: string;
   copyLabel?: string;
   filePaths?: readonly string[];
+  // A terminal command the body asks the person to run, shown with its copy.
+  command?: string;
   Icon: typeof Bell;
 };
 
@@ -487,6 +489,15 @@ export function LocalNoticeRow(props: {
         <p className={`m-0 mt-0.5 ${notice.filePaths !== undefined ? "" : "line-clamp-3 "}text-[11px] leading-snug text-muted`}>
           {notice.body}
         </p>
+        {notice.command ? (
+          <div className="mt-1 flex items-start gap-2">
+            <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
+              {notice.command}
+            </code>
+            <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
+              getText={() => notice.command ?? ""} />
+          </div>
+        ) : null}
         {notice.filePaths?.length ? (
           <div className="mt-1 flex items-start gap-2">
             <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
@@ -874,11 +885,10 @@ export function NoticeCenter(props: {
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);
+      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
-          result.state.status === "error"
-            ? result.state.message
-            : "Could not restart into the update.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
         );
       } else {
         setUpdateActionError(null);
@@ -1216,6 +1226,7 @@ export function NoticeCenter(props: {
         tone: "neutral",
         title: "Update ready",
         body: updateActionError ?? updateState.message,
+        ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
         ...(updateState.canInstall
           ? {
               actions: [{
@@ -1630,7 +1641,18 @@ export function NoticeCenter(props: {
               role="status"
               className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <span>{updateActionError ?? updateState?.message}</span>
+              <span className="min-w-0">
+                {updateActionError ?? updateState?.message}
+                {updateState?.installCommand ? (
+                  <code data-testid="update-toast-install-command" className="mt-1 block select-text break-all font-mono text-[11px] text-muted">
+                    {updateState.installCommand}
+                  </code>
+                ) : null}
+              </span>
+              {updateState?.installCommand ? (
+                <CopyButton iconOnly pinName label="Copy command" testId="update-toast-install-command-copy"
+                  getText={() => updateState.installCommand ?? ""} />
+              ) : null}
               {updateState?.canInstall ? (
                 <button
                   type="button"
