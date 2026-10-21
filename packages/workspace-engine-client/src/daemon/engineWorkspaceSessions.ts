@@ -121,7 +121,7 @@ export interface EngineWorkspaceRunOptions {
 }
 
 export interface EngineWorkspaceSessionsOptions {
-  onOpened?(workspace: EngineWorkspace, binding: EngineWorkspaceBinding): void;
+  onOpened?(workspace: EngineWorkspace): void;
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
   // Test injection for the retry-deadline clock; production uses
@@ -454,19 +454,31 @@ export class EngineWorkspaceSessions {
     }
   }
 
-  /** Uses an existing binding without opening or reconnecting a workspace. */
-  async runIfOpen<T>(
-    workspace: EngineWorkspace,
-    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
-  ): Promise<T | null> {
+  /**
+   * The workspace's binding while it is current: its open finished, and it is
+   * not closing, retiring or rebuilding, and is on the current client. A new
+   * open makes a new binding. Never opens or reconnects a workspace.
+   */
+  currentBinding(workspace: EngineWorkspace): EngineWorkspaceBinding | null {
     const key = this.sessionKey(workspace);
     const entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
       entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
       !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
+    return entry.binding;
+  }
+
+  /** Uses an existing binding without opening or reconnecting a workspace. */
+  async runIfOpen<T>(
+    workspace: EngineWorkspace,
+    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
+  ): Promise<T | null> {
+    const binding = this.currentBinding(workspace);
+    const entry = this.entries.get(this.sessionKey(workspace));
+    if (!binding || !entry) return null;
     entry.activeRuns += 1;
     try {
-      return await operation(entry.binding);
+      return await operation(binding);
     } finally {
       this.release(entry);
     }
@@ -1226,7 +1238,7 @@ export class EngineWorkspaceSessions {
       entry.binding = binding;
       entry.opened = true;
       try {
-        this.onOpened?.(workspace, binding);
+        this.onOpened?.(workspace);
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }

@@ -1,17 +1,16 @@
-import { mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { GetWorkspaceUiStateResult, WorkspaceUiState } from "../../ipc/bridgeContract";
 import { readUiStateFile, writeUiStateFile } from "../../workspaces/workspaceUiState";
 import { createTestScratch } from "../../workspaces/testTemp";
-import { recordLocalStateOpen } from "../../workspaces/workspaceLocalState";
+import { fakeLocalStateOpens } from "../../testing/preparedLocalState";
 import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, parseTab, parseUiState, serializeUiState } from "./workbenchState";
 
-// A workspace whose engine open prepared .dohc/local, as the engine does.
+const engine = fakeLocalStateOpens();
+// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace(prefix: string) {
   const workspace = { workspaceId: prefix, rootPath: await createTestScratch(prefix) };
-  await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
-  recordLocalStateOpen(workspace, true);
+  await engine.open(workspace);
   return workspace;
 }
 

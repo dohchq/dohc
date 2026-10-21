@@ -6,7 +6,8 @@ import {
   readUiStateFile,
   writeUiStateFile,
 } from "./workspaceUiState";
-import { LocalStateUnavailableError, recordLocalStateOpen } from "./workspaceLocalState";
+import { LocalStateUnavailableError } from "./workspaceLocalState";
+import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import type { WorkspaceUiState } from "../ipc/bridgeContract";
 
 import { createTestScratch } from "./testTemp";
@@ -43,13 +44,13 @@ const STATE: WorkspaceUiState = {
 };
 
 
+const engine = fakeLocalStateOpens();
 let workspaces = 0;
-// A workspace whose engine open prepared .dohc/local, as the engine does.
+// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace() {
   workspaces += 1;
   const workspace = { workspaceId: `ui-state-${workspaces}`, rootPath: await createTestScratch("dohc-ui-state-") };
-  await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
-  recordLocalStateOpen(workspace, true);
+  await engine.open(workspace);
   return workspace;
 }
 
@@ -82,10 +83,16 @@ describe("ui-state file store", () => {
     expect(await lstat(join(workspace.rootPath, ".dohc")).catch(() => null)).toBeNull();
 
     // An open that could not keep the folder out of iCloud Drive leaves it empty.
-    await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
-    recordLocalStateOpen(workspace, false);
+    await engine.open(workspace, false);
     await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(LocalStateUnavailableError);
     expect(await readdir(join(workspace.rootPath, ".dohc", "local"))).toEqual([]);
+
+    // A write after the workspace's engine open closed changes nothing.
+    await engine.open(workspace);
+    await writeUiStateFile(workspace, STATE);
+    engine.close(workspace);
+    await expect(writeUiStateFile(workspace, { ...STATE, sidebarWidth: 300 })).rejects.toBeInstanceOf(LocalStateUnavailableError);
+    expect(await readUiStateFile(workspace.rootPath)).toEqual(STATE);
   });
 
   it("serializes a burst of writes and leaves the latest complete state", async () => {

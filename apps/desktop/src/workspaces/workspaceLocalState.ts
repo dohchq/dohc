@@ -4,13 +4,20 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // `.dohc/local` holds what belongs to this computer rather than the
 // workspace, such as its layout. Only the engine creates it: each open that
-// writes makes it private and, on a Mac, keeps it out of iCloud Drive before
-// anything is written in it. A writer that created the folder itself would
-// leave it syncing, so writers get it only from localStateDir.
+// writes makes it private and, on a Mac, marks it so that file-provider
+// services such as iCloud Drive skip it, before anything is written in it.
+// A writer that created the folder itself would leave it unmarked, so
+// writers get it only from localStateDir.
 
 export interface LocalStateWorkspace {
   readonly workspaceId: string;
   readonly rootPath: string;
+  readonly attachmentId?: symbol;
+}
+
+/** What the engine's current open of a workspace said about `.dohc/local`. */
+export interface LocalStateBindings {
+  currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
 }
 
 export type LocalStateRefusal = "not-opened" | "not-excluded";
@@ -28,26 +35,36 @@ export class LocalStateUnavailableError extends Error {
   }
 }
 
-// What each workspace's latest engine open reported, by workspace id.
-const opens = new Map<string, { rootPath: string; ready: boolean }>();
+let bindings: LocalStateBindings | null = null;
 
-/** Records whether an engine open of the workspace prepared `.dohc/local`. */
-export function recordLocalStateOpen(workspace: LocalStateWorkspace, ready: boolean): void {
-  opens.set(workspace.workspaceId, { rootPath: workspace.rootPath, ready });
+/** The engine sessions set this once; readiness lives and ends with their bindings. */
+export function readLocalStateFrom(source: LocalStateBindings | null): void {
+  bindings = source;
+}
+
+function currentBinding(workspace: LocalStateWorkspace) {
+  try {
+    return bindings?.currentBinding(workspace) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * The workspace's `.dohc/local`, for a writer. Refuses with
- * LocalStateUnavailableError unless the latest engine open of the workspace
- * at this root prepared it and it is still a real folder in the workspace.
- * Never creates anything.
+ * LocalStateUnavailableError unless the engine's current open of the
+ * workspace prepared it, still does once dohc has looked at the folder, and
+ * the folder is a real folder in the workspace. Never creates anything.
  */
 export async function localStateDir(workspace: LocalStateWorkspace): Promise<string> {
-  const open = opens.get(workspace.workspaceId);
-  if (open?.rootPath !== workspace.rootPath) throw new LocalStateUnavailableError("not-opened");
-  if (!open.ready) throw new LocalStateUnavailableError("not-excluded");
+  const binding = currentBinding(workspace);
+  if (binding === null) throw new LocalStateUnavailableError("not-opened");
+  if (!binding.localStateReady) throw new LocalStateUnavailableError("not-excluded");
   const dir = await existingLocalStateDir(workspace.rootPath);
-  if (dir === null) throw new LocalStateUnavailableError("not-opened");
+  // A close, a rebind or a new open while dohc looked ends this open's word.
+  if (currentBinding(workspace) !== binding || dir === null) {
+    throw new LocalStateUnavailableError("not-opened");
+  }
   return dir;
 }
 

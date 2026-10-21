@@ -4,11 +4,12 @@ import { atomicReplaceFile } from "../atomicReplaceFile";
 import { existingLocalStateDir, localStateDir, type LocalStateWorkspace } from "./workspaceLocalState";
 
 // Main-side store for per-workspace UI state (.dohc/local/ui-state.json). The
-// layout belongs to this computer, so it lives in `.dohc/local`, which never
-// syncs. The watcher, tree and history ignore .dohc at any depth, and the
-// renderer cannot write there through writeWorkspaceText (reserved path), so
-// this narrow main-owned pair is the only writer. A write waits for nothing:
-// until the engine has prepared `.dohc/local`, it is refused.
+// layout belongs to this computer, so it lives in `.dohc/local`, which
+// file-provider services on a Mac, such as iCloud Drive, skip. The watcher,
+// tree and history ignore .dohc at any depth, and the renderer cannot write
+// there through writeWorkspaceText (reserved path), so this narrow main-owned
+// pair is the only writer. A write waits for nothing: unless the engine's
+// current open of the workspace prepared `.dohc/local`, it is refused.
 
 const UI_STATE_FILE = "ui-state.json";
 const writeQueues = new Map<string, Promise<void>>();

@@ -65,9 +65,6 @@ pub(crate) struct OpenWorkspace {
     pub(super) durability: super::automations::DurabilityQueue,
     pub(super) mode: WorkspaceOpenMode,
     handle_kind: WorkspaceHandleKind,
-    /// Whether this binding's open prepared `.dohc/local` for this
-    /// computer's state. `None` for an open that writes nothing.
-    local_state_ready: Option<bool>,
     pub(super) relay: Option<RelayConfiguration>,
     /// The binding's capture policy, retained when its driver stops and inherited by read-only attachments.
     pub(super) capture_enabled: bool,
@@ -149,7 +146,6 @@ impl OpenWorkspace {
             durability: self.durability.clone(),
             mode: WorkspaceOpenMode::ReadOnly,
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
-            local_state_ready: None,
             relay: self.relay.clone(),
             capture_enabled: self.capture_enabled,
             observation: Arc::clone(&self.observation),
@@ -830,6 +826,16 @@ impl EngineService {
                         "workspace relay configuration mismatch",
                     ));
                 }
+                // Something outside dohc can remove `.dohc/local`, or put an
+                // unmarked folder in its place, while the binding is open, so
+                // this open prepares it again before it changes anything.
+                let local_root = root.clone();
+                let local_state_ready = tokio::task::spawn_blocking(move || {
+                    root_binding::prepare_local_state(&local_root)
+                })
+                .await
+                .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))?
+                .map_err(map_root_binding)?;
                 if let Some(author_json) = capture_author_json.clone() {
                     let _apply = tokio::select! {
                         biased;
@@ -861,7 +867,7 @@ impl EngineService {
                     // The update the pull held back can run now.
                     self.collections_changed(ctx, &open).await;
                 }
-                return Ok(open_result(&handle, open.local_state_ready));
+                return Ok(open_result(&handle, Some(local_state_ready)));
             }
             lock(&self.handles).remove(&handle);
             lock(&self.live_applications).retire_workspace(&open);
@@ -1310,7 +1316,6 @@ impl EngineService {
                 durability: super::automations::DurabilityQueue::default(),
                 mode: requested_mode,
                 handle_kind: WorkspaceHandleKind::Owner,
-                local_state_ready,
                 relay: params
                     .relay
                     .map(|configuration| configuration.configuration()),
@@ -3301,6 +3306,69 @@ mod tests {
         assert!(read.get("localStateReady").is_none());
         assert!(std::fs::symlink_metadata(&local).is_err());
         close(read).await;
+    }
+
+    /// While a binding is open, something outside dohc can remove
+    /// `.dohc/local` or put an unmarked folder in its place. A second open of
+    /// the live binding prepares it again and answers what it found.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_open_of_a_live_workspace_prepares_its_local_folder_again() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        let service = &EngineService::new();
+        let open = || {
+            let params = open_params(scratch.path(), "local", json!({ "captureMode": "none" }));
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            }
+        };
+        let opened = open().await.expect("open");
+        std::fs::remove_dir(&local).expect("remove local");
+        assert_eq!(open().await.expect("second open"), opened);
+        assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let excluded = |dir: &std::path::Path| {
+                std::process::Command::new("xattr")
+                    .args(["-s", "-p", "com.apple.fileprovider.ignore#P"])
+                    .arg(dir)
+                    .output()
+                    .expect("xattr")
+                    .status
+                    .success()
+            };
+            let chflags = |flag: &str, path: &std::path::Path| {
+                let status = std::process::Command::new("chflags")
+                    .arg(flag)
+                    .arg(path)
+                    .status()
+                    .expect("chflags");
+                assert!(status.success());
+            };
+            // An unmarked folder macOS won't let dohc mark is not ready.
+            std::fs::remove_dir(&local).expect("remove local");
+            std::fs::create_dir(&local).expect("unmarked folder");
+            std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).expect("mode");
+            chflags("uchg", &local);
+            let locked = open().await;
+            chflags("nouchg", &local);
+            assert_eq!(
+                locked.expect("locked open")["localStateReady"],
+                json!(false)
+            );
+            assert!(!excluded(&local));
+            let unlocked = open().await.expect("unlocked open");
+            assert_eq!(unlocked["localStateReady"], json!(true));
+            assert!(excluded(&local));
+        }
+        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+        service
+            .workspace_close(Some(handle.expect("handle")))
+            .await
+            .expect("close");
     }
 
     /// A link or a file where `.dohc/local` goes is refused as the engine's

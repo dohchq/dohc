@@ -12,7 +12,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from 
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
-import { recordLocalStateOpen } from "../workspaces/workspaceLocalState";
+import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "../window/rendererWorkspaceSessionOwner";
@@ -30,6 +30,7 @@ const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SE
 const workspacePayload = { workspaceId: "workspace-a" };
 const patchPayload = { ...workspacePayload, patch: { privacy: { confirmExternalLinks: false } } };
 const uiPayload = { ...workspacePayload, state };
+const localState = fakeLocalStateOpens();
 const settingsRequests = [
   [settingsOperations.getUserSettings.channel, undefined],
   [settingsOperations.reloadUserSettings.channel, undefined],
@@ -132,13 +133,13 @@ async function harness() {
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
-    // What workspace-a's engine open does before it reports .dohc/local ready.
+    // What workspace-a's engine open does: prepare .dohc/local, then answer.
     prepareLocalState: async (ready = true) => {
       const workspace = entries.get("workspace-a")!;
-      await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
-      recordLocalStateOpen(workspace, ready);
+      await localState.open(workspace, ready);
       return workspace;
     },
+    closeLocalState: () => localState.close(entries.get("workspace-a")!),
     invoke: async (channel: string, payload?: unknown, value = first, trusted = true) => {
       const handler = handlers.get(channel);
       if (!handler) throw new Error(`Missing handler: ${channel}`);
@@ -633,6 +634,12 @@ describe("registered workspace settings and UI state", () => {
 
     await h.prepareLocalState();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).resolves.toBeUndefined();
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
+
+    // Once the engine closes the workspace, writes stop and the saved layout stays.
+    h.closeLocalState();
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: 300 } }))
+      .rejects.toThrow("dohc has not finished opening this workspace.");
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
   });
 

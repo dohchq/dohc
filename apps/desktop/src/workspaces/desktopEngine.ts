@@ -21,7 +21,7 @@ import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
-import { recordLocalStateOpen } from "./workspaceLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
@@ -118,6 +118,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // A failure since the engine last launched is already in the crash report.
   let engineProblemRecorded = false;
   let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
+  // Writers of this computer's state ask the current binding, so readiness
+  // ends when its open closes, rebinds or fails.
+  readLocalStateFrom({
+    currentBinding: workspace => rustEngineWorkspaceSessions?.currentBinding(workspace) ?? null,
+  });
   let rustEngineRelayClient: EngineRelayClient | null = null;
   let rustEngineSessionSource: RelayConfiguredDaemonClientSource | null = null;
   let ownerHost: ReturnType<typeof startDesktopOwnerHost> | undefined;
@@ -559,8 +564,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: (workspace, binding) => {
-          recordLocalStateOpen(workspace, binding.localStateReady);
+        onOpened: workspace => {
           startupSmoke.resolve("skip");
           dependencies.onWorkspaceOpened?.(workspace.workspaceId);
         },

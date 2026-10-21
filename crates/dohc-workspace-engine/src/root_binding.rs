@@ -229,9 +229,10 @@ fn exclude_from_icloud(engine_dir: &Path) {
 /// The folder is private like the engine's, since it holds what one person
 /// keeps on one computer. A link, anything but a folder, or on a Mac's local
 /// volume another user's folder is refused, and what it names is left as it
-/// is. On a Mac the folder is kept out of iCloud Drive before anything is
-/// written in it. If that fails, the folder could sync, so it is not ready
-/// and the desktop writes nothing in it, but the workspace still opens.
+/// is. On a Mac the folder is marked so that file-provider services such as
+/// iCloud Drive skip it, before anything is written in it. If that fails,
+/// the folder could sync, so it is not ready and the desktop writes nothing
+/// in it, but the workspace still opens.
 pub fn prepare_local_state(root: &Path) -> Result<bool, RootBindingError> {
     #[cfg(target_os = "macos")]
     {
@@ -577,12 +578,14 @@ mod tests {
     }
 
     /// An open that writes makes `.dohc/local` for this computer's state,
-    /// private and, on a Mac, out of iCloud Drive. A later open keeps what is
-    /// in it, and marks it again if the mark was lost.
+    /// private and, on a Mac, marked for file providers to skip. A later open
+    /// keeps what is in it, and marks it again if the mark was lost.
     #[test]
     fn an_open_prepares_this_computers_folder_and_a_reopen_keeps_it() {
         let scratch = ScratchDir::new().expect("scratch");
         let local = scratch.join(".dohc").join("local");
+        // As an open does: the root binding makes `.dohc` first.
+        write_new_root_binding(scratch.path()).expect("mint");
         assert!(prepare_local_state(scratch.path()).expect("prepare"));
         assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
         #[cfg(unix)]

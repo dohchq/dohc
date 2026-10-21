@@ -175,7 +175,7 @@ describe("desktop engine construction", () => {
       expect(opened).toHaveBeenCalledTimes(2);
     } finally { await f.close(); }
   });
-  it("lets writers into .dohc/local as each open of the workspace reported it", async () => {
+  it("lets writers into .dohc/local only while the open that prepared it stands", async () => {
     const f = fixture();
     const workspace = { workspaceId: "local-state-workspace", rootPath: await createTestScratch("local-state-open-") };
     mkdirSync(resolve(workspace.rootPath, ".dohc", "local"), { recursive: true });
@@ -190,6 +190,7 @@ describe("desktop engine construction", () => {
       await sessions.run(workspace, async () => undefined);
       await expect(localStateDir(workspace)).resolves.toMatch(/local$/);
       await sessions.closeWorkspace(workspace);
+      await expect(localStateDir(workspace)).rejects.toThrow("dohc has not finished opening this workspace.");
       localStateReady = false;
       await sessions.run(workspace, async () => undefined);
       await expect(localStateDir(workspace)).rejects.toThrow("out of iCloud Drive");
