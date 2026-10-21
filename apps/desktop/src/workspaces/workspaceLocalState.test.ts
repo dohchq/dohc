@@ -1,6 +1,6 @@
-import { chmod, lstat, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -11,6 +11,7 @@ import {
   LocalStateFolderError,
   LocalStateUnavailableError,
   ownedLocalStateDir,
+  ownedSqliteFiles,
   readLocalStateFrom,
 } from "./workspaceLocalState";
 import { createTestScratch } from "./testTemp";
@@ -191,6 +192,32 @@ describe("this computer's .dohc/local", () => {
       "dohc could not open this Collection's records. A link is at .dohc/local/datasets, which must be a real folder.");
     expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe("unusable");
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  // A SQLite database in `.dohc/local` can decide what dohc does, such as the
+  // next operation number, so each of its files must be one only this user can change.
+  it.skipIf(process.platform === "win32")("trusts a SQLite database only when it and each of its files is this user's alone", async () => {
+    const folder = await createTestScratch("dohc-local-sqlite-");
+    const elsewhere = await createTestScratch("dohc-local-sqlite-elsewhere-");
+    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+    for (const name of ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm", "state.sqlite-journal"]) await writeFile(join(folder, name), "", { mode: 0o644 });
+    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+    const someoneElse = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+    try {
+      expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(false);
+    } finally { someoneElse.mockRestore(); }
+    for (const [name, untrust, restore] of [
+      ["state.sqlite", () => chmod(join(folder, "state.sqlite"), 0o664), () => chmod(join(folder, "state.sqlite"), 0o644)],
+      ["state.sqlite-wal", () => link(join(folder, "state.sqlite-wal"), join(elsewhere, "wal")), () => rm(join(elsewhere, "wal"))],
+      ["state.sqlite-shm", async () => { await rm(join(folder, "state.sqlite-shm")); await symlink(join(elsewhere, "shm"), join(folder, "state.sqlite-shm")); },
+        async () => { await rm(join(folder, "state.sqlite-shm")); await writeFile(join(folder, "state.sqlite-shm"), ""); }],
+      ["state.sqlite-journal", () => chmod(join(folder, "state.sqlite-journal"), 0o646), () => chmod(join(folder, "state.sqlite-journal"), 0o644)],
+    ] as const) {
+      await untrust();
+      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(false);
+      await restore();
+      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(true);
+    }
   });
 
   it("gives a reader the folder whatever the engine said, and null when it is missing", async () => {
