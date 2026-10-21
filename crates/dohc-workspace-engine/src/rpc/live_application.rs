@@ -177,16 +177,15 @@ impl OutputGuard for RestoreFenceOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.host.current(&self.host.connection)
-            && !self.cancel.is_cancelled()
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let _fence = lock(&self.host.output_fence);
-        if !self.is_current() {
+        if !self.is_current_ignoring_cancel() || (cancellable && self.cancel.is_cancelled()) {
             return false;
         }
         action();
@@ -208,9 +207,9 @@ impl OutputGuard for ApplicationOutputGuard {
     fn retirement_signal(&self) -> CancelSignal {
         self.registration.retired.clone()
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let _fence = lock(&self.registration.host.output_fence);
-        if !self.is_current() {
+        if !self.is_current_ignoring_cancel() || (cancellable && self.cancel.is_cancelled()) {
             return false;
         }
         action();
@@ -219,12 +218,11 @@ impl OutputGuard for ApplicationOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.registration
             .host
             .current(&self.registration.host.connection)
             && !self.registration.retired.is_cancelled()
-            && !self.cancel.is_cancelled()
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
