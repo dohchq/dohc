@@ -2990,6 +2990,13 @@ fn checked_staging_dir(root: &Path, create: bool) -> Result<PathBuf, Materialize
     } else {
         ensure_target_symlink_free(root, &dir)?;
     }
+    // Check access without walking other jobs' entries.
+    #[cfg(windows)]
+    if let Err(err) = std::fs::read_dir(&dir)
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(MaterializeError::io(&dir, &err));
+    }
     Ok(dir)
 }
 
