@@ -110,7 +110,8 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     assert_eq!(work.checkpoint_rows, 4, "separate checkpoint bookkeeping");
 
     let root = dohc_engine_testkit::ScratchDir::new().unwrap();
-    let mut store = EngineStore::open(&engine_db_path(&root).unwrap(), 1).unwrap();
+    let mut store =
+        EngineStore::open_for_actor(&engine_db_path(&root).unwrap(), 1, None, None).unwrap();
     enable_work_probe(&store);
     store.read_with(|conn| conn.execute_batch(
         "CREATE TABLE reservation_row_probe(body BLOB); INSERT INTO reservation_row_probe VALUES(zeroblob(32*1024*1024)); PRAGMA main.wal_checkpoint(PASSIVE);"
