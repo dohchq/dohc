@@ -40,6 +40,25 @@ describe("useShellError", () => {
     act(() => result.current.shellErrors[0]!.retry!());
     expect(retry).toHaveBeenCalledOnce();
   });
+  it("keeps one row for where schedules run: a warning while another computer runs them, an error with Try again while none does", () => {
+    const retry = vi.fn();
+    const takeOver = vi.fn();
+    const { result } = renderHook(() => useShellError("ws"));
+    act(() => result.current.showScheduleHostNotice({ message: "This workspace's schedules run on Ice's laptop, not this computer.", failed: false, retry, takeOver }));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ tone: "warning", retry: null, seen: false, action: { label: "Take over now", ends: true } });
+    act(() => result.current.showScheduleHostNotice({ message: "No computer runs this workspace's schedules.", failed: true, cause: "EACCES: permission denied", retry, takeOver }));
+    expect(result.current.shellErrors).toHaveLength(1);
+    const failed = result.current.shellErrors[0]!;
+    expect(failed.tone).toBeUndefined();
+    expect(failed.retry).toBe(retry);
+    expect(failed.details).toEqual([["Cause", "EACCES: permission denied"]]);
+    act(() => result.current.runShellErrorAction(failed.id));
+    expect(takeOver).toHaveBeenCalledOnce();
+    act(() => result.current.showScheduleHostNotice({ message: "No computer runs this workspace's schedules.", failed: true, retry, takeOver }));
+    act(() => result.current.showScheduleHostNotice(null));
+    expect(result.current.shellErrors).toEqual([]);
+  });
   it("routes an additional Notice action independently of its primary action", () => {
     const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
     act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));

@@ -33,7 +33,7 @@ beforeAll(async () => {
 
 let next = 0;
 // A registered workspace whose folder record says it never synced, or whose
-// record cannot be written: `.dohc` is a file, or the record is a folder.
+// history cannot be written: `.dohc` is a file, or its marks' folder is.
 async function workspace(
   folder: "never-synced" | "unwritable-folder" | "unwritable-record",
   received: Pick<RegistryEntry, "shareMounts" | "sharedChannels"> = {},
@@ -41,8 +41,8 @@ async function workspace(
   const rootPath = canonicalWorkspaceRoot(await createTestScratch("dohc-registry-workspace-"));
   if (folder === "unwritable-folder") await writeFile(join(rootPath, ".dohc"), "");
   else await mkdir(join(rootPath, ".dohc"));
-  if (folder === "never-synced") await recordNeverSynced(rootPath);
-  if (folder === "unwritable-record") await mkdir(join(rootPath, ".dohc", "sync-history.json"));
+  if (folder === "never-synced") await recordNeverSynced(rootPath, { installId: "install-here", label: "This Mac" });
+  if (folder === "unwritable-record") await writeFile(join(rootPath, ".dohc", "sync-history"), "");
   const workspaceId = `w-${next++}`;
   registerWorkspace({ workspaceId, rootPath, kind: "personal", mode: "local-first", ...received });
   return { workspaceId, rootPath };
