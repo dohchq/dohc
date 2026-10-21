@@ -251,11 +251,21 @@ fn verify_key_dir(root: &std::path::Path) -> Result<(), CryptoError> {
 pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
     let key = SecretDataKey::generate()?;
+    // The key's directory must not advertise its existence to other local
+    // users (the file itself is 0600 below), on a Mac through an ACL entry
+    // the workspace folder passes on either.
+    #[cfg(target_vendor = "apple")]
+    {
+        let relative = std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
+            .parent()
+            .ok_or(CryptoError::KeyFileMalformed)?;
+        dohc_macos_files::ensure_private_dir(root, relative)
+            .map_err(|err| key_create_error(&err))?;
+    }
+    #[cfg(not(target_vendor = "apple"))]
     if let Some(parent) = path.parent() {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
-        // The key's directory must not advertise its existence to
-        // other local users (the file itself is 0600 below).
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -382,13 +392,22 @@ mod tests {
             .unwrap();
         assert!(added.success());
         create_key_file(scratch.path()).unwrap();
-        let listing = std::process::Command::new("/bin/ls")
-            .arg("-le")
-            .arg(scratch.path().join(SECRET_KEY_FILE_RELATIVE))
-            .output()
-            .unwrap();
-        let listing = String::from_utf8(listing.stdout).unwrap();
-        assert_eq!(listing.lines().count(), 1, "{listing}");
+        // The key's folder, and `.dohc` above it, take none of the entries
+        // either (#2207).
+        let key = scratch.path().join(SECRET_KEY_FILE_RELATIVE);
+        for path in [
+            key.as_path(),
+            key.parent().unwrap(),
+            &scratch.path().join(".dohc"),
+        ] {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            let listing = String::from_utf8(listing.stdout).unwrap();
+            assert_eq!(listing.lines().count(), 1, "{listing}");
+        }
     }
 
     #[cfg(target_vendor = "apple")]

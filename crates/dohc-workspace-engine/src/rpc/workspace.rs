@@ -3117,6 +3117,81 @@ mod tests {
         }
     }
 
+    /// A workspace folder whose ACL passes read and search to everyone must
+    /// not pass them to the engine's folder or the store in it (#2207). A
+    /// folder an earlier build left open to others is made private on the
+    /// next open, and its store still opens.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_workspace_keeps_its_engine_folder_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let acl_lines = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .expect("ls");
+            assert!(listing.status.success());
+            String::from_utf8(listing.stdout)
+                .expect("listing")
+                .lines()
+                .count()
+                - 1
+        };
+        let add_entry = |path: &std::path::Path| {
+            let added = std::process::Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    "group:everyone allow read,execute,file_inherit,directory_inherit",
+                ])
+                .arg(path)
+                .status()
+                .expect("chmod");
+            assert!(added.success());
+        };
+        let mode = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        let scratch = ScratchDir::new().expect("scratch");
+        add_entry(scratch.path());
+        let service = EngineService::new();
+        let open = || async {
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    open_params(scratch.path(), "private", json!({ "captureMode": "none" })),
+                )
+                .await
+                .expect("open");
+            serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone()).expect("handle")
+        };
+        let handle = open().await;
+        let engine = scratch.path().join(".dohc/engine");
+        assert!(engine.join("engine.db").is_file());
+        let mut created = vec![scratch.path().join(".dohc"), engine.clone()];
+        created.extend(
+            std::fs::read_dir(&engine)
+                .expect("engine folder")
+                .map(|entry| entry.expect("entry").path()),
+        );
+        for path in &created {
+            assert_eq!(acl_lines(path), 0, "{}", path.display());
+        }
+        service.workspace_close(Some(handle)).await.expect("close");
+
+        // As the desktop's mkdir left it: 0755 with the workspace's entries.
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        add_entry(&engine);
+        let handle = open().await;
+        assert_eq!(mode(&engine), 0o700);
+        assert_eq!(acl_lines(&engine), 0);
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
     fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {
         let mut params = json!({
             "rootDir": root.to_string_lossy(),

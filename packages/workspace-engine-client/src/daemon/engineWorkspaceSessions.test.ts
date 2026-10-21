@@ -719,14 +719,15 @@ describe("EngineWorkspaceSessions", () => {
     ).toBe(true);
   });
 
-  it("prepares an ordinary workspace before opening it in the daemon", async () => {
+  it("prepares an ordinary workspace and leaves its engine folder to the daemon", async () => {
     const rootPath = await tempRoot();
     let opened = false;
     const client: EngineDaemonClient = {
       close: () => undefined,
       async sendRequest(request) {
-        const engineDirectory = await lstat(join(rootPath, ".dohc", "engine"));
-        expect(engineDirectory.isDirectory()).toBe(true);
+        expect((await lstat(join(rootPath, ".dohc"))).isDirectory()).toBe(true);
+        // The daemon creates it, so on a Mac it inherits no ACL entries.
+        await expect(lstat(join(rootPath, ".dohc", "engine"))).rejects.toMatchObject({ code: "ENOENT" });
         opened = true;
         return {
           id: request.id,

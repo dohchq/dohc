@@ -1,7 +1,8 @@
-//! Create a file without the ACL entries its folder gives new files, copy a
-//! file's macOS ACL and extended attributes between open descriptors, flush a
-//! descriptor behind a drive write barrier, keep a folder out of iCloud Drive,
-//! and unlink a file only when no process has it open.
+//! Create a file without the ACL entries its folder gives new files, keep a
+//! folder private to its owner, copy a file's macOS ACL and extended
+//! attributes between open descriptors, flush a descriptor behind a drive
+//! write barrier, keep a folder out of iCloud Drive, and unlink a file only
+//! when no process has it open.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::io;
@@ -43,6 +44,8 @@ unsafe extern "C" {
     fn acl_add_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
     fn acl_set_flagset_np(acl: *mut c_void, flags: *mut c_void) -> c_int;
     fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+    fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
+    fn acl_set_link_np(path: *const c_char, kind: c_int, acl: *mut c_void) -> c_int;
     fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
     fn acl_set_fd_np(fd: c_int, acl: *mut c_void, kind: c_int) -> c_int;
     fn acl_free(acl: *mut c_void) -> c_int;
@@ -50,6 +53,7 @@ unsafe extern "C" {
     fn filesec_set_property(fsec: *mut c_void, property: c_int, value: *const c_void) -> c_int;
     fn filesec_free(fsec: *mut c_void);
     fn openx_np(path: *const c_char, flags: c_int, fsec: *mut c_void) -> c_int;
+    fn mkdirx_np(path: *const c_char, fsec: *mut c_void) -> c_int;
 }
 
 /// Create `name` in `dir` for writing, exclusively and without following a
@@ -149,6 +153,12 @@ fn has_entries(fd: BorrowedFd<'_>) -> io::Result<bool> {
     // SAFETY: The descriptor stays open for the call, which retains nothing.
     #[allow(unsafe_code)]
     let acl = unsafe { acl_get_fd_np(fd.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    any_entry(acl)
+}
+
+/// Whether `acl`, just returned by an `acl_get_*` call, has any entry. Frees
+/// it. A null `acl` reads the call's error.
+fn any_entry(acl: *mut c_void) -> io::Result<bool> {
     if acl.is_null() {
         let err = io::Error::last_os_error();
         return match err.raw_os_error() {
@@ -157,7 +167,7 @@ fn has_entries(fd: BorrowedFd<'_>) -> io::Result<bool> {
         };
     }
     let mut entry = std::ptr::null_mut();
-    // SAFETY: `acl` came from acl_get_fd_np. acl_get_entry only reads it and
+    // SAFETY: `acl` came from an acl_get call. acl_get_entry only reads it and
     // writes `entry`, which points into `acl` and is not used after the free.
     #[allow(unsafe_code)]
     let found = unsafe {
@@ -180,9 +190,26 @@ fn has_acls(dir: BorrowedFd<'_>) -> bool {
 fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
     let flags =
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC;
+    // SAFETY: The path ends with a NUL and outlives the call, and openx_np
+    // retains neither it nor the filesec.
+    #[allow(unsafe_code)]
+    let fd =
+        with_uninherited_filesec(mode, |fsec| unsafe { openx_np(path.as_ptr(), flags, fsec) })?;
+    // SAFETY: openx_np returned a new descriptor that nothing else owns.
+    #[allow(unsafe_code)]
+    let file = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok(file)
+}
+
+/// Call `create` with a filesec that holds `mode` and an empty ACL flagged
+/// not to inherit, and return what it returns unless that is negative.
+fn with_uninherited_filesec(
+    mode: u16,
+    create: impl FnOnce(*mut c_void) -> c_int,
+) -> io::Result<c_int> {
     // SAFETY: Each object is checked for null before use and freed once.
     // filesec_set_property copies the ACL and the mode it is given, and
-    // openx_np retains neither the path nor the filesec.
+    // `create` gets the filesec only for the call.
     #[allow(unsafe_code)]
     unsafe {
         let acl = acl_init(0);
@@ -191,14 +218,14 @@ fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
         }
         let fsec = filesec_init();
         let mut acl_flags = std::ptr::null_mut();
-        let fd = if !fsec.is_null()
+        let result = if !fsec.is_null()
             && acl_get_flagset_np(acl, &mut acl_flags) == 0
             && acl_add_flag_np(acl_flags, ACL_FLAG_NO_INHERIT) == 0
             && acl_set_flagset_np(acl, acl_flags) == 0
             && filesec_set_property(fsec, FILESEC_ACL, (&raw const acl).cast()) == 0
             && filesec_set_property(fsec, FILESEC_MODE, (&raw const mode).cast()) == 0
         {
-            openx_np(path.as_ptr(), flags, fsec)
+            create(fsec)
         } else {
             -1
         };
@@ -207,10 +234,217 @@ fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
             filesec_free(fsec);
         }
         acl_free(acl);
-        if fd < 0 {
+        if result < 0 {
             return Err(err);
         }
-        Ok(OwnedFd::from_raw_fd(fd))
+        Ok(result)
+    }
+}
+
+/// The mode of a private folder.
+const PRIVATE_DIR_MODE: u16 = 0o700;
+
+/// Create the folder `relative` in `base`, and any missing folder between
+/// them, or take the one already there, and make it private: refuse it
+/// unless this process's user owns it, then give it mode 0700 and no ACL
+/// entries. Others then cannot reach anything in it, whatever its files' own
+/// modes and ACLs. A folder created here takes none of the entries its parent
+/// gives new folders, so nothing created in it inherits any.
+///
+/// `base` may be or lie under a link. A link at any part of `relative` is
+/// refused before anything is changed, on any volume. A volume that is not
+/// local, such as a network share, keeps its server's owners, ACLs and
+/// modes: there a missing folder is created with mode 0700 and whatever the
+/// server gives it, and an existing one is taken as it is. A folder whose
+/// entries a local volume keeps fails with [`VolumeSharesNewFiles`]. On a
+/// refusal, only an empty folder this call created is removed. Returns the
+/// folder, open for reading.
+pub fn ensure_private_dir(base: &Path, relative: &Path) -> io::Result<OwnedFd> {
+    ensure_private_dir_with(base, relative, &System::REAL)
+}
+
+/// What [`ensure_private_dir`] asks of the system, replaced in tests.
+struct System {
+    /// The user the folder must belong to. `None` is this process's.
+    owner: Option<u32>,
+    /// Whether the folder is on a local volume.
+    local: fn(BorrowedFd<'_>) -> io::Result<bool>,
+    remove_acl: fn(BorrowedFd<'_>),
+    /// Runs on the folder's path just before it is made private.
+    before_protect: fn(&Path) -> io::Result<()>,
+}
+
+impl System {
+    const REAL: System = System {
+        owner: None,
+        local: is_local,
+        remove_acl,
+        before_protect: |_| Ok(()),
+    };
+}
+
+fn ensure_private_dir_with(base: &Path, relative: &Path, system: &System) -> io::Result<OwnedFd> {
+    let mut names = Vec::new();
+    for part in relative.components() {
+        match part {
+            std::path::Component::Normal(name) => names.push(name),
+            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+    let name = names.pop().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut parent = OwnedFd::from(std::fs::File::open(base)?);
+    for between in names {
+        make_dir(parent.as_fd(), between, system)?;
+        parent = open_folder(parent.as_fd(), between)?;
+    }
+    let created = make_dir(parent.as_fd(), name, system)?;
+    let protected = (system.before_protect)(&base.join(relative))
+        .and_then(|()| protect(parent.as_fd(), name, system));
+    if protected.is_err() && created {
+        // Removes the folder only while it is empty.
+        let _ = rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::REMOVEDIR);
+    }
+    protected
+}
+
+/// Open the folder `name` in `dir`, refusing a link.
+fn open_folder(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    Ok(rustix::fs::openat(dir, name, flags, Mode::empty())?)
+}
+
+/// Create the folder `name` in `dir` with mode 0700 less the umask, and on
+/// a local volume none of the ACL entries `dir` gives new folders. Return
+/// whether this call created it. Anything already at the name is left for
+/// the caller.
+fn make_dir(dir: BorrowedFd<'_>, name: &OsStr, system: &System) -> io::Result<bool> {
+    let made = if (system.local)(dir)? {
+        mkdir_uninherited(dir, name)
+    } else {
+        mkdir_plain(dir, name)
+    };
+    match made {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn mkdir_plain(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    let mode = rustix::fs::Mode::from_raw_mode(PRIVATE_DIR_MODE);
+    Ok(rustix::fs::mkdirat(dir, name, mode)?)
+}
+
+fn mkdir_uninherited(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    let mut path = rustix::fs::getpath(dir)?.into_bytes();
+    path.push(b'/');
+    path.extend_from_slice(name.as_bytes());
+    let path = CString::new(path)?;
+    // SAFETY: The path ends with a NUL and outlives the call, and mkdirx_np
+    // retains neither it nor the filesec.
+    #[allow(unsafe_code)]
+    let made = with_uninherited_filesec(PRIVATE_DIR_MODE, |fsec| unsafe {
+        mkdirx_np(path.as_ptr(), fsec)
+    });
+    match made {
+        // A file system without ACLs, such as FAT, refuses one at creation,
+        // and has none for the folder to inherit.
+        Err(err) if err.raw_os_error() == Some(libc::EINVAL) && !has_acls(dir) => {
+            mkdir_plain(dir, name)
+        }
+        made => made.map(drop),
+    }
+}
+
+/// Open `name` in `dir`, refusing anything but a folder, and a link. On a
+/// local volume, also refuse it unless the expected user owns it, then
+/// remove its ACL entries and give it mode 0700.
+fn protect(dir: BorrowedFd<'_>, name: &OsStr, system: &System) -> io::Result<OwnedFd> {
+    let folder = open_folder(dir, name)?;
+    // A network share's owners, ACLs and modes are its server's. One that
+    // maps every user to another uid would otherwise refuse each folder.
+    if !(system.local)(folder.as_fd())? {
+        return Ok(folder);
+    }
+    let stat = rustix::fs::fstat(&folder)?;
+    let owner = system
+        .owner
+        .unwrap_or_else(|| rustix::process::geteuid().as_raw());
+    if stat.st_uid != owner {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "another user owns this folder, so dohc can't keep it private",
+        ));
+    }
+    clear_entries(folder.as_fd(), system.remove_acl)?;
+    if stat.st_mode & 0o7777 != PRIVATE_DIR_MODE {
+        let mode = rustix::fs::Mode::from_raw_mode(PRIVATE_DIR_MODE);
+        rustix::fs::fchmod(&folder, mode)?;
+    }
+    Ok(folder)
+}
+
+/// Remove the ACL entries of the file `name` in the folder `dir`, without
+/// following a link at the name or opening the file. macOS has no ACL call
+/// relative to a folder, and closing a descriptor on the file would drop any
+/// lock this process holds on it, so this goes by the folder's current path.
+/// The caller checks that the volume is local. A file whose entries the
+/// volume keeps fails with [`VolumeSharesNewFiles`]. A file that is gone, or
+/// on a file system without ACLs, has none.
+pub fn remove_acl_entries_in(dir: impl AsFd, name: &OsStr) -> io::Result<()> {
+    let mut path = rustix::fs::getpath(dir.as_fd())?.into_bytes();
+    path.push(b'/');
+    path.extend_from_slice(name.as_bytes());
+    let path = CString::new(path)?;
+    // SAFETY: The path ends with a NUL and outlives each call, which retains
+    // nothing. Each ACL is checked for null and freed once.
+    #[allow(unsafe_code)]
+    let has_entries = || any_entry(unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) });
+    if has_entries()? {
+        #[allow(unsafe_code)]
+        unsafe {
+            let acl = acl_init(0);
+            if !acl.is_null() {
+                acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
+                acl_free(acl);
+            }
+        }
+        if has_entries()? {
+            return Err(io::Error::other(VolumeSharesNewFiles));
+        }
+    }
+    Ok(())
+}
+
+fn clear_entries(fd: BorrowedFd<'_>, remove_acl: fn(BorrowedFd<'_>)) -> io::Result<()> {
+    if has_entries(fd)? {
+        remove_acl(fd);
+        if has_entries(fd)? {
+            return Err(io::Error::other(VolumeSharesNewFiles));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `fd` is on a volume the kernel marks local. A network share is
+/// not, and its owners, ACLs and modes belong to its server.
+pub fn is_local(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    Ok(rustix::fs::fstatfs(fd)?.f_flags & libc::MNT_LOCAL as u32 != 0)
+}
+
+/// Give `fd` an empty ACL. A volume that keeps its entries anyway shows them
+/// when the caller reads the ACL back.
+fn remove_acl(fd: BorrowedFd<'_>) {
+    // SAFETY: `acl` is checked for null and freed once. The descriptor stays
+    // open for the call, which copies the ACL.
+    #[allow(unsafe_code)]
+    unsafe {
+        let acl = acl_init(0);
+        if !acl.is_null() {
+            acl_set_fd_np(fd.as_raw_fd(), acl, ACL_TYPE_EXTENDED);
+            acl_free(acl);
+        }
     }
 }
 
@@ -475,6 +709,229 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         let again = super::create_uninherited(&folder, name, 0o600).unwrap_err();
         assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    const INHERITED: &str = "group:everyone allow read,execute,file_inherit,directory_inherit";
+
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    fn relative() -> &'static std::path::Path {
+        std::path::Path::new(".dohc/engine")
+    }
+
+    /// A workspace whose `.dohc/engine` an earlier build made: mode 0755 and
+    /// the entries of a workspace folder that passes them on.
+    fn shared_workspace(scratch: &dohc_test_scratch::ScratchDir) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = scratch.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        add_entry(&workspace, INHERITED);
+        let engine = workspace.join(relative());
+        std::fs::create_dir_all(&engine).unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(engine.join("engine.db"), b"store").unwrap();
+        assert!(has_entries(&engine));
+        workspace
+    }
+
+    /// A system that expects `owner` and finds every volume local.
+    fn system(owner: Option<u32>) -> super::System {
+        super::System {
+            owner,
+            local: |_| Ok(true),
+            ..super::System::REAL
+        }
+    }
+
+    #[test]
+    fn a_new_private_folder_takes_none_of_its_folders_acl() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-new").unwrap();
+        let dir = scratch.path().join("shared");
+        std::fs::create_dir(&dir).unwrap();
+        add_entry(&dir, INHERITED);
+        let engine = dir.join(relative());
+        super::ensure_private_dir(&dir, super::Path::new(".dohc/engine")).unwrap();
+        for folder in [dir.join(".dohc"), engine.clone()] {
+            assert!(!has_entries(&folder), "{}", folder.display());
+            assert_eq!(mode(&folder), 0o700, "{}", folder.display());
+        }
+        // What is created inside inherits nothing either.
+        std::fs::write(engine.join("engine.db"), b"").unwrap();
+        std::fs::create_dir(engine.join("displaced")).unwrap();
+        assert!(!has_entries(&engine.join("engine.db")));
+        assert!(!has_entries(&engine.join("displaced")));
+        super::ensure_private_dir(&dir, super::Path::new(".dohc/engine")).unwrap();
+    }
+
+    #[test]
+    fn an_existing_folder_is_made_private_and_keeps_its_contents() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-existing").unwrap();
+        let workspace = shared_workspace(&scratch);
+        let engine = workspace.join(relative());
+        super::ensure_private_dir(&workspace, relative()).unwrap();
+        assert!(!has_entries(&engine));
+        assert_eq!(mode(&engine), 0o700);
+        assert_eq!(std::fs::read(engine.join("engine.db")).unwrap(), b"store");
+    }
+
+    /// A link at `.dohc`, or at the folder itself, is refused before the
+    /// folder it names is changed. A link above the base is followed.
+    #[test]
+    fn a_link_below_the_base_is_refused_and_its_target_left_alone() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-link").unwrap();
+        let target = shared_workspace(&scratch);
+        let workspace = scratch.path().join("linked");
+        std::fs::create_dir(&workspace).unwrap();
+        std::os::unix::fs::symlink(target.join(".dohc"), workspace.join(".dohc")).unwrap();
+        super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        std::fs::remove_file(workspace.join(".dohc")).unwrap();
+        std::fs::create_dir(workspace.join(".dohc")).unwrap();
+        std::os::unix::fs::symlink(target.join(relative()), workspace.join(relative())).unwrap();
+        super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        assert!(has_entries(&target.join(relative())));
+        assert_eq!(mode(&target.join(relative())), 0o755);
+
+        let above = scratch.path().join("above");
+        std::os::unix::fs::symlink(&target, &above).unwrap();
+        super::ensure_private_dir(&above, relative()).unwrap();
+        assert_eq!(mode(&target.join(relative())), 0o700);
+    }
+
+    /// Making a folder another user owns needs root, so the seam expects
+    /// another owner instead.
+    #[test]
+    fn a_folder_another_user_owns_is_refused_and_left_alone() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-owner").unwrap();
+        let workspace = shared_workspace(&scratch);
+        let other = rustix::process::geteuid().as_raw() + 1;
+        let err = super::ensure_private_dir_with(&workspace, relative(), &system(Some(other)))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(has_entries(&workspace.join(relative())));
+        assert_eq!(mode(&workspace.join(relative())), 0o755);
+    }
+
+    /// A network share keeps its server's ACLs and modes. The seam stands in
+    /// for one, and fails the test if anything writes an ACL.
+    const REMOTE: super::System = super::System {
+        local: |_| Ok(false),
+        remove_acl: |_| panic!("wrote a network folder's ACL"),
+        ..super::System::REAL
+    };
+
+    /// Another owner, as a share that maps every user to one uid shows, is
+    /// taken too. A link is still refused.
+    #[test]
+    fn a_folder_on_a_network_volume_opens_unchanged() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-remote").unwrap();
+        let workspace = shared_workspace(&scratch);
+        let squashed = super::System {
+            owner: Some(rustix::process::geteuid().as_raw() + 1),
+            ..REMOTE
+        };
+        super::ensure_private_dir_with(&workspace, relative(), &squashed).unwrap();
+        assert!(has_entries(&workspace.join(relative())));
+        assert_eq!(mode(&workspace.join(relative())), 0o755);
+        let linked = scratch.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(workspace.join(".dohc"), linked.join(".dohc")).unwrap();
+        super::ensure_private_dir_with(&linked, relative(), &REMOTE).unwrap_err();
+        // This test's own volume is local.
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        assert!(super::is_local(std::os::fd::AsFd::as_fd(&folder)).unwrap());
+    }
+
+    /// A new folder on a network volume is created with a plain mkdir, so it
+    /// takes what its parent gives it, as the server would decide, and no ACL
+    /// is written.
+    #[test]
+    fn a_folder_created_on_a_network_volume_writes_no_acl() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-remote-new").unwrap();
+        let workspace = scratch.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        add_entry(&workspace, INHERITED);
+        super::ensure_private_dir_with(&workspace, relative(), &REMOTE).unwrap();
+        for folder in [workspace.join(".dohc"), workspace.join(relative())] {
+            assert!(has_entries(&folder), "{}", folder.display());
+            assert_eq!(mode(&folder), 0o700, "{}", folder.display());
+        }
+    }
+
+    #[test]
+    fn removing_a_files_entries_leaves_it_none() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-file").unwrap();
+        let path = scratch.path().join("engine.db");
+        std::fs::write(&path, b"store").unwrap();
+        add_entry(&path, "group:everyone allow read");
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        let name = std::ffi::OsStr::new("engine.db");
+        super::remove_acl_entries_in(&folder, name).unwrap();
+        assert!(!has_entries(&path));
+        super::remove_acl_entries_in(&folder, name).unwrap();
+        // A file that is gone has none.
+        super::remove_acl_entries_in(&folder, std::ffi::OsStr::new("gone")).unwrap();
+    }
+
+    /// A local volume can keep a folder's entries too. The seam keeps them
+    /// the way such a volume would.
+    #[test]
+    fn a_folder_the_volume_keeps_shared_is_refused() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-served").unwrap();
+        let keeps = super::System {
+            remove_acl: |_| {},
+            before_protect: |path| {
+                add_entry(path, "group:everyone allow list");
+                Ok(())
+            },
+            ..system(None)
+        };
+        let err = super::ensure_private_dir_with(scratch.path(), relative(), &keeps).unwrap_err();
+        assert!(super::volume_shares_new_files(&err), "{err}");
+        assert!(
+            !scratch.path().join(relative()).exists(),
+            "the folder this call created stays"
+        );
+
+        let workspace = shared_workspace(&scratch);
+        let keeps = super::System {
+            remove_acl: |_| {},
+            ..system(None)
+        };
+        let err = super::ensure_private_dir_with(&workspace, relative(), &keeps).unwrap_err();
+        assert!(super::volume_shares_new_files(&err), "{err}");
+        let store = workspace.join(relative()).join("engine.db");
+        assert!(store.exists(), "an existing folder is removed");
+    }
+
+    /// The create succeeds, then the step after it fails while another
+    /// process puts a file in the folder and the volume adds entries. The
+    /// folder stays, and the next call makes it private before using it.
+    #[test]
+    fn a_folder_left_by_a_failed_create_is_made_private_next_time() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-failed").unwrap();
+        let fail = super::System {
+            before_protect: |path| {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                add_entry(path, INHERITED);
+                std::fs::write(path.join("ROOT_BINDING.lock"), b"").unwrap();
+                Err(std::io::Error::other("open failed"))
+            },
+            ..system(None)
+        };
+        let engine_dir = scratch.path().join(relative());
+        super::ensure_private_dir_with(scratch.path(), relative(), &fail).unwrap_err();
+        assert!(has_entries(&engine_dir));
+        super::ensure_private_dir(scratch.path(), relative()).unwrap();
+        assert!(!has_entries(&engine_dir));
+        assert_eq!(mode(&engine_dir), 0o700);
     }
 
     fn add_entry(path: &std::path::Path, entry: &str) {
