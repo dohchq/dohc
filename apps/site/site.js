@@ -60,9 +60,10 @@ const downloadBuilds = {
   },
 };
 
-// Each build links to the releases page until GitHub answers, then to its
-// installer, or to null when GitHub has none to offer.
-Object.values(downloadBuilds).forEach((build) => { build.url = RELEASES_URL; });
+// Each build's url stays undefined until GitHub answers. Then it is the
+// installer, null when GitHub has none to offer, or the releases page when
+// GitHub does not answer. Until then a link leads to the platforms below, so
+// a click that opens a new tab never reaches a missing releases page.
 
 function detectedDesktopPlatform() {
   const fingerprint = `${navigator.userAgentData?.platform ?? ''} ${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
@@ -168,10 +169,10 @@ preferredDownloadKey().then((key) => {
 let resolvingDownloads;
 let downloadPending = false;
 const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((assets) => {
-  // When GitHub does not answer, every build keeps the releases page.
-  if (assets !== null) Object.values(downloadBuilds).forEach((build) => {
-    const asset = assets.find((candidate) => build.matches(candidate.name));
-    build.url = !asset ? null : build.releasesPage ? RELEASES_URL : asset.browser_download_url;
+  Object.values(downloadBuilds).forEach((build) => {
+    const asset = assets?.find((candidate) => build.matches(candidate.name));
+    build.url = assets === null || (asset && build.releasesPage) ? RELEASES_URL
+      : asset?.browser_download_url ?? null;
   });
   refreshDownloadLinks();
 });
@@ -187,7 +188,6 @@ for (const link of document.querySelectorAll('[data-download-primary], [data-dow
     if (!canResolve() && link.matches('[data-download-primary]')) return;
     event.preventDefault();
     if (downloadPending) return;
-    if (!canResolve()) { location.assign(RELEASES_URL); return; }
     downloadPending = true;
     document.querySelector('[data-download-status]')?.remove();
     const label = link.querySelector('[data-download-primary-label], .download-card-action');

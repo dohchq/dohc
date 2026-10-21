@@ -78,7 +78,7 @@ describe('download architecture', () => {
     await mount('#downloads');
     const card = document.querySelector(`[data-download-card="${key}"]`);
     expect(fetch).not.toHaveBeenCalled();
-    expect(card.href).toBe('https://github.com/dohchq/dohc/releases');
+    expect(card.getAttribute('href')).toBe('#downloads');
     card.dispatchEvent(new Event('pointerenter'));
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(card.href).toBe(href));
@@ -194,7 +194,7 @@ it('opens the releases page for a Mac of unknown architecture once a Mac build e
   expect(card.hasAttribute('aria-busy')).toBe(false);
 });
 
-it('leaves modified download activations to the browser', async () => {
+it('leaves modified download activations to the browser, linked to the platforms until GitHub answers', async () => {
   const navigate = vi.fn();
   vi.stubGlobal('location', { assign: navigate });
   await mount('#downloads');
@@ -202,6 +202,7 @@ it('leaves modified download activations to the browser', async () => {
   // Observe prevention before blocking jsdom's own unimplemented navigation.
   let prevented;
   card.addEventListener('click', event => { prevented = event.defaultPrevented; event.preventDefault(); });
+  expect(card.getAttribute('href')).toBe('#downloads');
   card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
   expect(prevented).toBe(false);
   expect(fetch).not.toHaveBeenCalled();
