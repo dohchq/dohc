@@ -71,10 +71,17 @@ const pruned = new Set<string>();
 export function scheduleRecoveryPrune(root: string): void {
   if (pruned.has(root)) return;
   pruned.add(root);
-  setImmediate(() => { void prune(root).catch(() => undefined); });
+  setImmediate(() => prune(root).catch(() => undefined));
 }
 async function prune(root: string): Promise<void> {
-  const dir = await trashDir(root);
+  const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
+  if (!metadata) return;
+  const dir = join(metadata, "trash");
+  const entry = await info(dir);
+  if (!entry) return;
+  if (!entry.isDirectory() || entry.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) {
+    throw new Error("Cannot undo the delete. The workspace trash must be a real folder inside this workspace.");
+  }
   for (const name of await readdir(dir)) {
     if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
     try {
