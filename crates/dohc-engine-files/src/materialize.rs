@@ -2238,7 +2238,7 @@ fn job_staging_dir(
     create: bool,
 ) -> Result<PathBuf, MaterializeError> {
     let Some(rel) = store.staging_location(job_id)? else {
-        return staging_dir(root, create);
+        return checked_staging_dir(root, create);
     };
     let path = Path::new(&rel);
     if path.is_absolute()
@@ -2977,14 +2977,19 @@ fn sync_staged(
 /// The staging directory under an already-canonicalized root. Every
 /// component must be a real directory; `create` makes the missing ones.
 fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = checked_staging_dir(root, create)?;
+    #[cfg(windows)]
+    readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
+    Ok(dir)
+}
+
+fn checked_staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
     let dir = root.join(STAGING_DIR);
     if create {
         walk_target_components(root, &dir, ensure_real_directory)?;
     } else {
         ensure_target_symlink_free(root, &dir)?;
     }
-    #[cfg(windows)]
-    readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
     Ok(dir)
 }
 
@@ -3095,6 +3100,8 @@ fn rowless_staged(
     let mut found = Vec::new();
     let names = store.displacement_names()?;
     for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
         let entry = entry.map_err(|err| MaterializeError::io(staging, &err))?;
         let Ok(name) = entry.file_name().into_string() else {
             continue;
@@ -3966,6 +3973,9 @@ fn recover_job_displacements(
     let mut rowless = Vec::new();
     for n in 0..MAX_DISPLACED_NAMES {
         let name = staged_name(&job.job_id, n);
+        #[cfg(windows)]
+        readonly_link::recover_one(&dir.join(&name), &root.join(&job.target_path))
+            .map_err(|err| MaterializeError::io(&dir, &err))?;
         if !taken.contains(&name) && entry_exists(&dir.join(&name))? {
             rowless.push(name);
         }

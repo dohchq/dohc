@@ -35,6 +35,7 @@ pub(super) struct RewriteState {
     stops: Mutex<HashMap<String, usize>>,
     publishers: Mutex<HashSet<(String, String)>>,
     deferred_placements: Mutex<HashSet<String>>,
+    placement_failures: Mutex<HashMap<String, usize>>,
 }
 pub(super) struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {

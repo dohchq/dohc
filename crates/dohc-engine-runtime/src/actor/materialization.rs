@@ -434,7 +434,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) selected_seen: usize,
-    pub(super) deferred: HashSet<String>,
+    pub(super) hard_errors: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -637,13 +637,72 @@ pub(super) fn replay_pending_materializations(
     selected: Option<&HashSet<String>>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    replay_materializations(
+        store,
+        root_dir,
+        scope,
+        now_ms,
+        faults,
+        selected,
+        superseded_after_projection_is_drained,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replay_publication_materializations(
+    store: &mut EngineStore,
+    root: &std::path::Path,
+    workspace: &str,
+    holds: &dohc_engine_files::PlacementHolds,
+    recorder: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    selected: &HashSet<String>,
+) -> Result<MaterializationReplaySummary, RuntimeError> {
+    let summary = store.with_materialization_status_batch(|store| {
+        replay_materializations(
+            store,
+            root,
+            MaterializationReplayScope {
+                holds: Some(holds),
+                workspace_id: workspace,
+                self_writes: Some(recorder),
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+                planned_against_active_heads: false,
+            },
+            now_ms,
+            faults,
+            Some(selected),
+            false,
+            false,
+        )
+    })?;
+    // Statuses must reach the ledger before a successful settle can reconcile.
+    reconcile_selected_settlement_attempts(store, workspace, selected, now_ms, faults)?;
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_materializations(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    scope: MaterializationReplayScope<'_>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    selected: Option<&HashSet<String>>,
+    superseded_after_projection_is_drained: bool,
+    workspace_recovery: bool,
+) -> Result<MaterializationReplaySummary, RuntimeError> {
     if store.is_passive() {
         return Ok(MaterializationReplaySummary {
             parked: 0,
             completed: 0,
             failed: 0,
             selected_seen: 0,
-            deferred: HashSet::new(),
+            hard_errors: Vec::new(),
         });
     }
     let loaded_holds;
@@ -654,22 +713,32 @@ pub(super) fn replay_pending_materializations(
             &loaded_holds
         }
     };
-    // A crash can leave a replace half done, including for a job that will not
-    // run again. Resolve those first, so no displaced file is left unsettled.
-    recover_displacements(
-        store,
-        root_dir,
-        Some(scope.workspace_id),
-        &MaterializeOptions {
-            holds: Some(holds),
-            policy: DurabilityPolicy::per_os(),
-            replacer: &StdReplacer,
-            backoff: &StdBackoff,
+    if workspace_recovery {
+        // A crash can leave a replace half done, including for a job that will not
+        // run again. Resolve those first, so no displaced file is left unsettled.
+        recover_displacements(
+            store,
+            root_dir,
+            Some(scope.workspace_id),
+            &MaterializeOptions {
+                holds: Some(holds),
+                policy: DurabilityPolicy::per_os(),
+                replacer: &StdReplacer,
+                backoff: &StdBackoff,
+                now_ms,
+                faults,
+            },
+        )?;
+        reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+    } else {
+        reconcile_selected_settlement_attempts(
+            store,
+            scope.workspace_id,
+            selected.unwrap(),
             now_ms,
             faults,
-        },
-    )?;
-    reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+        )?;
+    }
     let mut jobs = if let Some(selected) = selected {
         let mut jobs = selected
             .iter()
@@ -704,7 +773,7 @@ pub(super) fn replay_pending_materializations(
             completed: 0,
             failed: 0,
             selected_seen: 0,
-            deferred: HashSet::new(),
+            hard_errors: Vec::new(),
         };
         let mut secret_key: Option<SecretDataKey> = None;
         // Replay changes disk and the job ledger, never active tips.
@@ -1090,18 +1159,21 @@ pub(super) fn replay_pending_materializations(
                                 StorageError::FileLocked
                             )
                     ) {
-                        summary.deferred.insert(job.job_id.clone());
-                        eprintln!(
-                            "engine: placement deferred until next open for {}: {error}",
-                            job.target_path
-                        );
+                        summary
+                            .hard_errors
+                            .push((job.job_id.clone(), format!("{}: {error}", job.target_path)));
                     }
                 }
             }
         }
-        reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+        if workspace_recovery {
+            reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+        }
         Ok(summary)
     })()?;
+    if !workspace_recovery {
+        return Ok(summary);
+    }
     let checked_jobs = store.read_with(|conn| {
         let mut stmt = conn
             .prepare(
@@ -1313,6 +1385,51 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
         PostCommitMaterializeOutcome::Conflict => 4,
         PostCommitMaterializeOutcome::Error => 5,
     }
+}
+
+fn reconcile_selected_settlement_attempts(
+    store: &mut EngineStore,
+    workspace: &str,
+    selected: &HashSet<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    for id in selected {
+        let Some(moment) = id.strip_prefix("ydoc-mat_") else {
+            continue;
+        };
+        let key = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT d.workspace_id,d.version_id,d.object_id FROM moments m
+             JOIN ydoc_docs d ON d.workspace_id=m.workspace_id AND d.version_id=m.version_id
+             AND d.object_id=m.object_id AND d.settle_seq=m.moment_order
+             JOIN materialization_jobs j ON j.job_id='ydoc-mat_'||m.moment_id
+             WHERE m.moment_id=?1 AND d.workspace_id=?2 AND d.settle_prior_update_seq IS NOT NULL
+             AND j.status!='pending'",
+                params![moment, workspace],
+                |r| {
+                    Ok(dohc_engine_collab::DocKey {
+                        workspace_id: r.get(0)?,
+                        version_id: r.get(1)?,
+                        object_id: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+        })?;
+        if let Some(key) = key
+            && matches!(
+                store.write_with(faults, |tx| {
+                    dohc_engine_collab::author_coverage::reconcile_in(tx, &key, now_ms)
+                })?,
+                dohc_engine_storage::TxnOutcome::Crashed { .. }
+            )
+        {
+            return Err(RuntimeError::OperationCrashed);
+        }
+    }
+    Ok(())
 }
 
 fn reconcile_settlement_attempts(

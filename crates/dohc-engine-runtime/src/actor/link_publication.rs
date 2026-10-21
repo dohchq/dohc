@@ -1,5 +1,5 @@
 //! Publish committed link rewrites without holding the actor for the whole pass.
-use super::super::materialization::{MaterializationReplayScope, replay_pending_materializations};
+use super::super::materialization::replay_publication_materializations;
 use super::*;
 
 pub(super) struct Publication {
@@ -25,7 +25,10 @@ impl ActorHandle {
         let actor = self.clone();
         tokio::spawn(async move {
             let mut cursor = 0;
+            let mut cursor_version = String::new();
+            let mut retry = false;
             let mut backoff = Duration::from_millis(25);
+            let holds = Arc::new(Mutex::new(None::<(u64, dohc_engine_files::PlacementHolds)>));
             while actor.lifecycle() == super::super::LifecycleState::Ready {
                 // Close may hold a gate while it drains the actor.
                 let gates = tokio::time::timeout(Duration::from_secs(1), async {
@@ -38,72 +41,86 @@ impl ActorHandle {
                 let p = publication.clone();
                 let state = actor.link_rewrites.clone();
                 let turn_key = key.clone();
+                let holds = holds.clone();
+                let prior_version = cursor_version.clone();
                 let outcome = actor.run(move |store, _| {
                     let _gates = gates;
                     #[cfg(test)]
                     let mut turn = tests::publication::Turn::start(&p.workspace);
                     let stopped = store.read_with(|conn| conn.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",
-                            params![p.workspace, p.operation], |r| r.get::<_, bool>(0))
-                            .map_err(StorageError::corrupt_public))?;
+                        "SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",
+                        params![p.workspace, p.operation], |r| r.get::<_, bool>(0))
+                        .map_err(StorageError::corrupt_public))?;
                     if !stopped && state.stops.lock().unwrap().contains_key(&p.operation) {
-                        return Ok(Some((0, false)));
+                        return Ok(Some((0, false, prior_version)));
                     }
                     let version = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
+                    let after = if version == prior_version { cursor } else { 0 };
                     let job: Option<(i64, String)> = if stopped { None } else {
                         store.read_with(|conn| {
                             let mut stmt = conn.prepare_cached(
-                            "SELECT m.moment_order,j.job_id FROM moments m JOIN materialization_jobs j
-                             ON j.job_id IN ('authored-mat_'||m.moment_id,'ydoc-mat_'||m.moment_id)
-                             WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.version_id=?3
-                             AND m.operation='write' AND m.moment_order>?4 AND j.workspace_id=?1 AND j.status='pending'
-                             AND j.job_id NOT IN (SELECT value FROM json_each(?5))
-                             ORDER BY m.moment_order LIMIT 1").map_err(StorageError::corrupt_public)?;
-                            stmt.query_row(params![p.workspace,p.operation,version,cursor,
-                                serde_json::to_string(&*state.deferred_placements.lock().unwrap()).unwrap()],
-                                |r| Ok((r.get(0)?,r.get(1)?)))
-                            .optional().map_err(StorageError::corrupt_public)
+                                "SELECT m.moment_order,j.job_id FROM moments m JOIN materialization_jobs j
+                                 ON j.job_id IN ('authored-mat_'||m.moment_id,'ydoc-mat_'||m.moment_id)
+                                 WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.version_id=?3
+                                 AND m.operation='write' AND m.moment_order>?4 AND j.workspace_id=?1 AND j.status='pending'
+                                 ORDER BY m.moment_order LIMIT 1").map_err(StorageError::corrupt_public)?;
+                            stmt.query_row(params![p.workspace,p.operation,version,after],
+                                |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(StorageError::corrupt_public)
                         })?
                     };
                     let Some((order, id)) = job else {
-                        if !stopped && cursor != 0 { return Ok(Some((0, false))); }
-                        // Remove admission in this actor turn, before another commit can land.
+                        if !stopped && after != 0 && retry { return Ok(Some((0, false, version))); }
                         state.publishers.lock().unwrap().remove(&turn_key);
                         return Ok(None);
                     };
+                    if state.deferred_placements.lock().unwrap().contains(&id) {
+                        return Ok(Some((order, true, version)));
+                    }
                     #[cfg(test)]
                     { turn.jobs = 1; turn.ready(); }
                     #[cfg(not(test))]
                     let faults: Arc<dyn FaultInjector> = Arc::new(dohc_engine_storage::NoFaults);
                     #[cfg(test)]
                     let faults = tests::publication::faults(&p.workspace);
+                    // Reuse blockers until capture changes a hold. Unrelated
+                    // actor writes must not reload the workspace snapshot.
+                    let changes = store.read_with(dohc_engine_storage::capture_file_holds::generation_in).map_err(StorageError::corrupt_public)?;
+                    let mut cached = holds.lock().unwrap();
+                    if cached.as_ref().is_none_or(|(before, _)| *before != changes) {
+                        *cached = Some((changes, dohc_engine_files::PlacementHolds::from_holds(&p.workspace, &store.read_with(|conn| dohc_engine_storage::capture_file_holds::list_in(conn, &p.workspace))?)));
+                    }
                     let selected = HashSet::from([id.clone()]);
-                    let summary = store.with_materialization_status_batch(|store| {
-                        replay_pending_materializations(
-                            store, &p.root,
-                            MaterializationReplayScope {
-                                holds: None, workspace_id: &p.workspace,
-                                self_writes: Some(p.recorder.as_ref()), progress: None,
-                                file_outcomes_settled: false, released_hold_paths: None,
-                                planned_against_active_heads: false,
-                            },
-                            crate::links::now_ms(), faults.as_ref(), Some(&selected), false,
-                        )
-                    })?;
-                    state.deferred_placements.lock().unwrap().extend(summary.deferred);
+                    let summary = replay_publication_materializations(
+                        store, &p.root, &p.workspace, &cached.as_ref().unwrap().1,
+                        p.recorder.as_ref(), crate::links::now_ms(), faults.as_ref(), &selected,
+                    )?;
+                    for (job, error) in summary.hard_errors {
+                        let mut failures = state.placement_failures.lock().unwrap();
+                        let attempts = failures.entry(job.clone()).or_default();
+                        *attempts += 1;
+                        if *attempts >= 3 && state.deferred_placements.lock().unwrap().insert(job) {
+                            eprintln!("engine: placement deferred until next open after {attempts} attempts: {error}");
+                        }
+                    }
                     let completed = store.load_materialization_job(&id)?
                         .is_none_or(|job| job.status != dohc_engine_storage::JobStatus::Pending);
-                    Ok(Some((order, completed)))
+                    if completed { state.placement_failures.lock().unwrap().remove(&id); }
+                    let done = completed || state.deferred_placements.lock().unwrap().contains(&id);
+                    Ok(Some((order, done, version)))
                 }).await;
                 match outcome {
                     Ok(None) => return,
-                    Ok(Some((next, completed))) => {
+                    Ok(Some((next, completed, version))) => {
                         cursor = next;
-                        if completed {
-                            backoff = Duration::from_millis(25);
-                        } else if next == 0 {
+                        cursor_version = version;
+                        if next == 0 {
+                            retry = false;
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2).min(Duration::from_secs(1));
+                        } else if completed {
+                            backoff = Duration::from_millis(25);
+                        } else {
+                            retry = true;
                         }
                     }
                     Err(_) if actor.lifecycle() != super::super::LifecycleState::Ready => break,

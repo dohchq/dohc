@@ -6,6 +6,8 @@ struct Probe {
     turns: Vec<(usize, u128)>,
     pause: Option<(Arc<tokio::sync::Notify>, Receiver<()>)>,
     faults: Option<Arc<dyn FaultInjector>>,
+    work: Vec<StoreWork>,
+    before_attempt: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 fn placements() -> &'static Mutex<HashMap<String, Probe>> {
     static DATA: OnceLock<Mutex<HashMap<String, Probe>>> = OnceLock::new();
@@ -15,18 +17,33 @@ pub(in crate::actor) struct Turn {
     ws: String,
     start: Instant,
     paused_ns: u128,
+    staging_before: u64,
     pub(in crate::actor) jobs: usize,
 }
 impl Turn {
     pub(in crate::actor) fn start(ws: &str) -> Self {
+        STORE_WORK.with(|cell| cell.set(Some(StoreWork::default())));
         Self {
             ws: ws.into(),
             start: Instant::now(),
             paused_ns: 0,
+            staging_before: dohc_engine_storage::capture_phase::snapshot()
+                .count("publication_staging_entries"),
             jobs: 0,
         }
     }
     pub(in crate::actor) fn ready(&mut self) {
+        let (hook, attempt) = {
+            let mut data = placements().lock().unwrap();
+            let probe = data.entry(self.ws.clone()).or_default();
+            (
+                probe.before_attempt.clone(),
+                probe.turns.iter().map(|(n, _)| n).sum::<usize>() + 1,
+            )
+        };
+        if let Some(hook) = hook {
+            hook(attempt);
+        }
         let pause = placements()
             .lock()
             .unwrap()
@@ -44,6 +61,17 @@ impl Turn {
 }
 impl Drop for Turn {
     fn drop(&mut self) {
+        let mut work = STORE_WORK.with(|cell| cell.take()).unwrap();
+        work.staging_entries = dohc_engine_storage::capture_phase::snapshot()
+            .count("publication_staging_entries")
+            - self.staging_before;
+        placements()
+            .lock()
+            .unwrap()
+            .entry(self.ws.clone())
+            .or_default()
+            .work
+            .push(work);
         placements()
             .lock()
             .unwrap()
@@ -575,8 +603,8 @@ async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reop
             .iter()
             .map(|(n, _)| n)
             .sum::<usize>(),
-        2,
-        "hard error must be attempted once while other jobs still publish"
+        4,
+        "hard error gets three attempts while other jobs still publish"
     );
     assert_eq!(
         std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
@@ -600,8 +628,8 @@ async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reop
             .iter()
             .map(|(n, _)| n)
             .sum::<usize>(),
-        2,
-        "receipt replay must not retry a hard failure"
+        4,
+        "receipt replay must not retry a deferred hard failure"
     );
     #[cfg(windows)]
     std::fs::remove_dir(&path).unwrap();
@@ -612,4 +640,218 @@ async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reop
     f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
     f.wait_disk(2).await;
     f.close().await;
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
+struct StoreWork {
+    reads: usize,
+    writes: usize,
+    rows: usize,
+    staging_entries: u64,
+}
+thread_local! {
+    static STORE_WORK: std::cell::Cell<Option<StoreWork>> = const { std::cell::Cell::new(None) };
+}
+fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
+    STORE_WORK.with(|cell| {
+        let Some(mut work) = cell.get() else { return };
+        match event {
+            rusqlite::trace::TraceEvent::Stmt(_, sql) => {
+                let sql = sql.trim().to_ascii_uppercase();
+                let sql = sql.strip_prefix("-- ").unwrap_or(&sql);
+                if sql.starts_with("SELECT") || sql.starts_with("WITH") {
+                    work.reads += 1;
+                } else if ["INSERT", "UPDATE", "DELETE", "REPLACE"]
+                    .iter()
+                    .any(|p| sql.starts_with(p))
+                {
+                    work.writes += 1;
+                }
+            }
+            rusqlite::trace::TraceEvent::Row(stmt) => {
+                let sql = stmt.sql();
+                if !["PRAGMA main.wal_checkpoint(", "PRAGMA busy_timeout"]
+                    .iter()
+                    .any(|p| {
+                        sql.trim_start()
+                            .get(..p.len())
+                            .is_some_and(|s| s.eq_ignore_ascii_case(p))
+                    })
+                {
+                    work.rows += 1;
+                }
+            }
+            _ => {}
+        }
+        cell.set(Some(work));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pending_jobs() {
+    let mut counts = Vec::new();
+    let mut initialization = Vec::new();
+    for pending in [20, 2000] {
+        let sources = pending + 1;
+        let f = Fixture::new(sources, sources);
+        let _index = f.actor.hold_link_drain();
+        let ws = f.ws.clone();
+        f.actor.run(move |store, _| {
+            store.write_with(&NoFaults, |tx| tx.execute(
+                "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+            ).map_err(StorageError::persist_public))?;
+            Ok(())
+        }).await.unwrap();
+        let hold = f.capture.clone().lock_owned().await;
+        f.pass("publication-work", Arc::new(NoFaults))
+            .await
+            .unwrap();
+        let staging = f.root.join(".dohc/engine/displaced");
+        std::fs::create_dir_all(&staging).unwrap();
+        for i in 0..pending {
+            std::fs::write(staging.join(format!("unrelated-{i}")), []).unwrap();
+        }
+        let ws = f.ws.clone();
+        f.actor.run(move |store, _| {
+            store.write_with(&NoFaults, |tx| {
+                // Model committed open-document attempts, all still awaiting disk.
+                tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,settle_seq,last_settled_sha,updated_at_ms,settled_update_seq,settle_prior_update_seq)
+                    SELECT m.workspace_id,m.version_id,m.object_id,'plaintext',m.moment_order,j.content_sha256,3,0,0
+                    FROM moments m JOIN materialization_jobs j ON j.job_id='authored-mat_'||m.moment_id
+                    WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND j.status='pending'",
+                    params![ws,OP]).map_err(StorageError::persist_public)?;
+                tx.execute("UPDATE materialization_jobs SET job_id='ydoc-mat_'||substr(job_id,14)
+                    WHERE workspace_id=?1 AND job_id LIKE 'authored-mat_%' AND status='pending'",
+                    [&ws]).map_err(StorageError::persist_public)?;
+                tx.execute("INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested)
+                    SELECT workspace_id,version_id,object_id,path,blob_sha256,0,'ydoc-resolution-not-representable',3,1,0 FROM snapshots
+                    WHERE workspace_id=?1 AND object_id LIKE 'source-%' AND object_id NOT IN ('source-0000','source-0001')",
+                    [&ws]).map_err(StorageError::persist_public)?;
+                Ok::<_, RuntimeError>(())
+            })?;
+            store.read_with(|conn| {
+                let count: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE workspace_id=?1 AND status='pending'",[&ws],|r|r.get(0))?;
+                assert_eq!(count, sources as i64);
+                conn.trace_v2(rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW, Some(trace_store_work));
+                Ok::<_, rusqlite::Error>(())
+            }).map_err(StorageError::corrupt_public)?;
+            Ok(())
+        }).await.unwrap();
+        let (entered, release) = pause(&f.ws);
+        drop(hold);
+        let first = finish_one_turn(&f, entered, release).await;
+        initialization.push(placements().lock().unwrap()[&f.ws].work[0]);
+        let ws = f.ws.clone();
+        f.actor.run(move |store,_| {
+            store.read_with(|conn| {
+                let actual: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE workspace_id=?1 AND status='pending'",[&ws],|r|r.get(0))?;
+                assert_eq!(actual, pending as i64, "measure exactly this pending population");
+                Ok::<_, rusqlite::Error>(())
+            }).map_err(StorageError::corrupt_public)?;
+            // An unrelated editor marker write must not reload every hold.
+            store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET updated_at_ms=updated_at_ms+1 WHERE workspace_id=?1 AND object_id='source-0000'",[&ws]).map_err(StorageError::persist_public))?;
+            Ok(())
+        }).await.unwrap();
+        let (entered, release) = pause(&f.ws);
+        drop(first);
+        let next = finish_one_turn(&f, entered, release).await;
+        f.actor.run(|_, _| Ok(())).await.unwrap();
+        let ws = f.ws.clone();
+        f.actor.run(move |store, _| {
+            let prior: Option<i64> = store.read_with(|conn| conn.query_row(
+                "SELECT settle_prior_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND object_id='source-0001'",
+                [&ws], |row| row.get(0)).map_err(StorageError::corrupt_public))?;
+            assert_eq!(prior, None, "successful placement reconciles its own settlement after the status batch");
+            Ok(())
+        }).await.unwrap();
+        let probe = placements().lock().unwrap()[&f.ws].work[1];
+        counts.push(probe);
+        eprintln!("PUBLICATION_WORK pending={pending} {probe:?}");
+        f.close().await;
+        drop(next);
+    }
+    let evidence = json!({"pending":[20,2000],"work":counts,"initialization":initialization});
+    if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join("publication-work.json"),
+            evidence.to_string(),
+        )
+        .unwrap();
+    }
+    assert!(counts[0].reads > 0 && counts[0].writes > 0 && counts[0].rows > 0);
+    assert_eq!(
+        counts[0], counts[1],
+        "one placement turn must not scale with pending jobs"
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_turn_retries_a_temporary_staging_error_that_clears_on_the_second_attempt() {
+    let f = Fixture::new(1, 1);
+    let gate = f.capture.clone().lock_owned().await;
+    f.pass("temporary-error", Arc::new(NoFaults)).await.unwrap();
+    let staging = f.root.join(".dohc/engine/displaced");
+    placements()
+        .lock()
+        .unwrap()
+        .entry(f.ws.clone())
+        .or_default()
+        .before_attempt = Some(Arc::new(move |attempt| {
+        if attempt == 1 {
+            if staging.is_dir() {
+                std::fs::remove_dir(&staging).unwrap();
+            }
+            std::fs::write(&staging, "temporarily unavailable").unwrap();
+        } else if attempt == 2 {
+            std::fs::remove_file(&staging).unwrap();
+        }
+    }));
+    drop(gate);
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while !f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
+            f.actor.run(|_, _| Ok(())).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher must finish");
+    let attempts: usize = placements().lock().unwrap()[&f.ws]
+        .turns
+        .iter()
+        .map(|(n, _)| n)
+        .sum();
+    let deferred = f
+        .actor
+        .link_rewrites
+        .deferred_placements
+        .lock()
+        .unwrap()
+        .len();
+    let disk = std::fs::read_to_string(f.root.join("source-0000.md")).unwrap();
+    f.close().await;
+    assert_eq!(
+        attempts, 2,
+        "a temporary hard error must get its second attempt"
+    );
+    assert_eq!(deferred, 0);
+    assert_eq!(disk, "[[new#part|label]] [[./new.md]] [old](old.md)");
+}
+
+async fn finish_one_turn(
+    f: &Fixture,
+    entered: Arc<tokio::sync::Notify>,
+    release: Sender<()>,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    tokio::time::timeout(Duration::from_secs(120), entered.notified())
+        .await
+        .unwrap();
+    let next = f.capture.clone().lock_owned();
+    tokio::pin!(next);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(next.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    next.await
 }
