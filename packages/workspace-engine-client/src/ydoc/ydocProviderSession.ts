@@ -280,8 +280,10 @@ export async function openEngineYdocProviderSession(
       try {
         settledRevision = -1;
         await journalChain;
-        await retryWhileEngineBusy(() => session.resyncIfNeeded(), retrySignal);
-        await session.resendMissingState();
+        await retryWhileEngineBusy(async () => {
+          await session.resyncIfNeeded();
+          await session.resendMissingState();
+        }, retrySignal);
         if (localEditError !== null) throw localEditError;
         const revision = documentRevision;
         const result = await retryWhileEngineBusy(() =>

@@ -2751,6 +2751,53 @@ describe("YdocLiveAdapter", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  // An owner draft's journal write and its recovery resync need the same
+  // capacity. A settle that replays edits left unsent can meet it mid-replay.
+  it("waits out occupied live capacity while a settle replays unsent edits, and sends each edit once", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine();
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      let refuse = (_key: string) => true;
+      const sent: string[] = [];
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            sent.push(request.idempotencyKey ?? "");
+            if (refuse(request.idempotencyKey ?? "")) throw refusal;
+          }
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      await expect(provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first ")),
+        { idempotencyKey: "first" })).rejects.toBe(refusal);
+      await expect(provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc),
+        text => text.insert(text.length, "second")), { idempotencyKey: "second" })).rejects.toBe(refusal);
+      // The replay lands the first edit, then the capacity is taken once.
+      let refused = false;
+      refuse = key => key === "second" && !refused && (refused = true);
+      sent.length = 0;
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "first second" })]);
+      expect(settleErrors).toEqual([]);
+      // The retry resends only the edit the engine did not take.
+      expect(sent).toEqual(["first", "second", "second"]);
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
   it("surfaces a persistent store refusal when its total budget expires", async () => {
     vi.useFakeTimers();
     try {
@@ -2950,27 +2997,32 @@ describe("YdocLiveAdapter", () => {
   it("keeps resending while the store stays busy, and never settles without the text", async () => {
     // The poisoned-chain regression, and the ordering guard with it: no settle
     // may commit while the engine is still missing the text.
-    // Three refusals: the write, its recovery replay, and rung one's resend.
-    // Rung two then finds the store free.
-    const { provider, settled, scheduler } = await openAgainstABusyJournal(
-      "typed against a stubborn store",
-      3,
-    );
+    // Three refusals: the write, its recovery replay, and the settle's first
+    // resend. The settle waits out the busy store and resends.
+    vi.useFakeTimers();
+    try {
+      const { provider, settled, settleErrors, scheduler, methods } = await openAgainstABusyJournal(
+        "typed against a stubborn store",
+        3,
+      );
+      const writes = () => methods.filter(method => method === YDOC_METHOD.recordUpdate).length;
 
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    // Rung one resent and was refused again. Nothing settled behind it.
-    expect(settled).toEqual([]);
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await vi.advanceTimersByTimeAsync(0);
+      // The settle resent and was refused again. Nothing settled behind it.
+      expect(writes()).toBe(3);
+      expect(settled).toEqual([]);
 
-    // The contention clears; the next rung resends and the settle carries it.
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    expect(settled).toHaveLength(1);
-    expect(settled[0]?.content).toContain("typed against a stubborn store");
+      // The contention clears; the settle resends and carries the text.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(writes()).toBe(4);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.content).toContain("typed against a stubborn store");
+      expect(settleErrors).toEqual([]);
 
-    await provider.close({ settle: false });
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
   it("refuses to release a session still holding text the engine never got", async () => {
