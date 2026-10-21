@@ -1039,17 +1039,35 @@ fn reader_activation_and_adoption_reject_receipts_without_reader_source() {
         tx.execute("UPDATE ydoc_owner_activation_sources SET activation_id=?1,descriptor_json=?2", params![id,json]).map_err(write_sql)?;
         Ok::<_, ApplicationError>(())
     }).unwrap();
-    assert!(resume_imported(&mut f, &id, 1_000_000).is_err());
+    assert!(matches!(resume_imported(&mut f, &id, 1_000_000), Err(ApplicationError::Conflict)));
     f.cut.adoption_id = id;
-    assert!(f.adopt().is_err());
+    assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
     assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
 }
 
 #[test]
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
-fn reader_restore_refuses_before_writing_a_fence_or_binding() {
+fn reader_adoption_validates_the_receipts_reader_baseline() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
+    let captured = prove_activation(&mut f, &resolver).unwrap();
+    assert!(captured.source.reader_source);
+    let baseline = Ydoc::wire();
+    baseline.apply(&f.cut.baseline_bytes).unwrap();
+    assert!(baseline.validate_public_baseline(&f.cut.baseline_bytes).is_err());
+    f.cut.adoption_id = captured.activation_id;
+    reader_application_result(|| adopt_owner_committed(
+        &mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10,
+        &NoFaults, Some(&resolver), |_, _, _, _| Ok(()),
+    )).unwrap();
+    assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_can_fence_before_lazy_proof_dispatch() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = Arc::new(reader_resolver());
     let captured = prove_activation(&mut f, &resolver).unwrap();
     f.cut.adoption_id = captured.activation_id;
     reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
@@ -1060,19 +1078,18 @@ fn reader_restore_refuses_before_writing_a_fence_or_binding() {
         origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
         terminal: None, applied_sequence: 0,
     };
-    let before = f.store.read_with(|conn| read_binding(conn, &f.handle.registration.lock().unwrap())).unwrap();
-    let counts = f.counts();
+    let mut receipt = None;
     for reconnect in [false, true] {
         let result = if reconnect {
-            f._owner.fence_restore_after_reconnect(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
         } else {
-            f._owner.fence_restore(&mut f.store, operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
         };
-        assert!(matches!(result, Err(ApplicationError::Collab(CollabError::MarkdownReaderUnavailable))), "{result:?}");
-        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
-        assert_eq!(f.counts(), counts);
-        assert_eq!(f.store.read_with(|conn| read_binding(conn, &f.handle.registration.lock().unwrap())).unwrap(), before);
-        assert!(f.handle.registration.lock().unwrap().live);
+        let result = result.unwrap();
+        if let Some(previous) = &receipt { assert_eq!(previous, &result); }
+        receipt = Some(result);
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+        assert!(!f.handle.registration.lock().unwrap().live);
     }
 }
 fn reader_resolver() -> crate::reader_resolver::ReaderResolver {

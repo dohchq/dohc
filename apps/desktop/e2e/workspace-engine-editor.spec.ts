@@ -339,7 +339,7 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
     await quitDesktop(desktop);
     // Workbench state lives in the workspace, independently of the Electron profile.
     // Remove only this test's reopen intent so capture has no renderer lease.
-    await rm(join(temp.rootPath, ".dohc", "ui-state.json"), { force: true });
+    await rm(join(temp.rootPath, ".dohc", "local", "ui-state.json"), { force: true });
     desktop = await launchDesktopApp({workspace: { ...temp, baseDir: join(temp.baseDir, "fresh-profile") }});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);

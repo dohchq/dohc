@@ -133,13 +133,24 @@ function registerChatFlowHandlers(
           workspaceId: string;
           threadId: string;
           body: string;
+          resolves?: { messageId: string };
         }>(payload),
-      run: async ({ store }, input) =>
-        await store.sendMessage({
+      run: async ({ store }, { resolves, ...input }) => {
+        const message = await store.sendMessage({
           authorActorKey: null,
           ...input,
           author: { kind: "human", displayName: "Sam" },
-        }),
+        });
+        const resolved = resolves
+          ? await store.resolveChatDecision({
+              workspaceId: input.workspaceId,
+              threadId: input.threadId,
+              messageId: resolves.messageId,
+              resolvedByMessageId: message.id,
+            })
+          : undefined;
+        return { message, ...(resolved ? { resolved } : {}) };
+      },
     }),
   );
   ipc.handle(
@@ -172,21 +183,6 @@ function registerChatFlowHandlers(
           upToSequence: number;
         }>(payload),
       run: async ({ store }, input) => await store.markThreadRead(input),
-    }),
-  );
-  ipc.handle(
-    chatOperations.resolveChatDecision.channel,
-    createChatFlowHandler({
-      ...deps,
-      parsePayload: (payload) =>
-        parseWorkspacePayload<{
-          workspaceId: string;
-          threadId: string;
-          messageId: string;
-          resolvedByMessageId: string;
-        }>(payload),
-      run: async ({ store }, input) =>
-        await store.resolveChatDecision(input),
     }),
   );
   ipc.handle(
@@ -340,17 +336,22 @@ describe("main chat IPC live backend", () => {
           }),
         ]);
 
-        const resolution = (await ipc.invoke(chatOperations.sendChatMessage.channel, {
+        const { message: resolution, resolved } = (await ipc.invoke(chatOperations.sendChatMessage.channel, {
           workspaceId: workspace.workspaceId,
           threadId: started.thread.id,
           body: "Use the Rust path",
-        })) as Awaited<ReturnType<LinkedChatStore["sendMessage"]>>;
+          resolves: { messageId: started.message.id },
+        })) as {
+          message: Awaited<ReturnType<LinkedChatStore["sendMessage"]>>;
+          resolved?: Awaited<ReturnType<LinkedChatStore["resolveChatDecision"]>>;
+        };
+        expect(resolved).toMatchObject({ state: "resolved", resolvedByMessageId: resolution.id });
         await expect(
           ipc.invoke(chatOperations.getChatThreadRevision.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
           }),
-        ).resolves.toEqual({ revision: 3 });
+        ).resolves.toEqual({ revision: 4 });
         await expect(
           ipc.invoke(chatOperations.listChatMessages.channel, {
             workspaceId: workspace.workspaceId,
@@ -364,14 +365,6 @@ describe("main chat IPC live backend", () => {
             upToSequence: 2,
           }),
         ).resolves.toMatchObject({ lastReadSequence: 2 });
-        await expect(
-          ipc.invoke(chatOperations.resolveChatDecision.channel, {
-            workspaceId: workspace.workspaceId,
-            threadId: started.thread.id,
-            messageId: started.message.id,
-            resolvedByMessageId: resolution.id,
-          }),
-        ).resolves.toMatchObject({ state: "resolved" });
         await expect(
           ipc.invoke(chatOperations.setChatReaction.channel, {
             workspaceId: workspace.workspaceId,

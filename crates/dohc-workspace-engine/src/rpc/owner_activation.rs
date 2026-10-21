@@ -25,10 +25,8 @@ impl std::fmt::Debug for ActivationOutputGuard {
     }
 }
 impl OutputGuard for ActivationOutputGuard {
-    fn is_current(&self) -> bool {
-        self.connection.is_current()
-            && !self.cancel.is_cancelled()
-            && self.deadline.is_none_or(|limit| Instant::now() < limit)
+    fn is_current_ignoring_cancel(&self) -> bool {
+        self.connection.is_current() && self.deadline.is_none_or(|limit| Instant::now() < limit)
     }
     fn cancel_signal(&self) -> CancelSignal {
         self.cancel.clone()

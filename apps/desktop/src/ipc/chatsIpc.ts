@@ -14,7 +14,6 @@ import {
   GetChatThreadRevisionResult,
   SendChatMessageResult,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionResult,
   ListChatThreadAttachmentsResult,
   ListChatChannelsResult,
   ListChatFollowsResult,
@@ -33,6 +32,7 @@ import {
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { registerOperations, type OperationHandlers } from "./operationTable";
+import { ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -406,7 +406,7 @@ export function registerChatsIpcHandlers<
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    const message = await chatWrites.sendMessage(chatWritePlace(scope), {
+    const reply = {
       writer: RENDERER,
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
@@ -419,11 +419,17 @@ export function registerChatsIpcHandlers<
           (path) => chatFileObjectId(scope, path),
           input.fileReferences,
         ),
-    });
+    };
+    const sent = input.resolves
+      ? await chatWrites.answer(chatWritePlace(scope), { ...reply, resolves: input.resolves })
+      : { message: await chatWrites.sendMessage(chatWritePlace(scope), reply) };
+    const { message } = sent;
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+      ...("decision" in sent ? { resolved: chatDecisionForIpc(sent.decision) } : {}),
+      ...("failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {}),
       ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   };
@@ -437,30 +443,6 @@ export function registerChatsIpcHandlers<
       input.threadId,
     );
     return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
-  };
-
-  const resolveChatDecision: ChatHandler<"resolveChatDecision"> = async (input) => {
-    // Reads are reachable from a share view; this mutation is not.
-    const scope = await requireChatScope(input.workspaceId);
-    const decision = await chatWrites.resolveDecision(chatWritePlace(scope), {
-      threadId: input.threadId,
-      messageId: input.messageId,
-      resolvedByMessageId: input.resolvedByMessageId,
-      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-    });
-    return ResolveChatDecisionResult.parse({
-      decision: {
-        threadId: decision.threadId,
-        messageId: decision.messageId,
-        state: decision.state,
-        ...(decision.resolvedByMessageId
-          ? { resolvedByMessageId: decision.resolvedByMessageId }
-          : {}),
-        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
-        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-        atMs: decision.atMs,
-      },
-    });
   };
 
   const listChatThreadAttachments: ChatHandler<"listChatThreadAttachments"> = async (input) => {
@@ -1012,7 +994,6 @@ export function registerChatsIpcHandlers<
     createFileChat,
     getChatThreadRevision,
     listChatThreadDecisions,
-    resolveChatDecision,
     listChatThreadAttachments,
     listChatChannels,
     listChatFollows,

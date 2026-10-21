@@ -24,6 +24,7 @@ import { listFiles } from "../workspaces/workspaceFiles";
 import { shareViewWriteScopeOf, workspaceWriteRefusal, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 type Sender = { id: number };
 type Event = { sender: Sender; trusted: boolean };
@@ -187,6 +188,8 @@ describe("registered workspace file handlers", () => {
 
   it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     const root = h.workspace.rootPath;
     const foreignPath = collision === "root" ? "app/notes.txt"
       : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
@@ -228,6 +231,8 @@ describe("registered workspace file handlers", () => {
 
   it("keeps foreign descendants added to a created folder before rollback", async () => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     await expect(createFirstAppFiles({
       workspaceId: "workspace", files: [], folders: [],
       mutations: {

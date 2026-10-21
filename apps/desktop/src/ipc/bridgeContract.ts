@@ -826,7 +826,7 @@ export type DeleteWorkspacePathPayload = z.infer<
 
 // With emptyFolderOnly, false also means an empty folder was removed or a
 // nonempty folder was preserved. This mode never trashes descendants.
-// trashed: true = OS trash; false = the .dohc/trash fallback (cross-
+// trashed: true = OS trash; false = the .dohc/local/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a
 // file the workspace owns. There the change is what can be taken back: the
@@ -2057,6 +2057,11 @@ export const SendChatMessagePayload = z.object({
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  // The question or poll this message answers, and the choice it picks.
+  resolves: z.object({
+    messageId: OPAQUE_ID,
+    chosenOption: z.string().min(1).max(200).optional(),
+  }).optional(),
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
 
@@ -2080,6 +2085,11 @@ export const SendChatMessageResult = z.object({
   // The question or poll the message asked, read back after the write.
   // Absent when it asked none, or when that read failed.
   decision: ChatDecisionRecord.optional(),
+  // The question or poll the message answered. One another message resolved
+  // first comes back as that message left it.
+  resolved: ChatDecisionRecord.optional(),
+  // Why the answer failed. The message landed and the question stays open.
+  resolveFailure: z.string().optional(),
 });
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
@@ -2096,24 +2106,6 @@ export const ListChatThreadDecisionsResult = z.object({
 });
 export type ListChatThreadDecisionsResult = z.infer<
   typeof ListChatThreadDecisionsResult
->;
-
-export const ResolveChatDecisionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  threadId: OPAQUE_ID,
-  messageId: OPAQUE_ID,
-  resolvedByMessageId: OPAQUE_ID,
-  chosenOption: z.string().min(1).max(200).optional(),
-});
-export type ResolveChatDecisionPayload = z.infer<
-  typeof ResolveChatDecisionPayload
->;
-
-export const ResolveChatDecisionResult = z.object({
-  decision: ChatDecisionRecord,
-});
-export type ResolveChatDecisionResult = z.infer<
-  typeof ResolveChatDecisionResult
 >;
 
 export const ListChatThreadAttachmentsPayload = z.object({
@@ -5804,7 +5796,7 @@ export const UpdateCheckResult = z.object({
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 
-// Per-workspace UI state persisted to .dohc/ui-state.json by MAIN (the
+// Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
 // validateUserWritePath refuses reserved paths). The clamp/cap constants are
 // the pure workbench model's, so contract and model can never disagree.

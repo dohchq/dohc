@@ -68,6 +68,7 @@ pub fn retain_owner_base_source_in_tx(
                 path,
                 digest: &source.blob_sha256,
                 lineage: baseline_digest,
+                restore_fence: None,
                 authority: baseline_digest,
             },
             resolver,

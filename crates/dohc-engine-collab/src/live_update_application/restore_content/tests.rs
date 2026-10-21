@@ -55,6 +55,576 @@ use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
 use serde_json::json;
 
+fn reader_fixture() -> (Fixture, String) {
+    let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).unwrap();
+    (Fixture::with_doc(doc, &source), source)
+}
+
+fn store_restore_artifact(f: &mut Fixture, source: &str) {
+    dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "a.md".into(),
+                text: source.into(),
+                moment_id: "reader-current".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+}
+
+fn reader_result<T>(
+    mut action: impl FnMut() -> Result<T, ApplicationError>,
+) -> Result<T, ApplicationError> {
+    for _ in 0..5 {
+        match action() {
+            Err(ApplicationError::Collab(CollabError::MarkdownReaderPending(p))) => {
+                crate::reader_resolver::tests::run(p.resolve())
+            }
+            result => return result,
+        }
+    }
+    panic!("restore proof did not converge");
+}
+
+fn impossible_prefix_refuses_before_fencing(case: &str) {
+    let (mut f, _) = reader_fixture();
+    match case {
+        "no-reader" => f.resolver = None,
+        "missing" => damage(&f, "DELETE FROM moments"),
+        "pre-rename" => damage(&f, "UPDATE moments SET path='old.md'"),
+        "oversized" => damage(&f, "UPDATE blobs SET byte_length=3000000 WHERE sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')"),
+        _ => unreachable!(),
+    }
+    let before: String = f.store.read_with(|conn| conn.query_row(
+        "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
+    let input = f.fence_input();
+    assert!(
+        matches!(
+            f.owner.fence_restore(
+                &mut f.store,
+                f.resolver.as_ref(),
+                input,
+                f.host.clone(),
+                50,
+                &NoFaults
+            ),
+            Err(ApplicationError::Collab(
+                CollabError::MarkdownReaderUnavailable
+            ))
+        ),
+        "{case}"
+    );
+    assert_eq!(
+        f.store.table_row_count("live_restore_fences").unwrap(),
+        0,
+        "{case}"
+    );
+    let after: String = f.store.read_with(|conn| conn.query_row(
+        "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
+    assert_eq!(before, after, "{case}");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_no_reader_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("no-reader");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_missing_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("missing");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_pre_rename_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("pre-rename");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_oversized_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("oversized");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_settlement_retries_a_verdict_evicted_between_transactions() {
+    let (mut f, _) = reader_fixture();
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(&mut f, prep);
+    reader_result(|| apply_restore(&mut f, input.clone(), &NoFaults)).unwrap();
+    reader_result(|| {
+        f.owner.with_restore_settlement(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |_, _| Ok::<_, ApplicationError>(()),
+        )
+    })
+    .unwrap();
+    let resolver = f.resolver.clone().unwrap();
+    let mut evicted = false;
+    let result = f.owner.with_restore_settlement(
+        &mut f.store,
+        f.resolver.as_ref(),
+        input.clone(),
+        f.host.clone(),
+        2_000_000,
+        100,
+        |store, audit| {
+            crate::reader_resolver::tests::evict_with_other_snapshot_misses(&resolver);
+            evicted = true;
+            record_test_projection(store, audit, "after-eviction")
+        },
+    );
+    assert!(evicted, "the miss must occur after capturing the audit");
+    let Err(ApplicationError::Collab(CollabError::MarkdownReaderPending(pending))) = result else {
+        panic!("settlement must preserve the retryable reader miss: {result:?}");
+    };
+    crate::reader_resolver::tests::run(pending.resolve());
+    reader_result(|| {
+        f.owner.with_restore_settlement(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "after-eviction"),
+        )
+    })
+    .unwrap();
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_prepares_against_selected_history_without_changing_the_live_doc() {
+    let (mut f, source) = reader_fixture();
+    let edit = f.doc.richdoc_append_paragraph("later accepted body");
+    f.accept(edit, 3);
+    let input = f.freeze(f.baseline_point.clone());
+    let before = f.canonical().canonical_content_sha256();
+    let before_vector = f.canonical().encode_state_vector();
+    let proposal = reader_result(|| f.prepare(input.clone())).unwrap();
+    if let Ok(path) = std::env::var("DOHC_RESTORE_FIXTURE") {
+        let mut value = serde_json::to_value(&proposal).unwrap();
+        value["source"] = json!(source);
+        value["acceptedCheckpoint"] = json!(f.canonical().encode_full_state());
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    assert_eq!(
+        proposal.receipt().point.markdown_digest,
+        hex_sha256(source.as_bytes())
+    );
+    assert_eq!(f.canonical().canonical_content_sha256(), before);
+    assert_eq!(f.canonical().encode_state_vector(), before_vector);
+    let restored = Ydoc::wire();
+    restored.apply(proposal.frozen_state_bytes()).unwrap();
+    restored.apply(proposal.candidate_bytes()).unwrap();
+    assert!(restored.has_reader_source());
+    assert_eq!(restored.project(ContentKind::Richdoc).unwrap().content, {
+        let p = Ydoc::wire();
+        p.apply(proposal.point_state_bytes()).unwrap();
+        p.project(ContentKind::Richdoc).unwrap().content
+    });
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_source_proofs_refuse_forged_partial_and_stale_witnesses() {
+    let (mut f, _) = reader_fixture();
+    let input = f.freeze(f.baseline_point.clone());
+    let held = f.handle.registration.lock().unwrap();
+    for case in ["valid", "forged", "partial", "stale"] {
+        let (bytes, _) = crate::reader_resolver::tests::original_baseline_case(case);
+        let doc = Ydoc::wire();
+        doc.apply(&bytes).unwrap();
+        let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+        let result = reader_result(|| {
+            f.store.read_with(|conn| {
+                point_source(
+                    conn,
+                    &held,
+                    &doc,
+                    &canonical,
+                    &input,
+                    f.resolver.as_deref(),
+                    &mut Budget {
+                        remaining: 2_000_000,
+                    },
+                )
+            })
+        });
+        assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_rechecks_authority_and_artifact_after_a_cached_proof() {
+    for case in [
+        "binding",
+        "claim",
+        "fence",
+        "missing",
+        "self-anchor",
+        "reader-unavailable",
+    ] {
+        let (mut f, source) = reader_fixture();
+        let input = f.freeze(f.baseline_point.clone());
+        reader_result(|| f.prepare(input.clone())).unwrap();
+        match case {
+            "binding" => damage(
+                &f,
+                "UPDATE live_device_application_bindings SET host_id='replacement'",
+            ),
+            "claim" => damage(
+                &f,
+                "UPDATE ydoc_docs SET lineage_claim_id=printf('%064d',0)",
+            ),
+            "fence" => damage(
+                &f,
+                "UPDATE live_restore_fences SET input_json=json_set(input_json,'$.newFence',new_generation+1)",
+            ),
+            "missing" => damage(&f, "DELETE FROM moments"),
+            "self-anchor" => {
+                damage(
+                    &f,
+                    "UPDATE moments SET object_id='foreign-object'; DELETE FROM snapshots",
+                );
+                assert_eq!(
+                    f.doc
+                        .markdown_source(&f.doc.markdown_source_reference().unwrap())
+                        .as_deref(),
+                    Some(source.as_str())
+                );
+                assert_eq!(f.store.table_row_count("moments").unwrap(), 2);
+            }
+            "reader-unavailable" => f.resolver = None,
+            _ => unreachable!(),
+        }
+        let before = f.canonical().canonical_content_sha256();
+        let error = f.prepare(input.clone()).unwrap_err();
+        assert!(
+            matches!(
+                (&error, case),
+                (ApplicationError::Conflict, "binding" | "claim" | "fence")
+                    | (
+                        ApplicationError::Collab(CollabError::MarkdownReaderUnavailable),
+                        "missing" | "self-anchor" | "reader-unavailable"
+                    )
+            ),
+            "{case}: {error:?}"
+        );
+        assert_eq!(f.canonical().canonical_content_sha256(), before, "{case}");
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_applies_settles_and_resumes_in_both_directions() {
+    for direction in [
+        "reader-to-reader",
+        "native-to-reader",
+        "reader-to-native",
+        "reader-to-native-settled",
+    ] {
+        let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
+        let reader_point = Ydoc::wire();
+        reader_point.apply(&bytes).unwrap();
+        let mut f = if direction.starts_with("reader-to-native") {
+            Fixture::new("native original\n")
+        } else {
+            Fixture::with_doc(reader_point, &source)
+        };
+        let expected_reader = !direction.starts_with("reader-to-native");
+        let target = f.baseline_point.clone();
+        let expected = if expected_reader {
+            source.clone()
+        } else {
+            "native original\n".into()
+        };
+        let (next, markdown) = if direction.starts_with("reader-to-native") {
+            let doc = Ydoc::wire();
+            doc.apply(&bytes).unwrap();
+            (doc, source.clone())
+        } else {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "later native\n")
+                .unwrap();
+            (doc, "later native\n".into())
+        };
+        let edit = if direction == "reader-to-reader" {
+            f.doc.richdoc_append_paragraph("later reader edit")
+        } else {
+            f.doc
+                .rewrite_richdoc_preserving_source_bounded(
+                    &markdown,
+                    &next,
+                    2_000_000,
+                    Some(2123456),
+                )
+                .unwrap()
+        };
+        f.accept(edit, 3);
+        if direction.starts_with("reader-to-native") {
+            store_restore_artifact(&mut f, &source);
+            let config =
+                serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+            f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+                Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+            )));
+        }
+        if direction == "reader-to-native-settled" {
+            let edit = f.doc.richdoc_append_paragraph("settled body edit");
+            f.accept(edit, 4);
+            let canonical = f.doc.project(ContentKind::Richdoc).unwrap().content;
+            let digest = hex_sha256(canonical.as_bytes());
+            f.store
+                .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                    dohc_engine_storage::text::insert(
+                        tx,
+                        &digest,
+                        canonical.len() as i64,
+                        &canonical,
+                        true,
+                    )
+                    .map_err(write_sql)?;
+                    tx.execute(
+                        "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='object'",
+                        [&digest],
+                    )
+                    .map_err(write_sql)?;
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='object'",
+                        [&digest],
+                    )
+                    .map_err(write_sql)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let prep = f.freeze(target);
+        let input = admitted_restore(&mut f, prep.clone());
+        if let Ok(dir) = std::env::var("DOHC_RESTORE_DIRECTION_FIXTURES") {
+            let proposal = reader_result(|| f.prepare(prep.clone())).unwrap();
+            let mut value = serde_json::to_value(&proposal).unwrap();
+            value["source"] = json!(source);
+            value["acceptedCheckpoint"] = json!(f.canonical().encode_full_state());
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("{direction}.json")),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        }
+        let before = f.canonical().encode_full_state();
+        let receipt = reader_result(|| apply_restore(&mut f, input.clone(), &NoFaults)).unwrap();
+        assert_ne!(before, f.canonical().encode_full_state());
+        assert_eq!(
+            receipt,
+            reader_result(|| apply_restore(&mut f, input.clone(), &NoFaults)).unwrap()
+        );
+        let settled = reader_result(|| {
+            f.owner.with_restore_settlement(
+                &mut f.store,
+                f.resolver.as_ref(),
+                input.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                |store, audit| record_test_projection(store, audit, "reader-restored"),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            settled.markdown_digest,
+            hex_sha256(expected.as_bytes()),
+            "{direction}"
+        );
+        let resume = NativeRestoreResume {
+            application: input,
+            settlement_id: settled.settlement_id,
+        };
+        // A fresh resolver has no persisted verdict, including after settlement.
+        let config =
+            serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+        f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+        )));
+        let resumed = reader_result(|| {
+            f.owner.resume_restore(
+                &mut f.store,
+                f.resolver.as_ref(),
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                100,
+                &NoFaults,
+                |_, _, _, _| Ok(()),
+            )
+        })
+        .unwrap();
+        assert_eq!(resumed.binding.restore_fence_generation, 1);
+        assert_eq!(
+            f.canonical().has_reader_source(),
+            expected_reader,
+            "{direction}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_application_settlement_and_resume_recheck_authority() {
+    for stage in ["application", "settlement", "resume"] {
+        for case in [
+            "binding",
+            "claim",
+            "fence",
+            "missing",
+            "self-anchor",
+            "reader-unavailable",
+        ] {
+            let (mut f, source) = reader_fixture();
+            let prep = f.freeze(f.baseline_point.clone());
+            let input = admitted_restore(&mut f, prep);
+            let mut settlement_id = String::new();
+            if stage != "application" {
+                reader_result(|| apply_restore(&mut f, input.clone(), &NoFaults)).unwrap();
+            }
+            if stage == "resume" {
+                settlement_id = reader_result(|| {
+                    f.owner.with_restore_settlement(
+                        &mut f.store,
+                        f.resolver.as_ref(),
+                        input.clone(),
+                        f.host.clone(),
+                        2_000_000,
+                        100,
+                        |store, audit| record_test_projection(store, audit, "reader-restored"),
+                    )
+                })
+                .unwrap()
+                .settlement_id;
+            }
+            match case {
+                "binding" => damage(&f,"UPDATE live_device_application_bindings SET host_id='replacement'"),
+                "claim" => damage(&f,"UPDATE ydoc_docs SET lineage_claim_id=printf('%064d',0)"),
+                "fence" => damage(&f,"UPDATE live_restore_fences SET input_json=json_set(input_json,'$.newFence',new_generation+1)"),
+                "missing" => damage(&f,"DELETE FROM moments"),
+                "self-anchor" => {
+                    damage(&f,"UPDATE moments SET object_id='foreign-object'; DELETE FROM snapshots");
+                    assert_eq!(f.doc.markdown_source(&f.doc.markdown_source_reference().unwrap()).as_deref(),Some(source.as_str()));
+                }
+                "reader-unavailable" => f.resolver = None,
+                _ => unreachable!(),
+            }
+            let before = f.canonical().canonical_content_sha256();
+            let result = match stage {
+                "application" => {
+                    reader_result(|| apply_restore(&mut f, input.clone(), &NoFaults)).map(|_| ())
+                }
+                "settlement" => reader_result(|| {
+                    f.owner.with_restore_settlement(
+                        &mut f.store,
+                        f.resolver.as_ref(),
+                        input.clone(),
+                        f.host.clone(),
+                        2_000_000,
+                        100,
+                        |store, audit| record_test_projection(store, audit, "reader-restored"),
+                    )
+                })
+                .map(|_| ()),
+                _ => reader_result(|| {
+                    f.owner.resume_restore(
+                        &mut f.store,
+                        f.resolver.as_ref(),
+                        NativeRestoreResume {
+                            application: input.clone(),
+                            settlement_id: settlement_id.clone(),
+                        },
+                        f.host.clone(),
+                        2_000_000,
+                        100,
+                        100,
+                        &NoFaults,
+                        |_, _, _, _| Ok(()),
+                    )
+                })
+                .map(|_| ()),
+            };
+            let error = result.unwrap_err();
+            assert!(
+                matches!(
+                    (&error, case),
+                    (ApplicationError::Conflict, "binding" | "claim" | "fence")
+                        | (
+                            ApplicationError::Collab(CollabError::MarkdownReaderUnavailable),
+                            "missing" | "self-anchor" | "reader-unavailable"
+                        )
+                ),
+                "{stage} {case}: {error:?}"
+            );
+            assert_eq!(
+                f.canonical().canonical_content_sha256(),
+                before,
+                "{stage} {case}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_source_rechecks_its_fence_and_budget_before_a_cached_verdict() {
+    let (mut f, source) = reader_fixture();
+    let input = f.freeze(f.baseline_point.clone());
+    let held = f.handle.registration.lock().unwrap();
+    let canonical = f.doc.project(ContentKind::Richdoc).unwrap().content;
+    let prove = |limit| {
+        f.store.read_with(|conn| {
+            point_source(
+                conn,
+                &held,
+                &f.doc,
+                &canonical,
+                &input,
+                f.resolver.as_deref(),
+                &mut Budget { remaining: limit },
+            )
+        })
+    };
+    assert!(matches!(
+        prove(source.len() - 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    damage(&f,"UPDATE live_restore_fences SET input_json=json_set(input_json,'$.newFence',new_generation+1)");
+    assert!(matches!(
+        prove(2_000_000),
+        Err(ApplicationError::Collab(CollabError::RestoreFenced))
+    ));
+}
+
 #[test]
 fn restore_serialized_byte_refusals_keep_the_configured_budget_error() {
     assert!(matches!(
@@ -70,7 +640,7 @@ fn restore_serialized_byte_refusals_keep_the_configured_budget_error() {
     let f = Fixture::new("valid rich document");
     let error = f
         .doc
-        .rewrite_richdoc_preserving_source_bounded("valid replacement", &f.doc, 1)
+        .rewrite_richdoc_preserving_source_bounded("valid replacement", &f.doc, 1, None)
         .unwrap_err();
     assert!(matches!(
         ApplicationError::from(error),
@@ -366,6 +936,7 @@ fn restore_preparation_uses_native_checkpoints_for_a_long_applied_history() {
         .owner
         .prepare_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             input.clone(),
             f.host.clone(),
             1_000_000,
@@ -381,7 +952,15 @@ fn restore_preparation_uses_native_checkpoints_for_a_long_applied_history() {
     assert_eq!(proposal.receipt().selected_history.suffix.len(), 3);
     let replay = f
         .owner
-        .prepare_restore(&mut f.store, input, f.host.clone(), 1_000_000, 6, &NoFaults)
+        .prepare_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input,
+            f.host.clone(),
+            1_000_000,
+            6,
+            &NoFaults,
+        )
         .unwrap();
     assert_eq!(replay.receipt(), proposal.receipt());
 }
@@ -824,9 +1403,13 @@ pub(in crate::live_update_application) fn record_test_projection(
     let doc = store.read_with(|conn| durable::load_doc_in(conn, &key))?;
     let doc = audit.accepted_prefix().unwrap_or(&doc);
     let projected = doc.project(ContentKind::Richdoc)?.content;
-    let content = doc
-        .preserved_markdown_source(&projected)
-        .unwrap_or(projected);
+    let content = if doc.has_reader_source() {
+        doc.markdown_source(&doc.markdown_source_reference().unwrap())
+            .unwrap()
+    } else {
+        doc.preserved_markdown_source(&projected)
+            .unwrap_or(projected)
+    };
     let vector = hex_sha256(&doc.encode_state_vector());
     let result = store.write_with(&NoFaults,|tx| -> Result<_, ApplicationError> {
         let written = dohc_engine_domain::write_projected_text_in_tx(tx,dohc_engine_domain::ProjectedWriteText {
@@ -848,6 +1431,7 @@ pub(in crate::live_update_application) fn record_test_projection(
 struct Fixture {
     store: EngineStore,
     owner: ApplicationOwner,
+    resolver: Option<Arc<crate::reader_resolver::ReaderResolver>>,
     handle: ApplicationHandle,
     doc: Ydoc,
     binding: LiveObjectBinding,
@@ -937,21 +1521,77 @@ impl Fixture {
             projected_markdown_digest: hex_sha256(source.as_bytes()),
             projected_markdown_byte_length: source.len() as i64,
         };
-        bootstrap_committed::<Box<dyn std::error::Error>>(
-            &mut store,
-            &mut WriterDocCache::new(),
-            &handle,
-            bootstrap,
-            bytes,
-            &NoFaults,
-            |_, _, _, _| Ok(()),
-        )
-        .unwrap();
-        let baseline_point = point(&doc, 0, binding.lineage_claim_id.clone());
+        let mut cache = WriterDocCache::new();
+        if doc.has_reader_source() {
+            let config =
+                serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+            let resolver = Arc::new(crate::reader_resolver::ReaderResolver::new(Arc::new(
+                dohc_engine_reader::Reader::new(Some(config)),
+            )));
+            cache.reader_resolver = Some(resolver.clone());
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: "object".into(),
+                        path: path.into(),
+                        text: source.into(),
+                        moment_id: "received-file".into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 0,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            for _ in 0..2 {
+                match bootstrap_committed::<Box<dyn std::error::Error>>(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    bootstrap.clone(),
+                    bytes.clone(),
+                    &NoFaults,
+                    |_, _, _, _| Ok(()),
+                ) {
+                    Err(error) => match error.downcast::<ApplicationError>() {
+                        Ok(error) => match *error {
+                            ApplicationError::Collab(CollabError::MarkdownReaderPending(p)) => {
+                                crate::reader_resolver::tests::run(p.resolve())
+                            }
+                            error => panic!("{error:?}"),
+                        },
+                        Err(error) => panic!("{error:?}"),
+                    },
+                    other => {
+                        other.unwrap();
+                        break;
+                    }
+                }
+            }
+        } else {
+            bootstrap_committed::<Box<dyn std::error::Error>>(
+                &mut store,
+                &mut cache,
+                &handle,
+                bootstrap,
+                bytes,
+                &NoFaults,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
+        }
+        let mut baseline_point = point(&doc, 0, binding.lineage_claim_id.clone());
+        baseline_point.markdown_digest = hex_sha256(source.as_bytes());
         Self {
             dir,
             store,
             owner,
+            resolver: cache.reader_resolver.clone(),
             handle,
             doc,
             binding,
@@ -1028,7 +1668,14 @@ impl Fixture {
         let operation = self.fence_input();
         let fence = self
             .owner
-            .fence_restore(&mut self.store, operation, self.host.clone(), 50, &NoFaults)
+            .fence_restore(
+                &mut self.store,
+                self.resolver.as_ref(),
+                operation,
+                self.host.clone(),
+                50,
+                &NoFaults,
+            )
             .unwrap();
         NativeRestorePreparation { fence, point }
     }
@@ -1056,6 +1703,7 @@ impl Fixture {
     ) -> Result<NativeRestoreProposal, ApplicationError> {
         self.owner.prepare_restore(
             &mut self.store,
+            self.resolver.as_ref(),
             input,
             self.host.clone(),
             1_000_000,
@@ -1258,8 +1906,14 @@ fn a_hosted_document_that_is_not_ready_refuses_a_new_restore_fence() {
     );
     let input = f.fence_input();
     let fence = |f: &mut Fixture| {
-        f.owner
-            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
+        f.owner.fence_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            50,
+            &NoFaults,
+        )
     };
     assert!(matches!(
         fence(&mut f),
@@ -1370,6 +2024,7 @@ fn preparation_commit_boundaries_retain_exact_candidate_or_roll_back_every_refer
             .owner
             .prepare_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 input.clone(),
                 f.host.clone(),
                 1_000_000,
@@ -1411,6 +2066,7 @@ fn configured_limits_and_foreign_key_retention_apply_to_preparation_and_replay()
             .owner
             .prepare_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 input.clone(),
                 f.host.clone(),
                 bytes,
@@ -1434,7 +2090,15 @@ fn configured_limits_and_foreign_key_retention_apply_to_preparation_and_replay()
     }
     assert!(f
         .owner
-        .prepare_restore(&mut f.store, input, f.host.clone(), 1, 100, &NoFaults)
+        .prepare_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input,
+            f.host.clone(),
+            1,
+            100,
+            &NoFaults
+        )
         .is_err());
 }
 
@@ -1494,6 +2158,7 @@ fn verified_backup_retains_prepared_candidate_and_all_replay_evidence() {
     let replay = owner
         .prepare_restore(
             &mut restored,
+            None,
             input,
             f.host.clone(),
             1_000_000,
@@ -1547,7 +2212,7 @@ fn admitted_restore(
     f: &mut Fixture,
     preparation: NativeRestorePreparation,
 ) -> NativeRestoreApplication {
-    let proposal = f.prepare(preparation.clone()).unwrap();
+    let proposal = reader_result(|| f.prepare(preparation.clone())).unwrap();
     let mut binding = f.binding.clone();
     binding.restore_fence_generation = preparation.fence.operation.new_fence;
     NativeRestoreApplication {
@@ -1584,6 +2249,7 @@ fn apply_restore(
 ) -> Result<NativeRestoreApplicationReceipt, ApplicationError> {
     f.owner.apply_restore(
         &mut f.store,
+        f.resolver.as_ref(),
         &mut WriterDocCache::new(),
         input,
         f.host.clone(),
@@ -1603,7 +2269,7 @@ fn restore_publication_callback_rolls_back_with_content_and_does_not_repeat() {
     let input = admitted_restore(&mut f, prep);
     let before = f.canonical();
     let before_count = f.store.table_row_count("live_accepted_updates").unwrap();
-    let failed=f.owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),f.host.clone(),2_000_000,100,90,&NoFaults,|tx,namespace,binding,count| {
+    let failed=f.owner.apply_restore(&mut f.store, f.resolver.as_ref(),&mut WriterDocCache::new(),input.clone(),f.host.clone(),2_000_000,100,90,&NoFaults,|tx,namespace,binding,count| {
         assert_eq!(namespace,"namespace");
         assert_eq!(binding.restore_fence_generation,1);
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM live_accepted_updates WHERE relay_database_namespace=?1 AND event_count=?2)",params![namespace,count],|row|row.get(0)).unwrap();
@@ -1621,6 +2287,7 @@ fn restore_publication_callback_rolls_back_with_content_and_does_not_repeat() {
         .owner
         .apply_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             &mut WriterDocCache::new(),
             input.clone(),
             f.host.clone(),
@@ -1640,6 +2307,7 @@ fn restore_publication_callback_rolls_back_with_content_and_does_not_repeat() {
         .owner
         .apply_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             &mut WriterDocCache::new(),
             input,
             f.host.clone(),
@@ -1696,6 +2364,7 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
         f.owner
             .fence_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 prep.fence.operation.clone(),
                 f.host.clone(),
                 100,
@@ -1812,7 +2481,7 @@ fn restore_copy_preserves_public_point_actual_rich_marks() {
     let point = Ydoc::wire();
     point.apply(&doc.encode_full_state()).unwrap();
     let before_vector = doc.state_vector();
-    doc.rewrite_richdoc_preserving_source_bounded(&projection, &point, 8 * 1024 * 1024)
+    doc.rewrite_richdoc_preserving_source_bounded(&projection, &point, 8 * 1024 * 1024, None)
         .unwrap();
     assert!(doc
         .state_vector()
@@ -1858,6 +2527,7 @@ fn native_restore_apply_replay_refuses_damaged_saved_admission_and_application()
             f.owner
                 .fence_restore(
                     &mut f.store,
+                    f.resolver.as_ref(),
                     prep.fence.operation,
                     f.host.clone(),
                     100,
@@ -1898,6 +2568,7 @@ fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
         .owner
         .fence_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             prep.fence.operation.clone(),
             f.host.clone(),
             100,
@@ -1924,6 +2595,7 @@ fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
         f.owner
             .fence_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 prep.fence.operation.clone(),
                 f.host.clone(),
                 100,
@@ -1951,6 +2623,7 @@ fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
                 .owner
                 .apply_restore(
                     &mut f.store,
+                    f.resolver.as_ref(),
                     &mut WriterDocCache::new(),
                     input.clone(),
                     f.host.clone(),
@@ -1978,6 +2651,7 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
         .owner
         .with_restore_settlement(
             &mut f.store,
+            f.resolver.as_ref(),
             input.clone(),
             f.host.clone(),
             2_000_000,
@@ -2810,8 +3484,14 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
     assert_eq!(before, (0, 1, 0));
     let input = f.fence_input();
     assert!(matches!(
-        f.owner
-            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults),
+        f.owner.fence_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            50,
+            &NoFaults
+        ),
         Err(ApplicationError::PublicationPending)
     ));
     assert_eq!(state(&f), before);
@@ -2824,13 +3504,27 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
     publish(&f, 1);
     let fenced = f
         .owner
-        .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
+        .fence_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            50,
+            &NoFaults,
+        )
         .unwrap();
     // The committed fence replays without asking about publication again.
     publish(&f, 0);
     assert_eq!(
         f.owner
-            .fence_restore(&mut f.store, input, f.host.clone(), 51, &NoFaults)
+            .fence_restore(
+                &mut f.store,
+                f.resolver.as_ref(),
+                input,
+                f.host.clone(),
+                51,
+                &NoFaults
+            )
             .unwrap(),
         fenced
     );
@@ -2891,15 +3585,28 @@ fn fence_waits_for_retained_settlement_history_to_be_exported() {
     export(&f, "object", -1);
     let input = f.fence_input();
     assert!(matches!(
-        f.owner
-            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults),
+        f.owner.fence_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input.clone(),
+            f.host.clone(),
+            50,
+            &NoFaults
+        ),
         Err(ApplicationError::PublicationPending)
     ));
     assert_eq!(fences(&f), 0);
     // Export journaled the settlement. Its stream stays open for later events.
     export(&f, "object", settled.terminal_cursor);
     f.owner
-        .fence_restore(&mut f.store, input, f.host.clone(), 50, &NoFaults)
+        .fence_restore(
+            &mut f.store,
+            f.resolver.as_ref(),
+            input,
+            f.host.clone(),
+            50,
+            &NoFaults,
+        )
         .unwrap();
     assert_eq!(fences(&f), 1);
 }
@@ -3067,6 +3774,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
         .owner
         .with_restore_settlement(
             &mut f.store,
+            f.resolver.as_ref(),
             input.clone(),
             f.host.clone(),
             2_000_000,
@@ -3078,6 +3786,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
         .owner
         .resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             NativeRestoreResume {
                 application: input,
                 settlement_id: restored.settlement_id.clone(),
@@ -3135,6 +3844,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
     assert!(matches!(
         f.owner.resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             missing,
             f.host.clone(),
             2_000_000,
@@ -3149,6 +3859,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .with_restore_settlement(
             &mut f.store,
+            f.resolver.as_ref(),
             input.clone(),
             f.host.clone(),
             2_000_000,
@@ -3164,6 +3875,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             resume.clone(),
             f.host.clone(),
             2_000_000,
@@ -3186,6 +3898,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             resume.clone(),
             f.host.clone(),
             2_000_000,
@@ -3290,6 +4003,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         f.owner
             .resume_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 resume.clone(),
                 f.host.clone(),
                 2_000_000,
@@ -3317,6 +4031,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .with_restore_settlement(
             &mut f.store,
+            f.resolver.as_ref(),
             second.clone(),
             f.host.clone(),
             2_000_000,
@@ -3332,6 +4047,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             second_resume,
             f.host.clone(),
             2_000_000,
@@ -3364,6 +4080,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         f.owner
             .resume_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 resume.clone(),
                 f.host.clone(),
                 2_000_000,
@@ -3380,6 +4097,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .owner
         .resume_restore(
             &mut f.store,
+            f.resolver.as_ref(),
             forged,
             f.host.clone(),
             2_000_000,
@@ -3412,6 +4130,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
             .owner
             .with_restore_settlement(
                 &mut f.store,
+                f.resolver.as_ref(),
                 input.clone(),
                 f.host.clone(),
                 2_000_000,
@@ -3426,6 +4145,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
         assert!(matches!(
             f.owner.resume_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 resume.clone(),
                 f.host.clone(),
                 2_000_000,
@@ -3451,6 +4171,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
             .owner
             .resume_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 resume.clone(),
                 f.host.clone(),
                 2_000_000,
@@ -3469,6 +4190,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
             f.owner
                 .resume_restore(
                     &mut f.store,
+                    f.resolver.as_ref(),
                     resume,
                     f.host.clone(),
                     2_000_000,
@@ -3576,6 +4298,7 @@ fn restore_fence_quarantines_observed_collection_drafts_with_history() {
         f.owner
             .fence_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 operation.clone(),
                 f.host.clone(),
                 now,
@@ -3646,6 +4369,7 @@ fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
         f.owner
             .fence_restore(
                 &mut f.store,
+                f.resolver.as_ref(),
                 operation.clone(),
                 f.host.clone(),
                 now,
@@ -3827,4 +4551,293 @@ fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable()
             "hosted {hosted}, reconnect {reconnect}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_to_native_restore_without_a_reader_holds_the_current_reader_head() {
+    let mut f = Fixture::new("native original\n");
+    let target = f.baseline_point.clone();
+    let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let next = Ydoc::wire();
+    next.apply(&bytes).unwrap();
+    let edit = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(&source, &next, 2_000_000, Some(2123456))
+        .unwrap();
+    f.accept(edit, 3);
+    store_restore_artifact(&mut f, &source);
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+        Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+    )));
+    let input = f.freeze(target);
+    f.resolver = None;
+    let before = (
+        f.canonical().canonical_content_sha256(),
+        f.canonical().encode_state_vector(),
+    );
+    assert!(matches!(
+        f.prepare(input),
+        Err(ApplicationError::Collab(
+            CollabError::MarkdownReaderUnavailable
+        ))
+    ));
+    assert_eq!(
+        (
+            f.canonical().canonical_content_sha256(),
+            f.canonical().encode_state_vector()
+        ),
+        before
+    );
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority() {
+    for case in [
+        "valid",
+        "stale",
+        "expired",
+        "edited-and-settled",
+        "forged",
+        "partial",
+        "binding",
+        "claim",
+        "fence",
+        "missing",
+        "self-anchor",
+        "budget",
+    ] {
+        let mut f = Fixture::new("native original\n");
+        let target = f.baseline_point.clone();
+        let (bytes, source) = crate::reader_resolver::tests::original_baseline_case(
+            if matches!(case, "stale" | "forged" | "partial") {
+                case
+            } else {
+                "valid"
+            },
+        );
+        let next = Ydoc::wire();
+        next.apply(&bytes).unwrap();
+        let edit = f
+            .doc
+            .rewrite_richdoc_preserving_source_bounded(&source, &next, 2_000_000, Some(2123456))
+            .unwrap();
+        f.accept(edit, 3);
+        if matches!(case, "expired" | "edited-and-settled") {
+            let edit = f
+                .doc
+                .richdoc_append_paragraph("body edit expires source freshness");
+            f.accept(edit, 4);
+        }
+        store_restore_artifact(&mut f, &source);
+        if case == "edited-and-settled" {
+            let canonical = f.doc.project(ContentKind::Richdoc).unwrap().content;
+            let digest = hex_sha256(canonical.as_bytes());
+            f.store
+                .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                    dohc_engine_storage::text::insert(
+                        tx,
+                        &digest,
+                        canonical.len() as i64,
+                        &canonical,
+                        true,
+                    )
+                    .map_err(write_sql)?;
+                    tx.execute(
+                        "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='object'",
+                        [&digest],
+                    )
+                    .map_err(write_sql)?;
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='object'",
+                        [&digest],
+                    )
+                    .map_err(write_sql)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let config =
+            serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+        f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+        )));
+        if case == "partial" {
+            let operation = f.fence_input();
+            assert!(matches!(
+                f.owner.fence_restore(
+                    &mut f.store,
+                    f.resolver.as_ref(),
+                    operation,
+                    f.host.clone(),
+                    50,
+                    &NoFaults
+                ),
+                Err(ApplicationError::Collab(
+                    CollabError::MarkdownReaderUnavailable
+                ))
+            ));
+            assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+            continue;
+        }
+        let prep = f.freeze(target);
+        if !matches!(case, "forged" | "partial" | "stale") {
+            reader_result(|| f.prepare(prep.clone()))
+                .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+        }
+        match case {
+            "binding" => damage(&f,"UPDATE live_device_application_bindings SET host_id='replacement'"),
+            "claim" => damage(&f,"UPDATE ydoc_docs SET lineage_claim_id=printf('%064d',0)"),
+            "fence" => damage(&f,"UPDATE live_restore_fences SET input_json=json_set(input_json,'$.newFence',new_generation+1)"),
+            "missing" => damage(&f,"DELETE FROM moments WHERE moment_id='reader-current'"),
+            "self-anchor" => damage(&f,"UPDATE moments SET object_id='foreign' WHERE moment_id='reader-current'"),
+            "budget" => damage(&f,"UPDATE blobs SET byte_length=3000000 WHERE sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')"),
+            _ => {},
+        }
+        let before = (
+            f.canonical().canonical_content_sha256(),
+            f.canonical().encode_state_vector(),
+        );
+        let result = reader_result(|| f.prepare(prep.clone()));
+        if matches!(case, "valid" | "expired" | "edited-and-settled") {
+            result.unwrap_or_else(|error| panic!("{case}: {error:?}"));
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(
+                    (&error, case),
+                    (ApplicationError::Conflict, "binding" | "claim" | "fence")
+                        | (ApplicationError::ConfiguredByteBudgetExceeded, "budget")
+                        | (
+                            ApplicationError::Collab(CollabError::MarkdownReaderUnavailable),
+                            "forged" | "stale" | "missing" | "self-anchor"
+                        )
+                ),
+                "{case}: {error:?}"
+            );
+        }
+        assert_eq!(
+            (
+                f.canonical().canonical_content_sha256(),
+                f.canonical().encode_state_vector()
+            ),
+            before,
+            "{case}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_prefix_checks_the_budget_before_dispatch() {
+    let (mut f, source) = reader_fixture();
+    let input = f.freeze(f.baseline_point.clone());
+    let held = f.handle.registration.lock().unwrap();
+    let result = f.store.read_with(|conn| {
+        prefix_source(
+            conn,
+            &held,
+            &f.doc,
+            &input,
+            f.resolver.as_deref(),
+            &mut Budget {
+                remaining: source.len() - 1,
+            },
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_waits_for_the_authorized_history_artifact() {
+    let (mut f, source) = reader_fixture();
+    let edit = f.doc.richdoc_append_paragraph("later");
+    f.accept(edit, 3);
+    let input = f.freeze(f.baseline_point.clone());
+    damage(&f, "UPDATE moments SET object_id='foreign'");
+    assert!(matches!(
+        f.prepare(input.clone()),
+        Err(ApplicationError::Collab(
+            CollabError::MarkdownReaderUnavailable
+        ))
+    ));
+    let before = (
+        f.canonical().canonical_content_sha256(),
+        f.canonical().encode_state_vector(),
+    );
+    store_restore_artifact(&mut f, &source);
+    assert!(reader_result(|| f.prepare(input.clone())).is_ok());
+    assert_eq!(
+        (
+            f.canonical().canonical_content_sha256(),
+            f.canonical().encode_state_vector()
+        ),
+        before
+    );
+}
+
+fn ordinary_history_stays_native(caller: &str) {
+    for reader in [false, true] {
+        let f = if reader {
+            reader_fixture().0
+        } else {
+            Fixture::new("native control")
+        };
+        let result = if caller == "publication" {
+            f.store.read_with(|conn| {
+                crate::live_update_application::publication::read_native_accepted_in(
+                    conn,
+                    &DocKey::new("workspace", "main", "object").unwrap(),
+                    &mut 2_000_000,
+                )
+                .map(|_| ())
+            })
+        } else {
+            read_applied_sync(
+                &f.store,
+                &f.handle,
+                &[0],
+                AppliedSyncPolicy {
+                    max_client_vector_bytes: 1_000,
+                    max_host_vector_bytes: 1_000,
+                    max_output_bytes: 2_000_000,
+                    max_read_bytes: 2_000_000,
+                },
+                || true,
+            )
+            .map(|_| ())
+        };
+        if reader {
+            assert!(
+                matches!(
+                    result,
+                    Err(ApplicationError::Collab(
+                        CollabError::MalformedUpdate { .. }
+                    ))
+                ),
+                "{caller}: {result:?}"
+            );
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_history_leaves_publication_native() {
+    ordinary_history_stays_native("publication");
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_restore_history_leaves_sync_native() {
+    ordinary_history_stays_native("sync");
 }

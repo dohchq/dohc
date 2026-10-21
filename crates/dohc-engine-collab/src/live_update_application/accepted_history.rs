@@ -770,7 +770,11 @@ fn append_inner(
         if reconstruction.is_none() {
             budget.charge(state.len())?;
         }
-        doc.validate_public_baseline(&state)?;
+        if restored.is_some() && doc.has_reader_source() {
+            doc.validate_reader_baseline(&state)?;
+        } else {
+            doc.validate_public_baseline(&state)?;
+        }
         insert_checkpoint(
             tx,
             held,
@@ -913,7 +917,19 @@ pub(super) fn read(
     budget: &mut restore_content::Budget,
     max_events: usize,
 ) -> Result<HistoryRead, ApplicationError> {
-    read_inner(conn, held, through, budget, max_events, true)
+    read_inner(
+        conn,
+        held,
+        through,
+        budget,
+        max_events,
+        HistoryPurpose::Restore,
+    )
+}
+
+pub(super) enum HistoryPurpose {
+    Native,
+    Restore,
 }
 
 pub(super) fn read_inner(
@@ -922,13 +938,18 @@ pub(super) fn read_inner(
     through: i64,
     budget: &mut restore_content::Budget,
     max_events: usize,
-    retain_metadata: bool,
+    purpose: HistoryPurpose,
 ) -> Result<HistoryRead, ApplicationError> {
+    let retain_metadata = matches!(purpose, HistoryPurpose::Restore);
     let c = checkpoint(conn, held, through, budget, true)?;
     let baseline = budget.blob(conn, &c.state_digest)?;
     let doc = Ydoc::wire();
     doc.apply(&baseline)?;
-    doc.validate_public_baseline(&baseline)?;
+    if retain_metadata && doc.has_reader_source() {
+        doc.validate_reader_baseline(&baseline)?;
+    } else {
+        doc.validate_public_baseline(&baseline)?;
+    }
     let p = parameters(held);
     let sql = format!(
         "SELECT event_count,journal_cursor,length(CAST(metadata_json AS BLOB)),update_sha256,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 ORDER BY event_count LIMIT ?8"

@@ -37,7 +37,7 @@ export const DOHC_METADATA_GUARD: DohcPathGuard = {
 };
 
 export const DOHC_TRASH_GUARD: DohcPathGuard = {
-  path: ".dohc/trash",
+  path: ".dohc/local/trash",
   lead: "dohc could not move this to the workspace trash.",
 };
 
@@ -82,6 +82,12 @@ export function notAFileRefusal(
   const noun = squatterNoun(stats);
   const article = noun === "item" ? "An" : "A";
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a file. Remove or rename that ${noun}. Then retry.`;
+}
+
+// The path is a real folder, but another user owns it or can write in it, so
+// they could replace what dohc keeps there.
+export function notOnlyYoursRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} Another user can change ${guard.path}, which must be a folder only you can change. Remove or rename it. Then retry.`;
 }
 
 // The path is a real folder, but it leads out of the workspace. With the root

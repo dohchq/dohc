@@ -51,7 +51,7 @@ import {
 } from "./awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { deriveChatActorKey } from "../workspaces/chatWrites";
+import { createChatWrites, deriveChatActorKey, type ChatWriteStore } from "../workspaces/chatWrites";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
@@ -2906,6 +2906,99 @@ describe("chatDispatchService", () => {
     expect(workspaceFor).toHaveBeenCalledOnce();
     expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.errors).toEqual([]);
+  });
+
+  // The pump, a relay change, or any other write can start a scan while a
+  // person answers a poll. The agent woken by the answer must not read its
+  // poll as still open.
+  it("builds an answer's prompt with its poll resolved when a scan was due mid-answer", async () => {
+    const fixture = await createFixture();
+    const scanning = deferred();
+    const held = deferred();
+    let holdNextScan = true;
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      identityFor: async (workspace) => {
+        if (holdNextScan) {
+          holdNextScan = false;
+          scanning.resolve();
+          await held.promise;
+        }
+        return await fixture.serviceOptions.identityFor(workspace);
+      },
+    });
+    service.start();
+    try {
+      const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+      const poll = await fixture.chat.startChannelThread({
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        channelId: channel.id,
+        author: { kind: "agent", displayName: "Nova" },
+        origin: "cli",
+        body: "Ship on which day?",
+        options: ["Friday", "Monday"],
+      });
+      const competingScan = service.scanWorkspace(WORKSPACE_ID);
+      await scanning.promise;
+
+      // The answer goes as far as it can while that scan is held: it writes
+      // its reply, or waits for the scan to finish. Its resolution waits for
+      // the scan either way, so a scan between the two writes would build its
+      // prompt first.
+      const replyLanded = deferred();
+      const answerQueued = deferred();
+      const store: ChatWriteStore = {
+        ...fixture.chat,
+        sendMessage: async (input) => {
+          const message = await fixture.chat.sendMessage(input);
+          replyLanded.resolve();
+          return message;
+        },
+        resolveChatDecision: async (input) => {
+          await competingScan;
+          return await fixture.chat.resolveChatDecision(input);
+        },
+      };
+      const writes = createChatWrites({
+        findWorkspace: () => ({}),
+        warmCredentials: async () => undefined,
+        currentCredentials: () => null,
+        currentCredentialGeneration: () => 0,
+        localUserDisplayName: () => "Sam",
+        agentDisplayName: async () => "Nova",
+        localInstallationId: () => "install-local",
+        projectChatBookmarks: () => undefined,
+        queueCloudSync: () => undefined,
+        syncSharedChannelsForChatTarget: async () => undefined,
+        scanChatDispatch: (workspaceId) => service.scanWorkspace(workspaceId),
+        betweenDispatchScans: (workspaceId, write) => {
+          answerQueued.resolve();
+          return service.betweenScans(workspaceId, write);
+        },
+        notifyRenderer: () => undefined,
+      });
+      const answering = writes.answer({ workspaceId: WORKSPACE_ID, store }, {
+        writer: { via: "renderer" },
+        threadId: poll.thread.id,
+        body: "Monday",
+        resolves: { messageId: poll.message.id, chosenOption: "Monday" },
+        resolveAttachments: async () => [],
+      });
+      await Promise.race([replyLanded.promise, answerQueued.promise]);
+      held.resolve();
+
+      expect(await answering).toMatchObject({ decision: { state: "resolved", chosenOption: "Monday" } });
+      await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+      const prompt = fixture.spawnCalls[0]!.process.stdinText ?? "";
+      expect(prompt).toContain("- [x] Monday");
+      expect(prompt).toContain("needs-decision(resolved)");
+      expect(prompt).not.toContain("needs-decision(open)");
+    } finally {
+      for (const call of fixture.spawnCalls) call.process.markExitedSilently();
+      held.resolve();
+      await service.stop();
+    }
   });
 
   it("keeps a trigger recorded after stop for the next start, which runs it once", async () => {

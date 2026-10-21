@@ -72,6 +72,7 @@ const PARTS = [
   "rails",
   "composer-sending",
   "about-conversation",
+  "about-conversation-links",
   "file-view-actions",
   "offers",
   "csv-bound",

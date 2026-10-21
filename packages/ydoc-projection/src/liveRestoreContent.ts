@@ -4,11 +4,13 @@ import type {LiveDocumentKey, LiveUpdateStructRange} from "@dohc/live-session-co
 import * as Y from "yjs";
 import {yXmlFragmentToProseMirrorRootNode} from "y-prosemirror";
 import {getDohcProseMirrorSchema, yDocToMarkdown} from "./import-export.js";
-import {createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
 import {MAX_OLD_SUFFIX_ENTRIES, type OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
 
 type Cut = {checkpoint: Uint8Array; suffix: readonly Uint8Array[]};
+import {restoreValidators, type RestoreArtifact} from "./liveRestoreValidation.js";
+
 type RestoreContentInput = {
+  artifact?: RestoreArtifact;
   document: LiveDocumentKey;
   currentPath: string;
   accepted: Cut & {target: "accepted"};
@@ -70,7 +72,7 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
     refuse(Number.isSafeInteger(bytes) && bytes <= budget.maxBytes, "byte budget");
   }
   const document = {...input.document}, currentPath = input.currentPath;
-  const registration = createLiveMarkdownRegistrationValidator(policy), journal = createLiveMarkdownJournalValidator(policy);
+  const {registration, journal} = restoreValidators(policy, input.artifact);
   const cut = (value: Cut) => {
     const candidate = value.suffix.at(-1);
     const result = candidate === undefined
@@ -82,7 +84,27 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
   const context = cut({checkpoint: input.accepted.checkpoint, suffix: contextSuffix});
   const frozen = registration({document, currentPath, checkpoint: input.frozenState});
   if (frozen.kind !== "accepted") throw new Error(`Restore content refused: ${frozen.reason}.`);
-  refuse(context.stateUpdateSha256 === frozen.evidence.stateUpdateSha256, "frozen context differs from retained sources");
+  const sameReaderState = () => {
+    if (!input.artifact) return false;
+    if (!isDeepStrictEqual(Y.decodeUpdate(context.stateUpdate),Y.decodeUpdate(frozen.evidence.stateUpdate))) return false;
+    const doc = new Y.Doc({gc:false}), retained = new Y.Doc({gc:false}), selected = new Y.Doc({gc:false});
+    try {
+      Y.applyUpdate(doc,context.stateUpdate);
+      Y.applyUpdate(retained,frozen.evidence.stateUpdate);
+      let marked = doc.getMap("meta").get("dohcMarkdownSourceReader") === 1 ||
+        retained.getMap("meta").get("dohcMarkdownSourceReader") === 1;
+      if (!marked) {
+        // Native-to-reader restores can retain reordered attributes in a native prefix.
+        try {
+          for (const update of [input.point.checkpoint, ...input.point.suffix]) Y.applyUpdate(selected, update);
+          marked = selected.getMap("meta").get("dohcMarkdownSourceReader") === 1;
+        } catch {return false;}
+      }
+      return marked;
+    } finally {doc.destroy(); retained.destroy(); selected.destroy();}
+  };
+  // Yrs can reorder object properties in a retained attribute without changing its value or any struct.
+  refuse(context.stateUpdateSha256 === frozen.evidence.stateUpdateSha256 || sameReaderState(), "frozen context differs from retained sources");
   const point = cut(input.point);
   refuse(point.projectedMarkdownSha256 === input.pointMarkdownDigest, "selected artifact differs");
   const restored = journal({document, currentPath, checkpoint: context.stateUpdate, suffix: [], candidate: input.candidate});

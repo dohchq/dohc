@@ -93,6 +93,7 @@ import {
   type LinksView,
 } from "../workbench/About";
 import type { AboutConversation } from "../workbench/aboutConversation";
+import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
@@ -750,6 +751,21 @@ const ABOUT_CHAT_ACCESS: AccessAnswer = {
       selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
   ],
 };
+// The files #general mentions: the funnel by Nova, the landscape by Sam, and
+// the plan by both.
+const mentionedBy = (displayName: string, presentation: ActorPresentation, kind: "human" | "agent" = "human") =>
+  ({ kind, displayName, presentation });
+const ABOUT_MENTIONED: MentionedFile[] = [
+  { objectId: "states-funnel", path: "data/funnel.csv", authors: [mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+  { objectId: "states-competitors", path: "research/competitors.md", authors: [mentionedBy("Sam Rivera", SAMPLE_SAM)] },
+  { objectId: "states-plan", path: ABOUT_PATH, authors: [mentionedBy("Sam Rivera", SAMPLE_SAM), mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+];
+const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
+  status: "ready", files: ABOUT_MENTIONED, more: false, building: false, partial: false,
+};
+function ConversationLinks(props: { view: ConversationLinksView }) {
+  return <AboutConversationLinksView view={props.view} expanded onToggle={noop} onOpenFile={noop} onMore={noop} onRetry={noop} />;
+}
 
 // A group's feed and a thread, from the drawing's #general.
 const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
@@ -1085,7 +1101,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/trash if that fails, and you can
+            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
             restore them.
           </p>
         </ConfirmDialogCard>
@@ -2433,9 +2449,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="about-conversation" title="About a conversation">
-        <Specimen label="a Group: who is here, and its access checked">
+        <Specimen label="a Group: who is here, the files it mentions, and its access checked">
           <AboutPanelSpecimen>
             <AboutHeader subject={ABOUT_GROUP} />
+            <ConversationLinks view={ABOUT_MENTIONS} />
             <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2443,13 +2460,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="a person, with Access closed">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(1, 2) }} />
             <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
               setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="an agent, alone: no share includes it">
+        <Specimen label="an agent, alone: no file mentioned and no share includes it">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: [] }} />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
               onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2460,6 +2479,35 @@ function Pane(props: { theme: "light" | "dark" }) {
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
               onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      <Section part="about-conversation-links" title="About a conversation: Links">
+        <Specimen label="a file hovered, keyboard focus on another, and more to read">
+          <div data-force-state="hover" data-force-target='[data-path="data/funnel.csv"]'>
+            <div data-force-state="focus focus-visible" data-force-target={`[data-path="${ABOUT_PATH}"]`}>
+              <AboutPanelSpecimen>
+                <ConversationLinks view={{ ...ABOUT_MENTIONS, more: true }} />
+              </AboutPanelSpecimen>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the conversation's link index builds">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 1), building: true, partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a list that may be missing files">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 2), partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="loading, a failed read with its words in Notices, then a conversation dohc does not list">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ status: "loading" }} />
+            <ConversationLinks view={{ status: "failed" }} />
+            <ConversationLinks view={{ status: "unlisted" }} />
           </AboutPanelSpecimen>
         </Specimen>
       </Section>

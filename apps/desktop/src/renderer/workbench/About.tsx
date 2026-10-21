@@ -205,6 +205,16 @@ export function AboutNote(props: {
   );
 }
 
+// Said while a link index builds: the rows shown may grow.
+export function AboutGathering(props: { testId: string }) {
+  return (
+    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted">
+      <LoaderCircle size={12} aria-hidden className="shrink-0 text-subtle motion-safe:animate-spin" />
+      Gathering links
+    </p>
+  );
+}
+
 // The row that reads a list's next page, the same control while pages arrive,
 // so focus on it stays. `onMore` hears whether the row had focus when it was
 // pressed. With `onSeen`, the row coming into view reads the page too, and it
@@ -329,7 +339,7 @@ export type ChatLinksView = typeof LOADING | { status: "failed" } | ReadyChatLin
 
 const GATHER_FIRST_MS = 250;
 const GATHER_LAST_MS = 8_000;
-const gatherDelay = (reads: number) => Math.min(GATHER_FIRST_MS * 2 ** (reads - 1), GATHER_LAST_MS);
+export const gatherDelay = (reads: number) => Math.min(GATHER_FIRST_MS * 2 ** (reads - 1), GATHER_LAST_MS);
 // A read the engine refused while it reads the workspace's files keeps the
 // rows it would replace and gathers on.
 const gatheringOn = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> =>
@@ -649,7 +659,7 @@ function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void })
 // panel around them, so a long list costs nothing while someone types there.
 // A row out of the rail's view skips layout and paint until it scrolls in;
 // its focus ring and hover fill sit inside it, so nothing is clipped.
-const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
+export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
 // What makes a row the same row from one page to the next.
 const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
@@ -719,7 +729,7 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
 // adds, so a keyboard reader goes on from there, and keeps a place when the
 // last page takes Show more away. Only while focus is still on Show more, or
 // was lost with it: a person who moved on keeps their place.
-function useFocusAddedRow<Row>(
+export function useFocusAddedRow<Row>(
   rows: readonly Row[] | null,
   keyOf: (row: Row) => string,
   toggle: RefObject<HTMLButtonElement | null>,
@@ -793,12 +803,7 @@ export function AboutLinksView(props: {
         <RetryRow testId="about-links-failed" onRetry={props.onRetryLinks} />
       ) : (
         <>
-          {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? (
-            <p role="status" data-testid="about-links-gathering" className="m-0 flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted">
-              <LoaderCircle size={12} aria-hidden className="shrink-0 text-subtle motion-safe:animate-spin" />
-              Gathering links
-            </p>
-          ) : null}
+          {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? <AboutGathering testId="about-links-gathering" /> : null}
           {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
           {links.next !== null ? (
             <AboutMore testId="about-links-more" watch={links.rows}

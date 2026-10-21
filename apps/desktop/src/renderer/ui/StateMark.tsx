@@ -25,7 +25,7 @@ export type StatePresentation = {
 };
 
 export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
+  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.";
 
 // dohc cannot tell whether the original was moved or deleted, only that
 // another file now has its path.

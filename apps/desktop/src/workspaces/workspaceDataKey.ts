@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmod, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, lstat, realpath, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
 export const SECRET_FILE_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
@@ -49,23 +49,66 @@ function parseKeyFile(content: string): Buffer {
   return key;
 }
 
+// Match the Rust key directory check: aliases above the workspace are allowed,
+// but the key folder must be the workspace's own real .dohc/engine.
+async function verifyKeyDir(rootDir: string, path: string): Promise<void> {
+  let realParent: string;
+  let expected: string;
+  try {
+    realParent = await realpath(dirname(path));
+    expected = join(await realpath(rootDir), ".dohc", "engine");
+  } catch (error) {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again."
+        : "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+    );
+  }
+  if (realParent !== expected) {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
+    );
+  }
+}
+
+// Windows can follow a dangling file link even with "wx". Only an absent
+// entry is a missing key; inspect before every read, including an EEXIST retry.
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isFile()) {
+      throw new SecretFileStoreError(
+        "key-corrupt",
+        "dohc didn't use .dohc/engine/secret.key because it isn't a regular file. Replace it with this workspace's key file.",
+      );
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export async function loadSecretDataKey(
   rootDir: string,
   options: { createIfMissing: boolean },
 ): Promise<Buffer> {
   const path = keyFilePath(rootDir);
   try {
-    const content = await readFile(path, "utf8");
-    await chmod(path, 0o600).catch(() => undefined);
-    return parseKeyFile(content);
+    await verifyKeyDir(rootDir, path);
+    if (await fileExists(path)) {
+      const content = await readFile(path, "utf8");
+      await chmod(path, 0o600).catch(() => undefined);
+      return parseKeyFile(content);
+    }
   } catch (error) {
     if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new SecretFileStoreError(
-        "key-corrupt",
-        "The workspace secret key file could not be read; refusing to touch protected files.",
-      );
-    }
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to touch protected files.",
+    );
   }
   if (!options.createIfMissing) {
     throw new SecretFileStoreError(
@@ -82,9 +125,7 @@ export async function loadSecretDataKey(
     return key;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      const content = await readFile(path, "utf8");
-      await chmod(path, 0o600).catch(() => undefined);
-      return parseKeyFile(content);
+      return loadSecretDataKey(rootDir, { createIfMissing: false });
     }
     throw new SecretFileStoreError(
       "key-corrupt",
@@ -103,21 +144,22 @@ export async function installWorkspaceDataKey(
   }
   const path = keyFilePath(rootDir);
   try {
-    const existing = parseKeyFile(await readFile(path, "utf8"));
-    await chmod(path, 0o600).catch(() => undefined);
-    if (existing.equals(key)) return;
-    throw new SecretFileStoreError(
-      "key-corrupt",
-      "A different workspace secret key already exists locally; refusing to overwrite protected state.",
-    );
-  } catch (error) {
-    if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    await verifyKeyDir(rootDir, path);
+    if (await fileExists(path)) {
+      const existing = parseKeyFile(await readFile(path, "utf8"));
+      await chmod(path, 0o600).catch(() => undefined);
+      if (existing.equals(key)) return;
       throw new SecretFileStoreError(
         "key-corrupt",
-        "The workspace secret key file could not be read; refusing to install a replacement.",
+        "A different workspace secret key already exists locally; refusing to overwrite protected state.",
       );
     }
+  } catch (error) {
+    if (error instanceof SecretFileStoreError) throw error;
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to install a replacement.",
+    );
   }
   // As above, the engine has already created `.dohc/engine`.
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;

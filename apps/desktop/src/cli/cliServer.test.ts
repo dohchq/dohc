@@ -68,6 +68,7 @@ import {
   type CliWorkspaceContext,
 } from "./cliServer";
 import { agentWriteAuthor } from "./desktopCliServer";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -455,6 +456,7 @@ describe("CLI socket server", () => {
           writeTargets.push(target);
         },
         scanChatDispatch: async () => undefined,
+        betweenDispatchScans: (_workspaceId, write) => write(),
         notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
@@ -841,7 +843,7 @@ describe("CLI socket server", () => {
 
   it("lists and reads changes at CLI and MCP after an Undo adds compensation moments", async () => {
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    await mkdir(join(workspaceRoot, ".dohc"), { recursive: true });
+    await openedLocalState(operation.workspace);
     await mkdir(join(workspaceRoot, "folder"));
     await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
     const fixture = momentFixtures(WORKSPACE_ID, "tracked", SERVER_NOW_MS);
@@ -913,7 +915,8 @@ describe("CLI socket server", () => {
     await writeFile(join(workspaceRoot, "a.txt"), "move body");
     const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", ["a.txt"]);
     await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
-    await finishMoveRecovery(workspaceRoot, plan, "a.txt", "b.txt", false);
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot });
+    await finishMoveRecovery({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, plan, "a.txt", "b.txt", false);
     const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
         return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
@@ -951,7 +954,7 @@ describe("CLI socket server", () => {
     const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
-    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." };
+    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." };
     expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
     const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
     expect(await undoOperation({ root: workspaceRoot, home: stateDir, request }, { operationId })).toEqual(refusal);
