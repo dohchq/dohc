@@ -99,8 +99,25 @@ fn reader_result<T>(
 }
 
 fn impossible_prefix_refuses_before_fencing(case: &str) {
-    let (mut f, _) = reader_fixture();
+    let (mut reader, source) = reader_fixture();
+    let mut f = Fixture::new("native original\n");
+    let edit = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(&source, &reader.doc, 2_000_000, Some(2123456))
+        .unwrap();
+    f.accept(edit, 3);
+    store_restore_artifact(&mut f, &source);
+    f.resolver = reader.resolver.take();
     match case {
+        "partial" => {
+            use yrs::{Map, Transact, ReadTxn, updates::decoder::Decode};
+            let raw = yrs::Doc::with_options(yrs::Options { client_id: yrs::ClientID::new(333333), skip_gc: true, ..Default::default() });
+            raw.transact_mut().apply_update(yrs::Update::decode_v1(&f.doc.encode_full_state()).unwrap()).unwrap();
+            let before = raw.transact().state_vector();
+            raw.get_or_insert_map("meta").remove(&mut raw.transact_mut(), "dohcMarkdownSource");
+            let delta = raw.transact().encode_state_as_update_v1(&before);
+            f.doc.apply(&delta).unwrap(); f.accept(delta, 4);
+        },
         "no-reader" => f.resolver = None,
         "missing" => damage(&f, "DELETE FROM moments"),
         "pre-rename" => damage(&f, "UPDATE moments SET path='old.md'"),
@@ -110,21 +127,28 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
     let before: String = f.store.read_with(|conn| conn.query_row(
         "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
     let input = f.fence_input();
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        f.resolver.as_ref(),
+        input,
+        f.host.clone(),
+        50,
+        &NoFaults,
+    );
     assert!(
         matches!(
-            f.owner.fence_restore(
-                &mut f.store,
-                f.resolver.as_ref(),
-                input,
-                f.host.clone(),
-                50,
-                &NoFaults
-            ),
-            Err(ApplicationError::Collab(
-                CollabError::MarkdownReaderUnavailable
-            ))
+            (&result, case),
+            (
+                Err(ApplicationError::ConfiguredByteBudgetExceeded),
+                "oversized"
+            ) | (
+                Err(ApplicationError::Collab(
+                    CollabError::MarkdownReaderUnavailable
+                )),
+                "no-reader" | "missing" | "pre-rename" | "partial"
+            )
         ),
-        "{case}"
+        "{case}: {result:?}"
     );
     assert_eq!(
         f.store.table_row_count("live_restore_fences").unwrap(),
@@ -346,6 +370,9 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         "native-to-reader",
         "reader-to-native",
         "reader-to-native-settled",
+        "expired-to-native",
+        "expired-to-fresh",
+        "expired-to-expired",
     ] {
         let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
         let reader_point = Ydoc::wire();
@@ -356,8 +383,15 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
             Fixture::with_doc(reader_point, &source)
         };
         let expected_reader = !direction.starts_with("reader-to-native");
-        let target = f.baseline_point.clone();
-        let expected = if expected_reader {
+        let target = if direction.starts_with("expired-") {
+            let edit = f.doc.richdoc_append_paragraph("expired selected point");
+            f.accept(edit, 2)
+        } else {
+            f.baseline_point.clone()
+        };
+        let expected = if direction.starts_with("expired-") {
+            f.doc.project(ContentKind::Richdoc).unwrap().content
+        } else if expected_reader {
             source.clone()
         } else {
             "native original\n".into()
@@ -372,7 +406,18 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
                 .unwrap();
             (doc, "later native\n".into())
         };
-        let edit = if direction == "reader-to-reader" {
+        let edit = if direction == "expired-to-fresh" {
+            let fresh = Ydoc::wire();
+            fresh.apply(&bytes).unwrap();
+            f.doc
+                .rewrite_richdoc_preserving_source_bounded(
+                    &source,
+                    &fresh,
+                    2_000_000,
+                    Some(2123456),
+                )
+                .unwrap()
+        } else if direction == "reader-to-reader" || direction == "expired-to-expired" {
             f.doc.richdoc_append_paragraph("later reader edit")
         } else {
             f.doc
@@ -428,6 +473,7 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
             let proposal = reader_result(|| f.prepare(prep.clone())).unwrap();
             let mut value = serde_json::to_value(&proposal).unwrap();
             value["source"] = json!(source);
+            value["restoredMarkdown"] = json!(expected);
             value["acceptedCheckpoint"] = json!(f.canonical().encode_full_state());
             std::fs::write(
                 std::path::Path::new(&dir).join(format!("{direction}.json")),
@@ -1404,8 +1450,12 @@ pub(in crate::live_update_application) fn record_test_projection(
     let doc = audit.accepted_prefix().unwrap_or(&doc);
     let projected = doc.project(ContentKind::Richdoc)?.content;
     let content = if doc.has_reader_source() {
-        doc.markdown_source(&doc.markdown_source_reference().unwrap())
-            .unwrap()
+        let reference = doc.markdown_source_reference().unwrap();
+        if reference.projection_sha256 == hex_sha256(projected.as_bytes()) {
+            doc.markdown_source(&reference).unwrap()
+        } else {
+            projected.clone()
+        }
     } else {
         doc.preserved_markdown_source(&projected)
             .unwrap_or(projected)
@@ -1665,7 +1715,11 @@ impl Fixture {
         point(&self.doc, cursor, receipt.update_digest)
     }
     fn freeze(&mut self, point: NativeRestorePoint) -> NativeRestorePreparation {
-        let operation = self.fence_input();
+        let mut operation = self.fence_input();
+        operation.point = NativeRestoreSelection {
+            journal_cursor: point.journal_cursor,
+            receipt_digest: point.receipt_digest.clone(),
+        };
         let fence = self
             .owner
             .fence_restore(
@@ -1681,6 +1735,10 @@ impl Fixture {
     }
     fn fence_input(&self) -> NativeRestoreFence {
         NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: self.binding.lineage_claim_id.clone(),
+            },
             operation_id: if self.binding.restore_fence_generation == 0 {
                 "restore".into()
             } else {
@@ -4840,4 +4898,254 @@ fn reader_restore_history_leaves_publication_native() {
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
 fn reader_restore_history_leaves_sync_native() {
     ordinary_history_stays_native("sync");
+}
+
+fn binding_state(f: &Fixture) -> String {
+    f.store.read_with(|conn| conn.query_row("SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap()
+}
+
+fn impossible_point_refuses(case: &str) {
+    let (mut f, _) = reader_fixture();
+    let mut selected = f.baseline_point.clone();
+    if case == "partial" {
+        use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+        let raw = yrs::Doc::with_options(yrs::Options {
+            client_id: yrs::ClientID::new(333333),
+            skip_gc: true,
+            ..Default::default()
+        });
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&f.doc.encode_full_state()).unwrap())
+            .unwrap();
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_map("meta")
+            .remove(&mut raw.transact_mut(), "dohcMarkdownSource");
+        let update = raw.transact().encode_state_as_update_v1(&before);
+        f.doc.apply(&update).unwrap();
+        selected = f.accept(update, 3);
+    }
+    let native = Ydoc::wire();
+    native
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "native head\n")
+        .unwrap();
+    let update = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(
+            "native head\n",
+            &native,
+            2_000_000,
+            Some(2123456),
+        )
+        .unwrap();
+    f.accept(update, 4);
+    match case {
+        "partial" => {},
+        "no-reader" => f.resolver = None,
+        "missing" => damage(&f, "DELETE FROM moments"),
+        "pre-rename" => damage(&f, "UPDATE moments SET path='old.md'"),
+        "oversized" => damage(&f, "UPDATE blobs SET byte_length=3000000 WHERE sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')"),
+        _ => unreachable!(),
+    }
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: selected.journal_cursor,
+        receipt_digest: selected.receipt_digest,
+    };
+    assert_preflight_refusal(&mut f, operation, case);
+}
+fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case: &str) {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(config)));
+    if f.resolver.is_some() {
+        f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )));
+    }
+    let binding = binding_state(f);
+    let head = (
+        f.canonical().canonical_content_sha256(),
+        f.canonical().state_vector(),
+    );
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        f.resolver.as_ref(),
+        operation,
+        f.host.clone(),
+        50,
+        &NoFaults,
+    );
+    assert!(
+        matches!(
+            (&result, case),
+            (
+                Err(ApplicationError::ConfiguredByteBudgetExceeded),
+                "oversized"
+            ) | (
+                Err(ApplicationError::Collab(
+                    CollabError::MarkdownReaderUnavailable
+                )),
+                "no-reader" | "missing" | "pre-rename" | "partial"
+            )
+        ),
+        "{case}: {result:?}"
+    );
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    assert_eq!(binding_state(f), binding);
+    assert_eq!(
+        (
+            f.canonical().canonical_content_sha256(),
+            f.canonical().state_vector()
+        ),
+        head
+    );
+    assert_eq!(reader.dispatch_count(), 0);
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_no_reader_refuses_before_fencing() {
+    impossible_point_refuses("no-reader");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_missing_refuses_before_fencing() {
+    impossible_point_refuses("missing");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_pre_rename_refuses_before_fencing() {
+    impossible_point_refuses("pre-rename");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_oversized_refuses_before_fencing() {
+    impossible_point_refuses("oversized");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_partial_refuses_before_fencing() {
+    impossible_point_refuses("partial");
+}
+#[test]
+fn preparation_refuses_a_substituted_selected_point() {
+    let mut f = Fixture::new("original\n");
+    let point = f.baseline_point.clone();
+    let other = f.edit("newer\n", 3);
+    let mut input = f.freeze(point);
+    input.point = other;
+    let before = binding_state(&f);
+    assert!(matches!(f.prepare(input), Err(ApplicationError::Conflict)));
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+}
+#[test]
+fn old_fence_receipts_without_the_selection_are_refused() {
+    let f = Fixture::new("original\n");
+    let before = binding_state(&f);
+    let mut json = serde_json::to_value(NativeRestoreFenceReceipt {
+        operation: f.fence_input(),
+        local_head_sequence: 0,
+        recorded_at_ms: 50,
+    })
+    .unwrap();
+    json["operation"].as_object_mut().unwrap().remove("point");
+    assert!(serde_json::from_value::<NativeRestoreFenceReceipt>(json).is_err());
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_post_rename_point_does_not_require_the_old_head_artifact() {
+    let (mut f, source) = reader_fixture();
+    damage(&f, "UPDATE moments SET path='old.md'");
+    let fresh_source = source + "\n";
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = dohc_engine_reader::Reader::new(Some(config));
+    let mut result = None;
+    crate::reader_resolver::tests::run(async {
+        result = Some(
+            reader
+                .request(dohc_engine_reader::Request {
+                    method: dohc_engine_reader::Method::Construct,
+                    document: dohc_engine_reader::Document {
+                        workspace_id: "workspace".into(),
+                        main_version_id: "main".into(),
+                        object_id: "object".into(),
+                        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+                    },
+                    current_path: "a.md".into(),
+                    source: fresh_source.as_bytes().to_vec(),
+                    checkpoint: f.doc.encode_full_state(),
+                })
+                .await,
+        );
+    });
+    let result = result.unwrap().unwrap();
+    let dohc_engine_reader::Outcome::Constructed { delta, .. } = result else {
+        panic!("{result:?}");
+    };
+    f.doc.apply(&delta).unwrap();
+    let point = f.accept(delta, 3);
+    store_restore_artifact(&mut f, &fresh_source);
+    let (bytes, original_source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let original = Ydoc::wire();
+    original.apply(&bytes).unwrap();
+    let edit = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(
+            &original_source,
+            &original,
+            2_000_000,
+            Some(2123456),
+        )
+        .unwrap();
+    f.accept(edit, 4);
+    let prep = f.freeze(NativeRestorePoint {
+        markdown_digest: hex_sha256(fresh_source.as_bytes()),
+        ..point
+    });
+    let proposal = reader_result(|| f.prepare(prep.clone())).unwrap();
+    assert_eq!(proposal.reader_source(), Some(fresh_source.as_str()));
+}
+
+#[test]
+fn native_points_do_not_need_an_artifact() {
+    let mut f = Fixture::new("native original\n");
+    let target = f.baseline_point.clone();
+    f.edit("native later\n", 3);
+    damage(&f, "DELETE FROM moments");
+    f.freeze(target);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_partial_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("partial");
+}
+#[test]
+fn fence_authenticates_the_selected_history_receipt() {
+    for field in ["cursor", "digest"] {
+        let mut f = Fixture::new("native original\n");
+        f.edit("later\n", 3);
+        let mut operation = f.fence_input();
+        if field == "cursor" {
+            operation.point.journal_cursor = 3;
+        } else {
+            operation.point.receipt_digest = "f".repeat(64);
+        }
+        let before = binding_state(&f);
+        assert!(
+            matches!(
+                f.owner
+                    .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults),
+                Err(ApplicationError::Conflict)
+            ),
+            "{field}"
+        );
+        assert_eq!(binding_state(&f), before);
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    }
 }

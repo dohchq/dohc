@@ -296,6 +296,10 @@ mod tests {
         f.adopt().unwrap();
         let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
         let operation = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore-owner".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),
@@ -420,6 +424,10 @@ mod tests {
             assert_eq!(f.store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
             let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
             let input = NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: f.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "empty-owner-restore".into(),
                 relay_database_namespace: "namespace".into(),
                 old_binding: f.binding.clone(),
@@ -494,6 +502,10 @@ mod tests {
         assert!(!pending_before.is_empty());
         let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
         let input = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "owner-restore".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),

@@ -10,7 +10,15 @@ pub enum RestoreDeliveryOrigin {
 /// Supplied by an authenticated operation adapter after relay old-cut ACK.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRestoreSelection {
+    pub journal_cursor: i64,
+    pub receipt_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreFence {
+    pub point: NativeRestoreSelection,
     pub operation_id: String,
     pub relay_database_namespace: String,
     pub old_binding: LiveObjectBinding,
@@ -118,6 +126,8 @@ pub(crate) fn require_registration(
 
 impl NativeRestoreFence {
     pub(super) fn validate(&self) -> Result<(), ApplicationError> {
+        integer(self.point.journal_cursor, 0, SAFE)?;
+        digest(&self.point.receipt_digest)?;
         identifier(&self.operation_id, 512)?;
         identifier(&self.relay_database_namespace, 512)?;
         identifier(&self.host_id, 1024)?;
@@ -333,14 +343,22 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             let current = durable::load_doc_in(tx, &key)?;
-            if current.has_reader_source() {
-                let reference = current.markdown_source_reference().ok_or(CollabError::MarkdownReaderUnavailable)?;
-                if resolver.is_none() { return Err(CollabError::MarkdownReaderUnavailable.into()); }
-                crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
-                    .map_err(|error| match error {
-                        CollabError::ConfiguredByteBudgetExceeded => CollabError::MarkdownReaderUnavailable,
-                        error => error,
-                    })?;
+            let selected = accepted_history::read(
+                tx, &held, input.point.journal_cursor,
+                &mut restore_content::Budget { remaining: crate::limits::MAX_YDOC_UPDATE_BYTES * 5 },
+                100_000,
+            )?;
+            if selected.proof.terminal.as_ref().map_or(b.lineage_claim_id.as_str(), |r| r.update_digest.as_str()) != input.point.receipt_digest {
+                return Err(ApplicationError::Conflict);
+            }
+            let needed = if selected.doc.has_reader_source() { Some(&selected.doc) }
+                else if current.has_reader_source() { Some(&current) } else { None };
+            if let Some(doc) = needed {
+                let reference = doc.markdown_source_reference().ok_or(CollabError::MarkdownReaderUnavailable)?;
+                if doc.markdown_source(&reference).is_none() || resolver.is_none() {
+                    return Err(CollabError::MarkdownReaderUnavailable.into());
+                }
+                crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)?;
             }
             let receipt = NativeRestoreFenceReceipt {
                 operation: input.clone(),

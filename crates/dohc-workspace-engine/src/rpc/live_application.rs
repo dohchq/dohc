@@ -1332,7 +1332,7 @@ mod tests {
             deadline_ms: Some(60_000),
             idempotency_key: None,
             progress: false,
-            params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
+            params: json!({"operation":{"point":{"journalCursor":0,"receiptDigest":binding.lineage_claim_id},"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
         }
     }
 

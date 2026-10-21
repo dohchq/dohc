@@ -231,6 +231,11 @@ impl NativeRestorePreparation {
             return Err(invalid("invalid restore preparation budget"));
         }
         self.fence.operation.validate()?;
+        if self.point.journal_cursor != self.fence.operation.point.journal_cursor
+            || self.point.receipt_digest != self.fence.operation.point.receipt_digest
+        {
+            return Err(ApplicationError::Conflict);
+        }
         integer(self.fence.local_head_sequence, 0, SAFE)?;
         integer(self.fence.recorded_at_ms, 0, SAFE)?;
         integer(self.point.journal_cursor, 0, SAFE)?;
@@ -783,14 +788,10 @@ fn prefix_source(
         conn,
         &key,
         doc,
-        &crate::reader_snapshot::SnapshotIdentity {
-            moment: "",
-            path: &b.current_path,
-            digest: "",
-            lineage: &b.lineage_claim_id,
-            authority: &authority,
-            restore_fence: Some(input.fence.operation.new_fence),
-        },
+        &b.current_path,
+        &b.lineage_claim_id,
+        &authority,
+        input.fence.operation.new_fence,
         resolver,
         budget.remaining,
     )?;
