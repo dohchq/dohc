@@ -180,6 +180,10 @@ pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKe
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(CryptoError::KeyFileMalformed),
     };
+    // The file exists: its folder must not resolve anywhere else (a link at
+    // `.dohc` or the folder would mean this key belongs to some other tree).
+    // Same rule as the mint path.
+    verify_key_dir(engine_dir)?;
     let read = (|| -> std::io::Result<String> {
         let metadata = file.metadata()?;
         if !metadata.file_type().is_file() {
@@ -216,6 +220,38 @@ pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKe
     Ok(Some(key))
 }
 
+/// The key folder must not resolve anywhere else: neither it nor the folder
+/// above it, `.dohc` in a workspace, may be reached through a link, as each
+/// load and mint checked on main. A folder named by its ID, as the engine
+/// reaches the folder it checked on a Mac, has no names to follow. Shared by
+/// load and mint.
+fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
+    #[cfg(target_vendor = "apple")]
+    if dohc_macos_files::is_path_by_id(engine_dir) {
+        return Ok(());
+    }
+    let parent = engine_dir.parent();
+    let (Some(dohc), Some(engine)) = (parent, engine_dir.file_name()) else {
+        return Err(CryptoError::KeyFileMalformed);
+    };
+    let (Some(root), Some(dohc_name)) = (dohc.parent(), dohc.file_name()) else {
+        return Err(CryptoError::KeyFileMalformed);
+    };
+    let real = engine_dir
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?;
+    let expected = root
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?
+        .join(dohc_name)
+        .join(engine);
+    if real == expected {
+        Ok(())
+    } else {
+        Err(CryptoError::KeyFileMalformed)
+    }
+}
+
 /// Mint and durably publish a fresh workspace data key in `engine_dir`, the
 /// folder that holds the workspace's store, by the path the store opened
 /// through. The engine made that folder private when it opened the store,
@@ -228,6 +264,9 @@ pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKe
 pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     let path = engine_dir.join(SECRET_KEY_FILE_NAME);
     let key = SecretDataKey::generate()?;
+    // A link at `.dohc` or the folder would send key custody off the
+    // workspace.
+    verify_key_dir(engine_dir)?;
     // Durable publish: temp (0600) + fsync + hard-link. The key file must
     // be durably on disk before any ciphertext is committed under it —
     // a crash that lost a visible-but-unflushed key would strand every
@@ -542,6 +581,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A link put at `.dohc`, or at the engine's folder, after the workspace
+    /// opened sends the key folder's path into another tree. A later load
+    /// and a mint through that path both refuse, and the other tree gets no
+    /// key.
+    #[cfg(any(unix, windows))]
+    fn a_link_after_the_open_refuses_the_key(link: impl Fn(&std::path::Path, &std::path::Path)) {
+        for (n, linked) in [".dohc", ".dohc/engine"].into_iter().enumerate() {
+            let name = format!("key-link-{n}");
+            let scratch = dohc_test_scratch::ScratchDir::new_named(&name).unwrap();
+            let root = scratch.path();
+            let engine = root.join(".dohc").join("engine");
+            std::fs::create_dir_all(&engine).unwrap();
+            create_key_file(&engine).unwrap();
+            let elsewhere = root.join("elsewhere");
+            let other = elsewhere.join("engine");
+            std::fs::create_dir_all(&other).unwrap();
+            let key = SECRET_KEY_FILE_NAME;
+            std::fs::copy(engine.join(key), other.join(key)).unwrap();
+            std::fs::rename(root.join(".dohc"), root.join("moved")).unwrap();
+            if linked == ".dohc" {
+                link(&elsewhere, &root.join(".dohc"));
+            } else {
+                std::fs::create_dir(root.join(".dohc")).unwrap();
+                link(&other, &engine);
+            }
+            let loaded = load_key_file(&engine);
+            assert!(
+                matches!(loaded, Err(CryptoError::KeyFileMalformed)),
+                "{linked}"
+            );
+            std::fs::remove_file(other.join(key)).unwrap();
+            let minted = create_key_file(&engine);
+            assert!(
+                matches!(minted, Err(CryptoError::KeyFileMalformed)),
+                "{linked}"
+            );
+            assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0, "{linked}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_after_the_open_refuses_the_key() {
+        a_link_after_the_open_refuses_the_key(|target, link| {
+            std::os::unix::fs::symlink(target, link).unwrap();
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_after_the_open_refuses_the_key() {
+        a_link_after_the_open_refuses_the_key(|target, link| {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+        });
     }
 
     #[test]

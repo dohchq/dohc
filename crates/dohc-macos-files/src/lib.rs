@@ -549,11 +549,17 @@ fn owned_volume(flags: u32, kind: &[c_char]) -> bool {
         && !matches!(type_name(kind).as_slice(), b"msdos" | b"exfat")
 }
 
+/// Whether `path` names a folder by ID, as [`path_by_id`] does, or lies
+/// below one.
+pub fn is_path_by_id(path: &Path) -> bool {
+    path.starts_with("/.vol")
+}
+
 /// The folder's current path when `path` names it by ID, as [`path_by_id`]
 /// does, which has no names to climb. Any other path is returned as it is.
 pub fn path_by_name(path: &Path) -> io::Result<PathBuf> {
     use rustix::fs::{Mode, OFlags};
-    if !path.starts_with("/.vol") {
+    if !is_path_by_id(path) {
         return Ok(path.to_owned());
     }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
