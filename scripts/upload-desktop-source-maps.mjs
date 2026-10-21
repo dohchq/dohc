@@ -35,7 +35,7 @@ export function sourceMapUpload(env, platform = process.platform) {
     if (platform === "win32" && name.toUpperCase() === "PSMODULEPATH") delete childEnv[name];
   }
   // A dry run uploads nothing, but installs and runs the CLI as a release does.
-  if (env.DRY_RUN === "true") return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
+  if (env.DOHC_SOURCE_MAPS_DRY_RUN === "true") return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
   if (!env.DOHC_POSTHOG_KEY?.trim()) {
     return { skip: "DOHC_POSTHOG_KEY is not set, so this build sends no error reports and needs no source maps." };
   }

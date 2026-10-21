@@ -883,10 +883,12 @@ test("the source map upload leaves PowerShell 7's module path out of the CLI's e
 });
 
 test("a dry run installs and runs the CLI with the release's environment, and uploads nothing", async () => {
-  const dryRun = { DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", POSTHOG_CLI_HOST: "", PSModulePath: "C:\\Modules", PATH: "/bin" };
+  const dryRun = { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", POSTHOG_CLI_HOST: "", PSModulePath: "C:\\Modules", PATH: "/bin" };
   const upload = sourceMapUpload(dryRun, "win32");
   assert.deepEqual(upload.args, ["dlx", "--allow-build=@posthog/cli", "@posthog/cli@0.18.10", "--version"]);
-  assert.deepEqual(upload.env, { DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", PATH: "/bin" });
+  assert.deepEqual(upload.env, { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", PATH: "/bin" });
+  // The Mac's release passes its shell's environment on, so a DRY_RUN left there must not skip a real upload.
+  assert.equal(sourceMapUpload({ ...SOURCE_MAP_ENV, DRY_RUN: "true" }).dryRun, undefined);
 
   // A dry run's build has no PostHog key, so its files carry no chunk ID.
   const directories = await builtDist({ injected: false });
@@ -928,7 +930,7 @@ test("the release injects source maps for every build that names PostHog before 
   const upload = releaseStep(job, "upload-desktop-source-maps.mjs");
   const packaging = releaseStep(job, "electron-builder");
   assert.equal(upload.if, undefined);
-  assert.equal(upload.env.DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
+  assert.equal(upload.env.DOHC_SOURCE_MAPS_DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
   // The upload sees the key and dist the build compiled in.
   for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {
