@@ -90,15 +90,16 @@ async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise
   };
   return floor;
 }
-function personFloor(rootPath: string, word = "delete"): Floor {
+function personFloor(rootPath: string, word?: string, action: "read" | "undo" = "undo"): Floor {
+  const refusal = action === "read" ? word ? `Cannot read the ${word} operation.` : "Cannot read this operation." : `Cannot undo the ${word ?? "delete"}.`;
   return async (path, _entry, root = false) => {
     const checked = root ? validateUserWritePath(path) : validateUserMaterializePath(path, { platform: process.platform, allowIgnoredSegments: true });
-    if (!checked.ok || checked.normalized !== path) throw new Error(`Cannot undo the ${word}. Its recovery paths are invalid.`);
-    if (root) await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Undo path", access: "entry" });
+    if (!checked.ok || checked.normalized !== path) throw new Error(`${refusal} Its recovery paths are invalid.`);
+    if (root) await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: action === "read" ? "History path" : "Undo path", access: "entry" });
     else {
       const target = await realRelativeInRoot(rootPath, join(rootPath, path), true);
       if (!target.ok || target.relative !== path || !validateUserMaterializePath(target.relative, { platform: process.platform, allowIgnoredSegments: true }).ok) {
-        throw new Error(`Cannot undo the ${word}. ` + path + " now leads somewhere else.");
+        throw new Error(`${refusal} ` + path + " now leads somewhere else.");
       }
     }
   };
@@ -116,8 +117,8 @@ async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | 
   };
   await walk(staged, record.base);
 }
-async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Promise<void> {
-  const invalid = () => new Error(`Cannot undo the ${moveWord(record.from, record.to)}. Its recovery paths are invalid.`);
+async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor, action: "read" | "undo" = "undo"): Promise<void> {
+  const invalid = () => new Error(`Cannot ${action} the ${moveWord(record.from, record.to)}${action === "read" ? " operation" : ""}. Its recovery paths are invalid.`);
   if (record.from === record.to || record.from.startsWith(record.to + "/") || record.to.startsWith(record.from + "/")) throw invalid();
   const paths = "noUndo" in record ? [] : [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result => result?.restored ?? [])];
   for (const path of paths) if (path !== record.from) throw invalid();
@@ -149,8 +150,8 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
       writable(operation);
       const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
       const move = cursor ? undefined : await readMoveRecovery(rootPath, input.operationId);
-      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : personFloor(rootPath);
-      if (move) await moveRecoveryFloor(move, floor);
+      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : personFloor(rootPath, move ? moveWord(move.from, move.to) : record ? "delete" : undefined, "read");
+      if (move) await moveRecoveryFloor(move, floor, "read");
       let links = move && "links" in move && !move.engine && !move.progress && !move.result ? move.links : undefined;
       if (links?.state === "done") {
         const unchecked: string[] = [];

@@ -1,4 +1,5 @@
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import * as workspaceCore from "@dohc/workspace-core";
 import * as assets from "./workspaceAssets";
 import { withSharedWorkspaceOperation, withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import * as filesystem from "node:fs/promises";
@@ -276,9 +277,16 @@ it.each([false, true])("preserves operation-scoped wire refusals, agent=%s", asy
     const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
     const message = `domain error: Undo refused: ${reason}: ${moved.operationId}`;
     expect(moved.operationId).toMatch(/^dohc-operation:/u);
-    f.history.undoHistoryOperation.mockRejectedValue(new Error(message));
-    expect(await f.undo(undefined, byAgent)).toEqual({ok: false, reason: message});
+    const pathValidation = vi.spyOn(workspaceCore, "validateUserMaterializePath");
+    f.history.undoHistoryOperation.mockImplementation(async () => {
+      pathValidation.mockClear();
+      throw new Error(message);
+    });
+    const result = await f.undo(undefined, byAgent);
+    expect(pathValidation).not.toHaveBeenCalled();
+    expect(result).toEqual({ok: false, reason: message});
     expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+    pathValidation.mockRestore();
   }
 });
 

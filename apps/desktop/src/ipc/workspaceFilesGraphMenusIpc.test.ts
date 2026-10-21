@@ -157,6 +157,34 @@ async function harness(history?: OperationHistory) {
 }
 
 describe("registered workspace file handlers", () => {
+  it.each([
+    {word: "rename", from: "../old.md", to: "../new.md"},
+    {word: "move", from: "../old.md", to: "archive/new.md"},
+    {word: "rename", from: "same.md", to: "same.md"},
+  ])("names a failed $word operation read accurately ($from → $to)", async ({word, from, to}) => {
+    const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>();
+    const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
+    const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const record: FileMoveRecoveryRecord = {operationId, from, to, entries: [from], tracked: true};
+    await saveRecoveryRecord(h.workspace.rootPath, record, "move");
+    await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, {workspaceId: "workspace", operationId}))
+      .resolves.toEqual({ok: false, reason: `Cannot read the ${word} operation. Its recovery paths are invalid.`});
+    expect(readHistoryPage).not.toHaveBeenCalled();
+  });
+
+  it.each(["share view", "untrusted sender"])("refuses an operation read from a %s before calling the engine", async caller => {
+    const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>();
+    const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
+    const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
+    if (caller === "share view") h.workspace.shareView = {} as Workspace["shareView"];
+    const reading = h.invoke(workspaceFileOperations.readHistoryOperation.channel,
+      {workspaceId: "workspace", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111"}, caller !== "untrusted sender");
+    if (caller === "share view") await expect(reading).resolves.toEqual({ok: false, reason: "History operations require the owning workspace. Open it to continue."});
+    else await expect(reading).rejects.toThrow("untrusted");
+    expect(readHistoryPage).not.toHaveBeenCalled();
+  });
+
   it.each(["updating", "done"] as const)("reads %s link updates through IPC with the person's floor", async state => {
     const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>(async () => ({moments: [], nextCursor: null}) as never);
     const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
