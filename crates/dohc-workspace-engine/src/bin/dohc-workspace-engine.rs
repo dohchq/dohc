@@ -716,23 +716,36 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 let cancel = guard.cancel_signal();
                 let retired = guard.retirement_signal();
                 let deadline = guard.deadline();
+                // A Cancel withholds an acknowledgement only before its first
+                // byte. A started frame must finish, or the broken stream ends
+                // the connection; the client drops the late answer. Retirement
+                // and the deadline still stop it.
+                let only_cancelled = || {
+                    cancel.is_cancelled()
+                        && !retired.is_cancelled()
+                        && deadline.is_none_or(|deadline| std::time::Instant::now() < deadline)
+                };
                 let mut offset = 0;
                 while offset < frame.len() {
                     let write = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
-                        if !guard.with_current(&mut || {
+                        let mut poll = || {
                             result = std::pin::Pin::new(&mut output)
                                 .poll_write(cx, &frame[offset..])
                                 .map(|result| result.map(Some));
-                        }) {
-                            return std::task::Poll::Ready(Ok(None));
+                        };
+                        if !guard.with_current(&mut poll) {
+                            if offset == 0 || !only_cancelled() {
+                                return std::task::Poll::Ready(Ok(None));
+                            }
+                            poll();
                         }
                         result
                     });
                     let mut interruption_kind = io::ErrorKind::ConnectionAborted;
                     let count = tokio::select! {
                         biased;
-                        () = cancel.cancelled() => None,
+                        () = cancel.cancelled(), if offset == 0 => None,
                         () = retired.cancelled() => None,
                         () = async {
                             match deadline {
@@ -766,29 +779,30 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 }
                 let flush = std::future::poll_fn(|cx| {
                     let mut result = std::task::Poll::Pending;
-                    if !guard.with_current(&mut || {
-                        result = std::pin::Pin::new(&mut output).poll_flush(cx);
-                    }) {
-                        let expired =
-                            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
-                        return std::task::Poll::Ready(Err(io::Error::new(
-                            if expired {
-                                io::ErrorKind::TimedOut
-                            } else {
-                                io::ErrorKind::ConnectionAborted
-                            },
-                            if expired {
-                                "live acknowledgement expired"
-                            } else {
-                                "live acknowledgement retired"
-                            },
-                        )));
+                    let mut poll = || result = std::pin::Pin::new(&mut output).poll_flush(cx);
+                    if !guard.with_current(&mut poll) {
+                        if !only_cancelled() {
+                            let expired = deadline
+                                .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                            return std::task::Poll::Ready(Err(io::Error::new(
+                                if expired {
+                                    io::ErrorKind::TimedOut
+                                } else {
+                                    io::ErrorKind::ConnectionAborted
+                                },
+                                if expired {
+                                    "live acknowledgement expired"
+                                } else {
+                                    "live acknowledgement retired"
+                                },
+                            )));
+                        }
+                        poll();
                     }
                     result
                 });
                 tokio::select! {
                     biased;
-                    () = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
                     () = retired.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
                     () = async {
                         match deadline {
@@ -2328,6 +2342,11 @@ mod tests {
     async fn guarded_output_retires_while_write_or_flush_is_blocked() {
         for flush_only in [false, true] {
             for retire_owner in [false, true] {
+                if flush_only && !retire_owner {
+                    // A Cancel lets a started flush finish.
+                    // `a_cancel_during_the_flush_finishes_the_acknowledgement` covers it.
+                    continue;
+                }
                 let cancel = CancelSignal::new();
                 let retired = CancelSignal::new();
                 let dropped = Arc::new(AtomicBool::new(false));
@@ -2388,6 +2407,126 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Writes acknowledgement 9, far larger than an 8-byte pipe, then
+    /// response 10. Returns the writer task, the signals that stop 9, and the
+    /// egress map.
+    fn write_acknowledgement_then_response<W: AsyncWrite + Unpin + Send + 'static>(
+        output: W,
+        deadline: Option<std::time::Instant>,
+    ) -> (
+        tokio::task::JoinHandle<io::Result<()>>,
+        CancelSignal,
+        CancelSignal,
+        ActiveEgress,
+    ) {
+        let cancel = CancelSignal::new();
+        let retired = CancelSignal::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"content": "x".repeat(1024)}),
+            },
+            guard: Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: retired.clone(),
+                deadline,
+                dropped: Arc::new(AtomicBool::new(false)),
+            }),
+        })
+        .unwrap();
+        tx.try_send(OutputItem::Envelope(Envelope::Response(WireResponse {
+            id: 10,
+            result: serde_json::Value::Null,
+        })))
+        .unwrap();
+        let active: ActiveEgress = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
+        let writer_active = active.clone();
+        let task = tokio::spawn(async move {
+            write_output(output, &mut rx, &WireLimits::default(), writer_active).await
+        });
+        (task, cancel, retired, active)
+    }
+
+    /// The ids of the complete responses in `transcript`, in order.
+    fn response_ids(transcript: &[u8]) -> Vec<u64> {
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(transcript);
+        let mut ids = Vec::new();
+        while let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() {
+            let Envelope::Response(response) = decode_control(&payload, &limits).unwrap() else {
+                panic!("response expected");
+            };
+            ids.push(response.id);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_cancel_after_the_first_byte_finishes_the_acknowledgement() {
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let (task, cancel, _retired, active) = write_acknowledgement_then_response(writer, None);
+        let mut transcript = vec![0; 8];
+        reader.read_exact(&mut transcript).await.unwrap();
+        cancel.cancel();
+        reader.read_to_end(&mut transcript).await.unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(response_ids(&transcript), [9, 10]);
+        assert!(!lock(&active).contains_key(&9));
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_the_flush_finishes_the_acknowledgement() {
+        let (pipe, mut reader) = tokio::io::duplex(8);
+        // The whole frame fits the buffer, so only its flush waits on the pipe.
+        let writer = tokio::io::BufWriter::with_capacity(64 * 1024, pipe);
+        let (task, cancel, _retired, _active) = write_acknowledgement_then_response(writer, None);
+        let mut transcript = vec![0; 8];
+        reader.read_exact(&mut transcript).await.unwrap();
+        cancel.cancel();
+        reader.read_to_end(&mut transcript).await.unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(response_ids(&transcript), [9, 10]);
+    }
+
+    #[tokio::test]
+    async fn retirement_ends_a_started_acknowledgement_even_after_a_cancel() {
+        for cancelled in [false, true] {
+            let (writer, mut reader) = tokio::io::duplex(8);
+            let (task, cancel, retired, _active) =
+                write_acknowledgement_then_response(writer, None);
+            let mut transcript = vec![0; 8];
+            reader.read_exact(&mut transcript).await.unwrap();
+            if cancelled {
+                cancel.cancel();
+            }
+            retired.cancel();
+            assert_eq!(
+                task.await.unwrap().unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            reader.read_to_end(&mut transcript).await.unwrap();
+            assert!(response_ids(&transcript).is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_ends_a_started_acknowledgement_even_after_a_cancel() {
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let (task, cancel, _retired, _active) =
+            write_acknowledgement_then_response(writer, Some(deadline));
+        let mut prefix = [0; 8];
+        reader.read_exact(&mut prefix).await.unwrap();
+        cancel.cancel();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 
     #[tokio::test(start_paused = true)]
