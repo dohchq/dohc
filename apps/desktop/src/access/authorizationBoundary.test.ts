@@ -3,7 +3,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { expect, it } from "vitest";
 
-const root = resolve(import.meta.dirname, "../../../.."), require = createRequire(resolve(root, "apps/desktop/package.json"));
+const root = resolve(import.meta.dirname, "../../../..");
 const forbidden = /\/access\/[^/]+\.ts$|\/workspaces\/receivedShareStore\.ts$/;
 const entries = ["services/sync-relay/src/shareAuthorization.ts", "services/sync-relay/src/shareFilter.ts",
   "packages/app-backend-runtime/src/dataset-host.ts", "apps/desktop/src/workspaces/localDatasetHost.ts", "apps/desktop/src/workspaces/remoteDataset.ts",
@@ -27,7 +27,7 @@ function imports(file: string, source: string): string[] {
       if (!found) throw new Error(`Unresolved relative import ${specifier} in ${file}`);
       return [found];
     }
-    if (specifier.startsWith("@dohc/")) { try { return [require.resolve(specifier)]; } catch { throw new Error(`Unresolved import ${specifier}`); } }
+    if (specifier.startsWith("@dohc/")) { try { return [createRequire(file).resolve(specifier)]; } catch { throw new Error(`Unresolved import ${specifier}`); } }
     return [];
   });
 }
@@ -56,6 +56,10 @@ it.each(['import "../access/accessOwner";', 'import("../access/accessOwner")', '
 it("walks through .js imports to deeper TypeScript authorization dependencies", () => {
   const deep = resolve(root, "packages/app-backend-runtime/src/dataset-read-result.ts");
   expect(violations(new Map([[deep, 'import "../../../apps/desktop/src/access/accessQuery.js";']]))).toHaveLength(1);
+});
+it.each(["access/accessQuery", "workspaces/receivedShareStore"])("detects a forbidden dependency through another package on %s", module => {
+  const dependency = resolve(root, "packages/workspace-auth/src/session.ts");
+  expect(violations(new Map([[dependency, `import "../../../apps/desktop/src/${module}";`]]))).toHaveLength(1);
 });
 it("refuses to skip an unresolved relative runtime import", () => {
   const entry = resolve(root, "packages/app-backend-runtime/src/dataset-host.ts");
