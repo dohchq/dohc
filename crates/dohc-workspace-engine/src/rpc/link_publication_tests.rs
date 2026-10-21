@@ -35,7 +35,12 @@ async fn pending_rewrite_publication_recovers_at_open_and_undo_races_it_safely()
         let open = service.open(Some(&handle)).unwrap();
         let capture = open.capture_apply_gate.clone().lock_owned().await;
         let root = scratch.path().to_path_buf();
-        let version = open.actor.active_version_id(WS.into()).await.unwrap();
+        let version = open
+            .actor
+            .ensure_main_version(WS.into(), 1, Arc::new(NoFaults), CancellationToken::new())
+            .await
+            .unwrap()
+            .version_id;
         for (i, path) in ["old.md", "one.md", "two.md", "three.md"]
             .iter()
             .enumerate()

@@ -240,6 +240,7 @@ impl Fixture {
             .await
     }
     async fn publish(&self) {
+        let _capture = self.capture.clone().lock_owned().await;
         let jobs = self
             .actor
             .history_operation_pending_jobs(self.ws.clone(), OP.into())
@@ -997,6 +998,8 @@ async fn case_only_and_delete_only_operations_refuse() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     let mut f = Fixture::new(2000, 4999);
+    // Measure forward and Undo turns here; publication has its own bulk proof.
+    let _publication = f.capture.clone().lock_owned().await;
     let initial_hold = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {

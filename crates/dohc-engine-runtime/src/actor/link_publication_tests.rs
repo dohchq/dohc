@@ -227,6 +227,13 @@ impl FaultInjector for FlushTimings {
 async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
     let f = Fixture::new(2000, 2001);
     let _index = f.actor.hold_link_drain();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+        ).map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
     let hold = f.capture.clone().lock_owned().await;
     let timings = Arc::new(FlushTimings::default());
     placements()
@@ -236,7 +243,10 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
         .or_default()
         .faults = Some(timings.clone());
     let start = Instant::now();
-    f.pass("placement-turns", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(
+        f.pass("placement-turns", Arc::new(NoFaults)).await.unwrap()["documents"],
+        2000
+    );
     let (entered, release) = pause(&f.ws);
     drop(hold);
     tokio::time::timeout(Duration::from_secs(120), entered.notified())
