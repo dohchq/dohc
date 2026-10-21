@@ -23,9 +23,9 @@ signs and notarizes a release. An unsigned build is not a stable release.
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
 installs an AppArmor profile that allows them. The profile covers every process
-dohc starts, including the engine, chat runners, and the commands agents run, so
-each of them can also create user namespaces. Point Ubuntu and Debian users to
-the `.deb`.
+the desktop app starts, including the engine, chat runners, and the commands
+agents run, so each of them can also create user namespaces. Point Ubuntu and
+Debian users to the `.deb`.
 
 On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
 `/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
