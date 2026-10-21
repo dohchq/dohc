@@ -1,5 +1,5 @@
 import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
-import { linkFixtureFile, measureLinkRename } from './packaged-link-rename.mjs';
+import { linkFixtureFile, measureLinkRename, rearmLinkReceipt, readLinkRecord } from './packaged-link-rename.mjs';
 import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
@@ -1123,6 +1123,15 @@ async function documentRelay(runDir, documentCase, deadline) {
     if (scenario === 'link-rename') {
       data.linkRename = await measureLinkRename({instance: fresh, links: options.links, typing, waitUntil, signal: benchmarkSignal});
       await shutdown(runDir, fresh);
+      await rearmLinkReceipt(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+      const resumedAt = performance.now(), resumed = await launch(runDir, f, 'resume');
+      const resumeReceipt = await waitUntil(async () => {
+        const record = await readLinkRecord(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+        return record.links.state === 'done' ? record.links : false;
+      }, 300_000);
+      data.linkRename.resume = {startup: resumed.startup, receipt: resumeReceipt, launchToDoneObservedMs: performance.now() - resumedAt,
+        interruption: 'engine receipt completed before main persisted done'};
+      await shutdown(runDir, resumed);
       await json(join(output, 'result.json'), receipt);
       continue;
     }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -12,6 +12,15 @@ export function linkFixtureFile(n, links) {
 export function linkingPaths(links) {
   return links ? ['large.md', ...Array.from({length: links - 1}, (_, n) => linkFixtureFile(n + 3, links).name)] : [];
 }
+const recordPath = (root, id) => join(root, '.dohc', 'trash', `move-${createHash('sha256').update(id).digest('hex')}.json`);
+export const readLinkRecord = async (root, id) => JSON.parse(await readFile(recordPath(root, id), 'utf8'));
+// Reproduce a quit after the engine receipt but before main saved done. The app is stopped.
+export async function rearmLinkReceipt(root, id) {
+  const record = await readLinkRecord(root, id);
+  if (record.links.state !== 'done' || record.engine || !record.linkRewrite) throw Error('Resume fixture is not a forward move');
+  record.links = {state: 'updating'};
+  await writeFile(recordPath(root, id), JSON.stringify(record));
+}
 
 // The collection scenario's typing collector supplies trusted input and long tasks.
 // beforeInput starts the move with both observers armed, before the first key.
@@ -23,7 +32,12 @@ export async function measureLinkRename({instance, links, typing, waitUntil, sig
   const pending = () => Number(database.prepare('SELECT COUNT(*) AS n FROM link_pending').get().n);
   const cases = [];
   try {
-    await waitUntil(() => pending() === 0, 300_000);
+    await waitUntil(async () => {
+      const pageOfLinks = await page.evaluate(({workspaceId, path}) => window.dohcDesktop.linksIn({workspaceId, subject: {path}}),
+        {workspaceId: workspace.workspaceId, path: LINK_TARGET});
+      return pageOfLinks && !pageOfLinks.indexBuilding && pending() === 0 &&
+        Number(database.prepare('SELECT COUNT(*) AS n FROM snapshots').get().n) >= 5000;
+    }, 300_000);
     for (const document of ['small.md', 'large.md']) {
       signal.throwIfAborted();
       let move, resultMs, started, observed, passEnded, moveStarted;
@@ -67,6 +81,10 @@ export async function measureLinkRename({instance, links, typing, waitUntil, sig
         typing: typed, actorTurns: null, floorWalkMs: null, longestRecordUpdateWaitMs: null,
         unavailable: 'Production exposes no per-turn, floor-walk, fsync or ydoc.recordUpdate timing. Receipt and disk times are observation upper bounds.'});
     }
-    return {links, cases};
+    const resumeMove = await page.evaluate(({workspaceId, fromPath, toPath}) => window.dohcDesktop.moveWorkspacePath({workspaceId, fromPath, toPath}),
+      {workspaceId: workspace.workspaceId, fromPath: LINK_TARGET, toPath: LINK_RENAMED});
+    if (!resumeMove.operationId || !resumeMove.undo?.available) throw Error('Resume fixture move failed');
+    await waitUntil(async () => (await readLinkRecord(root, resumeMove.operationId).catch(() => null))?.links?.state === 'done', 300_000);
+    return {links, cases, resumeOperationId: resumeMove.operationId};
   } finally {database.close();}
 }

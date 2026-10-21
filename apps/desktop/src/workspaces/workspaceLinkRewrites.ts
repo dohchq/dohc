@@ -12,6 +12,10 @@ type Pass = { cancel: AbortController; answer: Promise<unknown> };
 type State = { undo: number; pass?: Pass; scheduled?: boolean };
 const states = new Map<string, State>();
 const keyFor = (root: string, id: string) => JSON.stringify([root, id]);
+function retire(root: string, id: string, state: State): void {
+  const key = keyFor(root, id);
+  if (states.get(key) === state && !state.undo && !state.scheduled && !state.pass) states.delete(key);
+}
 const stateFor = (root: string, id: string) => {
   const key = keyFor(root, id);
   let state = states.get(key);
@@ -32,7 +36,7 @@ export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord
     if (!state.scheduled) return;
     state.scheduled = false;
     if (state.undo || context.signal?.aborted) {
-      if (!state.undo) states.delete(keyFor(root, record.operationId));
+      retire(root, record.operationId, state);
       return;
     }
     const cancel = new AbortController();
@@ -55,7 +59,7 @@ export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord
     }).finally(() => {
       context.signal?.removeEventListener("abort", retired);
       if (state.pass === pass) delete state.pass;
-      if (!state.undo && !state.scheduled && !state.pass) states.delete(keyFor(root, record.operationId));
+      retire(root, record.operationId, state);
     });
   });
 }
@@ -67,11 +71,18 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
   state.scheduled = false;
   const pass = state.pass;
   pass?.cancel.abort();
-  await pass?.answer.catch(() => undefined);
+  try { await pass?.answer; }
+  catch (error) {
+    if (!error || typeof error !== "object" || !("wireCode" in error) || error.wireCode !== "CANCELLED") {
+      state.undo--;
+      retire(root, id, state);
+      throw error;
+    }
+  }
   if (state.pass === pass) delete state.pass;
   return () => {
     state.undo--;
-    if (!state.undo && !state.scheduled && !state.pass) states.delete(keyFor(root, id));
+    retire(root, id, state);
   };
 }
 

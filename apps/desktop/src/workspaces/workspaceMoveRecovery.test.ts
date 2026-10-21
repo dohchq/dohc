@@ -25,6 +25,7 @@ const agent = { kind: "agent", agentId: "move-agent", onBehalfOf: "local:move-ow
 const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
 const linkReceipt = {documents: 3, links: 3, unchecked: ["adopted.md"], uncheckedCount: 1, complete: true};
 const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
+const cancelledPassError = () => Object.assign(new Error("Cancelled"), {wireCode: "CANCELLED"});
 async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewriteHistoryLinks"]>) {
   const rootPath = await createTestScratch("move-undo-");
   const write = async (path: string, text = path) => { await mkdir(dirname(join(rootPath, path)), { recursive: true }); await writeFile(join(rootPath, path), text); };
@@ -113,8 +114,8 @@ it.each([false, true])("returns a rename before its pass, reads updating without
   f.retirement.abort();
 });
 
-it("cancels the in-flight pass and waits for its last committed member before floors and Undo", async () => {
-  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<never>();
+it.each([false, true])("cancels the in-flight pass and waits for its last committed member before floors and Undo, receipt=%s", async completed => {
+  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<typeof linkReceipt>();
   const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
     input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
     started.resolve(); return ended.promise;
@@ -128,7 +129,7 @@ it("cancels the in-flight pass and waits for its last committed member before fl
   expect(f.history.readHistoryPage).not.toHaveBeenCalled();
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   f.members.push({path: "last.md", beforePath: "last.md", operation: "write", momentId: "last"});
-  ended.reject(new Error("Cancelled"));
+  if (completed) ended.resolve(linkReceipt); else ended.reject(cancelledPassError());
   expect(await undoing).toMatchObject({ok: true, tracked: {momentCount: 2}});
   expect(f.history.readHistoryPage).toHaveBeenCalled();
   expect(rewrite).toHaveBeenCalledTimes(1);
@@ -151,7 +152,7 @@ it("refuses an agent floor before every inverse and resumes with the same key an
   const moved = await f.moveAsAgent("old.md", "new.md"); await started.promise;
   const undoing = f.undo(undefined, true); await cancelled.promise;
   f.members.push({path: "private/.env", beforePath: "private/.env", operation: "write", momentId: "secret"});
-  ended.reject(new Error("Cancelled"));
+  ended.reject(cancelledPassError());
   expect(await undoing).toMatchObject({ok: false, reason: expect.stringContaining("private contains a link or a reserved, secret, or excluded path")});
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   await resumed.promise;
@@ -172,13 +173,28 @@ it.each(["link changed after rename", "linking document removed"])("maps only th
   });
   const f = await fixture(rewrite); await f.write("old.md"); await f.move("old.md", "new.md"); await started.promise;
   f.history.undoHistoryOperation.mockRejectedValue(new Error(`Undo refused: ${reason}: source.md`));
-  const undoing = f.undo(); await cancelled.promise; ended.reject(new Error("Cancelled"));
+  const undoing = f.undo(); await cancelled.promise; ended.reject(cancelledPassError());
   expect(await undoing).toEqual({ok: false, reason: reason === "link changed after rename"
     ? "Cannot undo the rename. The link in source.md changed after the rename. Rename it back yourself."
     : "Cannot undo the rename. source.md is no longer in this workspace. Rename it back yourself."});
   await resumed.promise;
   expect(rewrite.mock.calls[1]![0]).toMatchObject({author: person, requestId: rewrite.mock.calls[0]![0].requestId});
   await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, rewrite.mock.calls[0]![0].operationId)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  f.retirement.abort();
+});
+
+it("does not floor or Undo when cancellation has no engine acknowledgement", async () => {
+  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<never>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
+    input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
+    started.resolve(); return ended.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md"); await f.move("old.md", "new.md"); await started.promise;
+  f.history.readHistoryPage.mockClear();
+  const undoing = f.undo(); await cancelled.promise; ended.reject(new Error("transport lost"));
+  expect(await undoing).toEqual({ok: false, reason: "transport lost"});
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled();
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   f.retirement.abort();
 });
 
