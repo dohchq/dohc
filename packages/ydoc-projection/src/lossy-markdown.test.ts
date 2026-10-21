@@ -1,21 +1,23 @@
 import { expect, it } from 'vitest'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyMarkdown } from './lossy-markdown.js'
+import { isLossyMarkdown, sameMarkdownMeaning } from './lossy-markdown.js'
 
-// The 646 CommonMark 0.31.2 examples the desktop can open. Each records
-// whether the engine's write after an edit, on main at `measuredAt`, renders
-// differently in marked than the example. Regenerate it when the import
-// learns a form.
+// The 646 CommonMark 0.31.2 examples the desktop can open, each with the
+// Markdown the engine wrote for it after an edit, on main at `writtenAt`.
+// Regenerate it when the import learns a form.
 it('flags every CommonMark example whose meaning an edit would change', () => {
-  const misses = commonmark.examples
-    .filter(example => example.editChangesMeaning && !isLossyMarkdown(example.markdown))
+  const changed = commonmark.examples.filter(example => !sameMarkdownMeaning(example.markdown, example.written))
+  const misses = changed
+    .filter(example => !isLossyMarkdown(example.markdown))
     .map(example => example.example)
   const extra = commonmark.examples
-    .filter(example => !example.editChangesMeaning && isLossyMarkdown(example.markdown))
+    .filter(example => !changed.includes(example) && isLossyMarkdown(example.markdown))
     .map(example => example.example)
   expect(commonmark.examples).toHaveLength(646)
-  expect(commonmark.examples.filter(example => example.editChangesMeaning)).toHaveLength(273)
+  // 273 by marked's raw HTML. Examples 226, 241 and 645 differ only by spaces
+  // after a paragraph's last word, which CommonMark's own HTML strips.
+  expect(changed).toHaveLength(270)
   expect(misses).toEqual([])
   // Example 353, `` `foo`bar` ``, differs only in a code span marked reads
   // two ways. Flagging more would open ordinary notes read-only.
@@ -40,6 +42,11 @@ it('does not flag a note dohc wrote, with or without its final newline', () => {
 
 it('does not flag a respelling that keeps the meaning', () => {
   expect(isLossyMarkdown('Title\n=====\n\n* one\n* two\n\n_emphasis_\n')).toBe(false)
+})
+
+it('does not flag spaces after the last words of a note', () => {
+  expect(isLossyMarkdown('# Plan\n\nLast words \n')).toBe(false)
+  expect(isLossyMarkdown('# Plan \n')).toBe(false)
 })
 
 it('flags a note the editor cannot import', () => {
