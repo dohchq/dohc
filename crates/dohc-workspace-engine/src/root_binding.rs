@@ -29,13 +29,13 @@ pub enum RootBindingError {
     Unstamped,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
-    #[error("this computer's folder in .dohc could not be created")]
+    #[error("this computer's folder in .dohc could not be prepared")]
     LocalStateUnwritable,
-    /// `.dohc/local` is a link or not a folder. On a Mac, `NotPrivate`
-    /// names it, with the same message.
+    /// `.dohc/local` is a link, is not a folder, or is another user's. On a
+    /// Mac, `NotPrivate` names it, with the same message.
     #[cfg(not(target_os = "macos"))]
     #[error("engine-folder-not-private: {0} .dohc/local")]
-    LocalStateNotFolder(&'static str),
+    LocalStateNotPrivate(&'static str),
     /// macOS refused dohc the root's folder. See
     /// [`dohc_engine_files::privacy_denied`].
     #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
@@ -227,9 +227,9 @@ fn exclude_from_icloud(engine_dir: &Path) {
 /// folder an earlier open could not exclude is tried again.
 ///
 /// The folder is private like the engine's, since it holds what one person
-/// keeps on one computer. A link, anything but a folder, or on a Mac's local
-/// volume another user's folder is refused, and what it names is left as it
-/// is. On a Mac the folder is marked so that file-provider services such as
+/// keeps on one computer: each open gives it mode 0700, and on a Mac no ACL
+/// entries. A link, anything but a folder, or another user's folder (on a
+/// Mac, on a local volume) is refused, and what it names is left as it is. On a Mac the folder is marked so that file-provider services such as
 /// iCloud Drive skip it, before anything is written in it. If that fails,
 /// the folder could sync, so it is not ready and the desktop writes nothing
 /// in it, but the workspace still opens.
@@ -287,12 +287,40 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
         .map_err(io_failure(&dir, RootBindingError::LocalStateUnwritable))?
         .file_type();
     if kind.is_symlink() {
-        Err(RootBindingError::LocalStateNotFolder("link"))
-    } else if !kind.is_dir() {
-        Err(RootBindingError::LocalStateNotFolder("not-folder"))
-    } else {
-        Ok(())
+        return Err(RootBindingError::LocalStateNotPrivate("link"));
     }
+    if !kind.is_dir() {
+        return Err(RootBindingError::LocalStateNotPrivate("not-folder"));
+    }
+    #[cfg(unix)]
+    make_local_state_private(&dir)?;
+    Ok(())
+}
+
+/// Give `.dohc/local` mode 0700, whoever created it and however, as the Mac
+/// path does. The mode changes through a descriptor opened without following
+/// a link, so a link put at the path after the check is refused, and what it
+/// names is left alone.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn make_local_state_private(dir: &Path) -> Result<(), RootBindingError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let refused = RootBindingError::LocalStateNotPrivate;
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) => refused("link"),
+            Some(libc::ENOTDIR) => refused("not-folder"),
+            _ => io_failure(dir, RootBindingError::LocalStateUnwritable)(error),
+        })?;
+    folder
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| match error.raw_os_error() {
+            // Only the folder's owner may change its mode.
+            Some(libc::EPERM) => refused("other-owner"),
+            _ => io_failure(dir, RootBindingError::LocalStateUnwritable)(error),
+        })
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -561,7 +589,7 @@ mod tests {
         );
         assert_eq!(
             RootBindingError::LocalStateUnwritable.to_string(),
-            "this computer's folder in .dohc could not be created"
+            "this computer's folder in .dohc could not be prepared"
         );
     }
 

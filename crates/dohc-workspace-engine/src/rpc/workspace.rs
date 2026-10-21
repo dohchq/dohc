@@ -3371,6 +3371,37 @@ mod tests {
             .expect("close");
     }
 
+    /// A `.dohc/local` something else made with a looser mode is private
+    /// after the next open, as the engine's folder is.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_makes_an_existing_local_folder_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        std::fs::create_dir_all(&local).expect("local");
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(scratch.path(), "local", json!({ "captureMode": "none" })),
+            )
+            .await
+            .expect("open");
+        assert_eq!(opened["localStateReady"], json!(true));
+        let mode = std::fs::symlink_metadata(&local)
+            .expect("local")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+        service
+            .workspace_close(Some(handle.expect("handle")))
+            .await
+            .expect("close");
+    }
+
     /// A link or a file where `.dohc/local` goes is refused as the engine's
     /// own folder is, and what it names is left as it was.
     #[cfg(unix)]

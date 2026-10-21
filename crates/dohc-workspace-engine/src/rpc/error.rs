@@ -654,7 +654,7 @@ pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireErr
         }
         // The message is the one a Mac sends as `NotPrivate`.
         #[cfg(not(target_os = "macos"))]
-        root_binding::RootBindingError::LocalStateNotFolder(_) => ErrorCode::Internal,
+        root_binding::RootBindingError::LocalStateNotPrivate(_) => ErrorCode::Internal,
         _ => ErrorCode::InvalidParams,
     };
     WireError::new(code, error.to_string())
