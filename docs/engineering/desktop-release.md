@@ -23,9 +23,13 @@ signs and notarizes a release. An unsigned build is not a stable release.
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
 installs an AppArmor profile that allows them. The profile covers every process
-dohc starts, including the engine, chat runners, and the commands agents run, so
-each of them can also create user namespaces. Point Ubuntu and Debian users to
-the `.deb`.
+the desktop app starts, including the engine, chat runners, and the commands
+agents run, so each of them can also create user namespaces. Point Ubuntu and
+Debian users to the `.deb`.
+
+On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
+`/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
+([reference](../reference/cli-mcp-sdk.md)).
 
 ## Keep signing credentials on reviewed code
 
@@ -673,7 +677,9 @@ frame's chunk ID. No later step may rebuild `apps/desktop/dist`.
 
 Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
 `POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
-add the missing value or clear the key. A dry run skips the step.
+add the missing value or clear the key. A dry run uploads nothing. It only
+installs the CLI and runs `posthog-cli --version`, so a CLI that cannot install
+fails the dry run before it can fail a release.
 
 ### Check a release against PostHog
 

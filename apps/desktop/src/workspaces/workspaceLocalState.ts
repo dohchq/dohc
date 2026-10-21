@@ -2,6 +2,7 @@ import type { Stats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { notARealFolderRefusal, notOnlyYoursRefusal, outsideWorkspaceRefusal, type DohcPathGuard } from "@dohc/workspace-core";
+import { ownedFileRefusal } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -21,6 +22,8 @@ export interface LocalStateWorkspace {
 /** What the engine's current open of a workspace said about `.dohc/local`. */
 export interface LocalStateBindings {
   currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
+  /** The engine open of the workspace already under way, or null. Never starts one. */
+  openInProgress?(workspace: LocalStateWorkspace): Promise<unknown> | null;
 }
 
 export type LocalStateRefusal = "not-opened" | "not-excluded";
@@ -75,6 +78,30 @@ export async function localStateDir(workspace: LocalStateWorkspace): Promise<str
 }
 
 /**
+ * Waits for an engine open of the workspace that is already under way, so a
+ * writer refused during it can ask again. Starts no open and waits for no
+ * close: the caller may be inside an engine run, and a close waits for runs.
+ * Returns at once when no open is under way, and when `signal` aborts.
+ */
+export async function localStateOpened(workspace: LocalStateWorkspace, signal?: AbortSignal): Promise<void> {
+  let opening: Promise<unknown> | null = null;
+  try {
+    opening = bindings?.openInProgress?.(workspace) ?? null;
+  } catch {
+    return;
+  }
+  if (opening === null || signal?.aborted) return;
+  let stop = () => {};
+  const stopped = new Promise<void>((resolve) => { stop = resolve; });
+  signal?.addEventListener("abort", stop, { once: true });
+  try {
+    await Promise.race([opening.then(() => undefined, () => undefined), stopped]);
+  } finally {
+    signal?.removeEventListener("abort", stop);
+  }
+}
+
+/**
  * The workspace's `.dohc/local` for a reader, or null when it is not a real
  * folder in the workspace. A read writes nothing, so it does not wait for
  * the engine.
@@ -88,7 +115,7 @@ export async function existingLocalStateDir(rootPath: string): Promise<string | 
 }
 
 /** What keeps dohc from trusting `.dohc` or `.dohc/local` itself. */
-export type LocalFolderProblem = "link" | "not-folder" | "other-owner";
+export type LocalFolderProblem = "link" | "not-folder" | "other-owner" | "unreadable";
 
 // In the words the engine's open refuses the workspace with. Each names its
 // own way out, because replacing a file in the folder can't fix the folder.
@@ -96,6 +123,7 @@ export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: stri
   link: ["is a link", "Put what it links to in its place, then try again."],
   "not-folder": ["is not a folder", "Rename or move it, then try again."],
   "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
+  unreadable: ["can't be read", "Make sure you can open it, then try again."],
 };
 
 /** `.dohc` or `.dohc/local` is not a folder this user owns, so dohc trusts nothing in it. */
@@ -107,10 +135,15 @@ export class LocalStateFolderError extends Error {
   }
 }
 
-// Null for a folder of this user's.
+// Null for a folder of this user's. Only a path that is not there is missing:
+// a folder dohc can't look at may still hold what protects a person's work.
 async function folderProblem(path: string): Promise<LocalFolderProblem | "missing" | null> {
-  const stats = await lstat(path).catch(() => null);
-  if (stats === null) return "missing";
+  let stats: Stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
   if (stats.isSymbolicLink()) return "link";
   if (!stats.isDirectory()) return "not-folder";
   const uid = process.getuid?.();
@@ -119,10 +152,11 @@ async function folderProblem(path: string): Promise<LocalFolderProblem | "missin
 
 /**
  * The workspace's `.dohc/local` for a reader of state that changes what dohc
- * does, such as settings, or null when it or `.dohc` is missing. Both folders
- * are checked on every read, before any file in them: a link at either one
- * would be followed by the file's open. Throws LocalStateFolderError when
- * either is not a folder this user owns, and the metadata resolver's refusal
+ * does, such as settings, or null when it or `.dohc` is not there. Both
+ * folders are checked on every read, before any file in them: a link at
+ * either one would be followed by the file's open. Throws
+ * LocalStateFolderError when either is not a folder this user owns or can't
+ * be looked at, and the metadata resolver's refusal
  * when `.dohc` leads out of the workspace, which only a mount can do. Does
  * not wait for the engine, and creates nothing.
  */
@@ -131,7 +165,8 @@ export async function ownedLocalStateDir(rootPath: string): Promise<string | nul
   if (dohc === "missing") return null;
   if (dohc) throw new LocalStateFolderError(".dohc", dohc);
   const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
-  if (metadata === null) return null;
+  // `.dohc` was just there, so the resolver lost sight of it.
+  if (metadata === null) throw new LocalStateFolderError(".dohc", "unreadable");
   const dir = join(metadata, "local");
   const local = await folderProblem(dir);
   if (local === "missing") return null;
@@ -148,40 +183,71 @@ function changeableByOthers(stats: Stats): boolean {
 
 /**
  * A folder in the workspace's `.dohc/local`, for a writer, made 0700 when
- * missing. Refuses as localStateDir does, and in `guard`'s words when what is
- * at `name` is not a folder in the workspace that only this user can change.
- * Never creates `.dohc/local`.
+ * missing, with each folder on the way: `name` can be a path such as
+ * `datasets/workers`. Refuses as localStateDir does, and in `guard`'s words,
+ * naming the first folder on the way that is wrong, when what is at the path
+ * is not a folder in the workspace that only this user can change. Never
+ * creates `.dohc/local`.
  */
 export async function localStateFolder(workspace: LocalStateWorkspace, name: string, guard: DohcPathGuard): Promise<string> {
-  const dir = join(await localStateDir(workspace), name);
-  // Something else at the path fails mkdir with a raw errno, and the checks
-  // below name it. Two writers can both find it missing.
-  await mkdir(dir, { mode: 0o700 }).catch(async (error: unknown) => {
-    if ((await lstat(dir).catch(() => null)) === null) throw error;
-  });
-  const stats = await lstat(dir);
-  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(guard, stats));
-  if (changeableByOthers(stats)) throw new Error(notOnlyYoursRefusal(guard));
+  const parts = name.split("/");
+  const shown = guard.path.split("/");
+  let dir = await localStateDir(workspace);
+  for (const [index, part] of parts.entries()) {
+    dir = join(dir, part);
+    const partGuard = { ...guard, path: shown.slice(0, shown.length - (parts.length - 1 - index)).join("/") };
+    // Something else at the path fails mkdir with a raw errno, and the checks
+    // below name it. Two writers can both find it missing.
+    await mkdir(dir, { mode: 0o700 }).catch(async (error: unknown) => {
+      if ((await lstat(dir).catch(() => null)) === null) throw error;
+    });
+    const stats = await lstat(dir);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(partGuard, stats));
+    if (changeableByOthers(stats)) throw new Error(notOnlyYoursRefusal(partGuard));
+  }
   // With `.dohc` and `.dohc/local` real folders, only a mount leads out.
   if (!isInside(await realpath(workspace.rootPath), await realpath(dir))) throw new Error(outsideWorkspaceRefusal(guard));
   return dir;
 }
 
 /**
- * A folder in `.dohc/local` for a reader that trusts what it finds there:
- * null when it, `.dohc/local` or `.dohc` is missing, and "unusable" when it is
- * not a folder in the workspace that only this user can change. Throws as
- * ownedLocalStateDir does. Does not wait for the engine, and creates nothing.
+ * Whether dohc can open the SQLite database `name` in `folder` and trust what
+ * it says: the database and its -wal, -shm and -journal files are each
+ * missing, or a file this user owns, that no other user can write, with one
+ * name. `folder` must be one only this user can change, such as one from
+ * localStateFolder, so a check by name holds until the database opens.
+ */
+export async function ownedSqliteFiles(folder: string, name: string): Promise<boolean> {
+  for (const file of [name, `${name}-wal`, `${name}-shm`, `${name}-journal`]) {
+    const stats = await lstat(join(folder, file)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stats && ownedFileRefusal(stats) !== null) return false;
+  }
+  return true;
+}
+
+/**
+ * A folder in `.dohc/local` for a reader that trusts what it finds there,
+ * where `name` can be a path such as `datasets/exports`: null when it, a
+ * folder on the way, `.dohc/local` or `.dohc` is missing, and "unusable" when
+ * any of them is not a folder in the workspace that only this user can
+ * change. Throws as ownedLocalStateDir does. Does not wait for the engine,
+ * and creates nothing.
  */
 export async function existingLocalStateFolder(rootPath: string, name: string): Promise<string | null | "unusable"> {
   const local = await ownedLocalStateDir(rootPath);
   if (local === null) return null;
-  const dir = join(local, name);
-  const stats = await lstat(dir).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (stats === null) return null;
-  if (stats.isSymbolicLink() || !stats.isDirectory() || changeableByOthers(stats)) return "unusable";
+  let dir = local;
+  for (const part of name.split("/")) {
+    dir = join(dir, part);
+    const stats = await lstat(dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stats === null) return null;
+    if (stats.isSymbolicLink() || !stats.isDirectory() || changeableByOthers(stats)) return "unusable";
+  }
   return isInside(await realpath(rootPath), await realpath(dir)) ? dir : "unusable";
 }

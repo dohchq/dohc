@@ -46,7 +46,9 @@ function checkReceipt(value: DatasetTransferReceipt, marker: StoredTransfer): Da
 
 /** A complete archive and its journal fence become durable together. Target failures never restore local write authority. */
 export function createLocalDatasetTransfers(options: {
-  db: DatabaseSync; journal: DatasetJournal; workspaceId: string; exportDirectory: string; limits: RecoveryLimits;
+  db: DatabaseSync; journal: DatasetJournal; workspaceId: string; limits: RecoveryLimits;
+  /** The folder exports are staged in, or null when it is missing or not one only this user can change. */
+  exportDirectory(): Promise<string | null>;
   transaction<T>(run: () => T): T;
   assertCurrent(): void;
   exportRecovery(datasetId: string, signal?: AbortSignal): Promise<PreparedExport>;
@@ -72,8 +74,8 @@ export function createLocalDatasetTransfers(options: {
     if (head.active || !sameCursor(head.cursor, marker.sourceCursor)) throw Error("This Collection changed. Reopen the workspace before retrying.");
   }
   async function checkedArchive(archive: NonNullable<StoredTransfer["archive"]>) {
-    const expectedParent = await realpath(options.exportDirectory), actual = await realpath(archive.directory), info = await lstat(archive.directory);
-    if (info.isSymbolicLink() || !info.isDirectory() || dirname(actual) !== expectedParent || resolve(actual) !== resolve(archive.directory)) throw Error("The transfer archive is unavailable. Restore its private files before retrying.");
+    const actual = await realpath(archive.directory), info = await lstat(archive.directory), parent = await options.exportDirectory();
+    if (parent === null || info.isSymbolicLink() || !info.isDirectory() || dirname(actual) !== await realpath(parent) || resolve(actual) !== resolve(archive.directory)) throw Error("The transfer archive is unavailable. Restore its private files before retrying.");
     return actual;
   }
   async function finishImported(marker: StoredTransfer): Promise<DatasetTransferStatus> {

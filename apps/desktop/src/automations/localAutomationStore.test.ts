@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createAutomationRunStore, type StoredReach, type StoredRun } from "@dohc/automation-executor/automation-run-store";
@@ -145,6 +145,31 @@ describe("this computer's automation store", () => {
     expect(await readdir(local)).toContain("expiry.json");
     expect(await readdir(old)).toEqual(["run.json"]);
   });
+
+  // A folder dohc can't look into may hold allowed steps and Undo, so it reads
+  // as unreadable, never as an empty store. chmod can't hide a folder from
+  // root, and Windows has no such mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reads a .dohc or .dohc/local it can't look into as unreadable, not as nothing saved",
+    async () => {
+      const { opened, store } = await workspace();
+      await engine.open(opened);
+      await store().save(run("atc_one", 1));
+      await store().saveReachVerdicts(allowed);
+      for (const folder of [join(opened.rootPath, ".dohc"), join(opened.rootPath, ".dohc", "local")]) {
+        await chmod(folder, 0o600);
+        try {
+          const reader = store();
+          await expect(reader.readReachVerdicts()).resolves.toEqual({ ...none, unreadable: true, missing: false });
+          await expect(reader.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+          await expect(reader.unfinishedUndos()).resolves.toBeNull();
+        } finally {
+          await chmod(folder, 0o700);
+        }
+      }
+      await expect(store().readReachVerdicts()).resolves.toEqual({ ...allowed, unreadable: false, missing: false });
+    },
+  );
 
   it("reads nothing under a .dohc/local that is a link or another user's, and allows no step from it", async () => {
     const { opened, store } = await workspace();
