@@ -468,7 +468,13 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
   for (const runners of ["self-hosted", "github"]) assert.equal(maxParallel("linux", runners), 4);
   const resolveMetadata = releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"');
   assert.match(resolveMetadata.run, /--runners "\$DISPATCH_RUNNERS"/);
-  assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, "${{ inputs.runners }}");
+  assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, "${{ inputs.runners || 'self-hosted' }}");
+  const refusePublish = jobs.preflight.steps.find(step => step.name === "Refuse a publish on GitHub's runners");
+  assert.ok(refusePublish, "runners=github cannot publish until the repository is public");
+  const refuses = inputs => releaseExpression(`\${{ ${refusePublish.if} }}`, {}, {}, inputs);
+  assert.deepEqual([["github", false], ["github", true], ["self-hosted", false], [undefined, false]].map(([runners, dry_run]) => refuses({ runners, dry_run })),
+    [true, false, false, false]);
+  assert.ok(jobs.preflight.steps.indexOf(refusePublish) < jobs.preflight.steps.findIndex(step => step.name === "Checkout"));
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
   const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
   const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");

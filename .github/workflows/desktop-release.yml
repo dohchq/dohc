@@ -90,6 +90,14 @@ jobs:
             exit 1
           fi
 
+      # Until the repository is public, GitHub's runners only run trial dry runs.
+      - name: Refuse a publish on GitHub's runners
+        if: inputs.runners == 'github' && !inputs.dry_run
+        shell: bash
+        run: |
+          echo "::error::runners=github runs only dry runs until the repository is public. Nothing builds."
+          exit 1
+
       # A desktop build on Linux leaves the staged Markdown reader folder
       # read-only, so checkout could not clean this runner's workspace.
       - name: Let checkout remove an earlier build's reader folder
@@ -133,7 +141,7 @@ jobs:
           DISPATCH_CHANNEL: ${{ inputs.channel }}
           DISPATCH_VERSION: ${{ inputs.version }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms }}
-          DISPATCH_RUNNERS: ${{ inputs.runners }}
+          DISPATCH_RUNNERS: ${{ inputs.runners || 'self-hosted' }}
         run: |
           set -euo pipefail
           version_arg=()
