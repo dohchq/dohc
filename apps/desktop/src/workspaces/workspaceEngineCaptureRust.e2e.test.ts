@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1312,6 +1312,61 @@ async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEn
   };
   return { root, sessions, capture, health, stop };
 }
+
+it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
+  "captures an outside %s write into an open document without pausing History (#2463)",
+  async (style) => {
+    const opened = await openRealCapture(`outside-write-${style}`, { settleDebounceMs: 60_000 });
+    const editor = new Y.Doc();
+    const base = "base\n";
+    const outside = "written outside dohc\n";
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, base, "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const session = await opened.capture.openYDocSession({
+        path: "note.md", contentKind: "plaintext",
+        onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+      });
+      Y.applyUpdate(editor, session.initialUpdate);
+      expect(editor.getText("plainText").toString()).toBe(base);
+
+      if (style === "rename") {
+        const temporary = join(opened.root, "note.md.tmp");
+        await writeFile(temporary, outside, "utf8");
+        await rename(temporary, absolute);
+      } else {
+        const file = await open(absolute, "r+");
+        try {
+          await file.truncate(0);
+          await file.writeFile(outside, "utf8");
+        } finally {
+          await file.close();
+        }
+      }
+
+      // Reconcile also scans disk, so a lost watcher event cannot hide a
+      // failure to adopt an edit the engine has already discovered.
+      expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      await expect.soft(vi.waitFor(() => expect(editor.getText("plainText").toString()).toBe(outside), {
+        timeout: 10_000,
+      })).resolves.toBeUndefined();
+      const history = await opened.capture.listMoments({ limit: 100 }).then(async (page) =>
+        Promise.all(page.moments.filter((moment) => moment.path === "note.md").map(async (moment) => {
+          const detail = await opened.capture.readMoment(moment.id);
+          return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+        })),
+      (error: unknown) => isWorkspaceUpdatingRefusal(error) ? "still updating" : Promise.reject(error));
+      expect.soft(history).toEqual([outside, base]);
+      expect.soft(await readFile(absolute, "utf8")).toBe(outside);
+      await session.close().catch(() => undefined);
+    } finally {
+      await opened.stop();
+      editor.destroy();
+    }
+  },
+  60_000,
+);
 
 // dohc#2308. An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until
