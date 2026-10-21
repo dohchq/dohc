@@ -872,6 +872,14 @@ test("the source map upload leaves a PostHog host the release did not set unset,
   );
 });
 
+test("the source map upload leaves PowerShell 7's module path out of the CLI's environment", () => {
+  for (const name of ["PSModulePath", "PSMODULEPATH"]) {
+    const { env } = sourceMapUpload({ ...SOURCE_MAP_ENV, [name]: "C:\\Program Files\\PowerShell\\7\\Modules", PATH: "/bin" });
+    assert.equal(Object.keys(env).some((key) => key.toUpperCase() === "PSMODULEPATH"), false);
+    assert.equal(env.PATH, "/bin");
+  }
+});
+
 test("the source map upload fails when a script the reports name ships without its chunk ID", async () => {
   const directories = await builtDist({ injected: false });
   assert.deepEqual(scriptsWithoutChunkIds(directories).map((path) => path.replaceAll("\\", "/").split("/").at(-1)).sort(), [

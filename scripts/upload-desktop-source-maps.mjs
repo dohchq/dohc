@@ -41,6 +41,11 @@ export function sourceMapUpload(env) {
   for (const name of OPTIONAL_POSTHOG_SETTINGS) {
     if (!env[name]?.trim()) delete childEnv[name];
   }
+  // The CLI's Windows installer unzips with Windows PowerShell, which cannot load
+  // Expand-Archive from the PowerShell 7 folders a pwsh step puts on PSModulePath.
+  for (const name of Object.keys(childEnv)) {
+    if (name.toUpperCase() === "PSMODULEPATH") delete childEnv[name];
+  }
   return {
     args: [
       "dlx", "--allow-build=@posthog/cli", POSTHOG_CLI, "sourcemap", "process",
