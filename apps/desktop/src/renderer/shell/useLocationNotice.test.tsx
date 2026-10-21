@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useShellError } from "./useShellError";
 import {
   forgetLocationNoticesForTests,
-  LOCATION_MESSAGES,
+  LOCATION_NOTICES,
   useLocationNotice,
   type WorkspaceLocation,
 } from "./useLocationNotice";
@@ -44,7 +44,7 @@ describe("useLocationNotice", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       tone: "warning",
-      message: LOCATION_MESSAGES["network-share"],
+      ...LOCATION_NOTICES["network-share"],
       details: [["Detail", "network-share"]],
       kind: "workspace-location",
       retry: null,
@@ -60,7 +60,7 @@ describe("useLocationNotice", () => {
     // Another workspace gets its own toast.
     const other = mountShell("ws-icloud", "icloud-drive");
     expect(other.result.current.shell.shellErrors).toMatchObject([
-      { message: LOCATION_MESSAGES["icloud-drive"], details: [["Detail", "icloud-drive"]], seen: false },
+      { ...LOCATION_NOTICES["icloud-drive"], details: [["Detail", "icloud-drive"]], seen: false },
     ]);
   });
 
@@ -75,7 +75,7 @@ describe("useLocationNotice", () => {
     relaunch();
     const moved = mountShell("ws-moved", "network-share");
     expect(moved.result.current.shell.shellErrors).toMatchObject([
-      { message: LOCATION_MESSAGES["network-share"], seen: false },
+      { ...LOCATION_NOTICES["network-share"], seen: false },
     ]);
   });
 

@@ -441,10 +441,11 @@ export function useShellError(workspaceId: string) {
   // Where the workspace is kept: one warning row. Nothing failed, so it
   // offers no Try again.
   const reportWorkspaceLocation = useCallback(
-    (notice: { message: string; location: string; toast: boolean }) =>
+    (notice: { title: string; message: string; location: string; toast: boolean }) =>
       push(
         {
           tone: "warning",
+          title: notice.title,
           message: notice.message,
           details: [["Detail", notice.location]],
           retry: null,

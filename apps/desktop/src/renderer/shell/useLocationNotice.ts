@@ -3,11 +3,15 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 export type WorkspaceLocation = NonNullable<SyncStatusResult["workspaceLocation"]>;
 
-export const LOCATION_MESSAGES: Record<WorkspaceLocation, string> = {
-  "icloud-drive":
-    "This workspace is in iCloud Drive. If two Macs use it, its Collections can lose recent changes or differ between the Macs. Keep the workspace outside iCloud Drive.",
-  "network-share":
-    "This workspace is on a network share. Anyone who can read the share can read its History, including text deleted from its files. To keep History private, move the workspace to this computer's disk.",
+export const LOCATION_NOTICES: Record<WorkspaceLocation, { title: string; message: string }> = {
+  "icloud-drive": {
+    title: "This workspace is in iCloud Drive",
+    message: "If two Macs use it, its Collections can lose recent changes or differ between the Macs. Keep the workspace outside iCloud Drive.",
+  },
+  "network-share": {
+    title: "This workspace is on a network share",
+    message: "Anyone who can read the share can read its History, including text deleted from its files. To keep History private, move the workspace to this computer's disk.",
+  },
 };
 
 // This computer's dohc profile keeps which workspaces were told, so each
@@ -43,7 +47,7 @@ function rememberTold(key: string): void {
 export function useLocationNotice(input: {
   workspaceId: string;
   location: WorkspaceLocation | undefined;
-  report: (notice: { message: string; location: WorkspaceLocation; toast: boolean }) => void;
+  report: (notice: { title: string; message: string; location: WorkspaceLocation; toast: boolean }) => void;
 }): { noteDismissed: () => void } {
   const { workspaceId, location, report } = input;
   const key = location ? storageKey(workspaceId, location) : null;
@@ -56,7 +60,7 @@ export function useLocationNotice(input: {
       rememberTold(key);
       session.set(key, { dismissed: false });
     }
-    report({ message: LOCATION_MESSAGES[location], location, toast: !told });
+    report({ ...LOCATION_NOTICES[location], location, toast: !told });
   }, [key, location, report]);
   const noteDismissed = useCallback(() => {
     if (key) session.set(key, { dismissed: true });
