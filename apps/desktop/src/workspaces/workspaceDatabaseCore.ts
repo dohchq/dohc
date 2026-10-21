@@ -1,17 +1,22 @@
 import { randomUUID } from "node:crypto";
+import type { BigIntStats } from "node:fs";
 import {
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readFile,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
+import {
+  DOHC_DATABASES_GUARD,
+  fileChangedWhileOpeningRefusal,
+  hardLinkedFileRefusal,
+  notAFileRefusal,
+} from "@dohc/workspace-core/guard-refusals";
 import type {
   DatabaseColumnView,
   DatabaseEdit,
@@ -359,8 +364,27 @@ async function appendOperationDurably(
   logPath: string,
   operation: DatabaseOperationInput & { version: number },
 ): Promise<void> {
-  const handle = await open(logPath, "a", 0o600);
+  const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}/operations.jsonl` };
+  const checkFile = (stats: BigIntStats) => {
+    if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
+    if (stats.nlink !== 1n) throw new Error(hardLinkedFileRefusal(guard));
+  };
+  const before = await lstat(logPath, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (before) checkFile(before);
+  const handle = await open(logPath, before ? "a" : "ax", 0o600);
   try {
+    const opened = await handle.stat({ bigint: true });
+    const named = await lstat(logPath, { bigint: true });
+    checkFile(opened);
+    checkFile(named);
+    // Compare full NTFS file indexes, which can exceed Number's safe range.
+    if (opened.ino === 0n || opened.ino !== named.ino || opened.dev !== named.dev ||
+        (before && (opened.ino !== before.ino || opened.dev !== before.dev))) {
+      throw new Error(fileChangedWhileOpeningRefusal(guard));
+    }
     await handle.appendFile(`${JSON.stringify(operation)}\n`, "utf8");
     await handle.sync();
   } finally {
@@ -405,57 +429,7 @@ function createValidatedOperation(
   };
 }
 
-async function prepareDatabaseStorage(input: {
-  rootPath: string;
-  logPath: string;
-  statePath: string;
-}): Promise<{ logPath: string; statePath: string }> {
-  const slug = basename(dirname(input.logPath));
-  const storageRelativePath = join(".dohc", "databases", slug);
-  if (
-    resolve(input.logPath) !== join(resolve(input.rootPath), storageRelativePath, "operations.jsonl") ||
-    resolve(input.statePath) !== join(resolve(input.rootPath), storageRelativePath, "state.sqlite")
-  ) {
-    throw new Error("Database edit storage must use this workspace's .dohc/databases folder.");
-  }
-  const realRoot = await realpath(input.rootPath);
-  let directory = realRoot;
-  // Create one level at a time. Recursive mkdir could create children through
-  // a planted junction before its resolved path can be checked.
-  for (const segment of [".dohc", "databases", slug]) {
-    directory = join(directory, segment);
-    try {
-      await mkdir(directory, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const stats = await lstat(directory);
-    if (!stats.isDirectory() || await realpath(directory) !== directory) {
-      const path = relative(realRoot, directory);
-      throw new Error(
-        `dohc couldn't save the database edit because ${path} is a link or isn't a regular folder. Replace it with this workspace's folder, then try again.`,
-      );
-    }
-  }
-  const logPath = join(directory, "operations.jsonl");
-  const statePath = join(directory, "state.sqlite");
-  // SQLite can also open these files when recovering a previous transaction.
-  for (const path of [logPath, statePath, `${statePath}-journal`, `${statePath}-wal`, `${statePath}-shm`]) {
-    try {
-      if (!(await lstat(path)).isFile()) {
-        throw new Error(
-          `dohc couldn't save the database edit because ${relative(realRoot, path)} isn't a regular file. Replace it with this workspace's file, then try again.`,
-        );
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-  return { logPath, statePath };
-}
-
 export async function editDatabaseAtPath(input: {
-  rootPath: string;
   absolutePath: string;
   resultPath: string;
   logPath: string;
@@ -465,8 +439,7 @@ export async function editDatabaseAtPath(input: {
   pageOffset: number;
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
-  const storage = await prepareDatabaseStorage(input);
-  const version = await reserveOperationVersion(storage);
+  const version = await reserveOperationVersion(input);
   const operation = createValidatedOperation(input.operation, version);
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(input.absolutePath);
@@ -475,7 +448,7 @@ export async function editDatabaseAtPath(input: {
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     runEdit(db, input.edit);
-    await appendOperationDurably(storage.logPath, operation);
+    await appendOperationDurably(input.logPath, operation);
     db.exec("COMMIT");
     transactionOpen = false;
     const page = tablePage(

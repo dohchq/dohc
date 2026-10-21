@@ -71,7 +71,6 @@ async function run(
       });
     case "edit-path":
       return editDatabaseAtPath({
-        rootPath: request.rootPath,
         absolutePath: request.absolutePath,
         resultPath: request.resultPath,
         logPath: request.logPath,

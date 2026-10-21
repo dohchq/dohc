@@ -1,12 +1,17 @@
 import {
   databaseOpLogPath,
+  DOHC_DATABASES_GUARD,
+  hardLinkedFileRefusal,
   mediaTypeForPath,
+  notAFileRefusal,
+  notARealFolderRefusal,
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { createHash, randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   realpath,
   rm,
@@ -22,6 +27,7 @@ import {
 import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import type {
   DatabaseEdit,
   DatabaseEditResult,
@@ -137,6 +143,39 @@ export function readDatabasePageFromBytes(
   });
 }
 
+async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
+  let directory = await resolveWorkspaceMetadataDir(rootPath);
+  const slug = basename(dirname(databaseOpLogPath(databasePath)));
+  // Check each folder before creating anything beneath it.
+  for (const segment of ["databases", slug]) {
+    directory = join(directory, segment);
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const stats = await lstat(directory);
+    const path = segment === "databases" ? ".dohc/databases" : `.dohc/databases/${slug}`;
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error(notARealFolderRefusal({ ...DOHC_DATABASES_GUARD, path }, stats));
+    }
+  }
+  const logPath = join(directory, "operations.jsonl");
+  const statePath = join(directory, "state.sqlite");
+  // SQLite can open these sidecars when recovering a previous transaction.
+  for (const name of ["operations.jsonl", "state.sqlite", "state.sqlite-journal", "state.sqlite-wal", "state.sqlite-shm"]) {
+    try {
+      const stats = await lstat(join(directory, name));
+      const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${slug}/${name}` };
+      if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
+      if (stats.nlink !== 1) throw new Error(hardLinkedFileRefusal(guard));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return { logPath, statePath };
+}
+
 export async function applyDatabaseEdit(
   rootPath: string,
   relativePath: string,
@@ -154,13 +193,11 @@ export async function applyDatabaseEdit(
     relativePath,
   );
   if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
-  const logPath = join(rootPath, databaseOpLogPath(normalized));
+  const storage = await prepareDatabaseStorage(rootPath, normalized);
   return (options.worker ?? workspaceDatabaseWorker).editPath({
-    rootPath,
     absolutePath: realTarget,
     path: normalized,
-    logPath,
-    statePath: join(dirname(logPath), "state.sqlite"),
+    ...storage,
     edit,
     operation: {
       operationId: options.createId?.() ?? randomUUID(),
@@ -313,17 +350,12 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
       input.rootPath,
       resolved.resolvedPath,
     );
-    const logPath = join(
-      input.rootPath,
-      databaseOpLogPath(resolved.normalized),
-    );
+    const storage = await prepareDatabaseStorage(input.rootPath, resolved.normalized);
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
-        rootPath: input.rootPath,
         absolutePath,
         path: resolved.normalized,
-        logPath,
-        statePath: join(dirname(logPath), "state.sqlite"),
+        ...storage,
         edit: input.edit,
         operation: {
           operationId: input.operationId ?? randomUUID(),

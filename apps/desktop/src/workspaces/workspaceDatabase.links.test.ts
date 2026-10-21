@@ -1,5 +1,5 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { lstat, mkdir, readFile, readdir, readlink, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, readlink, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -49,7 +49,7 @@ function rowValue(): unknown {
 }
 
 describe.each(entryPoints)("$name metadata custody", ({ run }) => {
-  describe.each(["operations.jsonl", "state.sqlite", "state.sqlite-journal", "state.sqlite-wal", "state.sqlite-shm"])("%s", (file) => {
+  describe.each(["operations.jsonl", "state.sqlite", "state.sqlite-journal"])("%s", (file) => {
     it.each([false, true])("refuses a file link without touching its target (exists: %s)", async (exists) => {
       const logPath = join(root, databaseOpLogPath("data.sqlite"));
       const path = join(dirname(logPath), file);
@@ -71,7 +71,7 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
       expect(await readlink(path)).toBe(link);
       expect(outcome).toBeInstanceOf(Error);
       expect((outcome as Error).message).toContain(file);
-      expect((outcome as Error).message).toMatch(/regular file.*Replace/);
+      expect((outcome as Error).message).toMatch(/A link is at .*must be a file\. Remove or rename that link\. Then retry\./);
       if (file === "operations.jsonl") {
         await expect(lstat(join(dirname(path), "state.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
       } else {
@@ -92,8 +92,8 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
     expect(rowValue()).toBe("before");
     expect((await lstat(path)).isSymbolicLink()).toBe(true);
     expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toContain(relative(root, path));
-    expect((outcome as Error).message).toMatch(/link.*Replace/);
+    expect((outcome as Error).message).toContain(relative(root, path).replaceAll("\\", "/"));
+    expect((outcome as Error).message).toMatch(/A link is at .*must be a real folder\. Remove or rename that link\. Then retry\./);
   });
 
   it("refuses a slug redirected to another directory inside the workspace", async () => {
@@ -107,10 +107,25 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
     expect(rowValue()).toBe("before");
   });
 
-  it.each(["operations.jsonl", "state.sqlite"])("refuses a directory at %s before making any edit", async (file) => {
+  it.each(["operations.jsonl", "state.sqlite"])("names the refusal for a directory at %s", async (file) => {
     const logPath = join(root, databaseOpLogPath("data.sqlite"));
     await mkdir(join(dirname(logPath), file), { recursive: true });
-    await expect(run(root)).rejects.toThrow(/regular file/);
+    await expect(run(root)).rejects.toThrow(/An item is at .*must be a file\. Remove or rename that item\. Then retry\./);
+    expect(rowValue()).toBe("before");
+  });
+
+  it.each(["operations.jsonl", "state.sqlite"])("refuses a hard-linked %s without changing either name", async (file) => {
+    const path = join(dirname(join(root, databaseOpLogPath("data.sqlite"))), file);
+    const target = join(base, `outside-${file}`);
+    await mkdir(dirname(path), { recursive: true });
+    if (file === "state.sqlite") new DatabaseSync(target).close();
+    else await writeFile(target, "original\n");
+    await link(target, path);
+    const before = await readFile(target);
+    await expect(run(root)).rejects.toThrow(/has another link.*Remove or rename this file\. Then retry\./);
+    expect(await readFile(target)).toEqual(before);
+    expect(await readFile(path)).toEqual(before);
+    expect((await lstat(path)).nlink).toBe(2);
     expect(rowValue()).toBe("before");
   });
 

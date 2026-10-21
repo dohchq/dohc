@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DOHC_ENGINE_GUARD,
+  DOHC_DATABASES_GUARD,
   DOHC_METADATA_GUARD,
   DOHC_SYNC_HISTORY_GUARD,
   DOHC_TRASH_GUARD,
@@ -8,6 +9,8 @@ import {
   notARealFolderRefusal,
   notOnlyYoursRefusal,
   outsideWorkspaceRefusal,
+  hardLinkedFileRefusal,
+  fileChangedWhileOpeningRefusal,
 } from "./dohcGuardRefusals";
 
 const asFile = { isSymbolicLink: () => false, isFile: () => true };
@@ -19,6 +22,15 @@ const asOther = { isSymbolicLink: () => false, isFile: () => false };
 // surfaces at once. Pinned by exact match, byte for byte — swapping "folder"
 // back to "directory" fails these first.
 describe("dohc guard refusals", () => {
+  it("names a file's other link and a change during opening with recovery steps", () => {
+    const guard = { ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data/operations.jsonl" };
+    expect(hardLinkedFileRefusal(guard)).toBe(
+      "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl has another link, so changes here would change that file too. Remove or rename this file. Then retry.",
+    );
+    expect(fileChangedWhileOpeningRefusal(guard)).toBe(
+      "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl changed while dohc opened it. Stop other programs from changing this file. Then retry.",
+    );
+  });
   it("names the squatter, the constraint, and the way out — one noun for both paths", () => {
     expect(notARealFolderRefusal(DOHC_TRASH_GUARD, asFile)).toBe(
       "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",

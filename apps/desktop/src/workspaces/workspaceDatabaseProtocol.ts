@@ -46,7 +46,6 @@ export type WorkspaceDatabaseWorkerRequest =
   | {
       id: number;
       kind: "edit-path";
-      rootPath: string;
       absolutePath: string;
       resultPath: string;
       logPath: string;
