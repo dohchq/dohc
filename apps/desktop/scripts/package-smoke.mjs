@@ -171,6 +171,10 @@ if (config) {
     const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
     check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
   }
+  // A Linux desktop entry names types, not extensions.
+  for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
+    check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
+  }
   check(
     Array.isArray(config.protocols) &&
       config.protocols.length === 1 &&
