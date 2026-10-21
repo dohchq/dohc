@@ -826,7 +826,7 @@ export type DeleteWorkspacePathPayload = z.infer<
 
 // With emptyFolderOnly, false also means an empty folder was removed or a
 // nonempty folder was preserved. This mode never trashes descendants.
-// trashed: true = OS trash; false = the .dohc/trash fallback (cross-
+// trashed: true = OS trash; false = the .dohc/local/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a
 // file the workspace owns. There the change is what can be taken back: the

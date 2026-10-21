@@ -16,6 +16,7 @@ import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: string) => Promise<void>) }));
 vi.mock("node:fs/promises", async original => {
@@ -42,6 +43,8 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites closed links and un
   const workspace = {workspaceId: "link-rewrites-engine", rootPath, attachmentId: Symbol("link-rewrites")};
   const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0});
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
   const operation = {workspace: {...workspace, readOnly: false, shareView: undefined}, state: {}, signal: new AbortController().signal, assertCurrent: vi.fn()};
   await lifecycle.start();
@@ -90,6 +93,8 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
   const workspace = { workspaceId: "delete-recovery-engine", rootPath, attachmentId: Symbol("delete-recovery") };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
   const operation = { workspace: { ...workspace, readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
@@ -159,6 +164,8 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
   const workspace = { workspaceId: "move-recovery-engine", rootPath, attachmentId: Symbol("move-recovery") };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
   const operation = { workspace: { ...workspace, readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };

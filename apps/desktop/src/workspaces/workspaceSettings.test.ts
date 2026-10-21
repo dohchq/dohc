@@ -640,16 +640,19 @@ describe("workspace settings file store", () => {
     // user asked to replace their settings, not to lose whatever sat at that
     // path — so every descendant survives, in the workspace trash dohc already
     // teaches for anything it removes.
+    // An old `.dohc/trash` is not the trash any more.
+    await mkdir(join(root, ".dohc", "trash"));
     const reset = await resetWorkspaceSettingsFile(workspace);
     expect(reset.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     expect(reset.warning).toBe(
-      "dohc replaced workspace settings. The folder that was in their place is now in this workspace's .dohc/trash.",
+      "dohc replaced workspace settings. The folder that was in their place is now in this workspace's .dohc/local/trash.",
     );
-    const trashed = await readdir(join(root, ".dohc", "trash"));
+    const trashed = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashed).toHaveLength(1);
     expect(
-      await readFile(join(root, ".dohc", "trash", trashed[0]!, "squatter.txt"), "utf8"),
+      await readFile(join(root, ".dohc", "local", "trash", trashed[0]!, "squatter.txt"), "utf8"),
     ).toBe("not settings");
+    expect(await readdir(join(root, ".dohc", "trash"))).toEqual([]);
     expect(await readWorkspaceSettingsFile(workspace)).toEqual({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",
@@ -661,22 +664,22 @@ describe("workspace settings file store", () => {
     ).toBe(false);
   });
 
-  it("a reset over a FILE squatting .dohc/trash names the squatter, never a raw errno", async () => {
-    // Reset moves the settings-path squatter into .dohc/trash. A plain file
-    // at .dohc/trash made that mkdir throw raw "EEXIST: file already exists,
+  it("a reset over a FILE squatting .dohc/local/trash names the squatter, never a raw errno", async () => {
+    // Reset moves the settings-path squatter into .dohc/local/trash. A plain
+    // file there made that mkdir throw raw "EEXIST: file already exists,
     // mkdir …" straight into the Settings dialog, while reset is the
     // advertised recovery from an unreadable settings file. The refusal must
-    // name .dohc/trash, what squats it, and the way out.
+    // name .dohc/local/trash, what squats it, and the way out.
     const workspace = await openedWorkspace();
     const root = workspace.rootPath;
     const path = settingsFile(root);
     await writeWorkspaceSettingsFile(workspace, DEFAULT_WORKSPACE_SETTINGS);
     await rm(path);
     await mkdir(path); // a directory squats the settings path: file unreadable
-    await writeFile(join(root, ".dohc", "trash"), "squatting");
+    await writeFile(join(root, ".dohc", "local", "trash"), "squatting");
 
     await expect(resetWorkspaceSettingsFile(workspace)).rejects.toThrow(
-      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
+      "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
     // Nothing partial landed: the settings path still reads as recovered.
     expect((await readWorkspaceSettingsFile(workspace)).source).toBe("recovered");
@@ -744,7 +747,7 @@ describe("workspace settings file store", () => {
     // fresh file. What the link pointed at is left alone.
     const reset = await resetWorkspaceSettingsFile(workspace);
     expect(reset.warning).toBe(
-      "dohc replaced workspace settings. The link that was in their place is now in this workspace's .dohc/trash.",
+      "dohc replaced workspace settings. The link that was in their place is now in this workspace's .dohc/local/trash.",
     );
     expect(await readWorkspaceSettingsFile(workspace)).toEqual({
       settings: DEFAULT_WORKSPACE_SETTINGS,

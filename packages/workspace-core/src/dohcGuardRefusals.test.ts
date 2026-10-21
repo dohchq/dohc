@@ -6,6 +6,7 @@ import {
   DOHC_TRASH_GUARD,
   notAFileRefusal,
   notARealFolderRefusal,
+  notOnlyYoursRefusal,
   outsideWorkspaceRefusal,
 } from "./dohcGuardRefusals";
 
@@ -20,10 +21,10 @@ const asOther = { isSymbolicLink: () => false, isFile: () => false };
 describe("dohc guard refusals", () => {
   it("names the squatter, the constraint, and the way out — one noun for both paths", () => {
     expect(notARealFolderRefusal(DOHC_TRASH_GUARD, asFile)).toBe(
-      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
+      "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
     expect(notARealFolderRefusal(DOHC_TRASH_GUARD, asLink)).toBe(
-      "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
+      "dohc could not move this to the workspace trash. A link is at .dohc/local/trash, which must be a real folder. Remove or rename that link. Then retry.",
     );
     expect(notARealFolderRefusal(DOHC_METADATA_GUARD, asFile)).toBe(
       "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.",
@@ -46,13 +47,19 @@ describe("dohc guard refusals", () => {
   // follow the noun, or the sentence reads as a typo at the worst moment.
   it("agrees the article with the fallback noun", () => {
     expect(notARealFolderRefusal(DOHC_TRASH_GUARD, asOther)).toBe(
-      "dohc could not move this to the workspace trash. An item is at .dohc/trash, which must be a real folder. Remove or rename that item. Then retry.",
+      "dohc could not move this to the workspace trash. An item is at .dohc/local/trash, which must be a real folder. Remove or rename that item. Then retry.",
+    );
+  });
+
+  it("names a folder another user can change, and the way out", () => {
+    expect(notOnlyYoursRefusal(DOHC_TRASH_GUARD)).toBe(
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash, which must be a folder only you can change. Remove or rename it. Then retry.",
     );
   });
 
   it("states the containment constraint in the same shape", () => {
     expect(outsideWorkspaceRefusal(DOHC_TRASH_GUARD)).toBe(
-      "dohc could not move this to the workspace trash. The .dohc/trash folder points outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
+      "dohc could not move this to the workspace trash. The .dohc/local/trash folder points outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
     );
     expect(outsideWorkspaceRefusal(DOHC_METADATA_GUARD)).toBe(
       "dohc could not open this workspace's .dohc folder. The .dohc folder points outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
@@ -72,6 +79,7 @@ describe("dohc guard refusals", () => {
       outsideWorkspaceRefusal(DOHC_METADATA_GUARD),
       notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile),
       outsideWorkspaceRefusal(DOHC_ENGINE_GUARD),
+      notOnlyYoursRefusal(DOHC_TRASH_GUARD),
     ];
     for (const message of all) {
       expect(message).toMatch(/ Then retry\.$/);

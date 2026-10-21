@@ -16,6 +16,7 @@ import {
   type WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import { WORKSPACE_TRASH } from "./workspaceTrash";
 import { readOwnedFile, type OwnedFileRead } from "@dohc/workspace-core/owned-file";
 import {
   LOCAL_FOLDER_WORDS,
@@ -228,7 +229,7 @@ export function resetWorkspaceSettingsFile(
       // way the delete dialog names it, without the entry's decorated name.
       ...(replaced
         ? {
-            warning: `dohc replaced workspace settings. The ${replaced} that was in their place is now in this workspace's .dohc/trash.`,
+            warning: `dohc replaced workspace settings. The ${replaced} that was in their place is now in this workspace's ${WORKSPACE_TRASH}.`,
           }
         : {}),
     };
@@ -289,7 +290,6 @@ async function writeSettingsContent(
   content: Record<string, unknown>,
   verb: "save" | "reset",
 ): Promise<"folder" | "link" | null> {
-  const rootPath = workspace.rootPath;
   let folder: string;
   try {
     folder = await localStateDir(workspace);
@@ -318,7 +318,7 @@ async function writeSettingsContent(
         ? ("link" as const)
         : ("folder" as const)
       : null;
-    if (squatter) await moveIntoWorkspaceTrash(rootPath, path);
+    if (squatter) await moveIntoWorkspaceTrash(workspace, path);
   });
   return squatter;
 }

@@ -62,6 +62,7 @@ import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -5214,8 +5215,9 @@ it("drops an undone pending-placement receipt through the real guard before a fr
     }), removed),
   };
   const operation = {workspace: {workspaceId: WORKSPACE_ID, rootPath: root}, assertCurrent() {}};
+  await openedLocalState(operation.workspace);
   const run = () => duplicateWorkspaceFile(operation, "source.md", RESTORER, pendingCapture);
-  const directory = join(root, ".dohc/duplicate-pending");
+  const directory = join(root, ".dohc/local/duplicate-pending");
   try {
     const pending = await run();
     expect(pending.materialized).toBe(false);

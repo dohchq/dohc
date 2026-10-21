@@ -10,6 +10,7 @@ import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChang
 import { deferred } from "../testing/deferred";
 import { readDeleteRecovery } from "./workspaceDeleteRecovery";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const faults = vi.hoisted(() => ({ beforeLink: undefined as undefined | ((to: string) => Promise<void>), failRecord: false }));
 vi.mock("node:fs/promises", async original => {
@@ -33,6 +34,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   await write("folder/rowless.txt", "not retained");
   const operation = { workspace: { workspaceId: "test", rootPath: root, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown }, state: {},
     signal: new AbortController().signal, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const groups: string[] = [];
   let afterCommit: ((id: string) => void) | undefined;
   const recordDisk = vi.fn(async () => tracked);
@@ -288,8 +290,8 @@ describe("delete recovery", () => {
     });
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe(body);
-    const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-    expect(await readFile(join(f.root, ".dohc/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
+    const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+    expect(await readFile(join(f.root, ".dohc/local/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
   });
   it("keeps a raced file in trash without replacing its new occupant", async () => {
     const f = await fixture();
@@ -299,8 +301,8 @@ describe("delete recovery", () => {
       const result = await f.undo(id);
       expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
       expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("raced occupant");
-      const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-      expect(await readFile(join(f.root, ".dohc/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
+      const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+      expect(await readFile(join(f.root, ".dohc/local/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.beforeLink = undefined; }
   });
 });
@@ -320,8 +322,8 @@ describe("recovery durability and path authority", () => {
     const id = recovery(await f.remove(true));
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/node_modules", "folder/rowless.txt"], remaining: [] });
     expect(await readFile(join(f.root, "folder/node_modules/nested/file.txt"), "utf8")).toBe("excluded bytes");
-    const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-    expect(existsSync(join(f.root, ".dohc/trash", entry, "node_modules"))).toBe(false);
+    const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+    expect(existsSync(join(f.root, ".dohc/local/trash", entry, "node_modules"))).toBe(false);
   });
   it("replays a placement completed before its final receipt reached disk", async () => {
     const f = await fixture();
