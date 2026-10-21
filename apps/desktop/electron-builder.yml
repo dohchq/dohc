@@ -144,6 +144,9 @@ linux:
   # .deb installs an AppArmor profile that allows them.
   target: [AppImage, deb]
   category: Office
+  # A Linux desktop offers dohc under Open With only for the types its desktop
+  # entry names. These are the existing types of the associations below.
+  mimeTypes: [text/markdown, text/plain, text/csv, application/json]
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true

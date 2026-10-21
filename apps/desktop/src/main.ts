@@ -568,7 +568,9 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 makeProcessDiagnosticsNonFatal();
 
 // Finder and the Dock start a packaged dohc with launchd's PATH, where the
-// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. The
+// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. A
+// Linux desktop's launcher starts it with the session's PATH, which misses
+// what only the shell adds, such as nvm and its npm-installed agents. The
 // login shell's PATH is read once, in parallel with startup, once this
 // instance holds the single-instance lock. Agent runs and agent detection
 // wait for it, at most for its timeout.
@@ -7254,6 +7256,6 @@ if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
 // start() takes the lock first. A second instance quits without running the profile.
-if (process.platform === "darwin" && app.isPackaged && app.hasSingleInstanceLock()) {
+if ((process.platform === "darwin" || process.platform === "linux") && app.isPackaged && app.hasSingleInstanceLock()) {
   loginShellPathRead = adoptLoginShellPath(process.env);
 }
