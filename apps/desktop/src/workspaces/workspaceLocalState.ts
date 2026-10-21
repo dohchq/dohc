@@ -41,17 +41,27 @@ export class LocalStateUnavailableError extends Error {
 
 export type OwnedFileRead =
   | { readonly status: "read"; readonly content: string }
-  | { readonly status: "missing" | "not-file" | "other-owner" | "too-large" };
+  | {
+      readonly status:
+        | "missing"
+        | "not-file"
+        | "other-owner"
+        | "writable-by-others"
+        | "linked"
+        | "too-large";
+    };
 
 /**
  * Read one file of this computer's state whose content changes what dohc
- * does, such as settings, and trust it only if this user owns the file. The
- * file is opened once without following a link at its name, and its kind,
- * owner and size are checked on that same handle before it is read, so a
- * folder or path swapped meanwhile changes nothing: another local user can't
- * make a file this user owns. That is the only protection. A file that came
- * from a zip, a git checkout or a sync app belongs to this user and is read.
- * Windows reports no owner, so there the owner is not checked.
+ * does, such as settings, and trust it only if this user owns the file, no
+ * other user can write it, and it has no other name. The file is opened once
+ * without following a link at its name, and checked on that same handle
+ * before it is read, so a folder or path swapped meanwhile changes nothing:
+ * another local user can't make a file this user owns. That is the only
+ * protection. A file that came from a zip, a git checkout or a sync app
+ * belongs to this user and is read. Windows reports no owner or mode, so
+ * there only the link count is checked. A caller that writes such a file
+ * gives it mode 0600, whatever the umask.
  */
 export async function readOwnedFile(path: string, maxBytes: number): Promise<OwnedFileRead> {
   // Windows has neither flag, so there a link at the name is refused first.
@@ -74,6 +84,12 @@ export async function readOwnedFile(path: string, maxBytes: number): Promise<Own
     if (!stats.isFile()) return { status: "not-file" };
     const uid = process.getuid?.();
     if (uid !== undefined && stats.uid !== uid) return { status: "other-owner" };
+    // Group or other write lets another user rewrite it in place; on a Mac
+    // every local user is in staff.
+    if (uid !== undefined && (stats.mode & 0o022) !== 0) return { status: "writable-by-others" };
+    // A second name is a second way to change it. More than one, not "not
+    // one": a volume that reports no links would refuse every file.
+    if (stats.nlink > 1) return { status: "linked" };
     // Read one byte past the cap, so a file that grew since the check is
     // still refused instead of cut short.
     const buffer = Buffer.alloc(maxBytes + 1);

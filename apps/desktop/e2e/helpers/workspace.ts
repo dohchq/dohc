@@ -112,9 +112,11 @@ export async function seedWorkspaceSettings(
   // The engine's first open takes this folder and makes it private.
   const dir = join(workspace.rootPath, ".dohc", "local");
   await mkdir(dir, { recursive: true });
+  // dohc reads a settings file only if no other user can write it.
   await writeFile(
     join(dir, "settings.local.json"),
     `${JSON.stringify(settings, null, 2)}\n`,
+    { mode: 0o600 },
   );
 }
 
