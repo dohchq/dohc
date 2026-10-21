@@ -17,6 +17,7 @@ import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import type { RegistryEntry } from "./registryStore";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
+import { localStateDir } from "./workspaceLocalState";
 
 const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
 vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock.read, startDesktopOwnerHost: ownerHostMock.start }));
@@ -172,6 +173,27 @@ describe("desktop engine construction", () => {
       await sessions.closeWorkspace(workspace);
       await sessions.run(workspace, async () => undefined);
       expect(opened).toHaveBeenCalledTimes(2);
+    } finally { await f.close(); }
+  });
+  it("lets writers into .dohc/local only while the open that prepared it stands", async () => {
+    const f = fixture();
+    const workspace = { workspaceId: "local-state-workspace", rootPath: await createTestScratch("local-state-open-") };
+    mkdirSync(resolve(workspace.rootPath, ".dohc", "local"), { recursive: true });
+    let localStateReady = true;
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async request => request.method === "workspace.open" && workspaceIdOf(request) === workspace.workspaceId
+      ? { id: request.id, result: { workspace: "local-state-handle", localStateReady } } : originalSend(request);
+    try {
+      await f.engine.start();
+      const sessions = f.engine.sessions!;
+      await expect(localStateDir(workspace)).rejects.toThrow("dohc has not finished opening this workspace.");
+      await sessions.run(workspace, async () => undefined);
+      await expect(localStateDir(workspace)).resolves.toMatch(/local$/);
+      await sessions.closeWorkspace(workspace);
+      await expect(localStateDir(workspace)).rejects.toThrow("dohc has not finished opening this workspace.");
+      localStateReady = false;
+      await sessions.run(workspace, async () => undefined);
+      await expect(localStateDir(workspace)).rejects.toThrow("out of iCloud Drive");
     } finally { await f.close(); }
   });
 

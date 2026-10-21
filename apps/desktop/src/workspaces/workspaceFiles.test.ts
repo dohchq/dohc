@@ -540,7 +540,7 @@ describe("movePath", () => {
     await expect(movePath(root, "a.md", "..%252fb.md")).rejects.toThrow(/traversal/);
     await expect(movePath(root, "/etc/passwd", "b.md")).rejects.toThrow(/absolute/);
     await expect(movePath(root, "a.md", "C:\\evil.md")).rejects.toThrow(/absolute/);
-    await expect(movePath(root, ".dohc/ui-state.json", "b.md")).rejects.toThrow(/reserved/);
+    await expect(movePath(root, ".dohc/local/ui-state.json", "b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", ".dohc/b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", "notes/.dohc/b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", ".DOHC./b.md")).rejects.toThrow(/reserved/);
