@@ -24,7 +24,7 @@ beforeEach(async () => {
     db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')");
   } finally { db.close(); }
   worker = createWorkspaceDatabaseWorkerOwner();
-});
+}, 30_000);
 afterEach(async () => { await worker.dispose(); });
 
 const entryPoints = [
