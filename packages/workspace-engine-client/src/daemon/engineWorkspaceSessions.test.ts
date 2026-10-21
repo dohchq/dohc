@@ -100,6 +100,32 @@ it("drains an existing-binding operation before close and refuses new work while
   await sessions.closeAll();
 });
 
+it("gives the open under way to wait on, without a run, and nothing while closing", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("ready", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  const waited = sessions.openInProgress(workspace)!;
+  held.resolve();
+  await waited;
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+  await opening;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  // A close waits for runs, so a caller inside one is given nothing to wait on.
+  const inRun = deferred<void>(), finish = deferred<void>();
+  const running = sessions.run(workspace, async () => { inRun.resolve(); await finish.promise; });
+  await inRun.promise;
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  finish.resolve();
+  await running; await closing;
+  await sessions.closeAll();
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });

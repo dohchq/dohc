@@ -28,7 +28,7 @@ import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from 
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 import { existingLocalDatasetExports, localDatasetFolder, type LocalDatasetFolder } from "./localDatasetFolders";
-import { LocalStateUnavailableError } from "./workspaceLocalState";
+import { localStateOpened, LocalStateUnavailableError } from "./workspaceLocalState";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
@@ -58,8 +58,6 @@ export interface LocalDatasetHostOptions {
   workspaceRoot: string;
   /** The attachment whose engine open prepares `.dohc/local`, where workers and exports live. */
   attachmentId?: symbol;
-  /** Waits for that engine open to finish. A worker or export asked for before it waits, then asks once more. */
-  engineOpened?(): Promise<void>;
   /** The main process checks that this workspace session still belongs to the caller. */
   assertCurrent?(): void;
   runtime?: AppBackendRuntimeOptions;
@@ -238,13 +236,14 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     // Workers and exports are this computer's, in `.dohc/local`, which only
     // the engine's open prepares. Until it has, a Collection's history and
     // rules still read from state.sqlite. Anything that needs a worker or a
-    // staged file waits for that open, and refuses if the folder still isn't ready.
+    // staged file waits for an open already under way, never starts one, and
+    // refuses if the folder still isn't ready.
     const localState = { workspaceId, rootPath: options.workspaceRoot, attachmentId: options.attachmentId };
     async function folderOnceOpened(folder: LocalDatasetFolder): Promise<string> {
       try { return await localDatasetFolder(localState, folder); }
       catch (error) {
-        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened" || !options.engineOpened) throw error;
-        await options.engineOpened().catch(() => undefined);
+        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+        await localStateOpened(localState);
         return await localDatasetFolder(localState, folder);
       }
     }

@@ -21,6 +21,8 @@ export interface LocalStateWorkspace {
 /** What the engine's current open of a workspace said about `.dohc/local`. */
 export interface LocalStateBindings {
   currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
+  /** The engine open of the workspace already under way, or null. Never starts one. */
+  openInProgress?(workspace: LocalStateWorkspace): Promise<unknown> | null;
 }
 
 export type LocalStateRefusal = "not-opened" | "not-excluded";
@@ -72,6 +74,22 @@ export async function localStateDir(workspace: LocalStateWorkspace): Promise<str
     throw new LocalStateUnavailableError("not-opened");
   }
   return dir;
+}
+
+/**
+ * Waits for an engine open of the workspace that is already under way, so a
+ * writer refused during it can ask again. Starts no open and waits for no
+ * close: the caller may be inside an engine run, and a close waits for runs.
+ * Returns at once when no open is under way.
+ */
+export async function localStateOpened(workspace: LocalStateWorkspace): Promise<void> {
+  let opening: Promise<unknown> | null = null;
+  try {
+    opening = bindings?.openInProgress?.(workspace) ?? null;
+  } catch {
+    return;
+  }
+  await opening?.then(() => undefined, () => undefined);
 }
 
 /**

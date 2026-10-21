@@ -98,6 +98,9 @@ interface SessionEntry {
   opening: {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
+    // Settles once this open's step is over: its binding is published, or it
+    // failed or was superseded.
+    settled: Promise<void>;
   } | null;
   closing: Promise<void> | null;
   retiring: boolean;
@@ -466,6 +469,18 @@ export class EngineWorkspaceSessions {
       entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
       !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
     return entry.binding;
+  }
+
+  /**
+   * The open of this workspace already under way, settled either way, or null
+   * when none is or the session is closing. Never opens, and never counts as a
+   * run, so a caller inside a run can wait on it: a close waits for runs.
+   */
+  openInProgress(workspace: EngineWorkspace): Promise<void> | null {
+    const entry = this.entries.get(this.sessionKey(workspace));
+    if (!this.acceptingRuns || !entry?.opening || entry.closing || entry.retiring ||
+      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
+    return entry.opening.settled;
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */
@@ -1191,12 +1206,17 @@ export class EngineWorkspaceSessions {
       if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
       const promise = this.openWithClient(client, workspace);
-      entry.opening = { client, promise };
+      let settle!: () => void;
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      entry.opening = { client, promise, settled };
       let binding: EngineWorkspaceBinding;
       try {
         binding = await this.untilFirstOpenAbandoned(entry, promise);
       } finally {
         if (entry.opening?.promise === promise) entry.opening = null;
+        // Waiters run after this step, which publishes the binding below
+        // without an await.
+        settle();
       }
       if (this.source.currentClient() !== client) {
         // Not awaited, and that is the point. This is cleanup for a client

@@ -11,7 +11,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 export const datasetCopyOwnerKey = (credentials: Pick<CloudCredentials, "serverUrl" | "userId">) =>
   hash([new URL(credentials.serverUrl).href.replace(/\/+$/, ""), credentials.userId]);
 type Copy = Awaited<ReturnType<typeof createOwnerDatasetCopy>>;
-type Entry = { rootPath: string; lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
+type Entry = { lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
 
 // A copy's database decides what the copy holds, so dohc opens only one that
 // is a file this user owns, that no other user can write, with one name. The
@@ -32,6 +32,8 @@ async function assertOwnCopyFiles(directory: string, key: string): Promise<void>
 export function createOwnerDatasetCopyRegistry() {
   // Copies that did not open but made their folder: an account change removes those too.
   const entries = new Map<string, Entry>(), failed = new Set<Entry>();
+  // Every workspace a copy was asked for since the last account change, opened or not.
+  const requested = new Set<string>();
   let ownerKey: string | null = null, stopped = false, barrier: Promise<void> = Promise.resolve();
   function close(entry: Entry): Promise<void> {
     entry.closed = true; entry.stop.abort(); entry.detach();
@@ -61,24 +63,23 @@ export function createOwnerDatasetCopyRegistry() {
   }
   // Every copy closes before any folder goes: a copy that opened on a retry
   // uses the folder of the attempt that failed. A copy that did not close
-  // keeps its folder.
-  async function removeAll(prior: Entry[]) {
+  // keeps its folder. Each removal runs whatever another one did.
+  async function removeAll(prior: Entry[], roots: string[]) {
     const closed = await Promise.allSettled(prior.map(close));
     const open = new Set(prior.filter((_, index) => closed[index]!.status === "rejected").map(entry => entry.directory));
     const folders = new Set(prior.flatMap(entry => entry.directory && !open.has(entry.directory) ? [entry.directory] : []));
-    await Promise.all([...folders].map(removeFolder));
-    await Promise.all([...new Set(prior.map(entry => entry.rootPath))].map(removeOldCopies));
-    const failure = closed.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    const removed = await Promise.allSettled([...[...folders].map(removeFolder), ...roots.map(removeOldCopies)]);
+    const failure = [...closed, ...removed].find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) throw failure.reason;
   }
   return {
     credentialsChanged(nextOwner: string | null): Promise<void> {
       if (ownerKey === nextOwner) return barrier;
       ownerKey = nextOwner;
-      const prior = [...entries.values(), ...failed];
+      const prior = [...entries.values(), ...failed], roots = [...requested];
       for (const entry of prior) { entry.closed = true; entry.stop.abort(); entry.detach(); }
-      entries.clear(); failed.clear();
-      barrier = barrier.then(() => removeAll(prior));
+      entries.clear(); failed.clear(); requested.clear();
+      barrier = barrier.then(() => removeAll(prior, roots));
       return barrier;
     },
     async get(input: {
@@ -93,6 +94,8 @@ export function createOwnerDatasetCopyRegistry() {
         if (stopped || ownerKey !== input.ownerKey) throw Error("The Collection owner changed. Reopen the workspace.");
       };
       current(); await barrier; current();
+      // Its old copies go at the next account change, even if this one never opens.
+      requested.add(input.rootPath);
       const key = hash([resolve(input.rootPath), input.workspaceId, input.datasetId, origin.origin, input.ownerKey]);
       let entry = entries.get(key);
       if (entry && (entry.closed || entry.lifetime !== input.lifetime)) { await close(entry); current(); if (entries.get(key) === entry) entries.delete(key); entry = entries.get(key); }
@@ -111,7 +114,7 @@ export function createOwnerDatasetCopyRegistry() {
           const scoped: Copy = { ...copy, data: (remote, source, signal) => copy.data(remote, source, AbortSignal.any([signal, next.stop.signal])) };
           return scoped;
         });
-        const next: Entry = { rootPath: input.rootPath, lifetime: input.lifetime, stop: new AbortController(), closed: false, opening,
+        const next: Entry = { lifetime: input.lifetime, stop: new AbortController(), closed: false, opening,
           detach: () => input.lifetime.removeEventListener("abort", abort) };
         entries.set(key, next);
         input.lifetime.addEventListener("abort", abort, { once: true });
@@ -130,7 +133,8 @@ export function createOwnerDatasetCopyRegistry() {
     },
     async closeAll() {
       stopped = true;
-      await barrier;
+      // A failed cleanup was reported by the account change that ran it; the copies still close.
+      await barrier.catch(() => undefined);
       await Promise.all([...entries.values()].map(close));
       entries.clear();
     },

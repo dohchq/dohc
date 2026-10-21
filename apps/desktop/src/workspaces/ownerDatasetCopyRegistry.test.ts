@@ -155,3 +155,24 @@ it("removes a copy that did not open when the account changes",async()=>{
   await f.registry.credentialsChanged(null);
   expect(await readdir(copies)).toEqual([]);
 });
+
+it("removes old copies even when a copy's own folder can't be removed",async()=>{
+  const f=await fixture(),old=join(f.input.rootPath,".dohc","dataset-copies","0".repeat(64));
+  await mkdir(old,{recursive:true});await writeFile(join(old,"replica.sqlite"),"account data");
+  await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0];
+  const outside=await mkdtemp(join(tmpdir(),"dohc-copy-registry-outside-"));cleanups.push(()=>rm(outside,{recursive:true,force:true}));
+  await rm(directory,{recursive:true});await symlink(outside,directory,"dir");
+  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("Collection copy storage changed. Its files were not removed.");
+  expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual(["local"]);
+  // Quitting still closes the copies.
+  await f.registry.closeAll();
+});
+it("removes old copies in a workspace whose copy never opened",async()=>{
+  const f=await fixture({opened:false});fakeLocalStateOpens();
+  const old=join(f.input.rootPath,".dohc","dataset-copies","0".repeat(64));
+  await mkdir(old,{recursive:true});await writeFile(join(old,"replica.sqlite"),"account data");
+  for(let attempt=0;attempt<2;attempt++)await expect(f.registry.get(f.input)).rejects.toThrow("the workspace has not finished opening");
+  expect(mocks.open).not.toHaveBeenCalled();
+  await f.registry.credentialsChanged(null);
+  expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual([]);
+});
