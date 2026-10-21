@@ -387,10 +387,11 @@ jobs:
       # chunk ID into each file and uploads its source map, which the
       # installer leaves out, so PostHog can show the original lines. The
       # package ships the files with those IDs. A build with a PostHog key
-      # fails here if the upload cannot run.
+      # fails here if the upload cannot run. A dry run only installs and runs
+      # the CLI.
       - name: Upload source maps
-        if: needs.preflight.outputs.dry_run != 'true'
         env:
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
           DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
