@@ -476,6 +476,12 @@ fn apply_deferred_base(
                 ));
             }
         };
+        let losing_seed_untouched = match (losing_doc.as_ref(), marker_before.as_ref()) {
+            (Some(doc), Some(marker)) => {
+                losing_seed_untouched_in_tx(tx, &key, doc, &incoming_doc, marker.content_kind)?
+            }
+            _ => false,
+        };
         if let Some(result) = preserve_incomplete_base_in_tx(
             tx, &key, &payload, &incoming_doc, relay_seq, &origin_id, origin_seq,
             recorded_at_ms, search_policy,
@@ -617,7 +623,7 @@ fn apply_deferred_base(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: payload.is_base_state,
             },
-            losing_claim_id.as_deref(), losing_projection.as_deref(), losing_authors.as_deref(), last_settled_sha.as_deref(),
+            losing_claim_id.as_deref(), losing_projection.as_deref(), losing_seed_untouched, losing_authors.as_deref(), last_settled_sha.as_deref(),
             &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
         )?;
         if let Some(opened) = conflict {
@@ -2929,6 +2935,38 @@ fn open_base_conflict_in_tx(
     Ok(conflicts_opened)
 }
 
+/// The losing lineage is only its seed, the file still holds that seed's
+/// source, and the winner is the same document. Only how the two bases were
+/// built differs, so the loser holds nothing the file and the winner lack.
+fn losing_seed_untouched_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    losing: &dohc_engine_collab::Ydoc,
+    incoming: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+) -> Result<bool, SyncError> {
+    let untouched: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id) \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+               AND d.head_update_seq=1 AND d.head_snapshot_seq=0 AND d.seed_source_sha256=s.blob_sha256 \
+               AND EXISTS(SELECT 1 FROM ydoc_updates u WHERE u.workspace_id=d.workspace_id \
+                 AND u.version_id=d.version_id AND u.object_id=d.object_id AND u.seq=1 AND u.is_seed=1))",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !untouched {
+        return Ok(false);
+    }
+    let canonical = |doc: &dohc_engine_collab::Ydoc| {
+        doc.project(content_kind)
+            .map(|projection| projection.content)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))
+    };
+    Ok(canonical(losing)? == canonical(incoming)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn preserve_base_sides_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -2937,6 +2975,7 @@ fn preserve_base_sides_in_tx(
     incoming: crate::ydoc_recovery::RecoveryEnvelopeBinding<'_>,
     losing_claim_id: Option<&str>,
     losing_projection: Option<&str>,
+    losing_seed_untouched: bool,
     losing_authors: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
@@ -2946,8 +2985,10 @@ fn preserve_base_sides_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(Option<i64>, Vec<String>), SyncError> {
     let mut recovered_paths = Vec::new();
-    // Equal projections need neither a choice nor a second copy.
+    // Equal projections need neither a choice nor a second copy, and neither
+    // does an untouched seed of the winner's document.
     if let (Some(claim), Some(local)) = (losing_claim_id, losing_projection)
+        && !losing_seed_untouched
         && hex_sha256(local.as_bytes()) != hex_sha256(incoming_content.as_bytes())
     {
         if let Some(opened) = conflict_replaced_lineage_in_tx(
@@ -4770,7 +4811,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
                 return Ok(result);
             }
-            let losing_projection = if local_unpublished
+            let (losing_projection, losing_seed_untouched) = if local_unpublished
                 || marker_before.as_ref().is_some_and(|marker| {
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
                         && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
@@ -4780,9 +4821,20 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 let marker = marker_before
                     .as_ref()
                     .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
-                Some(project_ydoc_with_store(tx, &claim_key, &doc, marker.content_kind)?.content)
+                (
+                    Some(
+                        project_ydoc_with_store(tx, &claim_key, &doc, marker.content_kind)?.content,
+                    ),
+                    losing_seed_untouched_in_tx(
+                        tx,
+                        &claim_key,
+                        &doc,
+                        &incoming_doc,
+                        marker.content_kind,
+                    )?,
+                )
             } else {
-                None
+                (None, false)
             };
             let losing_authors = if losing_projection.is_some() {
                 dohc_engine_collab::author_coverage::reserved_in(tx, &claim_key)
@@ -4901,6 +4953,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 incoming.clone(),
                 losing_claim_id.as_deref(),
                 losing_projection.as_deref(),
+                losing_seed_untouched,
                 losing_authors.as_deref(),
                 losing_last_settled_sha.as_deref(),
                 &projection.content,

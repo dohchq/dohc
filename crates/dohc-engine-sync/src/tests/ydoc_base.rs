@@ -5069,6 +5069,88 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
     }
 }
 
+/// An untouched seed loses to a base of other text, here a file changed
+/// offline before the relay built from the older head. The file is a real
+/// divergence, so it stays the current side of a conflict. Only a winner of
+/// the same document adopts silently (`first_open_build_skew.rs`).
+///
+/// Mutation check: drop the same-document comparison in
+/// `losing_seed_untouched_in_tx` and the older text overwrites the file.
+#[test]
+fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
+    use dohc_engine_collab::{
+        ContentKind, DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+        record_local_update,
+    };
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/offline.md";
+    let file = "Written offline.\n";
+    let file_sha = seed_text_head(&mut engine, "offline", path, file);
+    let key = DocKey::new("ws", "main", "offline").unwrap();
+    record_local_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &Ydoc::wire().plaintext_insert(0, file),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed: true,
+            seed_source_sha256: Some(&file_sha),
+            ..Default::default()
+        },
+        &NoFaults,
+        1_100,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    let remote = Ydoc::wire();
+    remote.plaintext_insert(0, "Older head.\n");
+    let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+    let mut base_op = envelope(
+        "remote",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "plaintext", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let sides: (String, String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.text,i.text,h.text FROM conflicts f
+                 JOIN blobs c ON c.sha256=f.current_blob_sha256
+                 JOIN blobs i ON i.sha256=f.incoming_blob_sha256
+                 JOIN snapshots s ON s.object_id=f.current_object_id
+                 JOIN blobs h ON h.sha256=s.blob_sha256 WHERE f.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        sides,
+        (file.to_owned(), "Older head.\n".to_owned(), file.to_owned())
+    );
+}
+
 fn resolve_seed_conflict(
     engine: &mut EngineStore,
     key: &dohc_engine_collab::DocKey,
