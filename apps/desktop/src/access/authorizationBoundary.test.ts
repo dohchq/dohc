@@ -27,7 +27,12 @@ function imports(file: string, source: string): string[] {
       if (!found) throw new Error(`Unresolved relative import ${specifier} in ${file}`);
       return [found];
     }
-    if (specifier.startsWith("@dohc/")) { try { return [createRequire(file).resolve(specifier)]; } catch { throw new Error(`Unresolved import ${specifier}`); } }
+    if (specifier.startsWith("@dohc/")) {
+      let found: string;
+      try { found = createRequire(file).resolve(specifier); } catch { throw new Error(`Unresolved import ${specifier} in ${file}`); }
+      if (!found.endsWith(".ts") && !found.endsWith(".tsx")) throw new Error(`Non-TypeScript import ${specifier} in ${file} resolved to ${found}`);
+      return [found];
+    }
     return [];
   });
 }
