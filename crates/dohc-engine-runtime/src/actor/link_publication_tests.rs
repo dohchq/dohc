@@ -100,20 +100,28 @@ impl Fixture {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publishes_closed_sources_and_an_open_document_without_a_placement_caller() {
-    let f = Fixture::new(3, 3);
-    let (lease, _) = f.open_document("source-0001").await;
-    assert_eq!(
-        f.pass("disk", Arc::new(NoFaults)).await.unwrap()["documents"],
-        3
-    );
-    f.wait_disk(3).await;
-    assert!(
-        f.leases
-            .is_held_by_session(&DocKey::new(&f.ws, "main", "source-0001").unwrap())
-    );
-    drop(lease);
-    f.close().await;
+async fn publishes_three_closed_sources_and_an_open_document_without_a_placement_caller() {
+    for open in [false, true] {
+        let f = Fixture::new(3, 3);
+        let lease = if open {
+            Some(f.open_document("source-0001").await.0)
+        } else {
+            None
+        };
+        assert_eq!(
+            f.pass("disk", Arc::new(NoFaults)).await.unwrap()["documents"],
+            3
+        );
+        f.wait_disk(3).await;
+        if open {
+            assert!(
+                f.leases
+                    .is_held_by_session(&DocKey::new(&f.ws, "main", "source-0001").unwrap())
+            );
+        }
+        drop(lease);
+        f.close().await;
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_placement_recovers_and_retries_without_another_request() {
