@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -292,6 +293,68 @@ describe("first-open base", () => {
   it("refuses a base its activation could not capture or verify", () => {
     expect(buildFirstOpenBase(policy, input("Body", { bounds: { ...roomy, maxCaptureBytes: 100 } }))).toEqual({ kind: "refused", reason: "capture-budget" });
     expect(buildFirstOpenBase(policy, input("Body", { bounds: { ...roomy, maxBytesPerDrain: 10 } }))).toEqual({ kind: "refused", reason: "read-budget" });
+  });
+});
+
+// The relay's candidates for the engine's first-open check; Rust checks these
+// exact bytes against each file. Real notes keep their bytes at this revision.
+const CORPUS_REVISION = "a572fc3f5";
+const CORPUS = ["docs/reference/usage-and-error-reports.md", "vendor/yrs-0.27.3/README.md", "vendor/notify-8.2.0/README.md",
+  "vendor/file-guard-0.2.0/README.md", "tools/rust-engine-program/README.md", "CONTEXT.md", "examples/trip-poll/README.md",
+  "SECURITY.md", "docs/README.md", ".agents/skills/verification-triage/SKILL.md", "services/share-web/README.md",
+  "tools/perf-profiling/README.md"];
+// A setext heading makes the projection differ, so each base carries the file as its witness.
+const FOCUSED: [string, string][] = [
+  ["autolink", "See <https://example.com/b>.\n"],
+  ["amp-fenced", "Title\n=====\n\n```rust\nlet x = &mut y;\n```\n"],
+  ["lt-fenced", "Title\n=====\n\n```rust\nlet v: Vec<u8> = a < b;\n```\n"],
+  ["refdef-fenced", "Title\n=====\n\n```\n[docs]: https://example.com\n```\n"],
+  ["amp-indented", "Title\n=====\n\n    a && b\n"],
+  ["lt-indented", "Title\n=====\n\n    Vec<u8>\n"],
+  ["refdef-indented", "Title\n=====\n\n    [docs]: https://example.com\n"],
+  ["amp-inline", "Title\n=====\n\nUse `a && b` here.\n"],
+  ["lt-inline", "Title\n=====\n\nUse `Vec<u8>` here.\n"],
+  ["refdef-inline", "Title\n=====\n\nWrite `[docs]: url` once.\n"],
+  ["amp-bare", "Title\n=====\n\nFish & chips\n"],
+  ["amp-entity", "Title\n=====\n\nFish &amp; chips &copy; &#169;\n"],
+  ["lt-bare", "Title\n=====\n\n1 < 2 and 3 <= 4\n"],
+  ["html-inline", "Title\n=====\n\nHello <b>bold</b> world\n"],
+  ["html-block", "Title\n=====\n\n<div>\nblock\n</div>\n"],
+  ["refdef", "Title\n=====\n\nSee [docs][d].\n\n[d]: https://example.com\n"],
+  ["literal-punctuation", "Title\n=====\n\nKeys a]: b, x <- y, AT&T.\n"],
+  ["frontmatter", "---\ntitle: R&D <draft>\nref: \"[x]: y\"\n---\n\nTitle\n=====\n\nBody & more\n"],
+  ["mixed-technical", "Notes\n=====\n\n* Run `cargo test -- <filter>` & check.\n* See [the guide][g] for `a && b`.\n\n```sh\nfoo < in.txt && bar\n```\n\n[g]: https://example.com/guide\n"],
+  ["crlf", "Title\r\n=====\r\n\r\nFish & chips < 2\r\n"],
+  ["no-final-newline", "Title\n=====\n\nFish & chips < 2"],
+  ["extra-final-newlines", "Title\n=====\n\nFish & chips < 2\n\n\n"],
+  ["trailing-whitespace", "Title  \n=====\n\nFish & chips < 2   \n"],
+  ["unicode", "Café\n====\n\nnaïve 中文 — 🎉 & <ok>\n"],
+  ["empty", ""],
+];
+
+describe("first-open candidates", () => {
+  const fixture = new URL("candidates.json", fixtures);
+  const identity = { workspaceId: "workspace", versionId: "main", objectId: "object", contentKind: "richdoc", headMomentId: "head-moment" } as const;
+  type Row = { name: string; corpus: { path: string; revision: string; sha256: string } | null; markdown: string; oldGuard: string; candidate: string };
+  const row = (name: string, markdown: string, corpus: Row["corpus"]): Row => {
+    const candidate = encodeRichdocSeed(markdown, seedClientId({ ...identity, headBlobSha256: sha256(markdown) }));
+    const built = buildFirstOpenBase(policy, input(markdown));
+    if (built.kind === "built") expect(Buffer.from(built.base).equals(Buffer.from(candidate)), name).toBe(true);
+    return { name, corpus, markdown, oldGuard: built.kind === "built" ? "built" : built.reason, candidate: Buffer.from(candidate).toString("base64") };
+  };
+
+  it("keeps the committed candidates the relay builds today", () => {
+    const writing = process.env.DOHC_WRITE_FIRST_OPEN_FIXTURES === "1";
+    const read = () => JSON.parse(readFileSync(fixture, "utf8")) as Row[];
+    const committed = writing ? undefined : read();
+    const markdown = (path: string) => committed ? committed.find(row => row.corpus?.path === path)!.markdown
+      : execFileSync("git", ["show", `${CORPUS_REVISION}:${path}`], { encoding: "utf8" });
+    const rows = [
+      ...CORPUS.map(path => { const text = markdown(path); return row(`corpus:${path}`, text, { path, revision: CORPUS_REVISION, sha256: sha256(text) }); }),
+      ...FOCUSED.map(([name, text]) => row(name, text, null)),
+    ];
+    if (writing) writeFileSync(fixture, `[\n${rows.map(row => JSON.stringify(row)).join(",\n")}\n]\n`);
+    expect(read()).toEqual(rows);
   });
 });
 

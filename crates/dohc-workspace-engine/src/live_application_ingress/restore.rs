@@ -116,10 +116,7 @@ pub(super) fn begin(
     mut request: Request,
     connection: &ConnectionHandle,
 ) -> Result<(), WireError> {
-    if request.idempotency_key.is_some()
-        || ingress.uploads.contains_key(&request.id)
-        || ingress.restores.contains_key(&request.id)
-    {
+    if request.idempotency_key.is_some() || ingress.has_request(request.id) {
         return Err(invalid("invalid-native-restore-request"));
     }
     let config = ingress.service.restore_config(connection)?;
@@ -138,7 +135,7 @@ pub(super) fn begin(
         return Err(invalid("invalid-native-restore-bounds"));
     }
     let stream = Stream::new(params.stream_id, params.byte_length, params.digest)?;
-    if ingress.uploads.len() + ingress.restores.len() >= ingress.config.max_uploads {
+    if ingress.pending() >= ingress.config.max_uploads {
         return Err(overloaded());
     }
     let mut bytes = Vec::new();

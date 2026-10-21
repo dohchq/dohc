@@ -646,6 +646,87 @@ describe("private native restore transport", () => {
   });
 });
 
+describe("private first-open candidate check", () => {
+  const call = { id: 905, workspace: "ws-0000000000000001", deadlineMs: 30_000 };
+  const candidate = Uint8Array.of(0, 0, 7), source = Buffer.from("# Notes\n");
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const input = { objectId: "object", path: "notes/a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096 };
+  const binding = { objectId: "object", path: "notes/a.md", sourceMomentId: "moment", sourceSha256: digest(source), sourceByteLength: source.length,
+    candidateSha256: digest(candidate), candidateByteLength: candidate.length, replicationEpoch: "epoch", streamIdentity: "stream", maxFullStateBytes: 4096 };
+  const checked = { status: "checked", contractVersion: 1, binding, settledSourceSha256: digest(source), settledSourceByteLength: source.length,
+    fullStateSha256: "ab".repeat(32), fullStateByteLength: 40 };
+  async function answering(result: (params: Record<string, JsonValue>) => Record<string, JsonValue>) {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const sent = { params: {} as Record<string, JsonValue>, bundle: [] as Buffer[], requests: 0 };
+    let wireId = -1;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      sent.requests++; wireId = envelope.id; sent.params = envelope.params as Record<string, JsonValue>;
+      expect(envelope.method).toBe("liveApplication.checkFirstOpenCandidate");
+    };
+    peer.onBlobChunk = frame => {
+      sent.bundle.push(Buffer.from(frame.payload));
+      if (frame.fin) peer.send({ type: "response", id: wireId, result: result(sent.params) });
+    };
+    return { transport, sent };
+  }
+
+  it("uploads the candidate then the source in one stream and returns the engine's evidence", async () => {
+    const { transport, sent } = await answering(() => checked);
+    try {
+      expect(await transport.checkFirstOpenCandidate(call, input)).toStrictEqual(checked);
+      const bundle = Buffer.concat(sent.bundle);
+      expect(bundle).toEqual(Buffer.concat([candidate, source]));
+      expect(sent.params).toEqual({ contractVersion: 1, binding, streamId: expect.any(Number), byteLength: bundle.length, digest: digest(bundle) });
+      expect(sent.params).not.toHaveProperty("registrationId");
+    } finally { transport.close(); }
+  });
+
+  it.each([
+    ["refused", { status: "refused", contractVersion: 1, binding, cause: "settlement-mismatch" }],
+    ["too-large", { status: "too-large", contractVersion: 1, binding, bound: "full-state-encoding", limit: 4096 }],
+  ])("returns a %s verdict as a result, not an error", async (_name, result) => {
+    const { transport } = await answering(() => result);
+    try {
+      expect(await transport.checkFirstOpenCandidate(call, input)).toStrictEqual(result);
+    } finally { transport.close(); }
+  });
+
+  it.each([
+    ["an extra field", { ...checked, extra: true }],
+    ["another contract version", { ...checked, contractVersion: 2 }],
+    ["another source", { ...checked, binding: { ...binding, sourceMomentId: "other" } }],
+    ["an extra binding field", { ...checked, binding: { ...binding, versionId: "main" } }],
+    ["a settled source other than the file", { ...checked, settledSourceSha256: "cd".repeat(32) }],
+    ["a full state beyond the bound", { ...checked, fullStateByteLength: 4097 }],
+    ["an unknown cause", { status: "refused", contractVersion: 1, binding, cause: "unsupported" }],
+    ["another limit", { status: "too-large", contractVersion: 1, binding, bound: "full-state-encoding", limit: 4095 }],
+    ["an unknown status", { ...checked, status: "accepted" }],
+  ])("refuses an answer with %s", async (_name, result) => {
+    const { transport } = await answering(() => result as Record<string, JsonValue>);
+    try { await expect(transport.checkFirstOpenCandidate(call, input)).rejects.toThrow("Invalid first-open candidate check"); }
+    finally { transport.close(); }
+  });
+
+  it.each([
+    ["a candidate digest that is not the bytes'", { ...input, candidateSha256: "cd".repeat(32) }, "digest mismatch"],
+    ["a source digest that is not the bytes'", { ...input, sourceSha256: "cd".repeat(32) }, "digest mismatch"],
+    ["a source beyond the engine's text limit", { ...input, source: new Uint8Array(2 * 1024 * 1024 + 1) }, "bounds"],
+    ["an encoding cap beyond the update limit", { ...input, maxFullStateBytes: 20 * 1024 * 1024 + 1 }, "bounds"],
+    ["a one-byte candidate", { ...input, candidate: Uint8Array.of(0), candidateSha256: digest(Uint8Array.of(0)) }, "bounds"],
+  ])("refuses %s before sending anything", async (_name, wrong, message) => {
+    const { transport, sent } = await answering(() => checked);
+    try {
+      await expect(transport.checkFirstOpenCandidate(call, wrong)).rejects.toThrow(message);
+      expect(sent.requests).toBe(0);
+    } finally { transport.close(); }
+  });
+});
+
 function helloAck(
   limits: typeof LIMITS = LIMITS,
   capabilities: string[] = ["core", "blobs"],

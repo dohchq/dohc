@@ -572,6 +572,27 @@ impl EngineService {
             .ok_or_else(|| invalid("owner adoption not configured"))
     }
 
+    /// The live host of an attached ordinary workspace, when the configured
+    /// host's current connection is the caller. Desktop engines never qualify.
+    pub(crate) fn first_open_check_host(
+        &self,
+        connection: &ConnectionHandle,
+        workspace: Option<&WorkspaceHandle>,
+    ) -> Result<Arc<super::live_application::Host>, WireError> {
+        let discovery = self
+            .configured_live_host
+            .get()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
+        if !discovery.connection.same_connection(connection)
+            || !discovery.connection.is_current()
+            || !lock(&self.live_applications).hosts_current(&discovery.connection)
+            || !workspace.is_some_and(|workspace| discovery.is_ordinary(workspace))
+        {
+            return Err(super::error::workspace_unavailable());
+        }
+        self.restore_host(connection, workspace)
+    }
+
     pub(super) fn configured_ordinary_request(
         &self,
         ctx: &RequestContext,

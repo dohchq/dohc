@@ -605,16 +605,34 @@ impl Ydoc {
     /// Both keep a block's text as written, so the source's text must also
     /// read, block by block, as the projection's text does.
     pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
-        let reference = self.markdown_source_reference()?;
+        match self.preserved_markdown_source_cancellable(canonical_projection, &mut || {
+            Ok::<_, std::convert::Infallible>(())
+        }) {
+            Ok(source) => source,
+            Err(never) => match never {},
+        }
+    }
+
+    fn preserved_markdown_source_cancellable<E>(
+        &self,
+        canonical_projection: &str,
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Option<String>, E> {
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(None);
+        };
         if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
-            return None;
+            return Ok(None);
         }
-        let source = self.markdown_source(&reference)?;
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(None);
+        };
         if source == canonical_projection {
-            return Some(source);
+            return Ok(Some(source));
         }
-        self.source_reproduces(&source, canonical_projection, true)
-            .then_some(source)
+        Ok(self
+            .source_reproduces(&source, canonical_projection, true, proceed)?
+            .then_some(source))
     }
 
     /// The exact Markdown source for the version's file, where `snapshot_text`
@@ -633,7 +651,24 @@ impl Ydoc {
         canonical_projection: &str,
         snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
     ) -> Result<Option<String>, E> {
-        if let Some(source) = self.preserved_markdown_source(canonical_projection) {
+        self.settled_markdown_source_cancellable(
+            canonical_projection,
+            snapshot_text,
+            &mut || Ok(()),
+        )
+    }
+
+    /// [`Ydoc::settled_markdown_source`], calling `proceed` before each
+    /// reading of the source so a caller can stop between them.
+    pub(crate) fn settled_markdown_source_cancellable<E>(
+        &self,
+        canonical_projection: &str,
+        snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Option<String>, E> {
+        if let Some(source) =
+            self.preserved_markdown_source_cancellable(canonical_projection, proceed)?
+        {
             return Ok(Some(source));
         }
         let Some(reference) = self.markdown_source_reference() else {
@@ -655,7 +690,7 @@ impl Ydoc {
         let (source_body, snapshot_body) = (body(&source), body(&snapshot));
         Ok(
             (source[source.len() - source_body..] == snapshot[snapshot.len() - snapshot_body..]
-                && self.source_reproduces(&source, canonical_projection, false))
+                && self.source_reproduces(&source, canonical_projection, false, proceed)?)
             .then_some(source),
         )
     }
@@ -663,31 +698,37 @@ impl Ydoc {
     /// Whether `source` rebuilds a document that projects
     /// `canonical_projection`, under the importer's reading or the fold's.
     /// With `reads_alike`, each text block must also read as its projection
-    /// does; see [`markdown_reads_alike`].
-    fn source_reproduces(
+    /// does; see [`markdown_reads_alike`]. `proceed` runs before each reading.
+    fn source_reproduces<E>(
         &self,
         source: &str,
         canonical_projection: &str,
         reads_alike: bool,
-    ) -> bool {
-        [MarkdownReading::Source, MarkdownReading::Projection]
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
-            .any(|reading| {
-                let staged = Ydoc::wire();
-                staged
-                    .rewrite_content_to_markdown_checked::<false>(
-                        ContentKind::Richdoc,
-                        source,
-                        reading,
-                        FileFold::No,
-                    )
-                    .is_ok()
-                    && staged
-                        .project_richdoc()
-                        .is_ok_and(|projection| projection == canonical_projection)
-                    && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
-            })
+        {
+            proceed()?;
+            let staged = Ydoc::wire();
+            if staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    source,
+                    reading,
+                    FileFold::No,
+                )
+                .is_ok()
+                && staged
+                    .project_richdoc()
+                    .is_ok_and(|projection| projection == canonical_projection)
+                && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {

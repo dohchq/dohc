@@ -16,6 +16,7 @@ function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
     sendLiveOwnerAdoption: (input: {id: number}, _cut: unknown, _bounds: unknown, signal?: AbortSignal) => invoke(input, signal),
     readNextLiveApplied: (input: {id: number}, _position: unknown, _limit: number, signal?: AbortSignal) => invoke(input, signal),
     readLiveApplicationAck(input: {id: number}, _identity: unknown, signal?: AbortSignal) {return this.sendRequest(input, signal);},
+    checkFirstOpenCandidate: (input: {id: number}, _candidate: unknown, signal?: AbortSignal) => invoke(input, signal),
   };
   const retire = vi.fn(() => lifetime.abort(new Error("retired")));
   const client = queueLiveHostRequests(native as unknown as EngineClient, {maxPendingReads: maxPending, maxPendingWrites: maxPending,
@@ -123,6 +124,19 @@ it("holds an active envelope's input charge until native completes after cancell
   await expect(f.client.sendRequest({...envelope, id: 2})).rejects.toThrow("retained input capacity");
   expect(f.invoke).toHaveBeenCalledTimes(1); release.resolve({result: {}}); await cancelled;
   await f.client.sendRequest({...envelope, id: 3}); expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
+});
+
+const firstOpen = (bytes: number) => ({objectId: "object", path: "a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+  source: new Uint8Array(bytes), sourceSha256: "a".repeat(64), candidate: new Uint8Array(bytes), candidateSha256: "b".repeat(64), maxFullStateBytes: 100});
+it("queues a first-open check with its candidate and source charged until native completes after cancellation", async () => {
+  const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();
+  f.invoke.mockImplementationOnce(() => release.promise);
+  const active = f.client.checkFirstOpenCandidate(request(1), firstOpen(10_000), caller.signal);
+  const cancelled = expect(active).rejects.toThrow("cancelled"); caller.abort(new Error("cancelled"));
+  expect(f.invoke.mock.calls[0]![1]).toBe(f.lifetime.signal);
+  await expect(f.client.checkFirstOpenCandidate(request(2), firstOpen(10_000))).rejects.toThrow("retained input capacity");
+  expect(f.invoke).toHaveBeenCalledTimes(1); release.resolve({result: {}}); await cancelled;
+  await f.client.checkFirstOpenCandidate(request(3), firstOpen(10_000)); expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
 });
 
 it("refuses an oversized backing allocation before native and leaves no partial reservation", async () => {

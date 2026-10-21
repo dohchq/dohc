@@ -12,6 +12,7 @@ import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type
 import {validateUserWritePath} from "@dohc/workspace-core";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
+import { firstOpenCandidateBinding, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -1560,6 +1561,28 @@ export class EngineClient implements EngineTransport {
     return { response, bytes: output.blob!.bytes };
   }
 
+  /** Private configured-host check of a first-open candidate. The engine stores nothing. */
+  async checkFirstOpenCandidate(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    input: FirstOpenCandidateInput,
+    signal?: AbortSignal,
+  ): Promise<FirstOpenCandidateCheck> {
+    const binding = firstOpenCandidateBinding(input);
+    const byteLength = binding.candidateByteLength + binding.sourceByteLength;
+    const response = await this.sendLiveUpload(request, "liveApplication.checkFirstOpenCandidate", byteLength + 3 * 1024 * 1024, () => {
+      // Capture bytes once. Caller mutations cannot change a queued upload.
+      const bundle = Buffer.concat([input.candidate, input.source], byteLength);
+      const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+      if (digest(bundle.subarray(0, binding.candidateByteLength)) !== binding.candidateSha256 ||
+          digest(bundle.subarray(binding.candidateByteLength)) !== binding.sourceSha256) throw new TypeError("First-open candidate digest mismatch.");
+      const streamId = this.nextLiveStreamId++, bundleDigest = digest(bundle);
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { contractVersion: 1, binding: { ...binding }, streamId, byteLength, digest: bundleDigest },
+        streams: [{ streamId, bytes: bundle, digest: bundleDigest }] };
+    }, signal);
+    return parseFirstOpenCandidateCheck(response.result, binding);
+  }
+
   async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalRow[], signal?: AbortSignal): Promise<ReplicaPageResult> {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("Invalid replica cursor.");
     if (!Number.isSafeInteger(epochLogFloor) || epochLogFloor < 0) throw new TypeError("Invalid replica epoch floor.");
@@ -1592,7 +1615,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry","liveApplication.checkFirstOpenCandidate"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||

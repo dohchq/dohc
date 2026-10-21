@@ -92,6 +92,7 @@ impl EngineService {
                 | "liveApplication.releaseOwnerActivation"
                 | "liveApplication.ownerState"
                 | "liveApplication.adoptOwner"
+                | "liveApplication.checkFirstOpenCandidate"
                 | "ydoc.ownerOutbox.readPending"
                 | "ydoc.ownerOutbox.acknowledge"
                 | "sync.materializePendingCursor"
@@ -166,6 +167,10 @@ impl EngineService {
             }
             crate::LiveApplicationInput::Owner(input) => {
                 self.owner_delivery_apply(ctx, request, *input).await
+            }
+            crate::LiveApplicationInput::FirstOpenCheck(input) => {
+                self.live_application_check_first_open(ctx, request, *input)
+                    .await
             }
         }
     }

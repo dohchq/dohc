@@ -27,6 +27,7 @@ const RANGE_BYTES: usize = 16;
 const MAX_HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 mod adoption;
+mod first_open_check;
 mod replica;
 mod restore;
 pub(crate) use restore::RestoreConfig;
@@ -295,10 +296,21 @@ pub struct LiveApplicationIngress {
     upload_slots: Arc<Semaphore>,
     uploads: HashMap<u64, Upload>,
     restores: HashMap<u64, restore::Upload>,
+    first_open_checks: HashMap<u64, first_open_check::Upload>,
     last_stream_id: Option<u64>,
 }
 
 impl LiveApplicationIngress {
+    fn pending(&self) -> usize {
+        self.uploads.len() + self.restores.len() + self.first_open_checks.len()
+    }
+
+    fn has_request(&self, id: u64) -> bool {
+        self.uploads.contains_key(&id)
+            || self.restores.contains_key(&id)
+            || self.first_open_checks.contains_key(&id)
+    }
+
     pub(crate) fn owner_admission(&self) -> Result<SettlementAdmission, WireError> {
         // Two input buffers plus decoded vector, checkpoint and output scratch.
         // The configured working reserve remains charged while the actor hydrates Yrs.
@@ -405,6 +417,7 @@ impl LiveApplicationIngress {
             config,
             uploads: HashMap::new(),
             restores: HashMap::new(),
+            first_open_checks: HashMap::new(),
             last_stream_id: None,
         })
     }
@@ -417,6 +430,9 @@ impl LiveApplicationIngress {
         self.service.guard_replica_request(&mut request)?;
         if restore::is_method(&request.method) {
             return restore::begin(self, request, connection);
+        }
+        if first_open_check::is_method(&request.method) {
+            return first_open_check::begin(self, request, connection);
         }
         if !matches!(
             request.method.as_str(),
@@ -433,11 +449,11 @@ impl LiveApplicationIngress {
         {
             return Err(invalid("invalid-live-application-request"));
         }
-        if self.uploads.contains_key(&request.id) || self.restores.contains_key(&request.id) {
+        if self.has_request(request.id) {
             return Err(invalid("duplicate-live-request"));
         }
         // Headers remain bounded even when the body admission budget is exhausted.
-        if self.uploads.len() + self.restores.len() >= self.config.max_uploads {
+        if self.pending() >= self.config.max_uploads {
             return Err(overloaded());
         }
         let (metadata, registration_id, update, ranges, range_count) = if request
@@ -682,6 +698,9 @@ impl LiveApplicationIngress {
         if let Some(upload) = self.restores.get_mut(&start.request_id) {
             return upload.start(&start);
         }
+        if let Some(upload) = self.first_open_checks.get_mut(&start.request_id) {
+            return upload.start(&start);
+        }
         let upload = self
             .uploads
             .get_mut(&start.request_id)
@@ -713,6 +732,13 @@ impl LiveApplicationIngress {
             .any(|upload| upload.stream_id() == stream_id)
         {
             return restore::chunk(self, stream_id, fin, bytes);
+        }
+        if self
+            .first_open_checks
+            .values()
+            .any(|upload| upload.stream_id() == stream_id)
+        {
+            return first_open_check::chunk(self, stream_id, fin, bytes);
         }
         let id = self
             .uploads
@@ -891,7 +917,9 @@ impl LiveApplicationIngress {
     }
 
     pub fn cancel(&mut self, request_id: u64) -> bool {
-        self.uploads.remove(&request_id).is_some() | self.restores.remove(&request_id).is_some()
+        self.uploads.remove(&request_id).is_some()
+            | self.restores.remove(&request_id).is_some()
+            | self.first_open_checks.remove(&request_id).is_some()
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -899,6 +927,11 @@ impl LiveApplicationIngress {
             .values()
             .map(|upload| upload.deadline)
             .chain(self.restores.values().map(|upload| upload.deadline()))
+            .chain(
+                self.first_open_checks
+                    .values()
+                    .map(|upload| upload.deadline()),
+            )
             .min()
     }
 
@@ -916,9 +949,16 @@ impl LiveApplicationIngress {
                 .filter(|(_, upload)| upload.deadline() <= now)
                 .map(|(id, _)| *id),
         );
+        expired.extend(
+            self.first_open_checks
+                .iter()
+                .filter(|(_, upload)| upload.deadline() <= now)
+                .map(|(id, _)| *id),
+        );
         for id in &expired {
             self.uploads.remove(id);
             self.restores.remove(id);
+            self.first_open_checks.remove(id);
         }
         expired
     }
@@ -926,6 +966,7 @@ impl LiveApplicationIngress {
     pub fn clear(&mut self) {
         self.uploads.clear();
         self.restores.clear();
+        self.first_open_checks.clear();
     }
 }
 

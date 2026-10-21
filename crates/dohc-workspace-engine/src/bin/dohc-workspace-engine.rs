@@ -575,6 +575,7 @@ where
                                     | "liveApplication.applyRestore"
                                     | "liveApplication.settleRestore"
                                     | "liveApplication.resumeRestore"
+                                    | "liveApplication.checkFirstOpenCandidate"
                             ) =>
                         {
                             let id = request.id;

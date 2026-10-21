@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
+pub(crate) mod first_open_check;
 pub(crate) mod restore;
 pub(crate) mod sync;
 
@@ -116,6 +117,7 @@ pub enum LiveApplicationInput {
     Admitted(Box<AdmittedApplicationInput>),
     Restore(Box<restore::RestoreInput>),
     Owner(Box<super::owner_delivery::OwnerInput>),
+    FirstOpenCheck(Box<first_open_check::FirstOpenCheckInput>),
 }
 
 #[doc(hidden)]
