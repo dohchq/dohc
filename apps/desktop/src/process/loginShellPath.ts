@@ -98,6 +98,16 @@ export function readLoginShellPath(options: {
   });
 }
 
+/**
+ * Whether startup reads the login shell's PATH. Finder, the Dock and a Linux
+ * desktop's launcher start dohc without what the shell adds. A Linux terminal
+ * launch already has the shell's PATH, with whatever the person chose there,
+ * such as `nvm use`, so it keeps that PATH as it is.
+ */
+export function needsLoginShellPath(platform: NodeJS.Platform, fromTerminal: boolean): boolean {
+  return platform === "darwin" || (platform === "linux" && !fromTerminal);
+}
+
 /** The account's registered shell, when /etc/shells lists it, or null. */
 export function registeredLoginShell(
   shell: string | null | undefined,

@@ -542,7 +542,7 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
-import { adoptLoginShellPath } from "./process/loginShellPath";
+import { adoptLoginShellPath, needsLoginShellPath } from "./process/loginShellPath";
 import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
@@ -572,8 +572,9 @@ makeProcessDiagnosticsNonFatal();
 // Linux desktop's launcher starts it with the session's PATH, which misses
 // what only the shell adds, such as nvm and its npm-installed agents. The
 // login shell's PATH is read once, in parallel with startup, once this
-// instance holds the single-instance lock. Agent runs and agent detection
-// wait for it, at most for its timeout.
+// instance holds the single-instance lock, unless a Linux terminal started
+// dohc (needsLoginShellPath). Agent runs and agent detection wait for it, at
+// most for its timeout.
 let loginShellPathRead: Promise<void> = Promise.resolve();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
@@ -7256,6 +7257,8 @@ if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
 // start() takes the lock first. A second instance quits without running the profile.
-if ((process.platform === "darwin" || process.platform === "linux") && app.isPackaged && app.hasSingleInstanceLock()) {
+// A terminal is attached to one of the standard streams when one started dohc.
+const fromTerminal = [process.stdin, process.stdout, process.stderr].some((stream) => stream.isTTY === true);
+if (app.isPackaged && needsLoginShellPath(process.platform, fromTerminal) && app.hasSingleInstanceLock()) {
   loginShellPathRead = adoptLoginShellPath(process.env);
 }
