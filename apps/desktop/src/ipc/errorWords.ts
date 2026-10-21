@@ -38,6 +38,38 @@ export const PRIVACY_DENIED_WORDS =
 export const VOLUME_SHARES_NEW_FILES_WORDS =
   "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
 
+/**
+ * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
+ * store file in it, or this computer's `.dohc/local` is a link, the wrong
+ * kind of item, or another user's. The message names the reason, then the
+ * path from the workspace's root: one of the paths below, and nothing else.
+ */
+const ENGINE_FOLDER_NOT_PRIVATE =
+  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
+// What is there, and the fix that keeps everything in it. Only an item dohc
+// never puts there can be moved without losing anything of dohc's.
+const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>([
+  ["link", ["is a link", "Put what it links to in its place, then try again."]],
+  ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
+  ["not-file", ["is not a file", "Rename or move it, then try again."]],
+  ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
+]);
+// What `sudo` makes in a folder is another user's too, so a folder's fix
+// covers everything in it.
+const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then try again.";
+
+/** What keeps a workspace's History, or this computer's own data, from being private, and what to do. */
+function engineFolderNotPrivateWords(message: string): string | null {
+  const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
+  const words = NOT_PRIVATE_WORDS.get(reason);
+  if (words === undefined) return null;
+  const [fact, fix] = words;
+  const folder = path === ".dohc" || path === ".dohc/engine" || path === ".dohc/local";
+  const fixed = reason === "other-owner" && folder ? OTHER_OWNER_FOLDER_FIX : fix;
+  const kept = path === ".dohc/local" ? "this computer's own data" : "its History";
+  return `This workspace's ${path} ${fact}, so dohc can't keep ${kept} private. ${fixed}`;
+}
+
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
@@ -265,6 +297,8 @@ export function readError(error: unknown): ReadError {
     const path = message.slice("capture-file-held: ".length);
     return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
   }
+  const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
+  if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }

@@ -102,6 +102,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
+import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
@@ -848,6 +849,7 @@ export function DesktopWorkspaceShell(props: {
     showSettingsFileNotice,
     showSuccessNotice,
     showWarningNotice,
+    showScheduleHostNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
@@ -862,6 +864,7 @@ export function DesktopWorkspaceShell(props: {
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
+  useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
@@ -1212,7 +1215,7 @@ export function DesktopWorkspaceShell(props: {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
 
-  // Restore per-workspace workbench state from .dohc/ui-state.json. The shell
+  // Restore per-workspace workbench state from .dohc/local/ui-state.json. The shell
   // renders at once under the opening cover (launch budgets key off shell
   // visibility); the cover lifts in the commit that applies the stored state,
   // or the defaults when it is missing or unreadable. The stored state applies

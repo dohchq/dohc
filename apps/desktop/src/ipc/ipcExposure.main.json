@@ -136,6 +136,7 @@
     "desktop:list-chat-channel-shares",
     "desktop:list-chat-channels",
     "desktop:chat-file-mentions-page",
+    "desktop:chat-links",
     "desktop:list-chat-follows",
     "desktop:list-chat-messages",
     "desktop:list-chat-reactions",

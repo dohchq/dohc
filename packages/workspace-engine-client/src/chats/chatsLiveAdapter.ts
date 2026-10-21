@@ -1,3 +1,4 @@
+import type { ChatLinksEngineInput, ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { randomUUID } from "node:crypto";
 import {
@@ -475,6 +476,12 @@ export class ChatsLiveAdapter {
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;
+  }
+
+  async linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage> {
+    this.assertWorkspace(input.workspaceId);
+    const { workspaceId: _workspaceId, ...params } = input;
+    return this.request(CHATS_METHOD.conversationLinks, params);
   }
 
   async fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage> {

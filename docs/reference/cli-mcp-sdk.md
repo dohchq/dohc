@@ -90,6 +90,15 @@ No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
+### `dohc_chat_links`
+
+Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.
+
+- `channelWireId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] } | null`.
+
 ### `dohc_chat_file_mentions`
 
 Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.
@@ -382,7 +391,7 @@ List the workspace's Chats groups (including the default #general) with each gro
 
 No arguments.
 
-Returns `{ ok: true, groups: { kind, id, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
+Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
 
 ### `dohc_start_group_chat`
 
@@ -796,7 +805,7 @@ dohc chat groups [options]
 
 List the Groups in this workspace.
 
-With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose? }[] }`.
+With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
 
 #### `dohc chat threads`
 
@@ -914,6 +923,18 @@ Use at most one of --all, --group, or --thread.
 - `--thread <thread>`: Export one thread.
 
 With `--json`, prints `{ schemaVersion, files: { threadId, path }[] }`.
+
+#### `dohc chat links`
+
+```sh
+dohc chat links <group> [options]
+```
+
+Read one page of files mentioned in a chat.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] }` or `null`.
 
 #### `dohc chat file-mentions`
 

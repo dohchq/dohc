@@ -1646,6 +1646,12 @@ export class CollectionAutomations {
     while (this.draining) await this.draining;
   }
 
+  /** Whether an enabled automation starts on a schedule or a Group message, which only the host runs. */
+  hasHostTriggers(): boolean {
+    return this.state === "open" && this.everyAutomation().some(({ automation }) =>
+      automation.enabled && (automation.when.kind === "schedule" || automation.when.kind === "group-message"));
+  }
+
   /** The enabled schedules this executor can run, or null until it has opened. */
   schedules(): ScheduledAutomation[] | null {
     if (this.state !== "open") return null;

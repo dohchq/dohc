@@ -195,6 +195,48 @@ describe("error words", () => {
     );
   });
 
+  const LINK = "Put what it links to in its place, then try again.";
+  const OTHER_OWNER = "Make it yours again, then try again.";
+  const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
+  const MOVE_ASIDE = "Rename or move it, then try again.";
+  it.each([
+    ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
+    ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
+    ["not-folder .dohc/engine", `This workspace's .dohc/engine is not a folder, so dohc can't keep its History private. ${MOVE_ASIDE}`],
+    ["not-file .dohc/engine/engine.db-wal", `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private. ${MOVE_ASIDE}`],
+    ["other-owner .dohc", `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
+    ["other-owner .dohc/engine", `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
+    ["other-owner .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`],
+    ["link .dohc/engine/engine.db-shm", `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`],
+    ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
+    ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
+    ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
+  ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
+    const message = `engine-folder-not-private: ${detail}`;
+    expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
+      words,
+      mapped: true,
+      cause: `DaemonRefusalError [INTERNAL]: ${message}`,
+    });
+    for (const sentence of words.split(/(?<=\.) /)) {
+      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
+    }
+  });
+
+  it("leaves a refusal of the engine's folder it has no words for to the caller", () => {
+    for (const detail of [
+      "constructor .dohc",
+      "link /Users/me",
+      "link .dohc/trash",
+      "other-owner .dohc/engine/ROOT_BINDING",
+      "link .dohc/engine/engine.db-wal/x",
+      "link .dohc/local/ui-state.json",
+      "link ../.dohc",
+    ]) {
+      expect(readError(acrossIpc(refusal("INTERNAL", `engine-folder-not-private: ${detail}`))).words).toBeNull();
+    }
+  });
+
   it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
     const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
     expect(isPrivacyDenied(eperm)).toBe(false);

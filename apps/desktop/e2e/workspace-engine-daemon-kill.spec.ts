@@ -327,7 +327,7 @@ test("a document reopened after an app crash reads Saved only once its file has 
     expect(await diskText()).not.toContain(crashed);
     // Reopen the document by hand after relaunch, so its marks can be watched
     // from its first frame.
-    await rm(join(temp.rootPath, ".dohc/ui-state.json"), { force: true });
+    await rm(join(temp.rootPath, ".dohc/local/ui-state.json"), { force: true });
 
     // The recovery settle waits on this file, so the test decides when the
     // write may happen.

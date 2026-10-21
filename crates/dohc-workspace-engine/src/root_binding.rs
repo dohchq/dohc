@@ -5,10 +5,14 @@
 //! open compares the two, so an `engine.db` copied under another root is
 //! refused instead of adopted. The storage fingerprint fence independently
 //! rejects foreign databases before any migration runs.
+//!
+//! An open that writes also prepares `.dohc/local`, the folder for what
+//! belongs to this computer rather than the workspace.
 
 use std::path::{Path, PathBuf};
 
 pub const ROOT_BINDING_RELATIVE_PATH: &str = ".dohc/engine/ROOT_BINDING";
+pub const LOCAL_STATE_RELATIVE_PATH: &str = ".dohc/local";
 const TOKEN_HEX_LEN: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +29,13 @@ pub enum RootBindingError {
     Unstamped,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
+    #[error("this computer's folder in .dohc could not be prepared")]
+    LocalStateUnwritable,
+    /// `.dohc/local` is a link, is not a folder, or is another user's. On a
+    /// Mac, `NotPrivate` names it, with the same message.
+    #[cfg(not(target_os = "macos"))]
+    #[error("engine-folder-not-private: {0} .dohc/local")]
+    LocalStateNotPrivate(&'static str),
     /// macOS refused dohc the root's folder. See
     /// [`dohc_engine_files::privacy_denied`].
     #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
@@ -33,10 +44,16 @@ pub enum RootBindingError {
     /// share can, so the store in it cannot be kept private.
     #[error("volume-shares-new-files")]
     VolumeSharesNewFiles,
+    /// `.dohc` or the engine's folder is a link, is not a folder, or is
+    /// another user's, so the store in it cannot be kept private.
+    #[cfg(target_os = "macos")]
+    #[error("{0}")]
+    NotPrivate(dohc_macos_files::NotPrivate),
 }
 
-/// A macOS privacy refusal at `path`, or a volume that shares new files,
-/// names itself; any other io failure is `otherwise`.
+/// A macOS privacy refusal at `path`, a volume that shares new files, or a
+/// folder dohc refuses to keep private names itself; any other io failure is
+/// `otherwise`.
 fn io_failure(
     path: &Path,
     otherwise: RootBindingError,
@@ -45,6 +62,10 @@ fn io_failure(
         #[cfg(target_os = "macos")]
         if dohc_macos_files::volume_shares_new_files(&error) {
             return RootBindingError::VolumeSharesNewFiles;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(refused) = dohc_macos_files::not_private(&error) {
+            return RootBindingError::NotPrivate(refused.clone());
         }
         if dohc_engine_files::privacy_denied(&error, path) {
             RootBindingError::PrivacyDenied
@@ -199,6 +220,107 @@ fn exclude_from_icloud(engine_dir: &Path) {
         }
         _ => {}
     }
+}
+
+/// Create `.dohc/local`, or take the one already there, and return whether
+/// this computer's state can go in it. Each open that writes runs this, so a
+/// folder an earlier open could not exclude is tried again.
+///
+/// The folder is private like the engine's, since it holds what one person
+/// keeps on one computer: each open gives it mode 0700, and on a Mac no ACL
+/// entries. A link, anything but a folder, or another user's folder (on a
+/// Mac, on a local volume) is refused, and what it names is left as it is. On a Mac the folder is marked so that file-provider services such as
+/// iCloud Drive skip it, before anything is written in it. If that fails,
+/// the folder could sync, so it is not ready and the desktop writes nothing
+/// in it, but the workspace still opens.
+pub fn prepare_local_state(root: &Path) -> Result<bool, RootBindingError> {
+    #[cfg(target_os = "macos")]
+    {
+        prepare_local_state_with(root, dohc_macos_files::exclude_from_sync)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        create_local_state_dir(root)?;
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_local_state_with(
+    root: &Path,
+    exclude: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<bool, RootBindingError> {
+    let relative = Path::new(LOCAL_STATE_RELATIVE_PATH);
+    let dir = root.join(relative);
+    dohc_macos_files::ensure_private_dir(root, relative)
+        .map_err(io_failure(&dir, RootBindingError::LocalStateUnwritable))?;
+    match exclude(&dir) {
+        Ok(()) => Ok(true),
+        // A volume without extended attributes has no file provider to sync it.
+        Err(error) if error.raw_os_error() == Some(libc::ENOTSUP) => Ok(true),
+        Err(error) => {
+            eprintln!("engine: could not keep .dohc/local out of iCloud Drive: {error}");
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
+    let dir = root.join(LOCAL_STATE_RELATIVE_PATH);
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)
+    };
+    #[cfg(not(unix))]
+    let created = std::fs::create_dir(&dir);
+    match created {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(io_failure(&dir, RootBindingError::LocalStateUnwritable)(
+                error,
+            ));
+        }
+        _ => {}
+    }
+    let kind = std::fs::symlink_metadata(&dir)
+        .map_err(io_failure(&dir, RootBindingError::LocalStateUnwritable))?
+        .file_type();
+    if kind.is_symlink() {
+        return Err(RootBindingError::LocalStateNotPrivate("link"));
+    }
+    if !kind.is_dir() {
+        return Err(RootBindingError::LocalStateNotPrivate("not-folder"));
+    }
+    #[cfg(unix)]
+    make_local_state_private(&dir)?;
+    Ok(())
+}
+
+/// Give `.dohc/local` mode 0700, whoever created it and however, as the Mac
+/// path does. The mode changes through a descriptor opened without following
+/// a link, so a link put at the path after the check is refused, and what it
+/// names is left alone.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn make_local_state_private(dir: &Path) -> Result<(), RootBindingError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let refused = RootBindingError::LocalStateNotPrivate;
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) => refused("link"),
+            Some(libc::ENOTDIR) => refused("not-folder"),
+            _ => io_failure(dir, RootBindingError::LocalStateUnwritable)(error),
+        })?;
+    folder
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| match error.raw_os_error() {
+            // Only the folder's owner may change its mode.
+            Some(libc::EPERM) => refused("other-owner"),
+            _ => io_failure(dir, RootBindingError::LocalStateUnwritable)(error),
+        })
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -378,10 +500,10 @@ mod tests {
         let root = scratch.join("root");
         std::fs::create_dir(&root).expect("root");
         std::os::unix::fs::symlink(&elsewhere, root.join(".dohc")).expect("symlink");
-        assert!(matches!(
-            write_new_root_binding(&root),
-            Err(RootBindingError::Unwritable)
-        ));
+        assert_eq!(
+            not_private(write_new_root_binding(&root)),
+            (".dohc".into(), dohc_macos_files::NotPrivateReason::Link)
+        );
         let mode = std::fs::metadata(&engine)
             .expect("engine")
             .permissions()
@@ -395,15 +517,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn opening_a_root_keeps_its_engine_folder_out_of_icloud() {
-        let excluded_at = |dir: &Path| {
-            std::process::Command::new("xattr")
-                .args(["-s", "-p", "com.apple.fileprovider.ignore#P"])
-                .arg(dir)
-                .output()
-                .expect("xattr")
-                .status
-                .success()
-        };
         let excluded = |root: &Path| excluded_at(&root.join(".dohc/engine"));
         let fresh = ScratchDir::new().expect("scratch");
         write_new_root_binding(fresh.path()).expect("mint");
@@ -427,11 +540,25 @@ mod tests {
         std::fs::create_dir_all(&target).expect("target");
         std::fs::create_dir_all(linked.join(".dohc")).expect("dohc");
         std::os::unix::fs::symlink(&target, linked.join(".dohc/engine")).expect("symlink");
-        assert!(matches!(
-            write_new_root_binding(linked.path()),
-            Err(RootBindingError::Unwritable)
-        ));
+        assert_eq!(
+            not_private(write_new_root_binding(linked.path())),
+            (
+                ".dohc/engine".into(),
+                dohc_macos_files::NotPrivateReason::Link
+            )
+        );
         assert!(!excluded_at(&target));
+    }
+
+    /// The path and reason a refused binding names.
+    #[cfg(target_os = "macos")]
+    fn not_private(
+        written: Result<String, RootBindingError>,
+    ) -> (std::path::PathBuf, dohc_macos_files::NotPrivateReason) {
+        match written {
+            Err(RootBindingError::NotPrivate(refused)) => (refused.path, refused.reason),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -460,5 +587,78 @@ mod tests {
             RootBindingError::DatabaseMismatch.to_string(),
             "engine database is bound to another root"
         );
+        assert_eq!(
+            RootBindingError::LocalStateUnwritable.to_string(),
+            "this computer's folder in .dohc could not be prepared"
+        );
+    }
+
+    /// Whether iCloud Drive and other file providers leave `dir` alone.
+    #[cfg(target_os = "macos")]
+    fn excluded_at(dir: &Path) -> bool {
+        std::process::Command::new("xattr")
+            .args(["-s", "-p", "com.apple.fileprovider.ignore#P"])
+            .arg(dir)
+            .output()
+            .expect("xattr")
+            .status
+            .success()
+    }
+
+    /// An open that writes makes `.dohc/local` for this computer's state,
+    /// private and, on a Mac, marked for file providers to skip. A later open
+    /// keeps what is in it, and marks it again if the mark was lost.
+    #[test]
+    fn an_open_prepares_this_computers_folder_and_a_reopen_keeps_it() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.join(".dohc").join("local");
+        // As an open does: the root binding makes `.dohc` first.
+        write_new_root_binding(scratch.path()).expect("mint");
+        assert!(prepare_local_state(scratch.path()).expect("prepare"));
+        assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&local)
+                .expect("local")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        #[cfg(target_os = "macos")]
+        assert!(excluded_at(&local));
+        std::fs::write(local.join("ui-state.json"), "{}").expect("state");
+        #[cfg(target_os = "macos")]
+        {
+            let removed = std::process::Command::new("xattr")
+                .args(["-d", "com.apple.fileprovider.ignore#P"])
+                .arg(&local)
+                .status()
+                .expect("xattr");
+            assert!(removed.success());
+            assert!(!excluded_at(&local));
+        }
+        assert!(prepare_local_state(scratch.path()).expect("reopen"));
+        #[cfg(target_os = "macos")]
+        assert!(excluded_at(&local));
+        assert_eq!(
+            std::fs::read_to_string(local.join("ui-state.json")).expect("state"),
+            "{}"
+        );
+    }
+
+    /// A folder the mark could not reach could sync, so it is not ready. A
+    /// volume without extended attributes has no file provider, so it is.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_failed_mark_leaves_this_computers_folder_not_ready() {
+        let failed = ScratchDir::new().expect("scratch");
+        let refused = |_: &Path| Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        assert!(!prepare_local_state_with(failed.path(), refused).expect("prepare"));
+        assert!(failed.join(".dohc/local").is_dir());
+
+        let unsupported = ScratchDir::new().expect("scratch");
+        let no_xattrs = |_: &Path| Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        assert!(prepare_local_state_with(unsupported.path(), no_xattrs).expect("prepare"));
     }
 }

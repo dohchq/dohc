@@ -67,6 +67,7 @@ function sessionsFor(
   const binding: EngineWorkspaceBinding = {
     client,
     workspace: WORKSPACE_HANDLE,
+    localStateReady: true,
   };
   let captureAuthor: AgentAuthor | null = null;
   return {

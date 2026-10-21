@@ -1,3 +1,4 @@
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
@@ -1901,6 +1902,9 @@ export const ChatMessageRecord = z.object({
   attachments: z.array(ChatAttachmentRecord).optional(),
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
+
+export const ChatLinksPayload = ChatLinksInput.extend({workspaceId:WORKSPACE_ID});
+export const ChatLinksResult = ChatLinksPage;
 
 export const ChatFileMentionsPagePayload = ChatFileMentionsInput.extend({ workspaceId: WORKSPACE_ID });
 export const ChatFileMentionRecord = ChatFileMentionEntry;
@@ -5800,7 +5804,7 @@ export const UpdateCheckResult = z.object({
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 
-// Per-workspace UI state persisted to .dohc/ui-state.json by MAIN (the
+// Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
 // validateUserWritePath refuses reserved paths). The clamp/cap constants are
 // the pure workbench model's, so contract and model can never disagree.
@@ -6399,8 +6403,20 @@ const ScheduleHostComputer = z.object({
 });
 export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
 export const ScheduleHostResult = z.discriminatedUnion("kind", [
-  // A workspace that never synced runs its schedules here, its only computer.
+  // A workspace that never synced runs its schedules on one computer: this
+  // one, or the one named. `sameName` says it has this computer's name, so
+  // it may be an earlier installation here. `waits` says this computer has
+  // schedules or Group triggers that the other one runs.
   z.object({ kind: z.literal("this-computer") }),
+  z.object({
+    kind: z.literal("another-computer"),
+    label: z.string().min(1).max(64),
+    sameName: z.boolean(),
+    waits: z.boolean(),
+  }),
+  // dohc cannot read which computer runs a workspace that never synced, so
+  // none does until one takes over. `cause` is the error, for Copy.
+  z.object({ kind: z.literal("no-computer"), message: z.string().min(1).max(500), cause: z.string().min(1).max(2000).optional() }),
   // A shared view never runs schedules.
   z.object({ kind: z.literal("none") }),
   // dohc cannot ask the relay; `message` says what to do.
@@ -6475,7 +6491,9 @@ export const scheduleHostOperations = {
     scope: "workspace",
     handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:read-schedule-host",
-    payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
+    // `localOnly` answers "none" for a workspace that syncs, without asking
+    // its relay, for a reader that needs only a workspace that does not.
+    payload: ScheduleHostWorkspace.extend({ localOnly: z.boolean().optional() }), result: ScheduleHostResult, guard: "trusted-sender",
   },
   // Starts a handover to another of the owner's computers.
   chooseScheduleHost: {
@@ -6489,7 +6507,9 @@ export const scheduleHostOperations = {
     }),
     result: ScheduleHostResult, guard: "trusted-sender",
   },
-  // Ends a handover without the old computer. A run can repeat if it is still on.
+  // Ends a handover without the old computer, or moves a workspace that never
+  // synced to this computer, at generation 0. A run can repeat if the old
+  // computer is still on.
   takeOverScheduleHost: {
     capabilityId: "automation.host.takeover",
     scope: "workspace",

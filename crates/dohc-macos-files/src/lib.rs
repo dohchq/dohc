@@ -125,6 +125,57 @@ pub fn volume_shares_new_files(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<VolumeSharesNewFiles>())
 }
 
+/// What is at a path that dohc refuses to keep private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotPrivateReason {
+    Link,
+    NotFolder,
+    NotFile,
+    /// A folder on a local volume that another user owns.
+    OtherOwner,
+}
+
+impl NotPrivateReason {
+    /// The reason as the engine sends it.
+    pub fn code(self) -> &'static str {
+        match self {
+            NotPrivateReason::Link => "link",
+            NotPrivateReason::NotFolder => "not-folder",
+            NotPrivateReason::NotFile => "not-file",
+            NotPrivateReason::OtherOwner => "other-owner",
+        }
+    }
+}
+
+/// dohc refuses to keep `path` private because of what is there. `path` is
+/// relative to the folder the caller started from, a workspace's root in the
+/// engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotPrivate {
+    pub path: std::path::PathBuf,
+    pub reason: NotPrivateReason,
+}
+
+impl std::fmt::Display for NotPrivate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.reason {
+            NotPrivateReason::Link => "is a link",
+            NotPrivateReason::NotFolder => "is not a folder",
+            NotPrivateReason::NotFile => "is not a file",
+            NotPrivateReason::OtherOwner => "belongs to another user",
+        };
+        let path = self.path.display();
+        write!(f, "{path} {what}, so dohc can't keep it private")
+    }
+}
+
+impl std::error::Error for NotPrivate {}
+
+/// The [`NotPrivate`] refusal `err` carries, if it is one.
+pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
+    err.get_ref()?.downcast_ref()
+}
+
 /// Check that `file` is `name` in `dir` and has no ACL entries.
 fn check_created(dir: BorrowedFd<'_>, name: &OsStr, file: &OwnedFd) -> io::Result<()> {
     let created = rustix::fs::fstat(file)?;
@@ -256,9 +307,11 @@ const PRIVATE_DIR_MODE: u16 = 0o700;
 /// local, such as a network share, keeps its server's owners, ACLs and
 /// modes: there a missing folder is created with mode 0700 and whatever the
 /// server gives it, and an existing one is taken as it is. A folder whose
-/// entries a local volume keeps fails with [`VolumeSharesNewFiles`]. On a
-/// refusal, only an empty folder this call created is removed. Returns the
-/// folder, open for reading.
+/// entries a local volume keeps fails with [`VolumeSharesNewFiles`]. Any
+/// other failure names, as [`NotPrivate`], the first part of `relative` that
+/// is a link, is not a folder, or is a folder on a local volume another user
+/// owns, when one is. On a refusal, only an empty folder this call created is
+/// removed. Returns the folder, open for reading.
 pub fn ensure_private_dir(base: &Path, relative: &Path) -> io::Result<OwnedFd> {
     ensure_private_dir_with(base, relative, &System::REAL)
 }
@@ -284,6 +337,18 @@ impl System {
 }
 
 fn ensure_private_dir_with(base: &Path, relative: &Path, system: &System) -> io::Result<OwnedFd> {
+    make_private_dir(base, relative, system).map_err(|err| {
+        if volume_shares_new_files(&err) {
+            return err;
+        }
+        match not_private_part(base, relative, system) {
+            Some(refused) => io::Error::other(refused),
+            None => err,
+        }
+    })
+}
+
+fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result<OwnedFd> {
     let mut names = Vec::new();
     for part in relative.components() {
         match part {
@@ -305,6 +370,45 @@ fn ensure_private_dir_with(base: &Path, relative: &Path, system: &System) -> io:
         let _ = rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::REMOVEDIR);
     }
     protected
+}
+
+/// The first part of `relative` in `base` that is a link, is not a folder,
+/// or is a folder on a local volume another user owns. The first is the one
+/// the person can move: a folder in another user's `.dohc` can't be moved
+/// out of it.
+fn not_private_part(base: &Path, relative: &Path, system: &System) -> Option<NotPrivate> {
+    use rustix::fs::{AtFlags, FileType};
+    let mut parent = OwnedFd::from(std::fs::File::open(base).ok()?);
+    let mut path = std::path::PathBuf::new();
+    for part in relative.components() {
+        let std::path::Component::Normal(name) = part else {
+            return None;
+        };
+        path.push(name);
+        let stat = rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let reason = match FileType::from_raw_mode(stat.st_mode) {
+            FileType::Symlink => NotPrivateReason::Link,
+            FileType::Directory
+                if stat.st_uid != owner(system) && (system.local)(parent.as_fd()).ok()? =>
+            {
+                NotPrivateReason::OtherOwner
+            }
+            FileType::Directory => {
+                parent = open_folder(parent.as_fd(), name).ok()?;
+                continue;
+            }
+            _ => NotPrivateReason::NotFolder,
+        };
+        return Some(NotPrivate { path, reason });
+    }
+    None
+}
+
+/// The user a private folder must belong to.
+fn owner(system: &System) -> u32 {
+    system
+        .owner
+        .unwrap_or_else(|| rustix::process::geteuid().as_raw())
 }
 
 /// Open the folder `name` in `dir`, refusing a link.
@@ -368,10 +472,7 @@ fn protect(dir: BorrowedFd<'_>, name: &OsStr, system: &System) -> io::Result<Own
         return Ok(folder);
     }
     let stat = rustix::fs::fstat(&folder)?;
-    let owner = system
-        .owner
-        .unwrap_or_else(|| rustix::process::geteuid().as_raw());
-    if stat.st_uid != owner {
+    if stat.st_uid != owner(system) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "another user owns this folder, so dohc can't keep it private",
@@ -790,11 +891,16 @@ mod tests {
         let workspace = scratch.path().join("linked");
         std::fs::create_dir(&workspace).unwrap();
         std::os::unix::fs::symlink(target.join(".dohc"), workspace.join(".dohc")).unwrap();
-        super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        let err = super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        assert_eq!(refusal(&err), (".dohc", super::NotPrivateReason::Link));
         std::fs::remove_file(workspace.join(".dohc")).unwrap();
         std::fs::create_dir(workspace.join(".dohc")).unwrap();
         std::os::unix::fs::symlink(target.join(relative()), workspace.join(relative())).unwrap();
-        super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        let err = super::ensure_private_dir(&workspace, relative()).unwrap_err();
+        assert_eq!(
+            refusal(&err),
+            (".dohc/engine", super::NotPrivateReason::Link)
+        );
         assert!(has_entries(&target.join(relative())));
         assert_eq!(mode(&target.join(relative())), 0o755);
 
@@ -805,17 +911,52 @@ mod tests {
     }
 
     /// Making a folder another user owns needs root, so the seam expects
-    /// another owner instead.
+    /// another owner instead. Then `.dohc` is another user's too, and the
+    /// refusal names it, because the folder in it can't be moved out.
     #[test]
     fn a_folder_another_user_owns_is_refused_and_left_alone() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("private-owner").unwrap();
         let workspace = shared_workspace(&scratch);
-        let other = rustix::process::geteuid().as_raw() + 1;
-        let err = super::ensure_private_dir_with(&workspace, relative(), &system(Some(other)))
-            .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        let other = system(Some(rustix::process::geteuid().as_raw() + 1));
+        let err = super::ensure_private_dir_with(&workspace, relative(), &other).unwrap_err();
+        assert_eq!(
+            refusal(&err),
+            (".dohc", super::NotPrivateReason::OtherOwner)
+        );
         assert!(has_entries(&workspace.join(relative())));
         assert_eq!(mode(&workspace.join(relative())), 0o755);
+        let engine = std::path::Path::new("engine");
+        let err =
+            super::ensure_private_dir_with(&workspace.join(".dohc"), engine, &other).unwrap_err();
+        assert_eq!(
+            refusal(&err),
+            ("engine", super::NotPrivateReason::OtherOwner)
+        );
+    }
+
+    /// A file where `.dohc` or the folder in it belongs is named as not a
+    /// folder, and left as it was.
+    #[test]
+    fn a_file_in_a_folders_place_is_refused() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-file-squat").unwrap();
+        for squatted in [".dohc", ".dohc/engine"] {
+            let workspace = scratch.path().join(squatted.replace('/', "-"));
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::create_dir_all(workspace.join(squatted).parent().unwrap()).unwrap();
+            std::fs::write(workspace.join(squatted), b"mine").unwrap();
+            let err = super::ensure_private_dir(&workspace, relative()).unwrap_err();
+            assert_eq!(
+                refusal(&err),
+                (squatted, super::NotPrivateReason::NotFolder)
+            );
+            assert_eq!(std::fs::read(workspace.join(squatted)).unwrap(), b"mine");
+        }
+    }
+
+    /// The path and reason a refusal names.
+    fn refusal(err: &std::io::Error) -> (&str, super::NotPrivateReason) {
+        let refused = super::not_private(err).unwrap_or_else(|| panic!("{err}"));
+        (refused.path.to_str().unwrap(), refused.reason)
     }
 
     /// A network share keeps its server's ACLs and modes. The seam stands in
@@ -842,7 +983,17 @@ mod tests {
         let linked = scratch.path().join("linked");
         std::fs::create_dir(&linked).unwrap();
         std::os::unix::fs::symlink(workspace.join(".dohc"), linked.join(".dohc")).unwrap();
-        super::ensure_private_dir_with(&linked, relative(), &REMOTE).unwrap_err();
+        let err = super::ensure_private_dir_with(&linked, relative(), &REMOTE).unwrap_err();
+        assert_eq!(refusal(&err), (".dohc", super::NotPrivateReason::Link));
+        // The refusal names the link, never the owner the share shows.
+        std::fs::remove_file(linked.join(".dohc")).unwrap();
+        std::fs::create_dir(linked.join(".dohc")).unwrap();
+        std::os::unix::fs::symlink(workspace.join(relative()), linked.join(relative())).unwrap();
+        let err = super::ensure_private_dir_with(&linked, relative(), &squashed).unwrap_err();
+        assert_eq!(
+            refusal(&err),
+            (".dohc/engine", super::NotPrivateReason::Link)
+        );
         // This test's own volume is local.
         let folder = std::fs::File::open(scratch.path()).unwrap();
         assert!(super::is_local(std::os::fd::AsFd::as_fd(&folder)).unwrap());

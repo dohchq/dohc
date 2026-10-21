@@ -50,6 +50,31 @@
       }
     },
     {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_create_app",
       "description": "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       "inputSchema": {
@@ -3636,6 +3661,31 @@
       }
     },
     {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -4363,6 +4413,31 @@
       }
     },
     {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -5083,6 +5158,31 @@
             "maxLength": 32768
           }
         },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {

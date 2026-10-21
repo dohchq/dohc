@@ -29,7 +29,7 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
-import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
+import { automationHostGeneration, createAutomationHosts, createWorkspaceHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { collectionAutomationAuthor, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "../ipc/engineHistoryIpc";
 import {
@@ -5073,9 +5073,9 @@ describe("Collection automations that a Group message starts", () => {
   it("subscribes in a workspace that never synced, whose only computer this is, and not in one that synced before", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     // No remote: the workspace does not sync now.
-    const host = () => automationHostGeneration({ rootPath: w.root }, () => null);
+    const host = () => automationHostGeneration({ rootPath: w.root }, { installId: "laptop", label: "Laptop" }, () => null);
     const neverSynced = w.makeExecutor({ groupHost: host });
     await neverSynced.open();
     await w.until(() => w.subscriptions.has("collection:Tasks#task"));
@@ -5088,6 +5088,46 @@ describe("Collection automations that a Group message starts", () => {
     await syncedBefore.open();
     await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
     expect(await cannotRunOf(syncedBefore)).toBe("Turn on sync so Group messages start this automation.");
+  });
+
+  it("watches its Groups again once a read of a never-synced folder works again, with nothing else asking", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await mkdir(join(w.root, ".dohc"), { recursive: true });
+    const laptop = { installId: "laptop", label: "Laptop" };
+    await recordNeverSynced(w.root, laptop);
+    let executor: CollectionAutomations | null = null;
+    let recheck: (() => Promise<void>) | null = null;
+    const hosts = createWorkspaceHosts({
+      here: () => laptop,
+      workspace: () => ({ rootPath: w.root }),
+      relay: { runsHere: async () => false, stillRuns: () => false, runsAt: () => null },
+      hasHostTriggers: () => executor?.hasHostTriggers() ?? false,
+      hostChanged: () => executor?.hostChanged(),
+      elsewhereChanged: () => undefined,
+      logError: (_id, error) => { throw error; },
+      setTimer: (wake) => { recheck = wake; return wake; },
+      clearTimer: () => { recheck = null; },
+    });
+    hosts.open("ws");
+    executor = w.makeExecutor({ groupHost: () => hosts.groupHost("ws") });
+    await executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // The record is out of reach, as when the folder is evicted offline: a
+    // read finds no host, so the Group subscriptions go.
+    const record = join(w.root, ".dohc", "sync-history.json");
+    await rename(record, `${record}.away`);
+    executor.hostChanged();
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
+
+    // It is back, and only the 15-minute read notices.
+    await rename(`${record}.away`, record);
+    const next = recheck as (() => Promise<void>) | null;
+    expect(next).not.toBeNull();
+    await next?.();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    hosts.close("ws");
+    await executor.dispose();
   });
 
   it("runs for a Group message with the message and its author in its formulas", async () => {
@@ -5412,7 +5452,7 @@ describe("Collection automations that a Group message starts", () => {
       clearTimer: (cleared) => { for (const timer of timers) if (timer === cleared) timer.done = true; },
     });
     const executor = w.makeExecutor({
-      groupHost: () => automationHostGeneration(workspace, () => hosts.runsAt("ws")),
+      groupHost: () => automationHostGeneration(workspace, { installId, label: installId }, () => hosts.runsAt("ws")),
       // The relay answers only for the current generation, as main.ts reads it.
       groupRelayRecord: async (generation) => {
         if (relay.down) throw new TypeError("fetch failed");
@@ -5518,7 +5558,7 @@ describe("Collection automations that a Group message starts", () => {
   it("keeps its subscriptions when a workspace that never synced turns sync on", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
@@ -5546,7 +5586,7 @@ describe("Collection automations that a Group message starts", () => {
   ] as const)("drops its subscriptions when a workspace that never synced turns sync on and %s", async (_case, start) => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);

@@ -162,13 +162,15 @@ jobs:
       - name: Desktop typecheck
         run: pnpm --filter @dohc/desktop typecheck
 
+      # The desktop package's unit and script tests run through the PR gate's
+      # runner, with its rules. A test that fails runs once more, and a test
+      # that fails both tries must pass when its file runs alone. On the
+      # shared Windows PC, a third of the gate's desktop runs in the week to
+      # 2026-10-21 needed that retry.
       - name: Desktop tests
         env:
           DOHC_REQUIRE_ENGINE_E2E: "1"
-        run: pnpm --filter @dohc/desktop test:unit --maxWorkers=4
-
-      - name: Desktop script tests
-        run: pnpm --filter @dohc/desktop test:scripts
+        run: node scripts/verification/js-tests.mjs --prepared --package @dohc/desktop
 
   # The release action reuses an existing release with the same tag, published
   # or draft, and turns it back into a draft while it uploads. A dispatch must

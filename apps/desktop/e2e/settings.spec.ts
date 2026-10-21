@@ -96,7 +96,7 @@ test("draws a switch's thumb inside its track, on and off", async () => {
   }
 });
 
-test("settings search, theme persistence, MCP config, and corrupt settings recovery", async () => {
+test("settings search finds matching sections and shows an empty result", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
 
@@ -110,13 +110,41 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await desktop.page.getByTestId(desktopPins.settingsSearch).fill("definitely-no-setting");
     await expect(desktop.page.getByTestId(desktopPins.settingsEmptySearch)).toBeVisible();
     await desktop.page.getByTestId(desktopPins.settingsSearch).fill("");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
+test("theme setting persists across a restart", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("appearance")).click();
     await desktop.page.getByRole("radio", { name: "Dark" }).click();
     await expect
       .poll(() => desktop!.page.evaluate(() => document.documentElement.dataset.theme))
       .toBe("dark");
 
+    await desktop.close();
+    desktop = await openWorkspace(temp);
+    await expect
+      .poll(() => desktop!.page.evaluate(() => document.documentElement.dataset.theme))
+      .toBe("dark");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("MCP config shows and copies the canonical workspace path", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
     // The snippet renders the workspace's real path in forward-slash form.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
@@ -129,14 +157,16 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
         .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
         .toContain(canonicalRootPath);
     });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
-    await desktop.close();
-    desktop = await openWorkspace(temp);
-    await expect
-      .poll(() => desktop!.page.evaluate(() => document.documentElement.dataset.theme))
-      .toBe("dark");
+test("corrupt settings recover with a warning and a usable dialog", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
 
-    await desktop.close();
+  try {
     // Intentionally malformed JSON verifies tolerant recovery from a corrupt
     // user settings file.
     await writeFile(join(temp.homeDir, "dohc-settings.json"), "{not json");

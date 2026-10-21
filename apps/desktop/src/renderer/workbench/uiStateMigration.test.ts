@@ -3,7 +3,16 @@ import { describe, expect, it } from "vitest";
 import { GetWorkspaceUiStateResult, WorkspaceUiState } from "../../ipc/bridgeContract";
 import { readUiStateFile, writeUiStateFile } from "../../workspaces/workspaceUiState";
 import { createTestScratch } from "../../workspaces/testTemp";
+import { fakeLocalStateOpens } from "../../testing/preparedLocalState";
 import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, parseTab, parseUiState, serializeUiState } from "./workbenchState";
+
+const engine = fakeLocalStateOpens();
+// A workspace whose engine open prepared .dohc/local.
+async function openedWorkspace(prefix: string) {
+  const workspace = { workspaceId: prefix, rootPath: await createTestScratch(prefix) };
+  await engine.open(workspace);
+  return workspace;
+}
 
 async function fixture(version: 2 | 3) {
   return JSON.parse(await readFile(new URL(`./fixtures/ui-state-v${version}.json`, import.meta.url), "utf8"));
@@ -22,9 +31,9 @@ describe("a layout saved before the About rail", () => {
     const current = await fixture(3);
     const { aboutVisible: _visible, aboutWidth: _width, ...rest } = current;
     const old = { ...rest, chatsVisible: true, chatsWidth: 444 };
-    const root = await createTestScratch("ui-state-old-rail-");
-    await writeUiStateFile(root, old);
-    const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(root)));
+    const workspace = await openedWorkspace("ui-state-old-rail-");
+    await writeUiStateFile(workspace, old);
+    const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(workspace.rootPath)));
     expect(restored).toEqual({
       ...parseUiState(current),
       aboutVisible: false,
@@ -47,13 +56,13 @@ describe("UI-state v2 to v3", () => {
   });
 
   it("reads a v2 file through the IPC schema, writes v3, and round-trips through disk and the renderer", async () => {
-    const root = await createTestScratch("ui-state-migration-");
-    await writeUiStateFile(root, await fixture(2));
-    const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(root)));
+    const workspace = await openedWorkspace("ui-state-migration-");
+    await writeUiStateFile(workspace, await fixture(2));
+    const restored = parseUiState(GetWorkspaceUiStateResult.parse(await readUiStateFile(workspace.rootPath)));
     const v3 = WorkspaceUiState.parse(serializeUiState(restored));
     expect(v3).toEqual(await migratedFixture());
-    await writeUiStateFile(root, v3);
-    const read = GetWorkspaceUiStateResult.parse(await readUiStateFile(root));
+    await writeUiStateFile(workspace, v3);
+    const read = GetWorkspaceUiStateResult.parse(await readUiStateFile(workspace.rootPath));
     expect(read).toEqual(v3);
     expect(parseUiState(read)).toEqual(restored);
   });
