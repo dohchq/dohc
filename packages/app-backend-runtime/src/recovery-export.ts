@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, open, realpath, rm } from "node:fs/promises";
+import { mkdtemp, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -19,7 +19,7 @@ export interface DatasetExportOptions {
   db: JournalDb;
   journal: DatasetJournal;
   scope: DatasetScope;
-  /** Private host-owned staging directory. */
+  /** Private host-owned staging folder, which must exist. */
   directory: string;
   authorize(): void;
   signal?: AbortSignal;
@@ -113,7 +113,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
       !Number.isSafeInteger(file.byteLength) || file.byteLength<0 || !/^[a-f0-9]{64}$/.test(file.sha256) || typeof file.name!=="string" || Buffer.byteLength(file.name)>1024 || typeof file.contentType!=="string" || Buffer.byteLength(file.contentType)>256) throw new Error("A file in this Collection is damaged, so dohc cannot export it.");
     seen.add(file.fileId);
   }
-  await mkdir(options.directory,{recursive:true});const parent=await realpath(options.directory),directory=await mkdtemp(join(parent,"export-"));
+  const parent=await realpath(options.directory),directory=await mkdtemp(join(parent,"export-"));
   const entries:RecoveryEntry[]=[],paths=new Map<string,string>(),attachedReferences=new Set<string>();let total=0,disposed=false;
   const dispose=async()=>{if(!disposed){disposed=true;await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}};
   async function save(entry:Omit<RecoveryEntry,"byteLength"|"sha256">,chunks:AsyncIterable<Uint8Array>) {
