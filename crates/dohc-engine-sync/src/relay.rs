@@ -2250,7 +2250,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             leases,
         )?;
         // A ready document that stopped at a conflict child whose parent the
-        // feed withholds, or at work past the retention limit, is held from
+        // feed withholds, at a move onto another spelling of a path another
+        // document holds, or at work past the retention limit, is held from
         // there and reads its own rows.
         for (object_id, op) in &pass.stopped {
             if replica
@@ -2534,7 +2535,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         retryable_refusals.push((op, reason));
-                        holding.stop_where_it_can_wait(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
                                 durable.insert(key.clone());
@@ -2575,6 +2575,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !first && !made_progress {
+                // Nothing left in the pass can free these, so a ready
+                // document whose op can wait indefinitely stops here.
+                for (op, reason) in &retryable_refusals {
+                    holding.stop_where_it_can_wait(op, reason);
+                }
                 // A document that is not ready retains nothing: its read
                 // stops at its first op still to apply, in relay order.
                 let (stopped, retained): (Vec<_>, Vec<_>) = still_retryable

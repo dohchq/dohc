@@ -4092,6 +4092,77 @@ fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_fr
     assert_eq!(retained(&store), 0);
 }
 
+/// Opus's second-round finding: a rename onto another spelling of a held
+/// path stopped its ready document at the first refusal, even when the
+/// holder moved later in the same pass and the rename applied. A later edit
+/// behind a live session then held the document and cut the session off.
+/// The document is stopped only once nothing in the pass can free it. The
+/// scope keeps its paths, so only the spelling hold can stop `doc-b`.
+#[test]
+fn a_rename_freed_later_in_its_pass_leaves_the_document_ready() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.replace(
+        "owner",
+        5,
+        "doc-b",
+        "A.md",
+        "edited b",
+        ("doc-b", "hosted b", "moment-owner-3"),
+    );
+    let behind_session = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("doc-b"),
+        )
+        .unwrap();
+    assert!(commit(&client, &mut store, &behind_session));
+    assert!(ready(&store, "doc-b"), "the session keeps its document");
+
+    // The session closed.
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-b", "edited b")])
+    );
+    assert_eq!(retained(&store), 0);
+}
+
 /// Reports one document's live session.
 struct LiveSession(&'static str);
 
