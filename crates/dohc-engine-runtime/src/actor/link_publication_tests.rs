@@ -163,7 +163,9 @@ async fn undo_cancels_publication_between_complete_file_placements() {
         .unwrap();
     let (entered, release) = pause(&f.ws);
     drop(hold);
-    entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(120), entered.notified())
+        .await
+        .expect("publisher must enter its first turn");
     let result = {
         let undo = f.undo();
         tokio::pin!(undo);
@@ -222,7 +224,9 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
     f.pass("placement-turns", Arc::new(NoFaults)).await.unwrap();
     let (entered, release) = pause(&f.ws);
     drop(hold);
-    entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(120), entered.notified())
+        .await
+        .expect("publisher must enter its first turn");
     let admission = f.serial.clone().lock_owned();
     tokio::pin!(admission);
     std::future::poll_fn(|cx| {
