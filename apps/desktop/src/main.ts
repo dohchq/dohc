@@ -4742,6 +4742,7 @@ const chatWrites = createChatWrites({
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
   scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
+  betweenDispatchScans: (workspaceId, write) => chatDispatchService.betweenScans(workspaceId, write),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 

@@ -309,7 +309,14 @@ mod tests {
         };
         let fence = f
             ._owner
-            .fence_restore(&mut f.store, operation, coordinate.clone(), 20, &NoFaults)
+            .fence_restore(
+                &mut f.store,
+                None,
+                operation,
+                coordinate.clone(),
+                20,
+                &NoFaults,
+            )
             .unwrap();
         let point = Ydoc::wire();
         point.apply(&f.cut.baseline_bytes).unwrap();
@@ -342,6 +349,7 @@ mod tests {
                 f._owner
                     .prepare_restore(
                         &mut f.store,
+                        None,
                         changed,
                         coordinate.clone(),
                         1_000_000,
@@ -356,6 +364,7 @@ mod tests {
             ._owner
             .prepare_restore(
                 &mut f.store,
+                None,
                 input.clone(),
                 coordinate.clone(),
                 1_000_000,
@@ -375,6 +384,7 @@ mod tests {
             ._owner
             .prepare_restore(
                 &mut f.store,
+                None,
                 input.clone(),
                 coordinate.clone(),
                 1_000_000,
@@ -390,7 +400,15 @@ mod tests {
         changed.point.receipt_digest = "f".repeat(64);
         assert!(f
             ._owner
-            .prepare_restore(&mut f.store, changed, coordinate, 1_000_000, 100, &NoFaults)
+            .prepare_restore(
+                &mut f.store,
+                None,
+                changed,
+                coordinate,
+                1_000_000,
+                100,
+                &NoFaults
+            )
             .is_err());
     }
 
@@ -417,6 +435,7 @@ mod tests {
                 ._owner
                 .fence_restore(
                     &mut f.store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     20,
@@ -454,7 +473,7 @@ mod tests {
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
             assert_eq!(
                 owner
-                    .fence_restore(&mut store, input, coordinate, 22, &NoFaults)
+                    .fence_restore(&mut store, None, input, coordinate, 22, &NoFaults)
                     .unwrap(),
                 receipt
             );
@@ -490,6 +509,7 @@ mod tests {
             ._owner
             .fence_restore(
                 &mut f.store,
+                None,
                 input.clone(),
                 coordinate.clone(),
                 20,
@@ -534,7 +554,7 @@ mod tests {
         let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
         assert_eq!(
             owner
-                .fence_restore(&mut store, input, coordinate, 22, &NoFaults)
+                .fence_restore(&mut store, None, input, coordinate, 22, &NoFaults)
                 .unwrap(),
             receipt
         );
@@ -1301,6 +1321,7 @@ pub(super) fn read_adoption_source(
                     path: &binding.current_path,
                     digest: &source.source_digest,
                     lineage: &binding.lineage_claim_id,
+                    restore_fence: None,
                     authority: adoption_id,
                 },
                 resolver,

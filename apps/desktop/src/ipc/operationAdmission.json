@@ -40,7 +40,6 @@
   "desktop:create-file-chat": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-chat-thread-revision": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-thread-decisions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:resolve-chat-decision": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-thread-attachments": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-channels": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-follows": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

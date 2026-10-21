@@ -2373,9 +2373,9 @@ describe("SettingsDialog", () => {
   // happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/local/settings.local.json. Then restart dohc.";
     const refusal =
-      "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
+      "dohc did not save workspace settings. dohc cannot read /x/.dohc/local/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered" as const,
@@ -2580,6 +2580,75 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("agents");
     expect((screen.getByTestId("settings-search") as HTMLInputElement).value).toBe("");
     expect(setUp).not.toHaveBeenCalled();
+  });
+
+  // Main refuses a save or reset until this workspace's engine open has
+  // prepared .dohc/local. The person reads why, the control shows what is on
+  // disk, and Try again sends the same change.
+  it("says why a workspace settings save was refused, and Try again sends it again", async () => {
+    const words =
+      "dohc did not save this workspace's settings because it can't keep this computer's settings out of iCloud Drive. Restart dohc to try again.";
+    const refused = new Error(
+      `Error invoking remote method 'desktop:set-workspace-settings': LocalStateUnavailableError: ${words}`,
+    );
+    bridge.setWorkspaceSettings.mockRejectedValueOnce(refused);
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    const select = await screen.findByTestId("attachment-location-select");
+    await user.selectOptions(select, "global-folder");
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
+    expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
+      `Settings error: ${words}`,
+    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
+    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("per-document"));
+
+    await act(async () => {
+      await onError.mock.calls[0]![2]();
+    });
+    expect(bridge.setWorkspaceSettings).toHaveBeenCalledTimes(2);
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { files: { attachmentLocation: "global-folder" } },
+    });
+  });
+
+  it("says why a workspace settings reset was refused, and Try again resets", async () => {
+    const words =
+      "dohc did not reset this workspace's settings because the workspace has not finished opening. Try again when it opens.";
+    const refused = new Error(
+      `Error invoking remote method 'desktop:reset-workspace-settings': LocalStateUnavailableError: ${words}`,
+    );
+    bridge.resetWorkspaceSettings.mockRejectedValueOnce(refused);
+    const onError = vi.fn();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Reset workspace" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
+    await act(async () => {
+      await onError.mock.calls[0]![2]();
+    });
+    expect(bridge.resetWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
   it("hands every workspace settings answer to the shell", async () => {

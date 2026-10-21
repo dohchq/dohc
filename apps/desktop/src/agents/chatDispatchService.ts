@@ -340,16 +340,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  function enqueue(workspaceId: string, task: () => Promise<void>): Promise<void> {
+  function enqueue<Result>(
+    workspaceId: string,
+    task: () => Promise<Result>,
+    onFailure: (error: unknown) => void = reportError,
+  ): Promise<Result> {
     const prior = workspaceChains.get(workspaceId) ?? Promise.resolve();
     const run = prior.then(task, task);
-    workspaceChains.set(
-      workspaceId,
-      run.catch((error: unknown) => {
-        reportError(error);
-      }),
-    );
+    workspaceChains.set(workspaceId, run.then(() => undefined, onFailure));
     return run;
+  }
+
+  // Every scan, and so every claim and the prompt it builds, runs on the
+  // workspace's queue. A write of several rows runs there too, so no scan
+  // reads it half done. Its caller handles its errors.
+  function betweenScans<Result>(workspaceId: string, write: () => Promise<Result>): Promise<Result> {
+    return enqueue(workspaceId, write, () => undefined);
   }
 
   function runKey(workspaceId: string, runId: string): string {
@@ -1901,6 +1907,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     start,
     stop,
     scanWorkspace,
+    betweenScans,
     stopAgentRun,
     stopForRestrictedMode,
     waitsForTrust,

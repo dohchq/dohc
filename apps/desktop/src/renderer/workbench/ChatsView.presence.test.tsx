@@ -89,7 +89,6 @@ const bridgeMock = {
   listChannelThreads: vi.fn(),
   listChatMessages: vi.fn(),
   listChatThreadDecisions: vi.fn(),
-  resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
   chatRunRecordsForThread: vi.fn(),
   markChatThreadRead: vi.fn(),

@@ -1,4 +1,5 @@
-import { lstat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -27,11 +28,81 @@ const REFUSAL_WORDS: Record<LocalStateRefusal, string> = {
   "not-excluded": "dohc could not keep this workspace's .dohc/local out of iCloud Drive, so it saves nothing there. Restart dohc to try again.",
 };
 
-/** dohc won't write this computer's state for a workspace. */
+/**
+ * dohc won't write this computer's state for a workspace. A writer whose
+ * refusal a person sees gives words that name what it did not save.
+ */
 export class LocalStateUnavailableError extends Error {
-  constructor(readonly refusal: LocalStateRefusal) {
-    super(REFUSAL_WORDS[refusal]);
+  constructor(readonly refusal: LocalStateRefusal, message = REFUSAL_WORDS[refusal]) {
+    super(message);
     this.name = "LocalStateUnavailableError";
+  }
+}
+
+export type OwnedFileRead =
+  | { readonly status: "read"; readonly content: string }
+  | {
+      readonly status:
+        | "missing"
+        | "not-file"
+        | "other-owner"
+        | "writable-by-others"
+        | "linked"
+        | "too-large";
+    };
+
+/**
+ * Read one file of this computer's state whose content changes what dohc
+ * does, such as settings, and trust it only if this user owns the file, no
+ * other user can write it, and it has no other name. The file is opened once
+ * without following a link at its name, and checked on that same handle
+ * before it is read, so a folder or path swapped meanwhile changes nothing:
+ * another local user can't make a file this user owns. That is the only
+ * protection. A file that came from a zip, a git checkout or a sync app
+ * belongs to this user and is read. Windows reports no owner or mode, so
+ * there only the link count is checked. A caller that writes such a file
+ * gives it mode 0600, whatever the umask.
+ */
+export async function readOwnedFile(path: string, maxBytes: number): Promise<OwnedFileRead> {
+  // Windows has neither flag, so there a link at the name is refused first.
+  const noFollow: number | undefined = constants.O_NOFOLLOW;
+  const nonBlock: number | undefined = constants.O_NONBLOCK;
+  if (noFollow === undefined) {
+    const named = await lstat(path).catch(() => null);
+    if (named?.isSymbolicLink()) return { status: "not-file" };
+  }
+  // O_NONBLOCK keeps a FIFO at the name from holding the open.
+  const flags = constants.O_RDONLY | (noFollow ?? 0) | (nonBlock ?? 0);
+  const handle = await open(path, flags).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return "missing" as const;
+    if (error.code === "ELOOP" || error.code === "EISDIR") return "not-file" as const;
+    throw error;
+  });
+  if (typeof handle === "string") return { status: handle };
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) return { status: "not-file" };
+    const uid = process.getuid?.();
+    if (uid !== undefined && stats.uid !== uid) return { status: "other-owner" };
+    // Group or other write lets another user rewrite it in place; on a Mac
+    // every local user is in staff.
+    if (uid !== undefined && (stats.mode & 0o022) !== 0) return { status: "writable-by-others" };
+    // A second name is a second way to change it. More than one, not "not
+    // one": a volume that reports no links would refuse every file.
+    if (stats.nlink > 1) return { status: "linked" };
+    // Read one byte past the cap, so a file that grew since the check is
+    // still refused instead of cut short.
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) return { status: "too-large" };
+    return { status: "read", content: buffer.toString("utf8", 0, length) };
+  } finally {
+    await handle.close();
   }
 }
 

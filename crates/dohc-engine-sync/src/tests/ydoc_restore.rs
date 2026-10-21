@@ -82,6 +82,7 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
     let receipt = owner
         .fence_restore(
             &mut store,
+            None,
             operation.clone(),
             coordinate.clone(),
             200,
@@ -163,6 +164,7 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
             owner
                 .fence_restore(
                     &mut store,
+                    None,
                     operation.clone(),
                     coordinate.clone(),
                     201,

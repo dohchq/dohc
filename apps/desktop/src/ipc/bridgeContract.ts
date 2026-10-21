@@ -2059,6 +2059,11 @@ export const SendChatMessagePayload = z.object({
   // A poll's choices. Implies needsDecision. The engine normalizes them.
   options: z.array(z.string().max(200)).max(12).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
+  // The question or poll this message answers, and the choice it picks.
+  resolves: z.object({
+    messageId: OPAQUE_ID,
+    chosenOption: z.string().min(1).max(200).optional(),
+  }).optional(),
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
 
@@ -2082,6 +2087,11 @@ export const SendChatMessageResult = z.object({
   // The question or poll the message asked, read back after the write.
   // Absent when it asked none, or when that read failed.
   decision: ChatDecisionRecord.optional(),
+  // The question or poll the message answered. One another message resolved
+  // first comes back as that message left it.
+  resolved: ChatDecisionRecord.optional(),
+  // Why the answer failed. The message landed and the question stays open.
+  resolveFailure: z.string().optional(),
 });
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
@@ -2098,24 +2108,6 @@ export const ListChatThreadDecisionsResult = z.object({
 });
 export type ListChatThreadDecisionsResult = z.infer<
   typeof ListChatThreadDecisionsResult
->;
-
-export const ResolveChatDecisionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  threadId: OPAQUE_ID,
-  messageId: OPAQUE_ID,
-  resolvedByMessageId: OPAQUE_ID,
-  chosenOption: z.string().min(1).max(200).optional(),
-});
-export type ResolveChatDecisionPayload = z.infer<
-  typeof ResolveChatDecisionPayload
->;
-
-export const ResolveChatDecisionResult = z.object({
-  decision: ChatDecisionRecord,
-});
-export type ResolveChatDecisionResult = z.infer<
-  typeof ResolveChatDecisionResult
 >;
 
 export const ListChatThreadAttachmentsPayload = z.object({

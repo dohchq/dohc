@@ -101,7 +101,18 @@ test("release platform selection defaults to every workflow platform and leaves 
   assert.equal(linux.target, "x86_64-unknown-linux-gnu");
   assert.equal(linux.require_signing, "0");
   for (const target of both) assert.equal(target.runner[0], "self-hosted");
+  assert.deepEqual(desktopReleaseTargets("windows-linux", "self-hosted"), both);
   for (const platforms of ["mac", "macos", "all"]) assert.throws(() => desktopReleaseTargets(platforms), /Invalid release platforms/);
+});
+
+test("runners=github packages each target on its pinned GitHub-hosted image and changes nothing else", () => {
+  const withoutRunner = targets => targets.map(({ runner: _runner, ...target }) => target);
+  const hosted = desktopReleaseTargets("windows-linux", "github");
+  assert.deepEqual(hosted.map(target => target.runner), ["windows-2025", "ubuntu-24.04"]);
+  assert.deepEqual(withoutRunner(hosted), withoutRunner(desktopReleaseTargets("windows-linux")));
+  assert.deepEqual(desktopReleaseTargets("windows", "github"), [hosted[0]]);
+  assert.deepEqual(desktopReleaseTargets("linux", "github"), [hosted[1]]);
+  for (const runners of ["", "ubuntu-latest", "cloud"]) assert.throws(() => desktopReleaseTargets("windows-linux", runners), /Invalid release runners/);
 });
 
 test("Linux nightly metadata keeps the version generator and selects only Linux", async () => {
@@ -333,6 +344,13 @@ test("resolve-desktop-release prints release metadata when run as a command", as
     "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
   ]);
   assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
+  const matrix = output => JSON.parse(/^matrix=(.*)$/m.exec(output)[1]);
+  assert.deepEqual(matrix(stdout), desktopReleaseTargets());
+  const hosted = await runReleaseScript("resolve-desktop-release.mjs", [
+    "--root", root, "--channel", "nightly", "--platforms", "linux", "--runners", "github", "--date", "20260621",
+    "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
+  ]);
+  assert.deepEqual(matrix(hosted.stdout), desktopReleaseTargets("linux", "github"));
 });
 
 // Node resolves links in the entry path before it sets import.meta.url, so a
@@ -428,7 +446,7 @@ function releaseExpression(expression, needs, secrets = {}, inputs = {}, matrix 
   return Function("needs", "secrets", "inputs", "matrix", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix, JSON.parse);
 }
 
-test("desktop releases start only by dispatch, run on self-hosted Windows and Linux runners, and preserve unsigned package smoke", () => {
+test("desktop releases start only by dispatch, run on the selected Windows and Linux runners, and preserve unsigned package smoke", () => {
   const { jobs } = releaseWorkflow;
   assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
   assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
@@ -436,29 +454,51 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  // Cloud runners stay off (AGENTS.md). Packaging runs on the matrix preflight
-  // selects from the release targets. Every other job runs on the Linux runner
-  // for a Linux dispatch and on the Windows runner otherwise.
+  // The scheduled nightly dispatches without runners and gets the self-hosted
+  // runners. runners=github moves every job to a pinned GitHub-hosted image.
+  // Packaging runs on the matrix preflight selects from the release targets.
+  // Every other job runs on Linux for a Linux dispatch and on Windows otherwise.
+  const runnersInput = releaseWorkflow.on.workflow_dispatch.inputs.runners;
+  assert.deepEqual([runnersInput.type, runnersInput.default, runnersInput.options], ["choice", "self-hosted", ["self-hosted", "github"]]);
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
-  // Windows and WSL share one PC, so a combined dispatch packages one platform at a time.
-  assert.equal(jobs.build.strategy["max-parallel"], "${{ inputs.platforms == 'windows-linux' && 1 || 4 }}");
-  assert.match(releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"').run, /--platforms "\$DISPATCH_PLATFORMS"/);
+  // Windows and WSL share one PC, so a combined self-hosted dispatch packages one platform at a time.
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
-  for (const [name, job] of Object.entries(jobs)) {
-    const runners = name === "build"
-      ? desktopReleaseTargets("windows-linux").map(target => target.runner)
-      : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
-    if (name !== "build") {
-      assert.deepEqual(runners, dispatchPlatforms.map(platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"]),
-        `${name} runs on the Linux runner only for a Linux dispatch`);
+  const runnerStates = [undefined, "", "self-hosted", "github"];
+  const maxParallel = (platforms, runners) => releaseExpression(jobs.build.strategy["max-parallel"], {}, {}, { platforms, runners });
+  for (const runners of runnerStates) {
+    assert.deepEqual(dispatchPlatforms.map(platforms => maxParallel(platforms, runners)),
+      dispatchPlatforms.map(platforms => (platforms === "windows-linux" && runners !== "github" ? 1 : 4)), `max-parallel on runners=${runners}`);
+  }
+  const resolveMetadata = releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"');
+  assert.match(resolveMetadata.run, /--runners "\$DISPATCH_RUNNERS"/);
+  assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, "${{ inputs.runners || 'self-hosted' }}");
+  const refusePublish = jobs.preflight.steps.find(step => step.name === "Refuse a publish on GitHub's runners");
+  assert.ok(refusePublish, "runners=github cannot publish until the repository is public");
+  const refuses = inputs => releaseExpression(`\${{ ${refusePublish.if} }}`, {}, {}, inputs);
+  assert.deepEqual([["github", false], ["github", true], ["self-hosted", false], [undefined, false]].map(([runners, dry_run]) => refuses({ runners, dry_run })),
+    [true, false, false, false]);
+  assert.ok(jobs.preflight.steps.indexOf(refusePublish) < jobs.preflight.steps.findIndex(step => step.name === "Checkout"));
+  // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
+  for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
+    const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
+    assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
+    assert.equal(job.steps[toolchain].if, "inputs.runners == 'github'");
+    assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
+  }
+  const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
+  const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
+  const resolvedRunners = runners => releaseExpression(resolveMetadata.env.DISPATCH_RUNNERS, {}, {}, { runners });
+  for (const runners of runnerStates) {
+    const expected = runners === "github" ? hostedImage : selfHosted;
+    for (const platforms of dispatchPlatforms) {
+      assert.deepEqual(desktopReleaseTargets(platforms, resolvedRunners(runners)).map(target => target.runner),
+        (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(expected), `${platforms} packages run on runners=${runners}`);
     }
-    assert.ok(runners.length > 0, `${name} has a runner`);
-    for (const runner of runners) {
-      assert.ok(Array.isArray(runner), `${name} has explicit runner labels`);
-      assert.ok(runner.includes("self-hosted"));
-      assert.ok(runner.some(label => ["linux", "windows"].includes(label)));
-      assert.ok(runner.includes("x64"));
+    for (const [name, job] of Object.entries(jobs)) {
+      if (name === "build") continue;
+      assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms, runners })), dispatchPlatforms.map(expected),
+        `${name} runs on Linux only for a Linux dispatch, on runners=${runners}`);
     }
   }
 

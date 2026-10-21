@@ -2204,7 +2204,6 @@ export function ChatsView(props: {
     };
     sendingRef.current = true;
     setSending(true);
-    let sentMessage: SendChatMessageResult | null = null;
     try {
       const result = await bridge().sendChatMessage({
         workspaceId,
@@ -2212,6 +2211,9 @@ export function ChatsView(props: {
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
         ...(options ? { needsDecision: true, options } : {}),
+        ...(resolvingMessageId
+          ? { resolves: { messageId: resolvingMessageId, ...(chosenOption ? { chosenOption } : {}) } }
+          : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2220,21 +2222,9 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      sentMessage = result;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      let resolvedDecision: ChatDecisionRecord | null = null;
-      if (resolvingMessageId) {
-        const resolution = await bridge().resolveChatDecision({
-          workspaceId,
-          threadId: nav.thread.id,
-          messageId: resolvingMessageId,
-          resolvedByMessageId: result.message.id,
-          ...(chosenOption ? { chosenOption } : {}),
-        });
-        if (!requestOwnsActiveContext()) return;
-        resolvedDecision = resolution.decision;
-      }
       showSent(result);
+      const resolvedDecision = result.resolved;
       if (resolvedDecision) {
         const decisionWasOpen = reconcileResolvedChatDecision(
           latestDecisions.current,
@@ -2260,23 +2250,19 @@ export function ChatsView(props: {
           );
         }
       }
+      // A reply whose answer failed still leaves the mode, so retrying cannot
+      // silently post the reply twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
+      if (result.resolveFailure) {
+        props.onError(
+          ipcErrorMessage(result.resolveFailure, "Your reply was sent, but the decision is still open."),
+          result.resolveFailure,
+        );
+      }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      if (sentMessage && resolvingMessageId) {
-        // The two durable writes are intentionally separate. If the reply
-        // landed but resolution failed, show the real posted message and exit
-        // the mode so retrying cannot silently duplicate the reply.
-        showSent(sentMessage);
-        clearMatchingComposer();
-        props.onError(
-          ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
-          error,
-        );
-      } else {
-        props.onError(ipcErrorMessage(error, "Could not send that message."), error);
-      }
+      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
     } finally {
       const ownsContext =
         inFlightSendByContext.current.get(sendContextKey) === request;
