@@ -3935,6 +3935,7 @@ fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() 
         ("A.md", "a.md/c.md"),
         ("a.md/c.md", "A.md"),
         ("\u{212a}.md", "k.md"),
+        ("e\u{301}.md", "\u{e9}.md"),
     ] {
         let (_scratch, _path, mut store) = hosted_store();
         let client = RelaySyncClient::new(HostedFeed::new());
@@ -3997,16 +3998,17 @@ fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() 
     }
 }
 
-/// Documents shared together, at two spellings of one path, hold the later
-/// one by the feed's order, and a document beside them keeps syncing (#2036).
+/// Documents shared together, at two spellings of one path, backfill one at
+/// a time in object id order, so the later id is held whatever the feed's
+/// order, and a document beside them keeps syncing (#2036).
 #[test]
-fn documents_shared_together_at_spellings_of_one_path_hold_the_later_one() {
+fn documents_shared_together_at_spellings_of_one_path_hold_the_later_id() {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
-    feed.create("owner", 1, "doc-a", "notes.md", "hosted a");
-    feed.create("owner", 2, "doc-b", "Notes.md", "hosted b");
+    feed.create("owner", 1, "doc-b", "Notes.md", "hosted b");
+    feed.create("owner", 2, "doc-a", "notes.md", "hosted a");
     feed.create("owner", 3, "doc-c", "c.md", "hosted c");
     feed.share("doc-a", "notes.md");
     feed.share("doc-b", "Notes.md");
