@@ -17,7 +17,7 @@ use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
@@ -30,7 +30,7 @@ type Registry = HashMap<EngineDbIdentity, Slot>;
 enum Slot {
     Reserving,
     Closing,
-    Active(WorkspaceActor),
+    Active(Box<WorkspaceActor>),
 }
 
 #[derive(Clone, Copy)]
@@ -199,18 +199,20 @@ impl WorkspaceSupervisor {
         root_token: Option<&str>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
-        if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
-            prepare_store(db_path)?;
-        }
+        let prepared = match mode {
+            ActorOpenMode::ReadWrite | ActorOpenMode::Passive => Some(prepare_store(db_path)?),
+            ActorOpenMode::ReadOnly => None,
+        };
+        let store_path = prepared.as_ref().map_or(db_path, |prepared| &prepared.path);
         let mut dead: Option<WorkspaceActor> = None;
         let identity;
         {
             let mut guard = lock(&self.registry);
             identity = match mode {
                 ActorOpenMode::ReadWrite | ActorOpenMode::Passive => {
-                    EngineDbIdentity::resolve_or_create(db_path)?
+                    EngineDbIdentity::resolve_or_create(store_path)?
                 }
-                ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(db_path)?,
+                ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(store_path)?,
             };
             loop {
                 let action = match guard.get(&identity) {
@@ -246,7 +248,7 @@ impl WorkspaceSupervisor {
                     }
                     Action::Evict => {
                         if let Some(Slot::Active(actor)) = guard.remove(&identity) {
-                            dead = Some(actor);
+                            dead = Some(*actor);
                         }
                         guard.insert(identity.clone(), Slot::Reserving);
                         break;
@@ -265,11 +267,12 @@ impl WorkspaceSupervisor {
         // Release the evicted actor's worker outside the lock.
         drop(dead);
 
+        let store_path = store_path.to_path_buf();
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
                 if let Some(token) = root_token {
                     WorkspaceActor::spawn_root_bound(
-                        db_path.to_path_buf(),
+                        store_path,
                         identity.clone(),
                         1,
                         now_ms,
@@ -277,11 +280,11 @@ impl WorkspaceSupervisor {
                         work,
                     )
                 } else {
-                    WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
+                    WorkspaceActor::spawn(store_path, identity.clone(), 1, now_ms, work)
                 }
             }
             ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
-                db_path.to_path_buf(),
+                store_path,
                 identity.clone(),
                 1,
                 now_ms,
@@ -289,9 +292,10 @@ impl WorkspaceSupervisor {
                 work,
             ),
             ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
+                WorkspaceActor::spawn_read_only(store_path, identity.clone(), 1, work)
             }
         };
+        let spawned = spawned.map(|actor| actor.holding(prepared));
         let store_freshly_created = spawned
             .as_ref()
             .is_ok_and(WorkspaceActor::store_was_freshly_created);
@@ -307,11 +311,11 @@ impl WorkspaceSupervisor {
     /// generation. Generation continuity is preserved even if the predecessor's
     /// worker panicked (a dead predecessor is treated as already-closed).
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
-        prepare_store(db_path)?;
+        let prepared = prepare_store(db_path)?;
 
         let (old, next_generation, mode, identity) = {
             let mut guard = lock(&self.registry);
-            let identity = EngineDbIdentity::resolve_or_create(db_path)?;
+            let identity = EngineDbIdentity::resolve_or_create(&prepared.path)?;
             // Wait out any in-flight reservation/close for this identity.
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
@@ -336,7 +340,7 @@ impl WorkspaceSupervisor {
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
-            db_path.to_path_buf(),
+            prepared.path.clone(),
             identity.clone(),
             next_generation,
             now_ms,
@@ -344,6 +348,7 @@ impl WorkspaceSupervisor {
             None,
             None,
         );
+        let spawned = spawned.map(|actor| actor.holding(Some(prepared)));
         self.finalize_reservation(identity, spawned)
     }
 
@@ -363,7 +368,7 @@ impl WorkspaceSupervisor {
             match guard.remove(&identity) {
                 Some(Slot::Active(actor)) => {
                     guard.insert(identity.clone(), Slot::Closing);
-                    Some(actor)
+                    Some(*actor)
                 }
                 _ => None,
             }
@@ -403,7 +408,7 @@ impl WorkspaceSupervisor {
                     Some(Slot::Active(actor)) => {
                         guard.insert(identity.clone(), Slot::Closing);
                         closing.push(identity);
-                        Some(actor)
+                        Some(*actor)
                     }
                     _ => None,
                 })
@@ -463,7 +468,7 @@ impl WorkspaceSupervisor {
         let result = match spawned {
             Ok(actor) => {
                 let handle = actor.handle();
-                guard.insert(identity, Slot::Active(actor));
+                guard.insert(identity, Slot::Active(Box::new(actor)));
                 Ok(handle)
             }
             Err(err) => {
@@ -485,9 +490,17 @@ enum Action {
     Reserve,
 }
 
+/// A store [`prepare_store`] made ready: the path SQLite opens it by and, on
+/// a Mac, the folder that path goes through.
+pub(crate) struct PreparedStore {
+    pub(crate) path: PathBuf,
+    #[cfg(target_vendor = "apple")]
+    _folder: std::os::fd::OwnedFd,
+}
+
 /// Create the store's folder and keep it and the store private before
 /// SQLite opens anything there.
-fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
+fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
     let (Some(parent), Some(name)) = (db_path.parent(), db_path.file_name()) else {
         return Err(RuntimeError::Identity {
             reason: "engine.db path has no parent directory",
@@ -551,9 +564,25 @@ fn prepare_store(db_path: &Path) -> Result<(), RuntimeError> {
                 source: Some(err),
             })?;
     }
-    #[cfg(not(unix))]
-    let _ = (folder, shown, name);
-    Ok(())
+    // On a Mac, SQLite opens the store and creates its journals through the
+    // folder checked here, so a folder put at its name since then is never
+    // reached. FAT and exFAT have no path by ID, and no owners to keep the
+    // store private either. A network volume keeps the plain path.
+    #[cfg(target_vendor = "apple")]
+    {
+        let by_id = dohc_macos_files::path_by_id(&folder);
+        Ok(PreparedStore {
+            path: by_id.map_or_else(|| db_path.to_owned(), |dir| dir.join(name)),
+            _folder: folder,
+        })
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (folder, shown, name);
+        Ok(PreparedStore {
+            path: db_path.to_owned(),
+        })
+    }
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -756,6 +785,31 @@ mod tests {
             assert_eq!(acl_lines(path), 0, "{}", path.display());
         }
         supervisor.close(&db).unwrap();
+    }
+
+    /// A folder put at `.dohc/engine` after the engine checked the real one
+    /// gets neither the store nor its journals. They open in the checked
+    /// folder, wherever it has moved (#2375).
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_store_opens_in_the_folder_the_engine_checked() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let prepared = super::prepare_store(&db).unwrap();
+        let engine = db.parent().unwrap();
+        let moved = scratch.path().join(".dohc/moved");
+        std::fs::rename(engine, &moved).unwrap();
+        std::fs::create_dir(engine).unwrap();
+        let path = prepared.path.clone();
+        let identity = crate::identity::EngineDbIdentity::resolve_or_create(&path).unwrap();
+        let actor = crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None)
+            .unwrap()
+            .holding(Some(prepared));
+        assert_eq!(std::fs::read_dir(engine).unwrap().count(), 0);
+        for file in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+            assert!(moved.join(file).exists(), "{file}");
+        }
+        drop(actor);
     }
 
     #[cfg(unix)]

@@ -27,7 +27,7 @@
 mod automations;
 mod capture;
 mod recovery_import;
-use crate::supervisor::ActorOpenMode;
+use crate::supervisor::{ActorOpenMode, PreparedStore};
 pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
@@ -213,9 +213,19 @@ pub struct WorkspaceActor {
     link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
+    /// The store's folder, open until the worker and its connection are gone.
+    /// On a Mac the store opens through the folder's ID, which this keeps from
+    /// passing to another folder.
+    _prepared: Option<PreparedStore>,
 }
 
 impl WorkspaceActor {
+    /// This actor, keeping `prepared`, the store's folder, open.
+    pub(crate) fn holding(mut self, prepared: Option<PreparedStore>) -> Self {
+        self._prepared = prepared;
+        self
+    }
+
     /// Spawn the actor's worker thread and open the store. Blocks until the
     /// open completes so open errors (including the fingerprint fence)
     /// propagate synchronously. `spawn` is intentionally synchronous — a
@@ -377,6 +387,7 @@ impl WorkspaceActor {
                     link_rewrites: Arc::default(),
                     current_views: Arc::default(),
                     link_resolvers: Arc::default(),
+                    _prepared: None,
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -1201,6 +1212,7 @@ mod saturation_tests {
             current_views: Arc::default(),
             link_resolvers: Arc::default(),
             link_rewrites: Arc::default(),
+            _prepared: None,
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);

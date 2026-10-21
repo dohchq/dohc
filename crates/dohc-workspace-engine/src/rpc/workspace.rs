@@ -3221,8 +3221,8 @@ mod tests {
 
     /// A workspace whose engine folder or store file dohc can't keep private
     /// is refused with what is there and where, which the desktop names to
-    /// the person (#2377).
-    #[cfg(target_os = "macos")]
+    /// the person (#2377). Linux names the folder too (#2376).
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_open_names_what_keeps_the_engine_folder_from_being_private() {
         let service = &EngineService::new();
@@ -3248,21 +3248,29 @@ mod tests {
             refused.message,
             "engine-folder-not-private: link .dohc/engine"
         );
-
-        let journal = ScratchDir::new().expect("scratch");
-        let opened = open(journal.path()).await.expect("open");
-        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
-        let handle = handle.expect("handle");
-        service.workspace_close(Some(handle)).await.expect("close");
-        let wal = journal.path().join(".dohc/engine/engine.db-wal");
-        let _ = std::fs::remove_file(&wal);
-        std::os::unix::fs::symlink(elsewhere.path().join("wal"), &wal).expect("link");
-        let refused = open(journal.path()).await.expect_err("a linked journal");
-        assert_eq!(refused.code, ErrorCode::Internal);
         assert_eq!(
-            refused.message,
-            "engine-folder-not-private: link .dohc/engine/engine.db-wal"
+            std::fs::read_dir(elsewhere.path()).expect("target").count(),
+            0
         );
+
+        // Linux refuses a store file that is a link, but does not name it.
+        #[cfg(target_os = "macos")]
+        {
+            let journal = ScratchDir::new().expect("scratch");
+            let opened = open(journal.path()).await.expect("open");
+            let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+            let handle = handle.expect("handle");
+            service.workspace_close(Some(handle)).await.expect("close");
+            let wal = journal.path().join(".dohc/engine/engine.db-wal");
+            let _ = std::fs::remove_file(&wal);
+            std::os::unix::fs::symlink(elsewhere.path().join("wal"), &wal).expect("link");
+            let refused = open(journal.path()).await.expect_err("a linked journal");
+            assert_eq!(refused.code, ErrorCode::Internal);
+            assert_eq!(
+                refused.message,
+                "engine-folder-not-private: link .dohc/engine/engine.db-wal"
+            );
+        }
     }
 
     /// Only an open that writes prepares `.dohc/local`, and its answer says

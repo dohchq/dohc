@@ -1,14 +1,14 @@
 //! Create a file without the ACL entries its folder gives new files, keep a
-//! folder private to its owner, copy a file's macOS ACL and extended
-//! attributes between open descriptors, flush a descriptor behind a drive
-//! write barrier, keep a folder out of iCloud Drive, and unlink a file only
-//! when no process has it open.
+//! folder private to its owner, name a folder by its ID, copy a file's macOS
+//! ACL and extended attributes between open descriptors, flush a descriptor
+//! behind a drive write barrier, keep a folder out of iCloud Drive, and
+//! unlink a file only when no process has it open.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 
 /// The attribute that tells macOS file providers, iCloud Drive among them,
 /// not to sync an item or anything inside it.
@@ -486,18 +486,61 @@ fn protect(dir: BorrowedFd<'_>, name: &OsStr, system: &System) -> io::Result<Own
     Ok(folder)
 }
 
+/// The path `/.vol/<device>/<file ID>` of the folder `dir`. It names the
+/// folder itself, not whatever has the folder's name, so a folder put in its
+/// place is never reached through it. Keep `dir` open while the path is in
+/// use, so its ID cannot pass to another folder. `None` on a network volume,
+/// which keeps going by name, and on a volume that does not resolve the path
+/// to `dir`, as FAT and exFAT do not.
+pub fn path_by_id(dir: impl AsFd) -> Option<PathBuf> {
+    if !is_local(dir.as_fd()).ok()? {
+        return None;
+    }
+    let open = rustix::fs::fstat(dir.as_fd()).ok()?;
+    let path = PathBuf::from(format!("/.vol/{}/{}", open.st_dev, open.st_ino));
+    let named = rustix::fs::stat(&path).ok()?;
+    ((named.st_dev, named.st_ino) == (open.st_dev, open.st_ino)).then_some(path)
+}
+
+/// The folder's current path when `path` names it by ID, as [`path_by_id`]
+/// does, which has no names to climb. Any other path is returned as it is.
+pub fn path_by_name(path: &Path) -> io::Result<PathBuf> {
+    use rustix::fs::{Mode, OFlags};
+    if !path.starts_with("/.vol") {
+        return Ok(path.to_owned());
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let dir = rustix::fs::open(path, flags, Mode::empty())?;
+    let current = rustix::fs::getpath(&dir)?.into_bytes();
+    Ok(OsStr::from_bytes(&current).into())
+}
+
 /// Remove the ACL entries of the file `name` in the folder `dir`, without
 /// following a link at the name or opening the file. macOS has no ACL call
 /// relative to a folder, and closing a descriptor on the file would drop any
-/// lock this process holds on it, so this goes by the folder's current path.
-/// The caller checks that the volume is local. A file whose entries the
-/// volume keeps fails with [`VolumeSharesNewFiles`]. A file that is gone, or
-/// on a file system without ACLs, has none.
+/// lock this process holds on it, so this goes by the folder's path by ID, or
+/// on a volume without one, its current path. The caller checks that the
+/// volume is local. A file whose entries the volume keeps fails with
+/// [`VolumeSharesNewFiles`]. A file that is gone, or on a file system without
+/// ACLs, has none.
 pub fn remove_acl_entries_in(dir: impl AsFd, name: &OsStr) -> io::Result<()> {
-    let mut path = rustix::fs::getpath(dir.as_fd())?.into_bytes();
+    remove_acl_entries_in_with(dir.as_fd(), name, || {})
+}
+
+/// [`remove_acl_entries_in`], with a test seam just after the path is read.
+fn remove_acl_entries_in_with(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+    before_change: impl FnOnce(),
+) -> io::Result<()> {
+    let mut path = match path_by_id(dir) {
+        Some(folder) => folder.into_os_string().into_vec(),
+        None => rustix::fs::getpath(dir)?.into_bytes(),
+    };
     path.push(b'/');
     path.extend_from_slice(name.as_bytes());
     let path = CString::new(path)?;
+    before_change();
     // SAFETY: The path ends with a NUL and outlives each call, which retains
     // nothing. Each ACL is checked for null and freed once.
     #[allow(unsafe_code)]
@@ -1028,6 +1071,53 @@ mod tests {
         super::remove_acl_entries_in(&folder, name).unwrap();
         // A file that is gone has none.
         super::remove_acl_entries_in(&folder, std::ffi::OsStr::new("gone")).unwrap();
+    }
+
+    /// A folder renamed after its path is read, with another put at its
+    /// name, keeps its own file's entries from being removed only if the path
+    /// names it by ID (#2375).
+    #[test]
+    fn removing_a_files_entries_reaches_its_folder_after_a_swap() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-file-swap").unwrap();
+        let dir = scratch.path().join("engine");
+        let moved = scratch.path().join("moved");
+        let store = |dir: &std::path::Path, text: &[u8]| {
+            std::fs::write(dir.join("engine.db"), text).unwrap();
+            add_entry(&dir.join("engine.db"), "group:everyone allow read");
+        };
+        std::fs::create_dir(&dir).unwrap();
+        store(&dir, b"store");
+        let folder = std::fs::File::open(&dir).unwrap();
+        let swap = || {
+            std::fs::rename(&dir, &moved).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            store(&dir, b"theirs");
+        };
+        let name = std::ffi::OsStr::new("engine.db");
+        super::remove_acl_entries_in_with(folder.as_fd(), name, swap).unwrap();
+        assert!(!has_entries(&moved.join("engine.db")));
+        assert!(has_entries(&dir.join("engine.db")));
+    }
+
+    /// A file written through the path by ID lands in the folder after its
+    /// name moves, and none lands in a folder put at the name.
+    #[test]
+    fn a_path_by_id_names_the_folder_and_never_one_in_its_place() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("path-by-id").unwrap();
+        let dir = scratch.path().join("engine");
+        std::fs::create_dir(&dir).unwrap();
+        let folder = std::fs::File::open(&dir).unwrap();
+        let by_id = super::path_by_id(&folder).expect("APFS resolves a path by ID");
+        let moved = scratch.path().join("moved");
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(by_id.join("engine.db"), b"store").unwrap();
+        assert_eq!(std::fs::read(moved.join("engine.db")).unwrap(), b"store");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let current = std::fs::canonicalize(&moved).unwrap();
+        assert_eq!(super::path_by_name(&by_id).unwrap(), current);
+        assert_eq!(super::path_by_name(&dir).unwrap(), dir);
     }
 
     /// A local volume can keep a folder's entries too. The seam keeps them
