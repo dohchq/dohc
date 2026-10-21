@@ -68,6 +68,20 @@
   transform: rotate(-45deg);
 }
 
+/* The desktop's reduced-motion reset is scoped to :root, which nothing in a
+   shadow root matches. */
+@media (prefers-reduced-motion: reduce) {
+  .demo-window,
+  .demo-window *,
+  .demo-window ::before,
+  .demo-window ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
 /* Palettes cover the demo window, as they cover the desktop's. Only this
    layer contains them: menus place themselves by page coordinates. */
 .demo-overlay {

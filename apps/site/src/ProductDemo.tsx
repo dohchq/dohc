@@ -571,15 +571,24 @@ export function ProductDemo() {
       }
       return filtered;
     });
+    const remainingTabs = openTabs.filter((tab) => !isPathAtOrBelow(tab, path));
+    setOpenTabs(remainingTabs);
     if (isPathAtOrBelow(activePath, path)) {
-      setActivePath(Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path);
+      // The next open tab takes over, as when the tab closes; with none left
+      // the editor group is empty.
+      const index = Math.max(0, openTabs.indexOf(activePath));
+      setActivePath(
+        remainingTabs[Math.min(index, remainingTabs.length - 1)] ??
+          Object.keys(next)[0] ??
+          DEMO_DOCUMENTS[0].path,
+      );
       setShowSource(false);
       setSourceText("");
     }
     setEmptyFolders((current) =>
       current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
     );
-  }, [activePath, updateDrafts]);
+  }, [activePath, openTabs, updateDrafts]);
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
