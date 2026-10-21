@@ -65,6 +65,9 @@ pub(crate) struct OpenWorkspace {
     pub(super) durability: super::automations::DurabilityQueue,
     pub(super) mode: WorkspaceOpenMode,
     handle_kind: WorkspaceHandleKind,
+    /// Whether this binding's open prepared `.dohc/local` for this
+    /// computer's state. `None` for an open that writes nothing.
+    local_state_ready: Option<bool>,
     pub(super) relay: Option<RelayConfiguration>,
     /// The binding's capture policy, retained when its driver stops and inherited by read-only attachments.
     pub(super) capture_enabled: bool,
@@ -146,6 +149,7 @@ impl OpenWorkspace {
             durability: self.durability.clone(),
             mode: WorkspaceOpenMode::ReadOnly,
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
+            local_state_ready: None,
             relay: self.relay.clone(),
             capture_enabled: self.capture_enabled,
             observation: Arc::clone(&self.observation),
@@ -422,6 +426,16 @@ pub(super) fn validate_workspace_param(
         ));
     }
     Ok(())
+}
+
+/// The open's handle and, for an open that writes, whether `.dohc/local` is
+/// ready for this computer's state. The desktop writes there only when it is.
+fn open_result(handle: &WorkspaceHandle, local_state_ready: Option<bool>) -> Value {
+    let mut result = json!({ "workspace": handle });
+    if let Some(ready) = local_state_ready {
+        result["localStateReady"] = json!(ready);
+    }
+    result
 }
 
 fn bound_to_another_workspace() -> WireError {
@@ -793,7 +807,7 @@ impl EngineService {
                         }
                         handles.insert(attached_handle.clone(), attached);
                     }
-                    return Ok(json!({ "workspace": attached_handle }));
+                    return Ok(open_result(&attached_handle, None));
                 }
                 if open.mode != requested_mode {
                     return Err(WireError::new(
@@ -847,7 +861,7 @@ impl EngineService {
                     // The update the pull held back can run now.
                     self.collections_changed(ctx, &open).await;
                 }
-                return Ok(json!({ "workspace": handle }));
+                return Ok(open_result(&handle, open.local_state_ready));
             }
             lock(&self.handles).remove(&handle);
             lock(&self.live_applications).retire_workspace(&open);
@@ -907,15 +921,22 @@ impl EngineService {
         let mut opening = tokio::task::spawn_blocking(move || {
             // The marker precedes database creation. A crash leaves either a marker
             // and no schema, or a schema already bound to that marker.
-            let root_token = match requested_mode {
+            let (root_token, local_state_ready) = match requested_mode {
                 WorkspaceOpenMode::Full | WorkspaceOpenMode::Passive => {
-                    root_binding::write_new_root_binding(&binding_root).map_err(map_root_binding)?
+                    let token = root_binding::write_new_root_binding(&binding_root)
+                        .map_err(map_root_binding)?;
+                    let ready = root_binding::prepare_local_state(&binding_root)
+                        .map_err(map_root_binding)?;
+                    (token, Some(ready))
                 }
-                WorkspaceOpenMode::ReadOnly => root_binding::read_root_binding(&binding_root)
-                    .map_err(map_root_binding)?
-                    .ok_or_else(|| {
-                        map_root_binding(root_binding::RootBindingError::DatabaseMismatch)
-                    })?,
+                WorkspaceOpenMode::ReadOnly => (
+                    root_binding::read_root_binding(&binding_root)
+                        .map_err(map_root_binding)?
+                        .ok_or_else(|| {
+                            map_root_binding(root_binding::RootBindingError::DatabaseMismatch)
+                        })?,
+                    None,
+                ),
             };
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => {
@@ -964,9 +985,9 @@ impl EngineService {
             {
                 probe.pause_open_install_if_armed();
             }
-            Ok((opened, open_guard))
+            Ok((opened, open_guard, local_state_ready))
         });
-        let (actor_open, open_guard) = tokio::select! {
+        let (actor_open, open_guard, local_state_ready) = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 // Dropping the join handle detaches the blocking task. Its
@@ -1289,6 +1310,7 @@ impl EngineService {
                 durability: super::automations::DurabilityQueue::default(),
                 mode: requested_mode,
                 handle_kind: WorkspaceHandleKind::Owner,
+                local_state_ready,
                 relay: params
                     .relay
                     .map(|configuration| configuration.configuration()),
@@ -1355,7 +1377,7 @@ impl EngineService {
         {
             self.collections_changed(ctx, &opened).await;
         }
-        Ok(json!({ "workspace": handle }))
+        Ok(open_result(&handle, local_state_ready))
     }
 
     pub(super) async fn workspace_close(
@@ -3236,6 +3258,148 @@ mod tests {
             refused.message,
             "engine-folder-not-private: link .dohc/engine/engine.db-wal"
         );
+    }
+
+    /// Only an open that writes prepares `.dohc/local`, and its answer says
+    /// whether this computer's state can go there. A second open of the live
+    /// binding answers the same; a read-only open prepares nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_an_open_that_writes_prepares_this_computers_folder() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        let service = &EngineService::new();
+        let open = |options: Value| {
+            let params = open_params(scratch.path(), "local", options);
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+                    .expect("open")
+            }
+        };
+        let close = |opened: Value| async move {
+            let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+            service
+                .workspace_close(Some(handle.expect("handle")))
+                .await
+                .expect("close");
+        };
+        let none = json!({ "captureMode": "none" });
+        let read_only = json!({ "captureMode": "none", "skipStartupMaintenance": true });
+
+        let opened = open(none.clone()).await;
+        assert_eq!(opened["localStateReady"], json!(true));
+        assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
+        assert_eq!(open(none).await, opened);
+        let attached = open(read_only.clone()).await;
+        assert!(attached.get("localStateReady").is_none());
+        close(attached).await;
+        close(opened).await;
+
+        std::fs::remove_dir(&local).expect("remove local");
+        let read = open(read_only).await;
+        assert!(read.get("localStateReady").is_none());
+        assert!(std::fs::symlink_metadata(&local).is_err());
+        close(read).await;
+    }
+
+    /// A link or a file where `.dohc/local` goes is refused as the engine's
+    /// own folder is, and what it names is left as it was.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_refuses_a_link_or_a_file_where_this_computers_folder_goes() {
+        use std::os::unix::fs::PermissionsExt;
+        let service = &EngineService::new();
+        let open = |root: &std::path::Path| {
+            let params = open_params(root, "local", json!({ "captureMode": "none" }));
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            }
+        };
+        let elsewhere = ScratchDir::new().expect("scratch");
+        std::fs::set_permissions(elsewhere.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("mode");
+        let linked = ScratchDir::new().expect("scratch");
+        std::fs::create_dir(linked.path().join(".dohc")).expect("dohc");
+        std::os::unix::fs::symlink(elsewhere.path(), linked.path().join(".dohc/local"))
+            .expect("link");
+        let refused = open(linked.path()).await.expect_err("a linked folder");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: link .dohc/local"
+        );
+        let mode = std::fs::metadata(elsewhere.path())
+            .expect("target")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read_dir(elsewhere.path()).expect("target").count(),
+            0
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let marked = std::process::Command::new("xattr")
+                .args(["-s", "-p", "com.apple.fileprovider.ignore#P"])
+                .arg(elsewhere.path())
+                .output()
+                .expect("xattr");
+            assert!(!marked.status.success());
+        }
+
+        let squatted = ScratchDir::new().expect("scratch");
+        std::fs::create_dir(squatted.path().join(".dohc")).expect("dohc");
+        std::fs::write(squatted.path().join(".dohc/local"), "mine").expect("file");
+        let refused = open(squatted.path()).await.expect_err("a file");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: not-folder .dohc/local"
+        );
+        assert_eq!(
+            std::fs::read_to_string(squatted.path().join(".dohc/local")).expect("file"),
+            "mine"
+        );
+    }
+
+    /// A `.dohc/local` macOS won't let dohc keep out of iCloud Drive, here
+    /// one locked in Finder, could sync. The workspace still opens, but its
+    /// answer says the folder is not ready for this computer's state.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_workspace_opens_when_its_local_folder_cant_be_kept_out_of_icloud() {
+        use std::os::unix::fs::PermissionsExt;
+        let chflags = |flag: &str, path: &std::path::Path| {
+            let status = std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(path)
+                .status()
+                .expect("chflags");
+            assert!(status.success());
+        };
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        std::fs::create_dir_all(&local).expect("local");
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        chflags("uchg", &local);
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(scratch.path(), "local", json!({ "captureMode": "none" })),
+            )
+            .await;
+        chflags("nouchg", &local);
+        let opened = opened.expect("the workspace still opens");
+        assert_eq!(opened["localStateReady"], json!(false));
+        let handle = serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone());
+        service
+            .workspace_close(Some(handle.expect("handle")))
+            .await
+            .expect("close");
     }
 
     fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {

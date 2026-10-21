@@ -58,6 +58,8 @@ export type ShareMountEngineWorkspace = EngineWorkspace & {
 export interface EngineWorkspaceBinding {
   client: EngineDaemonClient;
   workspace: WorkspaceHandle;
+  /** The open prepared `.dohc/local` for this computer's state. */
+  localStateReady: boolean;
 }
 
 export interface EngineDaemonClientSource {
@@ -119,7 +121,7 @@ export interface EngineWorkspaceRunOptions {
 }
 
 export interface EngineWorkspaceSessionsOptions {
-  onOpened?(workspace: EngineWorkspace): void;
+  onOpened?(workspace: EngineWorkspace, binding: EngineWorkspaceBinding): void;
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
   // Test injection for the retry-deadline clock; production uses
@@ -1224,7 +1226,7 @@ export class EngineWorkspaceSessions {
       entry.binding = binding;
       entry.opened = true;
       try {
-        this.onOpened?.(workspace);
+        this.onOpened?.(workspace, binding);
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }
@@ -1287,7 +1289,11 @@ export class EngineWorkspaceSessions {
       { deadlineMs: this.workspaceOpenDeadlineMs },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
-    return { client, workspace: opened.workspace as WorkspaceHandle };
+    return {
+      client,
+      workspace: opened.workspace as WorkspaceHandle,
+      localStateReady: opened.localStateReady === true,
+    };
   }
 
   private async prepareWorkspace(rootPath: string): Promise<void> {

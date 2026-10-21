@@ -21,6 +21,7 @@ import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
+import { recordLocalStateOpen } from "./workspaceLocalState";
 import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
@@ -558,7 +559,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: workspace => {
+        onOpened: (workspace, binding) => {
+          recordLocalStateOpen(workspace, binding.localStateReady);
           startupSmoke.resolve("skip");
           dependencies.onWorkspaceOpened?.(workspace.workspaceId);
         },

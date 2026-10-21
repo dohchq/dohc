@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
@@ -12,6 +12,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from 
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
+import { recordLocalStateOpen } from "../workspaces/workspaceLocalState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "../window/rendererWorkspaceSessionOwner";
@@ -131,6 +132,13 @@ async function harness() {
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
+    // What workspace-a's engine open does before it reports .dohc/local ready.
+    prepareLocalState: async (ready = true) => {
+      const workspace = entries.get("workspace-a")!;
+      await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
+      recordLocalStateOpen(workspace, ready);
+      return workspace;
+    },
     invoke: async (channel: string, payload?: unknown, value = first, trusted = true) => {
       const handler = handlers.get(channel);
       if (!handler) throw new Error(`Missing handler: ${channel}`);
@@ -602,17 +610,37 @@ describe("registered workspace settings and UI state", () => {
 
   it("round-trips parsed UI state through the admitted workspace and strips unknown write fields", async () => {
     const h = await harness();
+    await h.prepareLocalState();
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, extra: "discard" } })).resolves.toBeUndefined();
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
     await expect(uiStateStore.readUiStateFile(h.otherRoot)).resolves.toBeNull();
   });
 
+  it("refuses a UI-state write the engine has not prepared .dohc/local for, and makes nothing", async () => {
+    const h = await harness();
+    // The renderer is admitted, but this workspace's engine open has not answered.
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).rejects.toThrow(
+      "dohc has not finished opening this workspace. Try again when it opens.",
+    );
+    expect(await lstat(join(h.root, ".dohc")).catch(() => null)).toBeNull();
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
+
+    // The open could not keep the folder out of iCloud Drive.
+    await h.prepareLocalState(false);
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).rejects.toThrow("out of iCloud Drive");
+    expect(await readdir(join(h.root, ".dohc", "local"))).toEqual([]);
+
+    await h.prepareLocalState();
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).resolves.toBeUndefined();
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
+  });
+
   it("denies a UI-state read from a renderer until its open admits it", async () => {
     const h = await harness();
     const fresh = sender(3);
     dispose.unshift(() => h.sessions.retireAfterCrash(fresh));
-    await uiStateStore.writeUiStateFile(h.root, state);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), state);
     const uiReads = vi.spyOn(uiStateStore, "readUiStateFile");
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).rejects.toThrow("UI state read stopped because this window changed workspaces.");
     expect(uiReads).not.toHaveBeenCalled();
@@ -622,28 +650,28 @@ describe("registered workspace settings and UI state", () => {
 
   it.each(["null", "[]", "7", "\"text\"", "{broken"])("returns null for unavailable or non-object UI state: %s", async raw => {
     const h = await harness();
-    await mkdir(join(h.root, ".dohc"));
-    await writeFile(join(h.root, ".dohc", "ui-state.json"), raw);
+    await h.prepareLocalState();
+    await writeFile(join(h.root, ".dohc", "local", "ui-state.json"), raw);
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
   });
 
   it("preserves raw object fields for renderer repair on UI-state reads", async () => {
     const h = await harness();
     const raw = { version: 1, activeView: "foreign", sidebarWidth: -100, extra: { retained: true } };
-    await uiStateStore.writeUiStateFile(h.root, raw);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), raw);
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(raw);
   });
 
   it.each(["read", "write"])("suppresses UI-state %s completion after renderer retirement", async kind => {
     const h = await harness();
-    await uiStateStore.writeUiStateFile(h.root, state);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), state);
     const reached = deferred(), release = deferred();
     const realRead = uiStateStore.readUiStateFile, realWrite = uiStateStore.writeUiStateFile;
     if (kind === "read") vi.spyOn(uiStateStore, "readUiStateFile").mockImplementationOnce(async root => {
       const result = await realRead(root); reached.resolve(); await release.promise; return result;
     });
-    else vi.spyOn(uiStateStore, "writeUiStateFile").mockImplementationOnce(async (root, value) => {
-      await realWrite(root, value); reached.resolve(); await release.promise;
+    else vi.spyOn(uiStateStore, "writeUiStateFile").mockImplementationOnce(async (workspace, value) => {
+      await realWrite(workspace, value); reached.resolve(); await release.promise;
     });
     const result = h.invoke(kind === "read" ? settingsOperations.getWorkspaceUiState.channel : settingsOperations.setWorkspaceUiState.channel, kind === "read" ? workspacePayload : uiPayload);
     const rejection = expect(result).rejects.toThrow("this window changed workspaces");

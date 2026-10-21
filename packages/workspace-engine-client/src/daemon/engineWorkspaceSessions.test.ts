@@ -100,16 +100,35 @@ it("drains an existing-binding operation before close and refuses new work while
   await sessions.closeAll();
 });
 
+it("tells the open observer whether each open prepared this computer's .dohc/local", async () => {
+  const workspace = await tempWorkspace();
+  const ready = new MockClient("ready", { localStateReady: true });
+  const unmarked = new MockClient("unmarked", { localStateReady: false });
+  const silent = new MockClient("silent");
+  let client = ready;
+  const opened = vi.fn();
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { onOpened: opened });
+  for (const next of [ready, unmarked, silent]) {
+    client = next;
+    await sessions.run(workspace, async () => undefined);
+  }
+  expect(opened.mock.calls.map(([, binding]) => binding.localStateReady)).toEqual([true, false, false]);
+  await sessions.closeAll();
+});
+
 class MockClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   private readonly eventHandlers = new Set<(event: Event) => void>();
 
-  constructor(private readonly handle: string) {}
+  constructor(
+    private readonly handle: string,
+    private readonly opened: { localStateReady?: boolean } = {},
+  ) {}
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
     if (request.method === "workspace.open") {
-      return { id: request.id, result: { workspace: this.handle } };
+      return { id: request.id, result: { workspace: this.handle, ...this.opened } };
     }
     if (request.method === "workspace.close") {
       return { id: request.id, result: { closed: true } };

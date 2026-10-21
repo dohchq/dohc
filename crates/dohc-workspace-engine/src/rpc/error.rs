@@ -652,6 +652,9 @@ pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireErr
         root_binding::RootBindingError::NotPrivate(refused) => {
             return engine_folder_not_private(refused);
         }
+        // The message is the one a Mac sends as `NotPrivate`.
+        #[cfg(not(target_os = "macos"))]
+        root_binding::RootBindingError::LocalStateNotFolder(_) => ErrorCode::Internal,
         _ => ErrorCode::InvalidParams,
     };
     WireError::new(code, error.to_string())

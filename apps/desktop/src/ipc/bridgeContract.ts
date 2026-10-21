@@ -5804,7 +5804,7 @@ export const UpdateCheckResult = z.object({
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 
-// Per-workspace UI state persisted to .dohc/ui-state.json by MAIN (the
+// Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
 // validateUserWritePath refuses reserved paths). The clamp/cap constants are
 // the pure workbench model's, so contract and model can never disagree.
