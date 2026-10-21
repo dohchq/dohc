@@ -725,8 +725,10 @@ enum Read {
 
 impl ReleasedTails {
     /// Tails each decision validates in its own transaction and never keeps:
-    /// the owner settlement drain's, which replays a page in one transaction,
-    /// and the oracle tests compare kept tails with.
+    /// the oracle tests compare kept tails with. No production decision scans
+    /// on its own connection, so only tests can build these.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn uncached() -> Self {
         Self(None)
     }

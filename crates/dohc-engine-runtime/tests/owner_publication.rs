@@ -8276,6 +8276,151 @@ async fn an_actor_pull_waiting_for_validation_goes_on_from_the_row_that_waited()
     w.close().await;
 }
 
+/// Queue three ready owner settlements of the window document for the
+/// drain, as an observed owner's store keeps them once its feed accepted
+/// them, with the owner's binding still present though the activation was
+/// released. In drain order: "a-moved", queued under a binding the owner has
+/// since left; "settled", under the binding it holds; "z-moved", as a-moved.
+fn queue_owner_settlements(w: &mut RetainedWindow) {
+    let binding = serde_json::to_string(&window_binding(&w.lineage)).unwrap();
+    let text = "A settlement the host never applied.\n";
+    let (before, latest, updated): (String, String, i64) = w
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,latest_moment_id,updated_at_ms FROM snapshots WHERE object_id='object'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    let mut sql = format!(
+        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES ('{}',{},'{text}');
+         INSERT INTO ydoc_owner_bindings VALUES ('workspace','main','object','{lineage}','{binding}',
+           'relay',1,1,0,'{lineage}',1000000,60000);",
+        hex_sha256(text.as_bytes()),
+        text.len(),
+        lineage = w.lineage,
+    );
+    for (seq, origin) in ["a-moved", "settled", "z-moved"].into_iter().enumerate() {
+        let payload = serde_json::json!({
+            "momentId": format!("settlement-{origin}"), "versionId": "main", "objectId": "object",
+            "path": WINDOW_PATH, "recordedAtMs": 2_000, "operation": "write",
+            "payloadBeforeBlobSha256": before, "payloadBeforePath": WINDOW_PATH,
+            "payloadAfterBlobSha256": hex_sha256(text.as_bytes()), "payloadAfterPath": WINDOW_PATH,
+            "metadata": {"origin": "sync"}, "beforePresent": "present", "beforeObjectId": "object",
+            "beforeVersionId": "main", "beforePath": WINDOW_PATH, "beforeBlobSha256": before,
+            "beforeContentKind": "text", "beforeUpdatedAtMs": updated, "beforeLatestMomentId": latest
+        });
+        let queued = if origin == "settled" {
+            format!("'{binding}'")
+        } else {
+            format!(
+                "json_set('{binding}','$.selectorPaths',json_array('{WINDOW_PATH}','notes/moved.md'))"
+            )
+        };
+        sql.push_str(&format!(
+            "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+               VALUES ('workspace','{origin}',{seq},'moment.append','{payload}',2000,1);
+             INSERT INTO owner_pending_settlements (workspace_id,origin_id,origin_seq,main_version_id,object_id,
+               lineage_claim_id,relay_namespace,binding_json,terminal_cursor)
+               VALUES ('workspace','{origin}',{seq},'main','object','{lineage}','relay',{queued},1);",
+            lineage = w.lineage,
+        ));
+    }
+    execute(&mut w.store, &sql);
+}
+
+/// Each queued owner settlement in drain order: its origin, whether it was
+/// scheduled, whether it applied, and the report that owns it.
+fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_id,checked_sequence>0,applied,report_id FROM owner_pending_settlements
+                 ORDER BY checked_sequence,terminal_cursor,origin_id,origin_seq",
+            )?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect()
+        })
+        .unwrap()
+}
+
+/// Sol's ruling 1 through the actor: the drain of a pull reaches the owner
+/// settlement of a lineage whose activation was released with work retained.
+/// The settlement before it commits with the pass's report and the one that
+/// waits rolls back, while the request stays outstanding and the actor
+/// serves other work. Once validation completes the request goes on from
+/// that settlement, fetched once: the lineage holds it, the settlement after
+/// it is refused, and the cursor names the report the committed one carries.
+#[tokio::test]
+async fn an_actor_pull_whose_drain_waits_commits_its_prefix_and_goes_on() {
+    let mut w = retained_window(Retained::Carried).await;
+    queue_owner_settlements(&mut w);
+    let feed = std::sync::Arc::new(HostedFeed::new(&[("object", WINDOW_PATH)]));
+    let tails = w.actor.released_tails();
+    tails.pause_validation();
+    let mut pull = tokio::spawn({
+        let (actor, feed) = (w.actor.clone(), std::sync::Arc::clone(&feed));
+        let operation = dohc_engine_runtime::RelayOperation::PullHosted {
+            workspace_id: "workspace".into(),
+            root: w.root.path().to_owned(),
+            relay_namespace: Some("relay".into()),
+            now_ms: 1_000_000,
+        };
+        async move {
+            actor
+                .relay_through(feed, operation, CancellationToken::new())
+                .await
+        }
+    });
+    held_validation(&tails, &mut pull).await;
+    let queue = settlement_queue(&w.store);
+    let report = queue[2].3.clone();
+    assert!(report.is_some(), "{queue:?}");
+    assert_eq!(
+        queue,
+        [
+            ("settled".into(), false, false, None),
+            ("z-moved".into(), false, false, None),
+            ("a-moved".into(), true, true, report.clone()),
+        ]
+    );
+    w.actor
+        .remote_changes_applied("workspace".into())
+        .await
+        .expect("the actor serves other work");
+    assert!(!pull.is_finished(), "the pull is outstanding");
+    tails.resume_validation();
+    let dohc_engine_runtime::RelayOperationOutcome::HostedPass { pass, .. } =
+        pull.await.unwrap().unwrap()
+    else {
+        panic!("a hosted pass");
+    };
+    assert_eq!(pass.pending_cursor.unwrap().settlement_report_id, report);
+    assert_eq!(
+        settlement_queue(&w.store),
+        [
+            ("a-moved".into(), true, true, report.clone()),
+            ("settled".into(), true, false, None),
+            ("z-moved".into(), true, true, report),
+        ],
+        "the lineage holds the settlement that waited"
+    );
+    let mut refused: Vec<_> = pass
+        .refusals
+        .iter()
+        .map(|refusal| refusal.origin_id.as_str())
+        .collect();
+    refused.sort_unstable();
+    assert_eq!(refused, ["a-moved", "z-moved"]);
+    assert_eq!(feed.pulls(), 1, "fetched once");
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    w.close().await;
+}
+
 /// The released-lineage binding `pass` holds the window document with.
 fn held_object(pass: &dohc_engine_sync::HostedPassOutcome) -> ReleasedLineageBinding {
     match pass.held.get("object") {

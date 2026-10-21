@@ -1419,7 +1419,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         1
     );
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
     assert!(!waiting.has_more);
@@ -1471,13 +1471,9 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     };
     // The parked settlement no longer waits for the owner's open editor. It
     // writes accepted state only; the pending draft stays out of the file.
-    let leased = crate::moment_apply::pending::drain_and_claim(
-        &mut store,
-        "ws",
-        &NoFaults,
-        &crate::AlwaysLive,
-    )
-    .unwrap();
+    let leased =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &crate::AlwaysLive)
+            .unwrap();
     assert_eq!(leased.changes.len(), 1);
     assert_eq!(leased.changes[0].path, "tasks/owner.md");
     assert!(leased.report_id.is_some());
@@ -1537,7 +1533,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     drop(store);
     let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 9).unwrap();
     let replay =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert_eq!(replay.changes, settled_changes);
     assert_ne!(replay.report_id, applied_cursor.settlement_report_id);
@@ -1707,7 +1703,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     assert_eq!(parked, vec![serde_json::to_string(&next).unwrap(); 2]);
     assert_eq!(snapshot(&store, "object"), before);
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
     assert!(waiting.changes.is_empty());
@@ -1723,7 +1719,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     // The replay repeats every check against the authenticated binding: the
     // restore reaches the file, and audit alone never authorizes content.
     let settled =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert_eq!(settled.changes.len(), 1);
     assert_eq!(settled.changes[0].path, "owner.md");
@@ -1789,7 +1785,7 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
         (generation(2), 2)
     );
     let report =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(report.changes.is_empty());
     assert!(report.report_id.is_some());
@@ -1931,7 +1927,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
         1
     );
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
 
@@ -2021,13 +2017,9 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
     let mut next = observed.binding.clone();
     if later_generation {
-        let waiting = crate::moment_apply::pending::drain_and_claim(
-            &mut store,
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
+        let waiting =
+            crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+                .unwrap();
         assert!(
             waiting.report_id.is_none(),
             "rename still waits for the cursor"
@@ -2038,7 +2030,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
     let before = snapshot(&store, "object");
     let mut report =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(
         report.report_id.is_some(),
@@ -2078,13 +2070,9 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
                 )
             })
             .unwrap();
-        report = crate::moment_apply::pending::drain_and_claim(
-            &mut store,
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
+        report =
+            crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+                .unwrap();
         assert!(report.report_id.is_some());
         assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
         assert!(
@@ -2188,6 +2176,447 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
             assert!(notices[0].document.as_ref().unwrap().path.is_none());
         }
     }
+}
+
+/// Sol's ruling 1 drain fixture: an owner observed at restore generation 0
+/// queues the restore's settlement ("host") and one the host never accepted
+/// ("later") until its feed reaches generation 1, with two more ("a-moved",
+/// "z-moved") whose queued binding the owner has since left. A capture of
+/// the lineage was released without adopting, its binding still the
+/// owner's, so no activation is current and the lineage's first decision
+/// waits for validation. The drain reads a-moved, host, later, z-moved.
+struct DrainWindow {
+    owner: RestoreOwner,
+    restore_id: String,
+    restored_text: String,
+}
+
+fn drain_window() -> DrainWindow {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    let mut owner = restore_owner();
+    let next = LiveObjectBinding {
+        restore_fence_generation: 1,
+        ..owner.observed.binding.clone()
+    };
+    let (restored, restored_text) = restored_host(&owner.checkpoint, "restored by the owner");
+    let forged_text = "a restore the host never accepted";
+    hydrate_texts(&mut owner.store, &[&restored_text, forged_text]);
+    let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
+    for (origin, digit, text) in [
+        ("a-moved", "c", forged_text),
+        ("host", "b", restored_text.as_str()),
+        ("later", "d", forged_text),
+        ("z-moved", "e", forged_text),
+    ] {
+        let id = format!("moment-ydoc-{}", digit.repeat(64));
+        retain_restore_audit(&owner.store, &next, "relay", &id, text, 1);
+        let settlement = restore_settlement(
+            origin,
+            &id,
+            &owner.initial_text,
+            &owner.initial_moment,
+            text,
+        );
+        assert_eq!(
+            apply_moment_envelope(&mut owner.store, &settlement, &NoFaults).unwrap(),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{origin} waits for the restore generation"
+        );
+    }
+    owner
+        .store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE owner_pending_settlements \
+                 SET binding_json=json_set(binding_json,'$.selectorPaths',json_array('owner.md','moved.md')) \
+                 WHERE origin_id IN ('a-moved','z-moved')",
+                [],
+            )
+        })
+        .unwrap();
+    enroll_restore(
+        &mut owner.store,
+        &next,
+        &restored,
+        1,
+        &owner.observed.limits,
+    );
+    owner
+        .store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,\
+                   source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
+                   released_at_ms,released_restore_generation,released_accepted_cursor,\
+                   released_boundary_json,carried_manifest_json) \
+                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',20,1,1,'null','[]')",
+                params![
+                    next.lineage_claim_id,
+                    serde_json::to_string(&next).unwrap(),
+                    owner.initial_moment,
+                    text_sha(&owner.initial_text),
+                    owner.initial_text.len() as i64
+                ],
+            )
+        })
+        .unwrap();
+    DrainWindow {
+        owner,
+        restore_id,
+        restored_text,
+    }
+}
+
+/// Each queued settlement in drain order: its origin, whether it was
+/// scheduled, whether it applied, and the report that owns it.
+fn drain_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_id,checked_sequence>0,applied,report_id FROM owner_pending_settlements \
+                 ORDER BY checked_sequence,terminal_cursor,origin_id,origin_seq",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect()
+        })
+        .unwrap()
+}
+
+/// One attempt of the drain into `report`, on `tails`.
+fn drain_once(
+    store: &mut EngineStore,
+    tails: &ReleasedTails,
+    report: &mut crate::moment_apply::pending::PendingSettlementReport,
+) -> Result<(), SyncError> {
+    crate::moment_apply::pending::drain_and_claim(
+        store,
+        "ws",
+        tails,
+        report,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+}
+
+/// The drain's first attempt, which waits at the host settlement: the
+/// pending validation and the report that owns a-moved.
+fn drain_to_host(
+    store: &mut EngineStore,
+    tails: &ReleasedTails,
+    report: &mut crate::moment_apply::pending::PendingSettlementReport,
+) -> (
+    Box<dohc_engine_collab::live_update_application::PendingValidation>,
+    String,
+) {
+    let Err(SyncError::ValidationPending(pending)) = drain_once(store, tails, report) else {
+        panic!("the host settlement's decision waits for validation");
+    };
+    let report_id = report.report_id.clone().expect("a-moved's report");
+    (pending, report_id)
+}
+
+fn commit_settlement_report(store: &mut EngineStore, report_id: Option<String>) {
+    let committed = crate::commit_relay_cursor(
+        store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 0,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report_id,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        10,
+    )
+    .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+}
+
+fn refusal_message(store: &EngineStore, origin: &str) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id=?1",
+                [origin],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Sol's ruling 1: at the drain's first decision that waits for validation,
+/// the waiting settlement rolls back with its scheduling, the one before it
+/// commits with its report, and nothing after it is read. Once validation
+/// completes the drain goes on from the settlement that waited, in the same
+/// report: every row it completes, before and after the wait, carries one
+/// id, and its change is reported once.
+#[test]
+fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        restore_id,
+        restored_text,
+    } = drain_window();
+    let before = snapshot(&store, "object");
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, report_id) = drain_to_host(&mut store, &tails, &mut report);
+    let owned = Some(report_id.clone());
+    assert_eq!(
+        drain_queue(&store),
+        [
+            ("host".into(), false, false, None),
+            ("later".into(), false, false, None),
+            ("z-moved".into(), false, false, None),
+            ("a-moved".into(), true, true, owned.clone()),
+        ],
+        "only a-moved committed; host rolled back its scheduling"
+    );
+    assert_eq!(disposition(&store, "a-moved").as_deref(), Some("refused"));
+    assert_eq!(
+        refusal_message(&store, "a-moved"),
+        crate::moment_apply::pending::BINDING_CHANGED
+    );
+    for origin in ["host", "later", "z-moved"] {
+        assert_eq!(
+            disposition(&store, origin).as_deref(),
+            Some("applied"),
+            "{origin} is still queued"
+        );
+    }
+    assert_eq!(snapshot(&store, "object"), before, "host wrote nothing");
+    assert!(report.changes.is_empty());
+    assert_eq!(
+        tails.validation_requests(),
+        0,
+        "nothing asked the worker yet"
+    );
+
+    pending.validate().wait().unwrap();
+    drain_once(&mut store, &tails, &mut report).unwrap();
+    assert_eq!(report.report_id, owned);
+    assert_eq!(
+        drain_queue(&store),
+        [
+            ("a-moved".into(), true, true, owned.clone()),
+            ("host".into(), true, true, owned.clone()),
+            ("later".into(), true, true, owned.clone()),
+            ("z-moved".into(), true, true, owned.clone()),
+        ]
+    );
+    assert_eq!(
+        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
+        Some((text_sha(&restored_text), restore_id))
+    );
+    assert_eq!(report.changes.len(), 1, "{:?}", report.changes);
+    assert_eq!(report.changes[0].path, "owner.md");
+    assert!(!report.has_more);
+    for origin in ["later", "z-moved"] {
+        assert_eq!(
+            disposition(&store, origin).as_deref(),
+            Some("refused"),
+            "{origin}"
+        );
+    }
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    commit_settlement_report(&mut store, owned);
+    assert!(
+        drain_queue(&store).is_empty(),
+        "the report released every row"
+    );
+}
+
+/// Sol's ruling 1, the retry: a completed validation authorizes nothing by
+/// itself. The owner's binding moves while the drain waits, so the
+/// settlement that waited is refused when the drain goes on; and a tail input
+/// that changes after validation completes makes it wait again for the
+/// generation it then reads.
+#[test]
+fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        ..
+    } = drain_window();
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, _) = drain_to_host(&mut store, &tails, &mut report);
+    pending.validate().wait().unwrap();
+    // The capture's release record changes: the generation moves past the
+    // one just validated.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_activations SET released_at_ms=21 WHERE activation_id='capture'",
+                [],
+            )
+        })
+        .unwrap();
+    let Err(SyncError::ValidationPending(again)) = drain_once(&mut store, &tails, &mut report)
+    else {
+        panic!("the moved generation waits for its own validation");
+    };
+    assert_eq!(
+        drain_queue(&store)[0],
+        ("host".into(), false, false, None),
+        "host rolled back again"
+    );
+    again.validate().wait().unwrap();
+    assert_eq!(tails.validation_requests(), 2);
+    let before = snapshot(&store, "object");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE ydoc_owner_bindings \
+                 SET binding_json=json_set(binding_json,'$.selectorPaths',json_array('owner.md','renamed.md'))",
+                [],
+            )
+        })
+        .unwrap();
+    drain_once(&mut store, &tails, &mut report).unwrap();
+    assert_eq!(disposition(&store, "host").as_deref(), Some("refused"));
+    assert_eq!(
+        refusal_message(&store, "host"),
+        crate::moment_apply::pending::BINDING_CHANGED
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    assert!(report.changes.is_empty());
+}
+
+/// Sol's ruling 1, cancellation and crash: a request that stops waiting
+/// leaves its committed prefix for the next pull, which reclaims it under a
+/// report of its own. Rows a report applied stay reclaimable, with their
+/// materialization, until a cursor naming that report commits: an older
+/// report releases nothing.
+#[test]
+fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_next_pull() {
+    let DrainWindow {
+        owner:
+            RestoreOwner {
+                _scratch: scratch,
+                mut store,
+                ..
+            },
+        ..
+    } = drain_window();
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, abandoned) = drain_to_host(&mut store, &tails, &mut report);
+    // The request is cancelled, and the engine stops before anything goes on.
+    drop((pending, report));
+    let path = engine_db_path(&scratch).unwrap();
+    drop(store);
+    let mut store = EngineStore::open(&path, 5).unwrap();
+    let next =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    let reclaimed = next.report_id.clone().expect("the next pull's report");
+    assert_ne!(reclaimed, abandoned);
+    assert!(
+        drain_queue(&store)
+            .iter()
+            .all(|(_, _, applied, owner)| *applied && owner.as_deref() == Some(reclaimed.as_str())),
+        "the next pull owns the abandoned prefix and the rest"
+    );
+    assert_eq!(next.changes.len(), 1, "{:?}", next.changes);
+    // That pull is lost too, after its writes and before its cursor commits.
+    drop(store);
+    let mut store = EngineStore::open(&path, 6).unwrap();
+    let last =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert_eq!(
+        last.changes, next.changes,
+        "the materialization is reclaimed"
+    );
+    commit_settlement_report(&mut store, Some(abandoned));
+    commit_settlement_report(&mut store, Some(reclaimed));
+    assert_eq!(
+        drain_queue(&store).len(),
+        4,
+        "older reports release nothing"
+    );
+    commit_settlement_report(&mut store, last.report_id);
+    assert!(drain_queue(&store).is_empty());
+}
+
+/// Sol's ruling 1, the pass: a pull whose drain waits keeps what it fetched
+/// and the drain's report. Its next run fetches nothing again and goes on
+/// with the same report, so the cursor it returns owns the settlement that
+/// committed before the wait, with that settlement's refusal.
+#[test]
+fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        ..
+    } = drain_window();
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![],
+        next_cursor: 0,
+        has_more: false,
+    });
+    let mut cache = dohc_engine_collab::WriterDocCache::default();
+    let Err(crate::RelayError::ValidationPending(pending)) =
+        client.pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 7)
+    else {
+        panic!("the pull's drain waits");
+    };
+    let committed = drain_queue(&store)
+        .into_iter()
+        .find_map(|(origin, _, _, report)| (origin == "a-moved").then_some(report))
+        .flatten()
+        .expect("a-moved committed before the wait");
+    // A second fetch fails the pass.
+    *client.transport().pull.lock().unwrap() = None;
+    pending.validate().wait().unwrap();
+    let crate::SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        changed_paths,
+        refusals,
+        ..
+    } = client
+        .pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 8)
+        .unwrap()
+    else {
+        panic!("the pass completes");
+    };
+    assert_eq!(
+        cursor.settlement_report_id.as_deref(),
+        Some(committed.as_str())
+    );
+    assert_eq!(
+        changed_paths
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        ["owner.md"]
+    );
+    let mut refused: Vec<_> = refusals
+        .iter()
+        .map(|refusal| refusal.origin_id.as_str())
+        .collect();
+    refused.sort_unstable();
+    assert_eq!(refused, ["a-moved", "later", "z-moved"]);
+    crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &NoLiveLeases, 9).unwrap();
+    assert!(drain_queue(&store).is_empty());
 }
 
 /// An owner observed at restore generation 0 and accepted cursor 0.
@@ -2730,7 +3159,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         );
         apply_test_owner_frame(&mut owner, update, cursor);
         assert_pending_status(&owner);
-        let drained = super::moment_apply::pending::drain_and_claim(
+        let drained = super::moment_apply::pending::drain_to_end(
             &mut owner.store,
             "ws",
             &NoFaults,

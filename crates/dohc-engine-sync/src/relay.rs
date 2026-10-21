@@ -2693,6 +2693,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             durable,
             holding,
             rounds_done: false,
+            settlements: Default::default(),
         })
     }
 
@@ -2702,7 +2703,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// reason is retained so the cursor can move past it, and any other hold
     /// fails the pass. An op that waits for released-tail validation stops
     /// the pass with nothing of it applied, keeping the progress to go on
-    /// from. `relay_namespace` names the feed, when the pull's trusted
+    /// from, as does a ready owner settlement once the settlements before it
+    /// commit. `relay_namespace` names the feed, when the pull's trusted
     /// configuration names one.
     #[allow(clippy::too_many_arguments)]
     fn apply_pulled(
@@ -2788,27 +2790,33 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             p.made_progress = false;
             p.held = p.holding.held_at_round(&p.durable);
         }
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+            .map_err(local)?;
+        let drained = crate::moment_apply::pending::drain_and_claim(
+            store,
+            workspace_id,
+            &cache.released_tails(store),
+            &mut p.settlements,
+            faults,
+            leases,
+        );
+        // A fault can report failure after the transaction commits.
+        if drained.is_err() || p.settlements.report_id.is_some() {
+            cache.clear();
+        }
+        match drained {
+            Ok(()) => {}
+            // The settlements before the one that waits committed into the
+            // report the pass goes on with.
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(Applying::Suspended(pending, Box::new(progress)));
+            }
+            Err(error) => return Err(local(error)),
+        }
         let completed: Vec<&ReplicationEnvelope> =
             p.completed.iter().map(|&index| &ordered[index]).collect();
         let mut pass = std::mem::take(&mut p.pass);
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-            .map_err(local)?;
-        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
-            store,
-            workspace_id,
-            faults,
-            leases,
-        ) {
-            Ok(settlements) => settlements,
-            Err(error) => {
-                // A fault can report failure after the transaction commits.
-                cache.clear();
-                return Err(local(error));
-            }
-        };
-        if settlements.report_id.is_some() {
-            cache.clear();
-        }
+        let mut settlements = std::mem::take(&mut p.settlements);
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
@@ -4920,12 +4928,15 @@ struct ApplyProgress {
     holding: Holding,
     /// Every round ran; only settling what the ops left pending remains.
     rounds_done: bool,
+    /// The owner settlements the pass reports so far.
+    settlements: crate::moment_apply::pending::PendingSettlementReport,
 }
 
 /// What applying a pass came to.
 enum Applying {
     Done(Box<AppliedPass>),
-    /// An op waits for released-tail validation; nothing of it applied.
+    /// An op or owner settlement waits for released-tail validation; nothing
+    /// of it applied.
     Suspended(
         Box<dohc_engine_collab::live_update_application::PendingValidation>,
         Box<ApplyProgress>,
