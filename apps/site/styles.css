@@ -1547,6 +1547,9 @@ main::before {
 .waitlist-field input::placeholder { color: var(--subtle); }
 .waitlist-field .btn { flex: none; padding: 10px 16px; font-size: 13px; }
 .waitlist-field .btn[aria-disabled='true'] { cursor: progress; }
+.waitlist-note { margin-top: 2px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
+.waitlist-note a { color: inherit; text-underline-offset: 3px; }
+.waitlist[data-state='joined'] .waitlist-note { display: none; }
 .waitlist-status:focus { outline: none; }
 .waitlist-status { min-height: 1.5em; margin-top: 10px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
@@ -2171,3 +2174,24 @@ p { text-wrap: pretty; }
   .download-card:active .download-card-action { transform: none; }
   .agent-chip:active, .app-person:active, .app-settle:active { transform: none; }
 }
+
+/* ---------- privacy ---------- */
+
+.privacy {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: clamp(104px, 14vw, 140px) 24px 96px;
+}
+.privacy h1 {
+  font: 500 clamp(44px, 7vw, 72px)/1 var(--font-serif);
+  letter-spacing: -0.028em;
+}
+.privacy-lede { margin-top: 18px; color: var(--muted); font-size: 19px; }
+.privacy h2 {
+  margin-top: 44px;
+  font: 500 26px/1.25 var(--font-serif);
+  letter-spacing: -0.01em;
+}
+.privacy p { margin-top: 10px; }
+.privacy a { color: inherit; text-underline-offset: 3px; }
+.privacy-updated { margin-top: 48px; color: var(--subtle); font-size: 14px; }
