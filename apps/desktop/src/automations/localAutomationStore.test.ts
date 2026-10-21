@@ -61,7 +61,7 @@ describe("this computer's automation store", () => {
     expect((await store().runsOf(AUTOMATION, "atc_one")).runs).toHaveLength(1);
     await expect(store().readReachVerdicts()).resolves.toEqual({ ...allowed, unreadable: false, missing: false });
     // Each file is this user's alone, whatever the umask.
-    expect((await lstat(join(local, "reach.json"))).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect((await lstat(join(local, "reach.json"))).mode & 0o777).toBe(0o600);
     expect((await readdir(old)).sort()).toEqual(["enabled.json", "reach.json", "runs"]);
     expect(await readdir(join(old, "runs"))).toEqual([]);
   });
