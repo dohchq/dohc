@@ -2,8 +2,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 
-// privacy.html names every service the site talks to. A new host, cookie or
-// beacon here means that page needs a matching change first.
+// A guard on the site's own sources, not proof of privacy.html: it does not
+// read the desktop code the demo imports, CSS, dependencies, or what a
+// visitor puts in the demo. A new host, cookie or beacon in these files means
+// privacy.html needs a matching change first.
 const KNOWN_HOSTS = new Set([
   "api.github.com",
   "app.loops.so",
@@ -25,14 +27,14 @@ const sources = [
     .map((name) => join("src", name)),
 ].map((path) => ({ path, text: readFileSync(join(site, path), "utf8") }));
 
-it("talks only to the services the privacy page names", () => {
+it("names only hosts the privacy page covers in the site's own sources", () => {
   const hosts = sources.flatMap(({ path, text }) =>
     [...text.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((match) => `${match[1]} (${path})`),
   );
   expect(hosts.filter((entry) => !KNOWN_HOSTS.has(entry.split(" ")[0]!))).toEqual([]);
 });
 
-it("sets no cookies and sends no beacons", () => {
+it("sets no cookies and sends no beacons from the site's own sources", () => {
   for (const { path, text } of sources) {
     expect(text, path).not.toMatch(/document\.cookie|sendBeacon|googletagmanager|gtag\(/);
   }
