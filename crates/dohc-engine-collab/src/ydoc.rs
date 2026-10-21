@@ -2621,33 +2621,31 @@ fn setext_underline(line: &str) -> Option<i64> {
     .then_some(level)
 }
 
-/// How marked reads the line above a setext underline: as heading text, as
-/// text when the line could start another block, or, for raw HTML and an
-/// empty heading, in a way this reader does not follow (`None`).
+/// How marked reads the line above a setext underline: as heading text, or
+/// as text when the line could start another block. This reader does not
+/// follow an empty heading (`None`).
 fn setext_text(line: &str) -> Option<bool> {
-    let rest = line.trim_start_matches(' ');
-    if let Some(tag) = rest.strip_prefix('<') {
-        // marked keeps a `<...>` that ends the line out of a heading.
-        if tag
-            .find('>')
-            .is_some_and(|end| end > 0 && end + 1 == tag.len())
-        {
-            return Some(false);
-        }
-        if tag.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) {
-            return None;
-        }
-    }
     if setext_heading_text(line).is_empty() {
         return None;
     }
+    let rest = line.trim_start_matches(' ');
+    // marked keeps block HTML, and a `<...>` that ends the line, out of a
+    // heading. Any other tag stays in its text.
+    let html = rest.strip_prefix('<').is_some_and(|tag| {
+        html_block(rest)
+            || tag
+                .find('>')
+                .is_some_and(|end| end > 0 && end + 1 == tag.len())
+    });
+    let divider = rest.contains('|')
+        && rest
+            .bytes()
+            .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'));
     Some(
-        !rest.starts_with(['\t', '#'])
-            && block_start(line, true, true).is_none()
-            && !(rest.contains('|')
-                && rest
-                    .bytes()
-                    .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'))),
+        !(html
+            || divider
+            || rest.starts_with(['\t', '#'])
+            || block_start(line, true, true).is_some()),
     )
 }
 
@@ -2752,12 +2750,15 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
     let mut quote_depth = 0;
     let mut list_indent = 0;
     let mut list_column = 0;
+    // Only the file reading reads indented code. The other readings must
+    // still rebuild the documents they built, so they normalize these tabs.
+    let opaque_code = reading == MarkdownReading::Source;
     for line in body.split_inclusive('\n') {
         let mut quoted = line;
         let mut quotes = 0;
         while fence.is_none() || quotes < quote_depth {
             let text = quoted.trim_start_matches(' ');
-            if fence.is_none() && !in_list && quoted.len() - text.len() >= 4 {
+            if opaque_code && fence.is_none() && !in_list && quoted.len() - text.len() >= 4 {
                 break;
             }
             let Some(rest) = text.strip_prefix('>') else {
@@ -2774,7 +2775,8 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
         }
         // Outside a list, a line indented four columns is indented code or
         // a lazy line, so its quote markers and tabs are its text.
-        if fence.is_none()
+        if opaque_code
+            && fence.is_none()
             && !in_list
             && !quoted.trim().is_empty()
             && indented_code_line(quoted.trim_end_matches('\n'))
@@ -2987,6 +2989,70 @@ enum FileFold {
     Strict,
 }
 
+/// Whether marked's block tokenizer starts block HTML at this line.
+fn html_block(line: &str) -> bool {
+    let Some(tag) = line.strip_prefix('<') else {
+        return false;
+    };
+    let line = line.trim_end_matches([' ', '\t']);
+    let tag = tag.trim_end_matches([' ', '\t']);
+    if tag.starts_with(['!', '?']) {
+        return true;
+    }
+    let tag = tag.strip_prefix('/').unwrap_or(tag);
+    let name = tag
+        .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
+        .next()
+        .unwrap_or("");
+    let tail = &tag[name.len()..];
+    let named_block = TABLE_ENDING_HTML
+        .split_ascii_whitespace()
+        .any(|block| name.eq_ignore_ascii_case(block));
+    if named_block && (tail.is_empty() || tail.starts_with([' ', '>']) || tail.starts_with("/>")) {
+        return true;
+    }
+    for raw in ["script", "pre", "style", "textarea"] {
+        if !line.starts_with("</")
+            && name.eq_ignore_ascii_case(raw)
+            && (tail.is_empty()
+                || tail
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c == '>' || is_js_whitespace(c)))
+        {
+            return true;
+        }
+        // Marked excludes these prefixes from standalone custom tags.
+        if name
+            .get(..raw.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(raw))
+        {
+            return false;
+        }
+    }
+    // Marked permits underscores in custom tag names. Keep this local:
+    // the existing inline reader has its own spelling contract.
+    let opening: std::borrow::Cow<'_, str> = if name.contains('_')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && !line.starts_with("</")
+    {
+        std::borrow::Cow::Owned(format!("<x{tail}"))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    };
+    html_tag_end(&opening, false).is_some_and(|end| opening[end..].trim().is_empty())
+        || line
+            .strip_prefix("</")
+            .and_then(|tag| tag.strip_suffix('>'))
+            .is_some_and(|tag| {
+                let name = tag.trim_end_matches(is_js_whitespace);
+                name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            })
+}
+
 /// Whether outside Markdown's additional item blocks belong to the proved
 /// subset. This does not enable strict-fold admission or authorize a witness.
 pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
@@ -3043,71 +3109,6 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
             }
             _ => !in_item,
         })
-    }
-
-    fn html_block(line: &str) -> bool {
-        let Some(tag) = line.strip_prefix('<') else {
-            return false;
-        };
-        let line = line.trim_end_matches([' ', '\t']);
-        let tag = tag.trim_end_matches([' ', '\t']);
-        if tag.starts_with(['!', '?']) {
-            return true;
-        }
-        let tag = tag.strip_prefix('/').unwrap_or(tag);
-        let name = tag
-            .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
-            .next()
-            .unwrap_or("");
-        let tail = &tag[name.len()..];
-        let named_block = TABLE_ENDING_HTML
-            .split_ascii_whitespace()
-            .any(|block| name.eq_ignore_ascii_case(block));
-        if named_block
-            && (tail.is_empty() || tail.starts_with([' ', '>']) || tail.starts_with("/>"))
-        {
-            return true;
-        }
-        for raw in ["script", "pre", "style", "textarea"] {
-            if !line.starts_with("</")
-                && name.eq_ignore_ascii_case(raw)
-                && (tail.is_empty()
-                    || tail
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c == '>' || is_js_whitespace(c)))
-            {
-                return true;
-            }
-            // Marked excludes these prefixes from standalone custom tags.
-            if name
-                .get(..raw.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(raw))
-            {
-                return false;
-            }
-        }
-        // Marked permits underscores in custom tag names. Keep this local:
-        // the existing inline reader has its own spelling contract.
-        let opening: std::borrow::Cow<'_, str> = if name.contains('_')
-            && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            && !line.starts_with("</")
-        {
-            std::borrow::Cow::Owned(format!("<x{tail}"))
-        } else {
-            std::borrow::Cow::Borrowed(line)
-        };
-        html_tag_end(&opening, false).is_some_and(|end| opening[end..].trim().is_empty())
-            || line
-                .strip_prefix("</")
-                .and_then(|tag| tag.strip_suffix('>'))
-                .is_some_and(|tag| {
-                    let name = tag.trim_end_matches(is_js_whitespace);
-                    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                        && name
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                })
     }
 
     // The source parser retains some blocks as text. Line shapes close
@@ -3597,16 +3598,25 @@ fn parse_markdown_blocks_at<'src>(
             MarkdownReading::Source
         };
         let mut para = vec![line];
-        let mut underline = None;
+        let mut heading = None;
         index += 1;
         while index < lines.len() {
             let next = lines[index];
-            if let Some(level) = setext_underline(next).filter(|_| in_list) {
+            if in_list && next.trim_end_matches([' ', '\t']) == "-" {
+                heading = Some((2, para.join("\n")));
+                break;
+            }
+            // The file reading also takes marked's other underlines. Every
+            // other reading keeps them as text, so a document it built still
+            // proves its file.
+            if let Some(level) =
+                setext_underline(next).filter(|_| in_list && reading == MarkdownReading::Source)
+            {
                 // marked reads every line above the underline as one heading,
                 // which the projector cannot write back as one.
                 match setext_text(para[0]) {
                     Some(true) if para.len() == 1 => {
-                        underline = Some(level);
+                        heading = Some((level, setext_heading_text(line).to_owned()));
                         break;
                     }
                     Some(false) => {}
@@ -3632,11 +3642,8 @@ fn parse_markdown_blocks_at<'src>(
             para.push(next);
             index += 1;
         }
-        if let Some(level) = underline {
-            blocks.push(MdBlock::Heading {
-                level,
-                text: setext_heading_text(line).to_owned(),
-            });
+        if let Some((level, text)) = heading {
+            blocks.push(MdBlock::Heading { level, text });
             index += 1;
             continue;
         }

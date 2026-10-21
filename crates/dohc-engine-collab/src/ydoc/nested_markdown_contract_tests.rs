@@ -811,7 +811,12 @@ fn nested_contract_r24_block_paragraph_whitespace() {
         assert!(!serde_json::to_string(&doc.canonical_content()["body"])
             .unwrap()
             .contains('\u{a0}'));
-        for source in ["- a\n  -\n\n x", "- a\n  *\n\n x", "- a\n  1.\n\n x"] {
+        for source in [
+            "- a\n  -\n\n x",
+            "- a\n  b\n  -\n\n x",
+            "- a\n  *\n\n x",
+            "- a\n  1.\n\n x",
+        ] {
             Ydoc::wire()
                 .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
                 .expect(source);
@@ -845,7 +850,7 @@ fn nested_contract_r25_boundaries_in_every_reading() {
                     case["source"].as_str().unwrap(),
                     reading,
                 );
-                if case["refuse"] == true || case["nativeSourceRefuse"] == true {
+                if case["refuse"] == true {
                     assert!(result.is_err());
                     return;
                 }
@@ -865,10 +870,7 @@ fn nested_contract_r25_boundaries_in_every_reading() {
 
 #[test]
 fn nested_contract_r25_multiline_heading_reread_stabilizes() {
-    // Every reading refuses the source. The desktop writes its heading over
-    // two lines, which reads back as a heading and then a paragraph.
     let source = "- a\n  b\n  -\n\n x";
-    let first = "- \n  ## a\n  b\n\n&#32;x";
     for reading in [
         MarkdownReading::Source,
         MarkdownReading::Projection,
@@ -876,12 +878,13 @@ fn nested_contract_r25_multiline_heading_reread_stabilizes() {
         MarkdownReading::Successor,
     ] {
         let doc = Ydoc::wire();
-        assert!(doc
-            .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
-            .is_err());
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+            .unwrap();
+        let first = doc.project_richdoc().unwrap();
+        assert_eq!(first, "- \n  ## a\n  b\n\n&#32;x");
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
-            first,
+            &first,
             MarkdownReading::ProjectedSource,
         )
         .unwrap();
@@ -960,14 +963,14 @@ fn nested_contract_indented_code_refuses_where_marked_reads_otherwise() {
 #[test]
 fn nested_contract_item_setext_underline_follows_marked() {
     // marked's heading text stops before a line that could start a block,
-    // a `<...>` that ends the line included, and its underline ends in spaces
-    // only, so these items hold text.
+    // block HTML and a `<...>` that ends the line included, and its
+    // underline ends in spaces only, so these items hold text.
     for (source, canonical) in [
         ("- #tag\n  --", "- #tag\n  &#45;-"),
-        ("- #tag\n  -", "- #tag\n  &#45;"),
         ("- a\n  --\t", "- a\n  &#45;-"),
         ("- <3 >\n  --", "- &lt;3 &gt;\n  &#45;-"),
         ("- <x>\n  --", "- &lt;x&gt;\n  &#45;-"),
+        ("- <div> x\n  --", "- &lt;div&gt; x\n  &#45;-"),
     ] {
         for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
             let doc = Ydoc::wire();
@@ -983,40 +986,36 @@ fn nested_contract_item_setext_underline_follows_marked() {
 }
 
 #[test]
-fn nested_contract_item_setext_refuses_what_the_projector_cannot_keep() {
-    // marked reads both lines as one heading, which the projector writes as
-    // a heading and then a paragraph. Raw HTML can start a block or stay in
-    // the heading, and this reader follows neither.
-    for source in [
-        "- a\n  b\n  --",
-        "- a\n  b\n  =",
-        "- a\n  b\n  -",
-        "- <b>x</b>\n  --",
-        "- <b>x</b>\n  --\n  -:",
-        "- <div> x\n  --",
+fn nested_contract_item_setext_other_readings_keep_text() {
+    // Only the file reading takes these underlines. The fold and the other
+    // readings keep them as text, so a document they built still proves its
+    // file.
+    for (source, text) in [
+        ("- a\n  --", "- a\n  &#45;-"),
+        ("- a\n  =", "- a\n  &#61;"),
+        ("- a\n   -", "- a\n   &#45;"),
+        ("- a\n  b\n  --", "- a\n  b\n  &#45;-"),
+        ("- a\n  b\n  =", "- a\n  b\n  &#61;"),
     ] {
         for reading in [
-            MarkdownReading::Source,
             MarkdownReading::Projection,
             MarkdownReading::ProjectedSource,
             MarkdownReading::Successor,
         ] {
-            assert!(
-                Ydoc::wire()
-                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
-                    .is_err(),
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                text,
                 "{source:?}, {reading:?}"
             );
         }
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), text, "{source:?}, fold");
     }
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown_as(
-        ContentKind::Richdoc,
-        "- \n  ## a\n  b",
-        MarkdownReading::Source,
-    )
-    .unwrap();
-    assert_eq!(doc.project_richdoc().unwrap(), "- \n  ## a\n\n  b");
 }
 
 #[test]

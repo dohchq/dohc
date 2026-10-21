@@ -235,9 +235,13 @@ fn passive_store_concurrent_delayed_and_source() {
         seed_text_head(&mut owner, "source", "source.md", source);
         let doc = Ydoc::wire();
         if let Some(canonical) = desktop_canonical {
+            let folded = Ydoc::wire();
             assert!(
-                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+                folded
+                    .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
                     .is_err()
+                    || folded.project(ContentKind::Richdoc).unwrap().content != canonical,
+                "{name}"
             );
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
                 .unwrap();
@@ -308,14 +312,33 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
     use base64::Engine as _;
     let vectors: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../tests/settle-parity/yjs.json")).unwrap();
-    // Each desktop seed settles with the file on disk and without it. Main
-    // settled `lexical-16` as fenced code, which its next settle turns back
-    // into the source. The engine refuses a list-item heading over two lines,
-    // so both settles write its projection, as main did.
-    for (name, file) in [
-        ("lexical-16", "```\nindented code\n```"),
-        ("list-heading", "- Plan\n  --\n- Notes\n"),
-        ("list-heading-two-lines", "- a\n  b\n  --\n"),
+    // Each desktop seed settles with the file on disk, then without it, which
+    // writes the vector's Markdown. Main settled `lexical-16` as fenced code,
+    // which its next settle turns back into the source. The file reading
+    // refuses a `--` heading over two lines, so both settles write its
+    // projection, as main did. A bare `-` heading over two lines keeps its
+    // file, as on main.
+    for (name, file, with_file) in [
+        (
+            "lexical-16",
+            "```\nindented code\n```",
+            "    indented code\n",
+        ),
+        (
+            "list-heading",
+            "- Plan\n  --\n- Notes\n",
+            "- Plan\n  --\n- Notes\n",
+        ),
+        (
+            "list-heading-two-lines",
+            "- a\n  b\n  --\n",
+            "- \n  ## a\n  b",
+        ),
+        (
+            "list-heading-bare-dash-two-lines",
+            "- a\n  b\n  -\n",
+            "- a\n  b\n  -\n",
+        ),
     ] {
         let vector = vectors
             .iter()
@@ -339,7 +362,7 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
             .unwrap()
             .content;
-        assert_eq!(owner_text, expected, "owner: {name}");
+        assert_eq!(owner_text, with_file, "owner: {name}");
         let (_scratch, _path, mut replica_store) = open_passive_store();
         seed_replication_version(&mut replica_store, "main", "main");
         let missing_file = replica_store
