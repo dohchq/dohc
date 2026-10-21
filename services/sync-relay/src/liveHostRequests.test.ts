@@ -17,12 +17,13 @@ function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
     readNextLiveApplied: (input: {id: number}, _position: unknown, _limit: number, signal?: AbortSignal) => invoke(input, signal),
     readLiveApplicationAck(input: {id: number}, _identity: unknown, signal?: AbortSignal) {return this.sendRequest(input, signal);},
     checkFirstOpenCandidate: (input: {id: number}, _candidate: unknown, signal?: AbortSignal) => invoke(input, signal),
+    cancelRequest: vi.fn(async (_id: number) => undefined),
   };
   const retire = vi.fn(() => lifetime.abort(new Error("retired")));
   const client = queueLiveHostRequests(native as unknown as EngineClient, {maxPendingReads: maxPending, maxPendingWrites: maxPending,
     maxRetainedInputBytes,
     deadlineMs: 1000, signal: lifetime.signal, retire});
-  return {client, invoke, seen, lifetime, retire};
+  return {client, invoke, seen, lifetime, retire, cancelRequest: native.cancelRequest};
 }
 afterEach(() => vi.useRealTimers());
 
@@ -54,7 +55,7 @@ it("holds active capacity after caller cancellation until native actually comple
   const refused = expect(active).rejects.toThrow("reader closed");
   caller.abort(new Error("reader closed"));
   expect(f.invoke.mock.calls[0]![1]).toBe(f.lifetime.signal);
-  expect(f.lifetime.signal.aborted).toBe(false);
+  expect(f.lifetime.signal.aborted).toBe(false); expect(f.cancelRequest).not.toHaveBeenCalled();
   const next = f.client.sendRequest(request(2)); expect(f.invoke).toHaveBeenCalledTimes(1);
   release.resolve(null); await refused; await next;
   expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
@@ -128,15 +129,34 @@ it("holds an active envelope's input charge until native completes after cancell
 
 const firstOpen = (bytes: number) => ({objectId: "object", path: "a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
   source: new Uint8Array(bytes), sourceSha256: "a".repeat(64), candidate: new Uint8Array(bytes), candidateSha256: "b".repeat(64), maxFullStateBytes: 100});
-it("queues a first-open check with its candidate and source charged until native completes after cancellation", async () => {
+it("asks native to stop a cancelled first-open check and holds its slot and input until native answers", async () => {
   const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();
   f.invoke.mockImplementationOnce(() => release.promise);
   const active = f.client.checkFirstOpenCandidate(request(1), firstOpen(10_000), caller.signal);
   const cancelled = expect(active).rejects.toThrow("cancelled"); caller.abort(new Error("cancelled"));
+  expect(f.cancelRequest).toHaveBeenCalledWith(1);
   expect(f.invoke.mock.calls[0]![1]).toBe(f.lifetime.signal);
   await expect(f.client.checkFirstOpenCandidate(request(2), firstOpen(10_000))).rejects.toThrow("retained input capacity");
-  expect(f.invoke).toHaveBeenCalledTimes(1); release.resolve({result: {}}); await cancelled;
-  await f.client.checkFirstOpenCandidate(request(3), firstOpen(10_000)); expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
+  const next = f.client.sendRequest(request(4)); expect(f.invoke).toHaveBeenCalledTimes(1);
+  // The check finished before it saw the cancellation; its answer is still withheld.
+  release.resolve({result: {status: "checked"}}); await cancelled; await next;
+  await f.client.checkFirstOpenCandidate(request(3), firstOpen(10_000)); expect(f.invoke).toHaveBeenCalledTimes(3);
+  expect(f.cancelRequest).toHaveBeenCalledOnce(); f.lifetime.abort();
+});
+
+it("gives a queued request only what remains of the deadline it entered with", async () => {
+  const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+  try {
+    const f = fixture(), release = deferred<unknown>();
+    f.invoke.mockImplementationOnce(() => release.promise);
+    const active = f.client.sendRequest(request(1));
+    const queued = f.client.checkFirstOpenCandidate(request(2), firstOpen(10));
+    const expired = f.client.checkFirstOpenCandidate({...request(3), deadlineMs: 300}, firstOpen(10)).catch((error: unknown) => error);
+    clock.mockReturnValue(500); release.resolve({result: {}}); await Promise.all([active, queued]);
+    expect(f.invoke.mock.calls[1]![0]).toMatchObject({id: 2, deadlineMs: 600});
+    expect(await expired).toMatchObject({message: "Native request queue deadline exceeded."});
+    expect(f.invoke).toHaveBeenCalledTimes(2); expect(f.retire).not.toHaveBeenCalled(); f.lifetime.abort();
+  } finally {clock.mockRestore();}
 });
 
 it("refuses an oversized backing allocation before native and leaves no partial reservation", async () => {

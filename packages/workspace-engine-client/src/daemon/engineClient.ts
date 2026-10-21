@@ -725,6 +725,8 @@ interface PendingRequest {
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
   readonly restoreOutput?: PrivateLiveOutput;
   readonly cancelUnsent?: () => boolean;
+  // An upload's cancel waits for its input, so the stream stays framed.
+  readonly cancelAfterInput?: () => void;
   // Present only when the request asked the engine for progress.
   readonly onProgress?: () => void;
 }
@@ -1244,6 +1246,10 @@ export class EngineClient implements EngineTransport {
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
     const expire = (): void => abandon(new EngineRequestDeadlineError(wireId, request.method, deadlineMs!), false);
+    let cancelRequested = false;
+    const sendCancel = (): void => {
+      if (this.pending.has(wireId)) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
+    };
     const abort = (): void => {
       // Finish reserved input before cancelling so other requests retain valid framing.
       if ((writeInput && !inputComplete) || cancellationSent) return;
@@ -1277,12 +1283,16 @@ export class EngineClient implements EngineTransport {
           abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }), false);
           return true;
         } } : {}),
+        ...(writeInput ? { cancelAfterInput: () => {
+          cancelRequested = true;
+          if (inputComplete) sendCancel();
+        } } : {}),
         ...(progress ? { onProgress } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
       writeTask = this.writeFrame(() => {
         let payload = serializedEnvelope;
-        if (ordinary && expiresAt !== null) {
+        if (expiresAt !== null) {
           const remaining = Math.ceil(expiresAt - performance.now());
           if (remaining <= 0) {
             expire();
@@ -1293,7 +1303,7 @@ export class EngineClient implements EngineTransport {
           payload = JSON.stringify(captured);
         }
         const frame = encodeFrame(FrameType.Control, 0, Buffer.from(payload, "utf8"), this.maxFrameBytes);
-        if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
+        if (expiresAt !== null && performance.now() >= expiresAt) {
           expire();
           throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
         }
@@ -1303,6 +1313,7 @@ export class EngineClient implements EngineTransport {
         await writeInput?.(wireId);
         inputComplete = true;
         if (signal?.aborted) abort();
+        else if (cancelRequested) sendCancel();
       });
       void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
@@ -1327,7 +1338,7 @@ export class EngineClient implements EngineTransport {
       // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
         await writeTask.catch(() => undefined);
-        if (!inputComplete) this.close();
+        if (transmitted && !inputComplete) this.close();
       }
       throw error;
     } finally {
@@ -1631,11 +1642,13 @@ export class EngineClient implements EngineTransport {
     }
     this.liveUploadBytes += charge;
     this.liveUploads += 1;
+    const expiresAt = performance.now() + request.deadlineMs;
     let stopped = false;
+    let started = false;
     let uploaded = false;
     const abort = (): void => {
       stopped = true;
-      if (!uploaded) this.close();
+      if (started && !uploaded) this.close();
     };
     // The reply timer ends when a response arrives. Keep the upload deadline
     // through the final drain so an early reply cannot strand retained input.
@@ -1643,8 +1656,11 @@ export class EngineClient implements EngineTransport {
 
     try {
       const upload = prepare();
+      // Preparation comes out of the request's one deadline.
+      const deadlineMs = Math.ceil(expiresAt - performance.now());
+      if (deadlineMs < 1) throw new EngineRequestDeadlineError(request.id, method, request.deadlineMs);
       const outgoing: Request = {
-        id: request.id, workspace: request.workspace, method, deadlineMs: request.deadlineMs,
+        id: request.id, workspace: request.workspace, method, deadlineMs,
         idempotencyKey: null, params: upload.params,
       };
       if (upload.streams.length === 0) {
@@ -1653,6 +1669,7 @@ export class EngineClient implements EngineTransport {
         return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
       }
       const writeInput = async (wireId: number): Promise<void> => {
+        started = true;
         const current = (): void => {
           if (
             stopped ||
@@ -1726,7 +1743,7 @@ export class EngineClient implements EngineTransport {
    * A live application acknowledgement (apply, settle, restore fence, native
    * restore, owner activation capture) stopped after its work landed gets no
    * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
-   * the outcome is unknown.
+   * the outcome is unknown. An upload's cancel follows its last input frame.
    */
   async cancelRequest(callerId: number): Promise<void> {
     const pending = [...this.pending.entries()].find(
@@ -1734,6 +1751,7 @@ export class EngineClient implements EngineTransport {
     );
     if (!pending) return;
     if (pending[1].cancelUnsent?.()) return;
+    if (pending[1].cancelAfterInput) return pending[1].cancelAfterInput();
     await this.writeEnvelope({ type: "cancel", id: pending[0] });
   }
 

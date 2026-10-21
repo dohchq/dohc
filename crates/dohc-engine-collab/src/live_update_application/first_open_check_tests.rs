@@ -331,6 +331,24 @@ fn the_public_baseline_schema_is_enforced() {
 }
 
 #[test]
+fn a_valid_baseline_too_deep_to_project_is_refused_as_projection_failed() {
+    let candidate = first_open_candidate_too_deep_to_project();
+    let doc = Ydoc::wire();
+    doc.apply(&candidate).unwrap();
+    assert!(!doc.has_missing_updates());
+    assert!(doc.validate_public_baseline(&candidate).is_ok());
+    assert!(doc.project(ContentKind::Richdoc).is_err());
+    assert_eq!(
+        refusal(&candidate, "deep\n"),
+        FirstOpenCandidateRefusal::ProjectionFailed
+    );
+    assert_eq!(
+        FirstOpenCandidateRefusal::ProjectionFailed.as_str(),
+        "projection-failed"
+    );
+}
+
+#[test]
 fn malformed_and_incomplete_updates_are_refused() {
     let candidate = seeded("Body\n");
     for bytes in [

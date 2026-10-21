@@ -149,6 +149,32 @@ pub fn check_first_open_candidate(
     ))
 }
 
+/// A complete schema version 1 candidate without a source witness whose
+/// blockquotes nest one level past the projection depth limit. Its public
+/// baseline is valid, so it reaches projection and fails there.
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_open_candidate_too_deep_to_project() -> Vec<u8> {
+    use yrs::types::xml::XmlIn;
+    use yrs::{
+        Any, Doc, Map, ReadTxn, StateVector, Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim,
+    };
+    let doc = Doc::new();
+    let meta = doc.get_or_insert_map(crate::ydoc::ROOT_META);
+    let body = doc.get_or_insert_xml_fragment(crate::ydoc::ROOT_BODY);
+    let mut child: XmlIn =
+        XmlElementPrelim::new("paragraph", [XmlIn::from(XmlTextPrelim::new("deep"))]).into();
+    for _ in 0..=crate::limits::MAX_PROJECTION_DEPTH {
+        child = XmlElementPrelim::new("blockquote", [child]).into();
+    }
+    {
+        let mut txn = doc.transact_mut();
+        meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+        body.push_back(&mut txn, child);
+    }
+    let txn = doc.transact();
+    txn.encode_state_as_update_v1(&StateVector::default())
+}
+
 #[cfg(test)]
 #[path = "first_open_check_tests.rs"]
 mod tests;

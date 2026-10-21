@@ -498,6 +498,48 @@ mod tests {
         f.close().await;
     }
 
+    /// While one first-open check holds its slot, a second is refused and a
+    /// live edit and a restore upload still find an upload slot.
+    #[tokio::test]
+    async fn a_held_first_open_check_leaves_slots_for_live_edits_and_restores() {
+        use crate::rpc::live_application::first_open_check::tests::{binding, candidate};
+        let mut f = Fixture::with_first_open_neighbour().await;
+        let neighbour = f.neighbour.as_ref().unwrap().1.clone();
+        let markdown = "Title\n=====\n\nBody\n";
+        let bytes = candidate(markdown);
+        let bundle = [bytes.as_slice(), markdown.as_bytes()].concat();
+        let check = |f: &mut Fixture| {
+            let stream = f.id + 10;
+            let mut request = f.request("liveApplication.checkFirstOpenCandidate", json!({
+                "contractVersion":1,"binding":binding(&bytes, markdown.as_bytes(), MAX_YDOC_UPDATE_BYTES),
+                "streamId":stream,"byteLength":bundle.len(),"digest":hex_sha256(&bundle)}));
+            request.workspace = Some(neighbour.clone());
+            let id = request.id;
+            f.ingress.begin(request, &f.owner.handle()).unwrap();
+            f.ingress
+                .start(BlobStart {
+                    request_id: id,
+                    stream_id: stream,
+                    total_bytes: Some(bundle.len() as u64),
+                    sha256: Some(hex_sha256(&bundle)),
+                })
+                .unwrap();
+            f.ingress.chunk(stream, true, &bundle).unwrap().unwrap()
+        };
+        let held = check(&mut f);
+        assert!(matches!(held, super::UploadCompletion::Admitted(..)));
+        let second = check(&mut f);
+        f.edit("# Edited\n").await;
+        drop(f.prepare_admitted().await);
+        let super::UploadCompletion::Refused(_, error) = second else {
+            panic!("a second first-open check was admitted")
+        };
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        drop(held);
+        assert_eq!(f.ingress.first_open_slot.available_permits(), 1);
+        f.close().await;
+    }
+
     struct Fixture {
         _scratch: ScratchDir,
         service: Arc<EngineService>,
@@ -511,12 +553,20 @@ mod tests {
         registration: Value,
         terminal: Value,
         sequence: u64,
+        /// An ordinary workspace on the same configured host, for first-open checks.
+        neighbour: Option<(ScratchDir, WorkspaceHandle)>,
     }
     impl Fixture {
         async fn new() -> Self {
-            Self::with_ordinary_host(false).await
+            Self::build(false, false).await
         }
         async fn with_ordinary_host(ordinary: bool) -> Self {
+            Self::build(ordinary, false).await
+        }
+        async fn with_first_open_neighbour() -> Self {
+            Self::build(false, true).await
+        }
+        async fn build(ordinary: bool, neighbour: bool) -> Self {
             let scratch = ScratchDir::new().unwrap();
             let db = scratch.path().join(".dohc/engine/engine.db");
             std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -527,15 +577,24 @@ mod tests {
                 .ensure_main_version("workspace", "main", 0, &NoFaults)
                 .unwrap();
             drop(store);
+            let neighbour_root = neighbour.then(|| ScratchDir::new().unwrap());
+            let mut workspaces =
+                vec![json!({"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4})];
+            if let Some(root) = &neighbour_root {
+                workspaces.push(
+                    json!({"root":root.path(),"workspaceId":"neighbour","maxRegistrations":4,
+                    "relay":{"baseUrl":"https://relay.example","bearerToken":"owner-credential"}}),
+                );
+            }
             let config = serde_json::from_value(json!({
                 "version":1,"relayNamespace":"namespace",
                 "host":{"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
-                "workspaces":[{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+                "workspaces":workspaces,
                 "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":32*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
                 "restore":{"maxBytes":1_000_000,"maxEvents":100},
                 "sync":{"policy":{"maxClientVectorBytes":1024,"maxHostVectorBytes":4096,"maxOutputBytes":1_000_000,"maxReadBytes":10_000_000},"workingReserveBytes":16*1024*1024}
             })).unwrap();
-            let (service, owner, ingress, workspace) = if ordinary {
+            let (service, owner, ingress, workspace, neighbour) = if ordinary {
                 let config = serde_json::from_value(json!({
                     "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":32*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
                     "maxRegistrations":4,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
@@ -559,12 +618,20 @@ mod tests {
                         host_id: "host".into(), host_epoch: 1, instance_id: "instance".into(), connection_id: "connection".into(),
                     }, max_registrations: 4,
                 }).await.unwrap();
-                (service, owner, ingress, workspace)
+                (service, owner, ingress, workspace, None)
             } else {
                 let (service, owner, ingress) =
                     EngineService::configured_live_host(config).await.unwrap();
-                let workspace = lock(&service.handles).keys().next().unwrap().clone();
-                (service, owner, ingress, workspace)
+                let handle = |id: &str| {
+                    lock(&service.handles)
+                        .iter()
+                        .find(|(_, open)| open.workspace_id == id)
+                        .map(|(handle, _)| handle.clone())
+                        .unwrap()
+                };
+                let workspace = handle("workspace");
+                let neighbour = neighbour_root.map(|root| (root, handle("neighbour")));
+                (service, owner, ingress, workspace, neighbour)
             };
             let vectors: Value = serde_json::from_str(include_str!(
                 "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
@@ -596,6 +663,7 @@ mod tests {
                 registration: Value::Null,
                 terminal: Value::Null,
                 sequence: 0,
+                neighbour,
             };
             let register = f
                 .control("liveApplication.register", json!({"binding":f.binding}))
@@ -785,6 +853,7 @@ mod tests {
                 mut service,
                 ingress,
                 workspace,
+                neighbour,
                 ..
             } = self;
             drop(ingress);
@@ -794,21 +863,24 @@ mod tests {
                     .configured_live_host
                     .take();
             }
-            service
-                .call(
-                    RequestContext::unbounded(),
-                    Request {
-                        id: 1000,
-                        method: "workspace.close".into(),
-                        workspace: Some(workspace),
-                        deadline_ms: None,
-                        idempotency_key: None,
-                        progress: false,
-                        params: Value::Null,
-                    },
-                )
-                .await
-                .unwrap();
+            let (_neighbour_root, neighbour) = neighbour.unzip();
+            for workspace in std::iter::once(workspace).chain(neighbour) {
+                service
+                    .call(
+                        RequestContext::unbounded(),
+                        Request {
+                            id: 1000,
+                            method: "workspace.close".into(),
+                            workspace: Some(workspace),
+                            deadline_ms: None,
+                            idempotency_key: None,
+                            progress: false,
+                            params: Value::Null,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
         }
     }
     fn framed(header: &Value) -> Vec<u8> {

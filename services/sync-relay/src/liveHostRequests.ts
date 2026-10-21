@@ -54,38 +54,48 @@ export function queueLiveHostRequests(client: EngineClient, options: {
   };
   options.signal.addEventListener("abort", stopped, {once: true});
 
-  function run(kind: Kind, caller: AbortSignal | undefined, input: unknown[], work: () => Promise<unknown>) {
+  function run(kind: Kind, caller: AbortSignal | undefined, input: unknown[], deadlineMs: number | undefined,
+    work: (remainingMs: number | undefined) => Promise<unknown>, forwardCancel?: () => void) {
     return new Promise((resolve, reject) => {
       if (caller?.aborted || options.signal.aborted) {reject(caller?.reason ?? options.signal.reason); return;}
       const queue = pending[kind], limit = kind === "read" ? options.maxPendingReads : options.maxPendingWrites;
       if (queue.length >= limit) {reject(new Error("Native request queue capacity is full.")); return;}
       const charge = retainedInputCharge(input, options.maxRetainedInputBytes - retainedBytes);
       retainedBytes += charge;
+      // One absolute deadline from entry: queueing comes out of what native gets.
+      const expiresAt = deadlineMs === undefined ? undefined : performance.now() + deadlineMs;
       let released = false;
       const releaseInput = () => {if (!released) {released = true; retainedBytes -= charge;}};
       let timer: ReturnType<typeof setTimeout>;
       const clean = () => {clearTimeout(timer); caller?.removeEventListener("abort", aborted);};
+      const expired = () => new Error("Native request queue deadline exceeded.");
       const entry: Pending = {
         kind,
         cancel(reason) {const index = queue.indexOf(entry); if (index >= 0) queue.splice(index, 1); clean(); releaseInput(); reject(reason);},
         start() {
           clean();
+          const remainingMs = expiresAt === undefined ? undefined : Math.ceil(expiresAt - performance.now());
           // Keep the caller's input reservation until the real response settles.
-          // Forwarding cancellation here could free the local slot before the peer.
+          // A forwarded cancellation still waits for native's answer.
+          if (forwardCancel) caller?.addEventListener("abort", forwardCancel, {once: true});
           void (async () => {
             try {
-              const value = await work();
+              if (remainingMs !== undefined && remainingMs < 1) throw expired();
+              const value = await work(remainingMs);
               options.signal.throwIfAborted(); caller?.throwIfAborted(); resolve(value);
             } catch (error) {
               if (error instanceof EngineRequestDeadlineError) options.retire();
               reject(error);
-            } finally {releaseInput(); active = false; pump();}
+            } finally {
+              if (forwardCancel) caller?.removeEventListener("abort", forwardCancel);
+              releaseInput(); active = false; pump();
+            }
           })();
         },
       };
       const aborted = () => entry.cancel(caller!.reason);
       caller?.addEventListener("abort", aborted, {once: true});
-      timer = setTimeout(() => entry.cancel(new Error("Native request queue deadline exceeded.")), options.deadlineMs);
+      timer = setTimeout(() => entry.cancel(expired()), Math.min(options.deadlineMs, deadlineMs ?? options.deadlineMs));
       queue.push(entry); pump();
     });
   }
@@ -94,6 +104,8 @@ export function queueLiveHostRequests(client: EngineClient, options: {
   // this queue again while their outer operation owns its only active slot.
   const signals = {sendRequest: 1, sendLiveBootstrap: 2, sendLiveApplication: 2, sendLiveOwnerAdoption: 3, captureOwnerActivation: 3,
     sendLiveRestore: 4, openLiveAppliedSync: 3, readNextLiveApplied: 3, readLiveApplicationAck: 2, checkFirstOpenCandidate: 2} as const satisfies Partial<Record<keyof EngineClient, number>>;
+  // Native answers a cancelled check only once its work exits, so the slot stays held until then.
+  const forwardsCancellation = new Set<PropertyKey>(["checkFirstOpenCandidate"]);
   const methods = new Map<PropertyKey, unknown>();
   return new Proxy(client, {get(target, property) {
     if (methods.has(property)) return methods.get(property);
@@ -104,8 +116,13 @@ export function queueLiveHostRequests(client: EngineClient, options: {
     const wrapped = index === undefined ? method : (...args: unknown[]) => {
       const caller = args[index] as AbortSignal | undefined;
       args[index] = options.signal;
+      const request = args[0] as {id: number; deadlineMs?: number | null};
       const kind = property === "openLiveAppliedSync" || property === "readNextLiveApplied" ? "read" : "write";
-      return run(kind, caller, args.slice(0, index), () => method(...args));
+      const forwardCancel = forwardsCancellation.has(property) ? () => void target.cancelRequest(request.id).catch(() => undefined) : undefined;
+      return run(kind, caller, args.slice(0, index), request.deadlineMs ?? undefined, remainingMs => {
+        if (remainingMs !== undefined) args[0] = {...request, deadlineMs: remainingMs};
+        return method(...args);
+      }, forwardCancel);
     };
     methods.set(property, wrapped); return wrapped;
   }});

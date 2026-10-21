@@ -408,46 +408,61 @@ pub(crate) mod tests {
         (rows, files)
     }
 
-    /// The check stops when its host loses standing, and the reservation it
-    /// carries stays charged until the check itself returns, even after its
-    /// join handle is aborted.
+    /// The check stops when its caller cancels or its host loses standing
+    /// while the work is held, and the reservation it carries stays charged
+    /// until the check itself returns, even after its join handle is aborted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_reservation_outlives_its_caller_until_the_check_exits() {
-        let f = Fixture::new().await;
-        let markdown = "Title\n=====\n\nBody\n";
-        let bytes = candidate(markdown);
-        let budget = Arc::new(tokio::sync::Semaphore::new(1));
-        let host = f
-            .service
-            .first_open_check_host(&f.owner.handle(), Some(&f.ordinary))
-            .unwrap();
-        let guard = Arc::new(RestoreFenceOutputGuard {
-            host: host.clone(),
-            cancel: CancelSignal::new(),
-            deadline: None,
-        });
-        let input = FirstOpenCheckInput {
-            host,
-            binding: binding(&bytes, markdown.as_bytes(), MAX_YDOC_UPDATE_BYTES),
-            bundle: [bytes.as_slice(), markdown.as_bytes()].concat(),
-            reservation: Arc::new(budget.clone().try_acquire_owned().unwrap()),
-        };
-        let (entered, entering) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let current = guard.clone();
-        let work = spawn_check(input, move || {
-            let _ = entered.send(());
-            let _ = released.recv();
-            !current.is_current()
-        });
-        entering.recv().unwrap();
-        work.abort();
-        assert_eq!(budget.available_permits(), 0);
-        f.detach(&f.ordinary).await.unwrap();
-        assert!(!guard.is_current());
-        release.send(()).unwrap();
-        assert!(matches!(work.await, Ok(Err(FirstOpenCheckError::Stopped))));
-        assert_eq!(budget.available_permits(), 1);
-        f.close().await;
+        for detach in [false, true] {
+            let f = Fixture::new().await;
+            let markdown = "Title\n=====\n\nBody\n";
+            let bytes = candidate(markdown);
+            let budget = Arc::new(tokio::sync::Semaphore::new(1));
+            let host = f
+                .service
+                .first_open_check_host(&f.owner.handle(), Some(&f.ordinary))
+                .unwrap();
+            let cancel = CancelSignal::new();
+            let guard = Arc::new(RestoreFenceOutputGuard {
+                host: host.clone(),
+                cancel: cancel.clone(),
+                deadline: None,
+            });
+            let input = FirstOpenCheckInput {
+                host,
+                binding: binding(&bytes, markdown.as_bytes(), MAX_YDOC_UPDATE_BYTES),
+                bundle: [bytes.as_slice(), markdown.as_bytes()].concat(),
+                reservation: Arc::new(budget.clone().try_acquire_owned().unwrap()),
+            };
+            let (entered, entering) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let current = guard.clone();
+            let work = spawn_check(input, move || {
+                let _ = entered.send(());
+                let _ = released.recv();
+                !current.is_current()
+            });
+            entering.recv().unwrap();
+            work.abort();
+            assert_eq!(budget.available_permits(), 0);
+            if detach {
+                f.detach(&f.ordinary).await.unwrap();
+            } else {
+                cancel.cancel();
+            }
+            assert!(!guard.is_current());
+            assert_eq!(budget.available_permits(), 0);
+            release.send(()).unwrap();
+            assert!(matches!(work.await, Ok(Err(FirstOpenCheckError::Stopped))));
+            // The caller hears why the work stopped, not a verdict.
+            let expected = if detach {
+                ErrorCode::WorkspaceUnavailable
+            } else {
+                ErrorCode::Cancelled
+            };
+            assert_eq!(stopped(&guard).code, expected);
+            assert_eq!(budget.available_permits(), 1);
+            f.close().await;
+        }
     }
 }

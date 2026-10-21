@@ -28,7 +28,14 @@ pub(super) struct Upload {
 
 struct Admitted {
     host: Arc<Host>,
-    permit: Arc<Reservation>,
+    permit: Arc<CheckReservation>,
+}
+
+/// The first-open slot with the shared upload slot and bytes, released
+/// together when the check exits.
+struct CheckReservation {
+    _check: OwnedSemaphorePermit,
+    _shared: Reservation,
 }
 
 impl Upload {
@@ -97,21 +104,28 @@ pub(super) fn begin(
     }
     let mut bytes = Vec::new();
     let admission = (|| {
-        let permit = Arc::new(Reservation {
-            _upload: ingress
-                .upload_slots
+        let permit = Arc::new(CheckReservation {
+            _check: ingress
+                .first_open_slot
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| overloaded())?,
-            _bytes: ingress
-                .budget
-                .clone()
-                .try_acquire_many_owned(
-                    ingress
-                        .first_open_check_reservation(&params.binding)
-                        .ok_or_else(overloaded)?,
-                )
-                .map_err(|_| overloaded())?,
+            _shared: Reservation {
+                _upload: ingress
+                    .upload_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| overloaded())?,
+                _bytes: ingress
+                    .budget
+                    .clone()
+                    .try_acquire_many_owned(
+                        ingress
+                            .first_open_check_reservation(&params.binding)
+                            .ok_or_else(overloaded)?,
+                    )
+                    .map_err(|_| overloaded())?,
+            },
         });
         bytes
             .try_reserve_exact(params.byte_length)
@@ -205,6 +219,7 @@ mod tests {
     use crate::rpc::live_application::first_open_check::tests::{
         Fixture, binding, candidate, inventory, live_state,
     };
+    use dohc_engine_collab::live_update_application::first_open_candidate_too_deep_to_project;
     use dohc_engine_protocol::transport::{ConnectionOwner, EngineService as _, RequestContext};
     use dohc_engine_protocol::wire::WorkspaceHandle;
     use dohc_engine_storage::hex_sha256;
@@ -308,6 +323,13 @@ mod tests {
         assert_eq!(
             check(&mut f, 4, params, &bundle).await.unwrap()["status"],
             "checked"
+        );
+        let deep = first_open_candidate_too_deep_to_project();
+        let (params, bundle) = upload(5, &deep, b"deep\n", MAX_YDOC_UPDATE_BYTES);
+        let unprojectable = check(&mut f, 5, params.clone(), &bundle).await.unwrap();
+        assert_eq!(
+            unprojectable,
+            json!({"status":"refused","contractVersion":1,"binding":params["binding"],"cause":"projection-failed"})
         );
         assert_eq!(
             (inventory(f.ordinary_root.path()), live_state(&f.service)),

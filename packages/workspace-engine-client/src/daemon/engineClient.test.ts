@@ -725,6 +725,79 @@ describe("private first-open candidate check", () => {
       expect(sent.requests).toBe(0);
     } finally { transport.close(); }
   });
+
+  async function connected() {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const checks: Extract<Envelope, { type: "request" }>[] = [];
+    let chunks = 0;
+    peer.onEnvelope = envelope => { if (envelope.type === "request" && envelope.method !== "blocker") checks.push(envelope); };
+    peer.onBlobChunk = frame => {
+      chunks++;
+      if (frame.fin) peer.send({ type: "response", id: checks.at(-1)!.id, result: checked });
+    };
+    return { peer, transport, checks, chunks: () => chunks };
+  }
+
+  it("sends what preparation and a delayed transport leave of the deadline, and refuses an expired check without uploading", async () => {
+    const { peer, transport, checks, chunks } = await connected();
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    peer.backpressured = true;
+    const blocker = transport.sendRequest(request(1, "blocker")).catch((error: unknown) => error);
+    const concat = Buffer.concat;
+    const preparation = vi.spyOn(Buffer, "concat").mockImplementationOnce((list, length) => {
+      clock.mockReturnValue(300);
+      return concat(list, length);
+    });
+    try {
+      const delayed = transport.checkFirstOpenCandidate(call, input);
+      clock.mockReturnValue(600); peer.drain();
+      expect(await delayed).toStrictEqual(checked);
+      expect(checks[0]).toMatchObject({ deadlineMs: 29_500 });
+      peer.backpressured = true;
+      const again = transport.sendRequest(request(2, "blocker")).catch((error: unknown) => error);
+      const expired = transport.checkFirstOpenCandidate({ ...call, id: 906, deadlineMs: 1_000 }, input).catch((error: unknown) => error);
+      const uploaded = chunks();
+      clock.mockReturnValue(2_000); peer.drain();
+      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(checks).toHaveLength(1);
+      expect(chunks()).toBe(uploaded);
+      // Nothing reached the wire, so the connection stays usable.
+      expect(await transport.checkFirstOpenCandidate({ ...call, id: 907 }, input)).toStrictEqual(checked);
+      transport.close(); await Promise.all([blocker, again]);
+    } finally { transport.close(); preparation.mockRestore(); clock.mockRestore(); }
+  });
+
+  it("asks the engine to stop a check after its last input frame and holds its upload slot until the engine answers", async () => {
+    const { peer, transport, checks } = await connected();
+    const source = Buffer.alloc(100_000, 0x61), large = { ...input, source, sourceSha256: digest(source) };
+    const reached = Promise.withResolvers<void>();
+    let finished = false;
+    peer.onBlobChunk = frame => {
+      if (frame.fin) { finished = true; return; }
+      peer.backpressured = true; reached.resolve();
+    };
+    const onEnvelope = peer.onEnvelope!;
+    peer.onEnvelope = envelope => {
+      onEnvelope(envelope);
+      if (envelope.type === "cancel") peer.send({ type: "error", id: envelope.id, error: { code: "CANCELLED", message: "first-open check cancelled", retry: "no" } });
+    };
+    try {
+      const pending = transport.checkFirstOpenCandidate(call, large);
+      const cancelled = expect(pending).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
+      await reached.promise;
+      await transport.cancelRequest(call.id);
+      expect(peer.received.some(envelope => envelope.type === "cancel")).toBe(false);
+      await expect(transport.checkFirstOpenCandidate({ ...call, id: 906 }, input)).rejects.toThrow("upload capacity is full");
+      peer.drain(); await cancelled;
+      expect(finished).toBe(true);
+      expect(peer.received.at(-1)).toEqual({ type: "cancel", id: checks[0]!.id });
+      peer.onBlobChunk = frame => { if (frame.fin) peer.send({ type: "response", id: checks.at(-1)!.id, result: checked }); };
+      expect(await transport.checkFirstOpenCandidate({ ...call, id: 907 }, input)).toStrictEqual(checked);
+    } finally { peer.drain(); transport.close(); }
+  });
 });
 
 function helloAck(

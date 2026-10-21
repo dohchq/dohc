@@ -294,6 +294,9 @@ pub struct LiveApplicationIngress {
     config: LiveApplicationIngressConfig,
     budget: Arc<Semaphore>,
     upload_slots: Arc<Semaphore>,
+    /// One first-open check at a time, so checks leave the other upload
+    /// slots to live edits, replica pages, owner delivery and restores.
+    first_open_slot: Arc<Semaphore>,
     uploads: HashMap<u64, Upload>,
     restores: HashMap<u64, restore::Upload>,
     first_open_checks: HashMap<u64, first_open_check::Upload>,
@@ -414,6 +417,7 @@ impl LiveApplicationIngress {
             service,
             budget: Arc::new(Semaphore::new(config.aggregate_bytes)),
             upload_slots: Arc::new(Semaphore::new(config.max_uploads)),
+            first_open_slot: Arc::new(Semaphore::new(1)),
             config,
             uploads: HashMap::new(),
             restores: HashMap::new(),
