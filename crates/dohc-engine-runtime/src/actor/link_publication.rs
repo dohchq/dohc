@@ -1,5 +1,5 @@
 //! Publish committed link rewrites without holding the actor for the whole pass.
-use super::super::materialization::materialize_pending_job;
+use super::super::materialization::{MaterializationReplayScope, replay_pending_materializations};
 use super::*;
 
 pub(super) struct Publication {
@@ -25,6 +25,7 @@ impl ActorHandle {
         let actor = self.clone();
         tokio::spawn(async move {
             let mut cursor = 0;
+            let deferred = Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
             let mut backoff = Duration::from_millis(25);
             while actor.lifecycle() == super::super::LifecycleState::Ready {
                 // Close may hold a gate while it drains the actor.
@@ -38,6 +39,7 @@ impl ActorHandle {
                 let p = publication.clone();
                 let state = actor.link_rewrites.clone();
                 let turn_key = key.clone();
+                let deferred = deferred.clone();
                 let outcome = actor.run(move |store, _| {
                     let _gates = gates;
                     #[cfg(test)]
@@ -50,43 +52,50 @@ impl ActorHandle {
                         return Ok(Some((0, false)));
                     }
                     let version = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
-                    let jobs: Vec<(i64, String)> = if stopped { Vec::new() } else {
+                    let job: Option<(i64, String)> = if stopped { None } else {
                         store.read_with(|conn| {
                             let mut stmt = conn.prepare_cached(
                             "SELECT m.moment_order,j.job_id FROM moments m JOIN materialization_jobs j
                              ON j.job_id IN ('authored-mat_'||m.moment_id,'ydoc-mat_'||m.moment_id)
                              WHERE m.workspace_id=?1 AND m.metadata_correlation_id=?2 AND m.version_id=?3
                              AND m.operation='write' AND m.moment_order>?4 AND j.workspace_id=?1 AND j.status='pending'
+                             AND j.job_id NOT IN (SELECT value FROM json_each(?5))
                              ORDER BY m.moment_order LIMIT 1").map_err(StorageError::corrupt_public)?;
-                            stmt.query_map(params![p.workspace,p.operation,version,cursor], |r| Ok((r.get(0)?,r.get(1)?)))
-                            .map_err(StorageError::corrupt_public)?.collect::<Result<Vec<_>,_>>()
-                            .map_err(StorageError::corrupt_public)
+                            stmt.query_row(params![p.workspace,p.operation,version,cursor,
+                                serde_json::to_string(&*deferred.lock().unwrap()).unwrap()],
+                                |r| Ok((r.get(0)?,r.get(1)?)))
+                            .optional().map_err(StorageError::corrupt_public)
                         })?
                     };
-                    let Some((order, _)) = jobs.last() else {
+                    let Some((order, id)) = job else {
                         if !stopped && cursor != 0 { return Ok(Some((0, false))); }
                         // Remove admission in this actor turn, before another commit can land.
                         state.publishers.lock().unwrap().remove(&turn_key);
                         return Ok(None);
                     };
-                    let order = *order;
-                    let count = jobs.len();
                     #[cfg(test)]
-                    { turn.jobs = count; turn.ready(); }
+                    { turn.jobs = 1; turn.ready(); }
                     #[cfg(not(test))]
                     let faults: Arc<dyn FaultInjector> = Arc::new(dohc_engine_storage::NoFaults);
                     #[cfg(test)]
                     let faults = tests::publication::faults(&p.workspace);
-                    let mut completed = 0;
-                    for (_, id) in jobs {
-                        if let Some(job) = store.load_materialization_job(&id)? {
-                            completed += usize::from(materialize_pending_job(
-                                store, &p.root, &p.workspace, &job, p.recorder.as_ref(),
-                                crate::links::now_ms(), faults.as_ref(), None,
-                            ).0);
-                        }
-                    }
-                    Ok(Some((order, completed == count)))
+                    let selected = HashSet::from([id.clone()]);
+                    let summary = store.with_materialization_status_batch(|store| {
+                        replay_pending_materializations(
+                            store, &p.root,
+                            MaterializationReplayScope {
+                                holds: None, workspace_id: &p.workspace,
+                                self_writes: Some(p.recorder.as_ref()), progress: None,
+                                file_outcomes_settled: false, released_hold_paths: None,
+                                planned_against_active_heads: false,
+                            },
+                            crate::links::now_ms(), faults.as_ref(), Some(&selected), false,
+                        )
+                    })?;
+                    deferred.lock().unwrap().extend(summary.deferred);
+                    let completed = store.load_materialization_job(&id)?
+                        .is_none_or(|job| job.status != dohc_engine_storage::JobStatus::Pending);
+                    Ok(Some((order, completed)))
                 }).await;
                 match outcome {
                     Ok(None) => return,

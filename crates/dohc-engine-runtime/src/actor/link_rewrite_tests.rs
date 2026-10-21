@@ -220,7 +220,6 @@ impl Fixture {
         };
         eprintln!("LINK_REWRITE_RETRIES request={request} retries={retries}");
         result
-
     }
     async fn text(&self, path: &str) -> String {
         let (ws, path) = (self.ws.clone(), path.to_owned());

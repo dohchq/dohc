@@ -12,7 +12,7 @@ use dohc_engine_files::{
     save_kept_displacement,
 };
 use dohc_engine_storage::{
-    Displacement, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    Displacement, EngineStore, FaultInjector, JobStatus, MaterializationJob,
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
 };
 use rusqlite::{OptionalExtension, params};
@@ -434,6 +434,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) selected_seen: usize,
+    pub(super) deferred: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -642,6 +643,7 @@ pub(super) fn replay_pending_materializations(
             completed: 0,
             failed: 0,
             selected_seen: 0,
+            deferred: HashSet::new(),
         });
     }
     let loaded_holds;
@@ -702,6 +704,7 @@ pub(super) fn replay_pending_materializations(
             completed: 0,
             failed: 0,
             selected_seen: 0,
+            deferred: HashSet::new(),
         };
         let mut secret_key: Option<SecretDataKey> = None;
         // Replay changes disk and the job ledger, never active tips.
@@ -1004,47 +1007,29 @@ pub(super) fn replay_pending_materializations(
                 summary.completed += 1;
                 continue;
             }
-            let outcome = if let Some(self_writes) = scope.self_writes {
-                let (materialized, reported) = materialize_pending_job(
-                    store,
-                    root_dir,
-                    scope.workspace_id,
-                    &job,
-                    self_writes,
+            if let Some(recorder) = scope.self_writes {
+                recorder.record(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
+            let outcome = dohc_engine_files::materialize::materialize_one_ordinary(
+                store,
+                root_dir,
+                &job,
+                &MaterializeOptions {
+                    holds: Some(holds),
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
                     now_ms,
                     faults,
-                    Some(holds),
-                );
-                if materialized {
-                    Ok(JobOutcome::Completed)
-                } else {
-                    Ok(match reported {
-                        PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
-                        PostCommitMaterializeOutcome::Parked => JobOutcome::Parked,
-                        PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
-                        PostCommitMaterializeOutcome::Applied
-                        | PostCommitMaterializeOutcome::Skipped
-                        | PostCommitMaterializeOutcome::Error => {
-                            JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit)
-                        }
-                    })
-                }
-            } else {
-                materialize_one(
-                    store,
-                    root_dir,
-                    &job,
-                    &MaterializeOptions {
-                        holds: Some(holds),
-                        policy: DurabilityPolicy::per_os(),
-                        replacer: &StdReplacer,
-                        backoff: &StdBackoff,
-                        now_ms,
-                        faults,
-                    },
-                )
-                .map_err(RuntimeError::from)
-            };
+                },
+            );
+            if !matches!(
+                outcome,
+                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized)
+            ) && let Some(recorder) = scope.self_writes
+            {
+                recorder.retract(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
             match outcome {
                 Ok(JobOutcome::Parked) => summary.parked += 1,
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -1095,7 +1080,23 @@ pub(super) fn replay_pending_materializations(
                         }
                     }
                 }
-                Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
+                Ok(JobOutcome::Crashed(_)) => summary.failed += 1,
+                Err(error) => {
+                    summary.failed += 1;
+                    if !matches!(
+                        error,
+                        dohc_engine_files::MaterializeError::FileLocked
+                            | dohc_engine_files::MaterializeError::Storage(
+                                StorageError::FileLocked
+                            )
+                    ) {
+                        summary.deferred.insert(job.job_id.clone());
+                        eprintln!(
+                            "engine: placement deferred until next open for {}: {error}",
+                            job.target_path
+                        );
+                    }
+                }
             }
         }
         reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;

@@ -291,26 +291,42 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
     );
     let key = DocKey::new(&f.ws, "main", "source-2000").unwrap();
     let doc = dohc_engine_collab::Ydoc::wire();
-    f.actor
-        .ydoc_record_update(
-            key,
-            "source-2000.md".into(),
-            dohc_engine_collab::ContentKind::Plaintext,
-            dohc_engine_collab::Regime::LocalOnly,
-            doc.plaintext_insert(0, "typing"),
-            None,
-            None,
-            None,
-            true,
-            None,
-            Some("placement-typing".into()),
-            5,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+    let update = doc.plaintext_insert(0, "typing");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let result = f
+            .actor
+            .ydoc_record_update(
+                key.clone(),
+                "source-2000.md".into(),
+                dohc_engine_collab::ContentKind::Plaintext,
+                dohc_engine_collab::Regime::LocalOnly,
+                update.clone(),
+                None,
+                None,
+                None,
+                true,
+                None,
+                Some("placement-typing".into()),
+                5,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await;
+        match result {
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+            | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                StorageError::FileLocked,
+            ))) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            result => {
+                result.unwrap();
+                break;
+            }
+        }
+    }
     let update_ns = update_start.elapsed().as_nanos();
     drop(admission);
     f.wait_disk(2000).await;
@@ -362,7 +378,7 @@ async fn a_refused_placement_stays_pending_and_retries_after_its_hold_is_release
                 .lock()
                 .unwrap()
                 .get(&f.ws)
-                .is_some_and(|p| p.turns.iter().any(|(n, _)| *n == 1))
+                .is_some_and(|p| p.turns.iter().filter(|(n, _)| *n == 1).count() >= 2)
             {
                 break;
             }
@@ -455,5 +471,101 @@ async fn cancelling_undo_before_its_plan_resumes_pending_publication() {
     }
     drop(undo_gate);
     f.wait_disk(1).await;
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
+    let f = Fixture::new(1, 1);
+    let (_lease, _) = f.open_document("source-0000").await;
+    let gate = f.capture.clone().lock_owned().await;
+    f.pass("open-conflict", Arc::new(NoFaults)).await.unwrap();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        let sha: Option<String> = store.read_with(|c| c.query_row(
+            "SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND object_id='source-0000'",
+            [&ws], |r| r.get(0))).map_err(StorageError::corrupt_public)?;
+        assert!(sha.is_some());
+        Ok(())
+    }).await.unwrap();
+    std::fs::write(f.root.join("source-0000.md"), "external edit").unwrap();
+    drop(gate);
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let ws = f.ws.clone();
+            let pending = f.actor.run(move |store, _| {
+                store.read_with(|c| c.query_row(
+                    "SELECT status='pending' FROM materialization_jobs WHERE workspace_id=?1 AND job_id LIKE 'ydoc-mat_%'",
+                    [&ws], |r| r.get::<_, bool>(0))).map_err(|e| StorageError::corrupt_public(e).into())
+            }).await.unwrap();
+            if !pending { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.read_with(|c| {
+            let status: String = c.query_row("SELECT status FROM materialization_jobs WHERE workspace_id=?1 AND job_id LIKE 'ydoc-mat_%'", [&ws], |r| r.get(0))?;
+            assert_eq!(status, "conflict");
+            let sha: Option<String> = c.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND object_id='source-0000'", [&ws], |r| r.get(0))?;
+            assert_eq!(sha, None, "conflicted rewrite is not settled on disk");
+            Ok::<_, rusqlite::Error>(())
+        }).map_err(StorageError::corrupt_public)?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        "external edit"
+    );
+    assert!(std::fs::read_dir(&f.root).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".conflict")
+    }));
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reopen() {
+    let f = Fixture::new(2, 2);
+    let gate = f.capture.clone().lock_owned().await;
+    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
+    let path = f.root.join("source-0000.md");
+    std::fs::remove_file(&path).unwrap();
+    let actual = f.root.join("actual");
+    std::fs::create_dir(&actual).unwrap();
+    assert!(dohc_engine_testkit::try_make_dir_alias(&actual, &path).unwrap());
+    drop(gate);
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
+                break;
+            }
+            f.actor.run(|_, _| Ok(())).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("hard errors must end publication");
+    let pending = f
+        .actor
+        .history_operation_pending_jobs(f.ws.clone(), OP.into())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        placements().lock().unwrap()[&f.ws]
+            .turns
+            .iter()
+            .map(|(n, _)| n)
+            .sum::<usize>(),
+        2,
+        "hard error must be attempted once while other jobs still publish"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
+        "[[new#part|label]] [[./new.md]] [old](old.md)"
+    );
     f.close().await;
 }
