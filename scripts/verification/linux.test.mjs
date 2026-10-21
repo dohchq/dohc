@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { gaveUpDownloading, linuxDistro, linuxRustJob, neededMemoryGb, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
+import { linuxDistro, linuxRustJob, neededMemoryGb, networkFailed, parseTips, runScript, stopScript, syncScript, wslPath } from "./linux.mjs";
 
 const head = "a".repeat(40);
 const base = "b".repeat(40);
@@ -247,19 +247,23 @@ const offline = [3, 2, 1].map(left => `warning: spurious network error (${left} 
 const stale = "    Updating crates.io index\nerror: cannot update the lock file /home/ice/.dohc-verification/linux/Cargo.lock because --locked was passed to prevent this\n"
   + "help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.\n";
 
-test("only an error whose cause cargo retried as a spurious network error is a download cargo gave up on", () => {
-  assert.equal(gaveUpDownloading(offline), true);
-  // A cause's numbers change between tries.
-  const connect = ms => `[7] Could not connect to server (Failed to connect to index.crates.io port 443 after ${ms} ms: Could not connect to server)`;
-  assert.equal(gaveUpDownloading(`warning: spurious network error (1 try remaining): ${connect(21003)}\nerror: failed to get \`itoa\` as a dependency of package \`probe v0.1.0\`\n\nCaused by:\n  ${connect(21011)}\n`), true);
-  const unavailable = ip => `failed to get successful HTTP response from \`https://index.crates.io/config.json\` (${ip}), got 503`;
-  assert.equal(gaveUpDownloading(`warning: spurious network error (1 try remaining): ${unavailable("18.65.3.12")}\nbody:\n\nerror: ${unavailable("18.65.3.71")}\nbody:\n`), true);
-  // A retry that succeeded, then the lockfile.
-  assert.equal(gaveUpDownloading(`warning: spurious network error (3 tries remaining): ${resolveHost}\n${stale}`), false);
-  assert.equal(gaveUpDownloading(stale), false);
-  // cargo does not retry a missing crate.
-  assert.equal(gaveUpDownloading("error: failed to download from `https://static.crates.io/crates/gone/1.0.0/download`\n\nCaused by:\n  failed to get successful HTTP response from `https://static.crates.io/crates/gone/1.0.0/download` (18.65.3.12), got 404\n"), false);
-  assert.equal(gaveUpDownloading(""), false);
+test("cargo's last error decides a network failure: one cargo retries, not the warnings before it", () => {
+  assert.equal(networkFailed(offline), true);
+  const causedBy = cause => `error: failed to get \`itoa\` as a dependency of package \`probe v0.1.0\`\n\nCaused by:\n  ${cause}\n`;
+  const warned = cause => `warning: spurious network error (1 try remaining): ${cause}\n`;
+  // The last try can fail differently from the ones before it.
+  const timeout = "[28] Timeout was reached (Operation timed out after 30001 milliseconds with 0 bytes received)";
+  assert.equal(networkFailed(warned(resolveHost) + causedBy(timeout)), true);
+  const http = (code, ip = "18.65.3.12") => `failed to get successful HTTP response from \`https://index.crates.io/config.json\` (${ip}), got ${code}`;
+  assert.equal(networkFailed(`${warned(http(503))}body:\n\nerror: ${http(503, "18.65.3.71")}\nbody:\n`), true);
+  assert.equal(networkFailed(causedBy(http(429))), true);
+  assert.equal(networkFailed(causedBy("transfer too slow: failed to transfer more than 10 bytes in 30s (transferred 0 bytes)")), true);
+  // A retry that worked, then a missing crate or the lockfile.
+  assert.equal(networkFailed(warned(http(503)) + causedBy(http(404))), false);
+  assert.equal(networkFailed(warned(resolveHost) + stale), false);
+  assert.equal(networkFailed(stale), false);
+  assert.equal(networkFailed(causedBy("[60] SSL peer certificate or SSH remote key was not OK (SSL certificate problem: unable to get local issuer certificate)")), false);
+  assert.equal(networkFailed(""), false);
 });
 
 test("a fetch cargo gave up on after network errors is the host's failure in either mode; any other failed fetch fails the change", windowsOnly, async () => {

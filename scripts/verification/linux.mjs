@@ -61,19 +61,20 @@ export function wslPath(path) {
 
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
+// The curl errors cargo retries as spurious: a proxy or host it could not resolve or reach, a timeout, a failed
+// send or receive, an HTTP/2 or TLS connection error, or a partial file (`maybe_spurious` in cargo's `src/cargo/util/network/retry.rs`).
+const spuriousCurlErrors = new Set([5, 6, 7, 16, 18, 28, 35, 55, 56, 92]);
+
 /**
- * Whether cargo's last error is a download it stopped retrying. cargo warns of a spurious network error, naming its cause,
- * before each retry, and once the retries run out the last one's cause ends its error. A retry can also succeed and a later
- * error, such as a lockfile that needs an update, end the run instead. Numbers, such as a timeout's milliseconds or the
- * server's address, can change between tries.
+ * Whether cargo's last error is a download that failed for a reason cargo retries: one of those curl errors, a server error
+ * or rate limit, or a transfer too slow. Once its retries run out, cargo ends with that error. A missing crate, a certificate,
+ * or a lockfile that needs an update ends with another one, even after a retry that worked.
  */
-export function gaveUpDownloading(log) {
+export function networkFailed(log) {
   const lines = log.split(/\r?\n/u);
   const last = lines.findLastIndex(line => line.startsWith("error:"));
-  if (last === -1) return false;
-  const shape = text => text.trim().replace(/\d+/gu, "#");
-  const error = shape(lines.slice(last).join("\n"));
-  return [...log.matchAll(/^warning: spurious network error \(\d+ tr(?:y|ies) remaining\): (.+)$/gmu)].some(([, cause]) => error.includes(shape(cause)));
+  return last !== -1 && lines.slice(last).some(line => spuriousCurlErrors.has(Number(/^(?:error:)?\s*\[(\d+)\] /u.exec(line)?.[1]))
+    || /^(?:error:)?\s*failed to get successful HTTP response from .*, got (?:5\d\d|429)$/u.test(line) || /transfer too slow: /u.test(line));
 }
 
 /** Prints the commits the Linux checkout keeps, then `head` and `base` if it has them. Creates the checkout on first use. */
@@ -244,7 +245,7 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
     const log = join(output, "wsl-run.log");
     const text = readLog(log);
     // Any other failed fetch, such as one whose lockfile needs an update, fails the change.
-    if (scope.fetched === false && gaveUpDownloading(text)) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${log}.`), { environment: "linux network" });
+    if (scope.fetched === false && networkFailed(text)) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${log}.`), { environment: "linux network" });
     let receipt;
     if (full && scope.fetched !== false) {
       receipt = readJson(join(output, "result.json"));
