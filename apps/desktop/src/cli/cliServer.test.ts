@@ -584,6 +584,26 @@ describe("CLI socket server", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it("syncs a joined shared channel before resolving the Links group operand", async () => {
+    expect(await store!.findChannelBySlug({ workspaceId: WORKSPACE_ID, slug: "joined" })).toBeNull();
+    let channelWireId: string | null = null;
+    onReadEffect = async () => {
+      const channel = await store!.createChannel({
+        workspaceId: WORKSPACE_ID, name: "Joined",
+      });
+      channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId: channel.id });
+      await makeChannelReadOnly(channel.id);
+    };
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+
+    expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: "joined" })).toBeNull();
+    expect(channelWireId).toBeTruthy();
+    expect(calls.reads).toBe(1);
+    expect(readTargets).toEqual([{ channelId: "joined" }]);
+    expect(read).toHaveBeenCalledExactlyOnceWith(registryWorkspace, { channelWireId, cursor: undefined });
+  });
+
   it("discovers chat wire IDs through CLI and MCP before asking for Links", async () => {
     const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };

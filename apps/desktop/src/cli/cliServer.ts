@@ -1417,6 +1417,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
   return (
     verb === "groups" ||
     verb === "threads" ||
+    verb === "chatLinks" ||
     verb === "inbox" ||
     verb === "show" ||
     verb === "grep" ||
@@ -1442,6 +1443,8 @@ function chatReadTarget(
       return { threadId: request.args.target };
     case "threads":
       return { channelId: request.args.group };
+    case "chatLinks":
+      return "group" in request.args ? { channelId: request.args.group } : undefined;
     default:
       return undefined;
   }

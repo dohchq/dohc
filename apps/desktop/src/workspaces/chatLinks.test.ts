@@ -157,10 +157,39 @@ it.each(["view", "mount"] as const)("keeps paging after %s skip records and warn
   change({});
   await h.read("w", { channelWireId: "wire" });
   const original = (h.store.linksPage.mock.calls.at(-1)![0] as { scope: string }).scope;
-  change({ skippedOps: { ops: [], more: 1, generation: 2, acknowledgedGeneration: 2 } });
-  await h.read("w", { channelWireId: "wire", cursor: "sealed" });
-  expect(h.store.linksPage.mock.calls.at(-1)![0]).toMatchObject({ scope: original });
+  for (const skippedOps of [
+    { ops: [], more: 1, generation: 2 },
+    { ops: [], more: 1, generation: 2, acknowledgedGeneration: 2 },
+  ]) {
+    change({ skippedOps });
+    await h.read("w", { channelWireId: "wire", cursor: "sealed" });
+    expect(h.store.linksPage.mock.calls.at(-1)![0]).toMatchObject({ scope: original });
+  }
   change({ grantedSelector: { paths: ["other"], versionId: null, access: "view" } });
   await h.read("w", { channelWireId: "wire", cursor: "sealed" });
   expect((h.store.linksPage.mock.calls.at(-1)![0] as { scope: string }).scope).not.toBe(original);
+});
+
+it.each(["mount", "channel"] as const)("binds new %s record fields by default and refuses stale cursors", async kind => {
+  const h = harness();
+  const record = kind === "mount"
+    ? { shareId: "s", label: "shared", granterEmail: null, relayUrl: "https://relay.test",
+        grantedSelector: { paths: ["notes"], versionId: null, access: "view" as const } }
+    : { shareId: "s", channelWireId: "wire", access: "read-only" as const, granterEmail: null,
+        relayUrl: "https://relay.test", recipientUserId: "u" };
+  const change = (extra: object) => kind === "mount"
+    ? h.change({ shareMounts: [{ ...record, ...extra }] as RegistryEntry["shareMounts"] })
+    : h.change({ sharedChannels: [{ ...record, ...extra }] as RegistryEntry["sharedChannels"] });
+  change({});
+  let original = "";
+  h.store.linksPage.mockImplementation(async input => {
+    const value = input as { scope: string; cursor?: string };
+    if (value.cursor && value.scope !== original) throw Error("chat-mention-access-changed");
+    original = value.scope;
+    return raw();
+  });
+  await h.read("w", { channelWireId: "wire" });
+  await h.read("w", { channelWireId: "wire", cursor: "sealed" });
+  change({ futureAccessField: "restricted" });
+  await expect(h.read("w", { channelWireId: "wire", cursor: "sealed" })).rejects.toThrow("chat-mention-access-changed");
 });

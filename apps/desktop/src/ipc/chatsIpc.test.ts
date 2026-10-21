@@ -846,26 +846,31 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
-    openWorkspace:async()=>({
-      workspaceId:"workspace",rootPath:root,readOnly:true,store:h.storeMethods,
-    } as unknown as CliWorkspaceContext),
+    openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},
   };
-  const request=async(value:CliRequestWithoutToken)=>{
+  const request=async(value:CliRequestWithoutToken,serverOptions=options)=>{
     const token="a".repeat(64);
-    const response=JSON.parse(await handleCliRequestLine(JSON.stringify({...value,token}),token,options));
+    const response=JSON.parse(await handleCliRequestLine(JSON.stringify({...value,token}),token,serverOptions));
     if(!response.ok)throw Error(response.error);
     return response.result;
   };
   const ipc=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
-  const cli=await executeCli({argv:["chat","links","Group","--cursor","sealed","--json"],cwd:root,env:{},request});
+  const cliPage=await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",
+    args:{cwd:root,actor:"agent",channelWireId:"wire",cursor:"sealed"}});
+  // Resolving a group needs a chat context; wire-ID reads must bypass it.
+  const cli=await executeCli({argv:["chat","links","Group","--cursor","sealed","--json"],cwd:root,env:{},
+    request:value=>request(value,{...options,openWorkspace:async()=>({
+      workspaceId:"workspace",rootPath:root,readOnly:true,store:h.storeMethods,
+    } as unknown as CliWorkspaceContext)}),
+  });
   expect(cli.exitCode).toBe(0);
-  const {schemaVersion:_,...cliPage}=JSON.parse(cli.stdout);
+  const {schemaVersion:_,...groupPage}=JSON.parse(cli.stdout);
+  expect(groupPage).toEqual(ipc);
   const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request},{channelWireId:"wire",cursor:"sealed"});
   expect(cliPage).toEqual(ipc);expect(mcp).toEqual(ipc);
   const calls=h.storeMethods.linksPage.mock.calls.map(([input])=>input);
-  expect(calls).toHaveLength(3);
-  expect(calls[1]).toMatchObject({cursor:"sealed",scope:calls[0]!.scope});
-  expect(calls[2]).toMatchObject({cursor:"sealed",scope:calls[0]!.scope});
+  expect(calls).toHaveLength(4);
+  for(const call of calls.slice(1)) expect(call).toMatchObject({cursor:"sealed",scope:calls[0]!.scope});
   expect(JSON.stringify(ipc)).not.toMatch(/secret|authorUserId|authorActorKey/);
   h.resolveEngineFiles.mockResolvedValue([{status:"absent"}]);
   const denied=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});

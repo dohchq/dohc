@@ -82,12 +82,26 @@ it("distinguishes idle, loading, loaded empty and unavailable; refresh keeps exi
   expect(h.result.current.pages[0]!.entries).toEqual([]);
 });
 
-it("keeps the loaded status and pages when a refresh fails", async () => {
+it("marks a failed refresh unavailable while preserving its pages", async () => {
   const h = setup();
   h.read.mockResolvedValueOnce(page()).mockRejectedValueOnce(Error("refresh"));
   await act(() => h.result.current.load());
   await act(() => h.result.current.load());
-  expect(h.result.current.status).toBe("loaded");
+  expect(h.result.current.status).toBe("unavailable");
   expect(h.result.current.pages).toHaveLength(1);
   expect(h.onError).toHaveBeenCalledOnce();
+});
+
+it("ends a failed first load as unavailable and allows an explicit retry", async () => {
+  const h = setup();
+  const error = Error("first load");
+  h.read.mockRejectedValueOnce(error).mockResolvedValueOnce(page());
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("unavailable");
+  expect(h.result.current.loading).toBe(false);
+  expect(h.result.current.pages).toEqual([]);
+  expect(h.onError).toHaveBeenCalledExactlyOnceWith(error);
+  expect(h.read).toHaveBeenCalledOnce();
+  await act(() => h.result.current.load());
+  expect(h.result.current.status).toBe("loaded");
 });

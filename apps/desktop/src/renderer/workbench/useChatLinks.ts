@@ -43,7 +43,10 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
         status: page ? "loaded" : "unavailable", loading: false,
       }));
     } catch (error) {
-      if (active()) onError(error);
+      if (active()) {
+        setState(previous => ({ ...previous, status: "unavailable", loading: false }));
+        onError(error);
+      }
     } finally {
       if (active()) {
         current.busy = false;

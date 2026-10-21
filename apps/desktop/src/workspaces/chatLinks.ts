@@ -32,10 +32,9 @@ export function createChatLinksReader(deps: {
       workspace.shareView === undefined ? ["owned"] : ["share",
         workspace.shareView?.shareId, workspace.shareView?.grantedSelector, workspace.shareView?.ended,
         workspace.shareView?.receivedIdentity, workspace.shareView?.recipientUserId, workspace.shareView?.relayUrl],
-      (workspace.sharedChannels ?? []).map(row => [row.shareId, row.channelWireId, row.access,
-        row.ended, row.left, row.recipientUserId, row.relayUrl, row.serverUrl]),
-      (workspace.shareMounts ?? []).map(row => [row.shareId, row.grantedSelector, row.ended, row.label,
-        row.receivedIdentity, row.recipientUserId, row.relayUrl, row.recipientEmail]),
+      workspace.sharedChannels ?? [],
+      // Warning bookkeeping does not change access. Bind every other field by default.
+      (workspace.shareMounts ?? []).map(({ skippedOps: _skippedOps, ...record }) => record),
       workspace.remote ?? null,
       workspace.pausedRemote ?? null, deps.principalGeneration(),
     ])).digest("hex");
