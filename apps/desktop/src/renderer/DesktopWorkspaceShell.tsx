@@ -71,7 +71,7 @@ import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
-import { TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
+import { RestrictedAgentsBand, TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
 import {
   chatMentionOpenTarget,
   graphChatOpenTarget,
@@ -862,7 +862,6 @@ export function DesktopWorkspaceShell(props: {
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
-  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
@@ -1814,13 +1813,19 @@ export function DesktopWorkspaceShell(props: {
   const workspaceTrust = useWorkspaceTrust(workspaceId, workspaceIsReady && !shareView, (error, retry) =>
     reportShellError(TRUST_READ_FAILED_MESSAGE, error, retry));
   const { requestTrust: requestWorkspaceTrust } = workspaceTrust;
-  const trustWorkspace = useCallback(async () => {
+  const trustWorkspace = useCallback(async (automatic?: true) => {
     try {
-      await requestWorkspaceTrust();
+      await requestWorkspaceTrust(automatic);
     } catch (error) {
       reportShellError("dohc could not trust this workspace.", error, () => void trustWorkspace());
     }
   }, [reportShellError, requestWorkspaceTrust]);
+  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind, () => void trustWorkspace());
+  // A send that asks an agent Restricted Mode holds opens main's dialog, only
+  // for the workspace this shell still shows.
+  const trustForHeldAgent = useCallback((forWorkspaceId: string) => {
+    if (forWorkspaceId === workspaceId) void trustWorkspace(true);
+  }, [trustWorkspace, workspaceId]);
   // The engine's newest file moment, whatever the History page holds: 50
   // newer Collection changes, or a moment that arrived with an old date,
   // can keep a changed file off the first page.
@@ -4706,6 +4711,7 @@ export function DesktopWorkspaceShell(props: {
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
+    onAgentWaitsForTrust: trustForHeldAgent,
   } as const;
   // The Chats view intentionally stays on the overview and only selects editor
   // destinations. Active chat pages own the live conversations: disable the
@@ -4742,7 +4748,11 @@ export function DesktopWorkspaceShell(props: {
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
+    onAgentWaitsForTrust: trustForHeldAgent,
   } as const;
+  // Chats shows that Restricted Mode holds this workspace's agent back.
+  const agentsRestricted = workspaceTrust.trusted === false && agentSetup?.workspaceId === workspaceId &&
+    agentSetup.runnerConfigured && agentSetup.runnerEnabled;
 
   // `openPath` is the file a notice named, inside the share.
   function handleMountedShare(label: string, access: ShareAccess | null, openPath?: string) {
@@ -5622,6 +5632,10 @@ export function DesktopWorkspaceShell(props: {
               // Each loading state of the tab puts its lines at the top, so
               // each one takes over from the last without blinking.
               <SkeletonSlot>{captureAvailable ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                {agentsRestricted ? (
+                  <RestrictedAgentsBand asking={workspaceTrust.asking} onTrust={() => void trustWorkspace()} />
+                ) : null}
                 <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
                   <LazyChatsView
                     key={`${workspaceId}:${tabPath}:${chatEditors.get(groupTab.path).generation}:${chatEditors.get(groupTab.path).revision}`}
@@ -5637,6 +5651,7 @@ export function DesktopWorkspaceShell(props: {
                     variant="page"
                   />
                 </Suspense>
+                </div>
               ) : shareView ? (
                 // A persisted Chats tab on a shared view. The
                 // neighbouring line blamed the Settings flag, and a share
@@ -5866,6 +5881,7 @@ export function DesktopWorkspaceShell(props: {
             openPathWithHeading={openPathWithHeading}
             onChatsThreadRead={onChatsThreadRead}
             reportFailureMessage={reportFailureMessage}
+            onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
             openMoment={openMomentDiffTab}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}

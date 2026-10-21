@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, trustOpenWorkspace } from "./helpers/workspace";
 
 test("a named agent replies to a group mention with its owner on hover and focus", async ({}, testInfo) => {
   test.setTimeout(180_000);
@@ -15,6 +15,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-add-agent-open").click();

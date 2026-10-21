@@ -10,6 +10,10 @@ export const AgentLaunchProfile = z.object({
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 
+// What a person reads when Restricted Mode holds an agent back: main's
+// notice and the band in Chats.
+export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
+
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
   if (tool !== "claude" || !version) return false;

@@ -63,6 +63,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
+  onAgentWaitsForTrust?: LinkedChatsPanelProps["onAgentWaitsForTrust"];
   historyRevision: number;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
   // Changes whenever the open file re-reads: history growth, a version
@@ -90,6 +91,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     openPathWithHeading,
     onChatsThreadRead,
     reportFailureMessage,
+    onAgentWaitsForTrust,
     historyRevision,
     openMoment,
     linksRevision,
@@ -193,6 +195,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}
+              onAgentWaitsForTrust={onAgentWaitsForTrust}
               notices={aboutNotices}
               accessContext={accessContext}
             />
