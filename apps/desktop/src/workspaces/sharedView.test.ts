@@ -7392,7 +7392,7 @@ describe("share-refresh records in .dohc/local", () => {
           errorMessage:
             "dohc did not update these shared files because an older record at .dohc/share-collision-record.json may be keeping your own files apart from the share. " +
             "Move the files it lists out of the shared folder, then remove the record and try again. " +
-            "Files you leave in place are no longer kept apart.",
+            "Files you leave in place are no longer kept apart. A refresh may replace them or count them as your edits.",
         };
 
         await expect(view.refresh(undefined, access)).resolves.toEqual(refusal);
