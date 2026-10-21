@@ -130,7 +130,7 @@
     "updates": [
       "AQfCyIyDDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAMLIjIMOAQYEAMLIjIMOAg1pbmRlbnRlZCBjb2RlKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdxIgICAgaW5kZW50ZWQgY29kZQooAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDU0ZjY3NTcwMjM0NDNhMzdmYzFkNDBiNmM5YzFlZWMwYWJlYTJhNDdlZDUzNGVjYWIxMDVlODI2ZDZmMWVkZGUoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0A3MDQ0MjEwZjcwYzlkZjFjYzQzYmYxMGM1MWM0MmFiNWU1Nzk1YjllNGM5YmUxYmYzZDhhZjJkYzc3NTNiZTk0AA=="
     ],
-    "markdown": "```\nindented code\n```"
+    "markdown": "    indented code\n"
   },
   {
     "name": "lexical-17",

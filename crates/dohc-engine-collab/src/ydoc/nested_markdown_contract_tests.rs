@@ -943,3 +943,41 @@ fn nested_contract_r26_boundaries_in_every_reading() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn nested_contract_indented_code_refuses_where_marked_reads_otherwise() {
+    // marked splits a code line at a lone carriage return, and an item reads
+    // its code through the list's own indentation.
+    for source in ["Text\n\n    a\rb", "- a\n\n      code"] {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+            assert!(
+                Ydoc::wire()
+                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                    .is_err(),
+                "{source:?}, {reading:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_contract_item_setext_underline_follows_marked() {
+    // marked's heading text stops before a line that could start a block,
+    // and its underline ends in spaces only, so these items hold text.
+    for (source, canonical) in [
+        ("- #tag\n  --", "- #tag\n  &#45;-"),
+        ("- #tag\n  -", "- #tag\n  &#45;"),
+        ("- a\n  --\t", "- a\n  &#45;-"),
+    ] {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                canonical,
+                "{source:?}, {reading:?}"
+            );
+        }
+    }
+}

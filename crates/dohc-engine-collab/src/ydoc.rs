@@ -2604,6 +2604,35 @@ fn thematic_break(line: &str) -> bool {
         && thematic_break_body(line)
 }
 
+/// The heading level of a setext underline as marked reads one: up to three
+/// spaces, a run of `=` or `-`, then spaces. A thematic break such as `---`
+/// stays a rule.
+fn setext_underline(line: &str) -> Option<i64> {
+    let rest = line.trim_start_matches(' ');
+    let level = match rest.as_bytes().first()? {
+        b'=' => 1,
+        b'-' => 2,
+        _ => return None,
+    };
+    let run = rest.trim_end_matches(' ');
+    (line.len() - rest.len() <= 3
+        && run.bytes().all(|byte| byte == run.as_bytes()[0])
+        && !thematic_break(line))
+    .then_some(level)
+}
+
+/// Whether marked keeps this paragraph line in a setext heading. Its heading
+/// stops before a line that could start another block, `#` and `<` included.
+fn setext_text(line: &str) -> bool {
+    let rest = line.trim_start_matches(' ');
+    !rest.starts_with(['\t', '#', '<'])
+        && block_start(line, true, true).is_none()
+        && !(rest.contains('|')
+            && rest
+                .bytes()
+                .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t')))
+}
+
 #[inline(never)]
 fn thematic_break_body(line: &str) -> bool {
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
@@ -3383,6 +3412,58 @@ fn parse_markdown_blocks_at<'src>(
             }
             // An unclosed fence is not a code block: fall through to text.
         }
+        // Indented code cannot interrupt a paragraph, and a quote or list
+        // item right before it takes it as a lazy line. Inside an item, and
+        // in other readings, it stays refused below.
+        if reading == MarkdownReading::Source
+            && !in_list
+            && indented_code_line(line)
+            && (index == 0
+                || blank_line(lines[index - 1])
+                || matches!(
+                    blocks.last(),
+                    Some(
+                        MdBlock::Heading { .. }
+                            | MdBlock::Rule
+                            | MdBlock::CodeBlock { .. }
+                            | MdBlock::Table { .. }
+                    )
+                ))
+        {
+            let start = index;
+            index += 1;
+            loop {
+                while lines.get(index).is_some_and(|line| blank_line(line)) {
+                    index += 1;
+                }
+                if !lines
+                    .get(index)
+                    .is_some_and(|line| indented_code_line(line))
+                {
+                    break;
+                }
+                index += 1;
+            }
+            // marked also ends a line at a lone carriage return.
+            *refused |= lines[start..index].iter().any(|line| line.contains('\r'));
+            let mut content = lines[start..index]
+                .iter()
+                .map(|line| {
+                    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+                    match spaces {
+                        0 => line.strip_prefix('\t').unwrap_or(line),
+                        _ => &line[spaces.min(4)..],
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.truncate(content.trim_end_matches('\n').len());
+            blocks.push(MdBlock::CodeBlock {
+                language: String::new(),
+                content,
+            });
+            continue;
+        }
         *refused |= (in_list
             || matches!(
                 line.trim_start_matches(' ').as_bytes(),
@@ -3400,7 +3481,8 @@ fn parse_markdown_blocks_at<'src>(
             index += 1;
             continue;
         }
-        if reading == MarkdownReading::Source && block_start(line, true, true).is_none() {
+        if reading == MarkdownReading::Source && !in_list && block_start(line, true, true).is_none()
+        {
             if let Some(underline) = lines
                 .get(index + 1)
                 .map(|line| line.trim_end_matches([' ', '\t']))
@@ -3484,7 +3566,9 @@ fn parse_markdown_blocks_at<'src>(
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
-                || (in_list && next.trim_end_matches([' ', '\t']) == "-")
+                || (in_list
+                    && setext_underline(next).is_some()
+                    && para.iter().all(|line| setext_text(line)))
                 || list_marker(next, paragraph_reading).is_some_and(|marker| {
                     (!marker.text.trim().is_empty() || matches!(marker.kind, ListKind::Task(_)))
                         && (!matches!(marker.kind, ListKind::Ordered(_))
@@ -3499,13 +3583,14 @@ fn parse_markdown_blocks_at<'src>(
             para.push(next);
             index += 1;
         }
-        if in_list
-            && lines
-                .get(index)
-                .is_some_and(|line| line.trim_end_matches([' ', '\t']) == "-")
+        // The loop stops at an underline only when it makes the paragraph a heading.
+        if let Some(level) = lines
+            .get(index)
+            .filter(|_| in_list)
+            .and_then(|line| setext_underline(line))
         {
             blocks.push(MdBlock::Heading {
-                level: 2,
+                level,
                 text: para.join("\n"),
             });
             index += 1;
@@ -5632,6 +5717,17 @@ fn escape_markdown_block_syntax(
         }
     }
     Ok(output.into_string())
+}
+
+/// Whether marked reads this line as indented code: four spaces, or a tab
+/// after fewer, then text. It strips up to four spaces or that one tab.
+fn indented_code_line(line: &str) -> bool {
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    let rest = &line[spaces.min(4)..];
+    match spaces {
+        4.. => !rest.is_empty(),
+        _ => rest.strip_prefix('\t').is_some_and(|text| !text.is_empty()),
+    }
 }
 
 fn indented_code_leading_entity(markdown: &str) -> Option<&'static str> {
