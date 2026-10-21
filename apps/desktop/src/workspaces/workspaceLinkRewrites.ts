@@ -31,7 +31,10 @@ export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord
   setImmediate(() => {
     if (!state.scheduled) return;
     state.scheduled = false;
-    if (state.undo || context.signal?.aborted) return;
+    if (state.undo || context.signal?.aborted) {
+      if (!state.undo) states.delete(keyFor(root, record.operationId));
+      return;
+    }
     const cancel = new AbortController();
     const retired = () => cancel.abort();
     context.signal?.addEventListener("abort", retired, { once: true });
