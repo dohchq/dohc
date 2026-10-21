@@ -42,6 +42,7 @@ import {
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
@@ -773,30 +774,83 @@ describe("deletePath", () => {
     expect(await deletePath(workspace(), "junk.md", async () => undefined)).toEqual({ trashed: true });
   });
 
-  // With Optimize Mac Storage, iCloud Drive leaves a file with a size and no
-  // blocks on disk. Moved into .dohc/local, which iCloud Drive skips, its
-  // bytes could be lost. A sparse file looks the same, so it stands in.
-  it.runIf(process.platform === "darwin")("moves nothing into the workspace trash that is only in iCloud Drive", async () => {
+  // A local sparse file has a size and no blocks, as a file only in iCloud
+  // Drive does. Its dataless flag is clear, so it moves like any other.
+  it.runIf(process.platform === "darwin")("moves a local sparse file and a folder holding one into the workspace trash", async () => {
+    await writeFile(join(root, "sparse.bin"), "");
+    await truncate(join(root, "sparse.bin"), 4096);
+    await mkdir(join(root, "folder"));
+    await writeFile(join(root, "folder", "sparse.bin"), "");
+    await truncate(join(root, "folder", "sparse.bin"), 4096);
+    expect((await stat(join(root, "sparse.bin"))).blocks).toBe(0);
+    expect(await deletePath(workspace(), "sparse.bin", rejectingTrash)).toEqual({ trashed: false });
+    expect(await deletePath(workspace(), "folder", rejectingTrash)).toEqual({ trashed: false });
+    expect(existsSync(join(root, "sparse.bin"))).toBe(false);
+    expect(await readdir(join(root, ".dohc", "local", "trash"))).toHaveLength(2);
+  });
+
+  // With Optimize Mac Storage, iCloud Drive can leave a file's bytes only in
+  // iCloud. Moved into .dohc/local, which iCloud Drive skips, they could be
+  // lost. A sparse file is the candidate, and the flags it reports decide.
+  describe("a file only in iCloud Drive", () => {
     const sparse = async (path: string) => { await writeFile(join(root, path), ""); await truncate(join(root, path), 4096); };
-    await sparse("evicted.md");
-    await mkdir(join(root, "folder", "inner"), { recursive: true });
-    await writeFile(join(root, "folder", "kept.md"), "here");
-    await sparse("folder/inner/evicted.md");
-    await expect(deletePath(workspace(), "evicted.md", rejectingTrash)).rejects.toThrow(
-      "dohc did not move evicted.md to the workspace trash because it is only in iCloud Drive. Download it, then try again.",
-    );
-    await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
-      "dohc did not move folder to the workspace trash because some of it is only in iCloud Drive. Download it, then try again.",
-    );
-    expect((await stat(join(root, "evicted.md"))).size).toBe(4096);
-    expect(await readFile(join(root, "folder", "kept.md"), "utf8")).toBe("here");
-    expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
-    // An empty file has no bytes to lose, and the system trash takes the rest.
-    await writeFile(join(root, "empty.md"), "");
-    expect(await deletePath(workspace(), "empty.md", rejectingTrash)).toEqual({ trashed: false });
-    const system: string[] = [];
-    expect(await deletePath(workspace(), "folder", async (path) => { system.push(path); })).toEqual({ trashed: true });
-    expect(system).toEqual([join(await realpath(root), "folder")]);
+    const evicted = async () => {
+      await sparse("evicted.md");
+      await mkdir(join(root, "folder", "inner"), { recursive: true });
+      await writeFile(join(root, "folder", "kept.md"), "here");
+      await sparse("folder/inner/evicted.md");
+    };
+    const untouched = async () => {
+      expect((await stat(join(root, "evicted.md"))).size).toBe(4096);
+      expect(await readFile(join(root, "folder", "kept.md"), "utf8")).toBe("here");
+      expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+    };
+
+    it.skipIf(process.platform === "win32")("moves nothing into the workspace trash when its dataless flag is set", async () => {
+      await evicted();
+      await withICloudCheck(datalessCandidates, async () => {
+        await expect(deletePath(workspace(), "evicted.md", rejectingTrash)).rejects.toThrow(
+          "dohc did not move evicted.md to the workspace trash because it is only in iCloud Drive. Download it, then try again.",
+        );
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
+          "dohc did not move folder to the workspace trash because some of it is only in iCloud Drive. Download it, then try again.",
+        );
+        await untouched();
+        // An empty file has no bytes to lose, and the system trash takes the rest.
+        await writeFile(join(root, "empty.md"), "");
+        expect(await deletePath(workspace(), "empty.md", rejectingTrash)).toEqual({ trashed: false });
+        const system: string[] = [];
+        expect(await deletePath(workspace(), "folder", async (path) => { system.push(path); })).toEqual({ trashed: true });
+        expect(system).toEqual([join(await realpath(root), "folder")]);
+      });
+    });
+
+    it.skipIf(process.platform === "win32")("moves nothing when it can't read the flags", async () => {
+      await evicted();
+      await withICloudCheck({ applies: true, readFlags: async () => { throw new Error("stat: evicted.md: No such file or directory"); } }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
+          "dohc did not move folder to the workspace trash because dohc could not check for files only in iCloud Drive. Try again.",
+        );
+      });
+      await untouched();
+    });
+
+    it.skipIf(process.platform === "win32")("moves nothing from a folder too large to check in its bounds", async () => {
+      await evicted();
+      for (const n of [1, 2, 3]) await writeFile(join(root, "folder", `${n}.md`), String(n));
+      const words = "dohc did not move folder to the workspace trash because it holds too many files to check. Delete it in smaller parts.";
+      await withICloudCheck({ applies: true, maxEntries: 3 }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(words);
+      });
+      await withICloudCheck({ applies: true, maxMs: 0 }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(words);
+      });
+      await untouched();
+      // Within its bounds the same folder moves.
+      await withICloudCheck({ applies: true, maxEntries: 7, readFlags: async (paths) => paths.map(() => 0) }, async () => {
+        expect(await deletePath(workspace(), "folder", rejectingTrash)).toEqual({ trashed: false });
+      });
+    });
   });
 
   it("rejects traversal, reserved paths, the root, and symlinked-ancestor escapes", async () => {

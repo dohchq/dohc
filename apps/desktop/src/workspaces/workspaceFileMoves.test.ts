@@ -21,6 +21,7 @@ import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 
 // Filesystem refusals a test switches on for chosen paths.
@@ -464,6 +465,49 @@ describe("agent moves and deletes", () => {
     expect(await f.move("dir", "moved")).toEqual({ ok: false, path: "dir", reason: expect.stringContaining("put everything back") });
     expect((await readdir(join(f.rootPath, "dir"))).sort()).toEqual(["1.txt", "2.txt"]);
     expect(existsSync(join(f.rootPath, "moved"))).toBe(false);
+    await f.engine().stop();
+  });
+
+  // iCloud Drive can leave a file's bytes only in iCloud. An agent's delete
+  // stages in .dohc/local/trash, which iCloud Drive skips, so it moves
+  // nothing whose dataless flag is set. A sparse file is the candidate.
+  it.skipIf(process.platform === "win32")("refuses an agent's delete of a file or folder only in iCloud Drive, and moves nothing", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "notes/kept.md", "here");
+    for (const path of ["evicted.bin", "notes/evicted.bin"]) { await write(f.rootPath, path, ""); await truncate(join(f.rootPath, path), 4096); }
+    await f.start();
+    await withICloudCheck(datalessCandidates, async () => {
+      expect(await f.remove("evicted.bin")).toEqual({ ok: false, deleted: [], path: "evicted.bin",
+        reason: "dohc did not move evicted.bin to the workspace trash because it is only in iCloud Drive. Download it, then try again." });
+      expect(await f.remove("notes")).toEqual({ ok: false, deleted: [], path: "notes",
+        reason: "dohc did not move notes to the workspace trash because some of it is only in iCloud Drive. Download it, then try again." });
+    });
+    expect((await lstat(join(f.rootPath, "evicted.bin"))).size).toBe(4096);
+    expect((await lstat(join(f.rootPath, "notes/evicted.bin"))).size).toBe(4096);
+    expect(await readFile(join(f.rootPath, "notes/kept.md"), "utf8")).toBe("here");
+    expect(await f.workspaceTrash()).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    await f.engine().stop();
+  });
+
+  // A failed move goes back through the workspace trash. When it can't go
+  // there, it stays where it was moved, and the note says why.
+  it.skipIf(process.platform === "win32").each([
+    ["part of it is only in iCloud Drive", "because some of it is only in iCloud Drive"],
+    ["the workspace trash is not ready", "because dohc could not move it to the workspace trash to put it back"],
+  ] as const)("says why a failed move stays at its target when %s", async (cause, because) => {
+    const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textRename, "dir/2.txt") });
+    for (const n of [1, 2]) await write(f.rootPath, `dir/${n}.txt`, String(n));
+    await write(f.rootPath, "dir/evicted.bin", "");
+    await truncate(join(f.rootPath, "dir/evicted.bin"), 4096);
+    await f.start();
+    if (cause === "the workspace trash is not ready") readLocalStateFrom(null);
+    const result = await withICloudCheck(datalessCandidates, () => f.move("dir", "moved"));
+    expect(result).toMatchObject({ ok: false, path: "dir",
+      reason: `History refused dir/2.txt. History still shows moved/2.txt at dir/2.txt. It stays at moved, ${because}. Rename it back yourself.` });
+    expect((await readdir(join(f.rootPath, "moved"))).sort()).toEqual(["1.txt", "2.txt", "evicted.bin"]);
+    expect(existsSync(join(f.rootPath, "dir"))).toBe(false);
+    expect(await f.workspaceTrash()).toEqual([]);
     await f.engine().stop();
   });
 
@@ -1188,26 +1232,6 @@ describe("before the workspace's open prepares .dohc/local", () => {
     expect(await readFile(join(f.rootPath, "dest.txt"), "utf8")).toBe("dest");
     expect(f.trashItem).not.toHaveBeenCalled();
     expect(existsSync(join(f.rootPath, ".dohc/local/trash"))).toBe(false);
-    await f.engine().stop();
-  });
-
-  // iCloud Drive can leave a file with a size and no blocks on disk. An
-  // agent's delete stages in .dohc/local/trash, which iCloud Drive skips, so
-  // it moves nothing that might be only in iCloud. A sparse file stands in.
-  it.runIf(process.platform === "darwin")("refuses an agent's delete of a file or folder only in iCloud Drive, and moves nothing", async () => {
-    const f = await fixture();
-    await write(f.rootPath, "notes/kept.md", "here");
-    for (const path of ["evicted.bin", "notes/evicted.bin"]) { await write(f.rootPath, path, ""); await truncate(join(f.rootPath, path), 4096); }
-    await f.start();
-    expect(await f.remove("evicted.bin")).toEqual({ ok: false, deleted: [], path: "evicted.bin",
-      reason: "dohc did not move evicted.bin to the workspace trash because it is only in iCloud Drive. Download it, then try again." });
-    expect(await f.remove("notes")).toEqual({ ok: false, deleted: [], path: "notes",
-      reason: "dohc did not move notes to the workspace trash because some of it is only in iCloud Drive. Download it, then try again." });
-    expect((await lstat(join(f.rootPath, "evicted.bin"))).size).toBe(4096);
-    expect((await lstat(join(f.rootPath, "notes/evicted.bin"))).size).toBe(4096);
-    expect(await readFile(join(f.rootPath, "notes/kept.md"), "utf8")).toBe("here");
-    expect(await f.workspaceTrash()).toEqual([]);
-    expect(f.trashItem).not.toHaveBeenCalled();
     await f.engine().stop();
   });
 

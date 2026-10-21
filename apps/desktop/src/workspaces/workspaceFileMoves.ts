@@ -15,7 +15,8 @@ import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, pre
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason, moveBack, moveWord } from "./workspaceMoveRecovery";
+import { ICloudCheckRefusal } from "./workspaceICloudOnly";
 import { WORKSPACE_TRASH } from "./workspaceTrash";
 
 // The workspace's id and attachment name the engine open whose `.dohc/local`
@@ -483,12 +484,14 @@ async function undoMove(workspace: PathChangeWorkspace, engine: AuthoredPathChan
   // Where each source file is now, and the trash entry that holds the rest.
   let where = (_file: string): "source" | "target" | "trash" => "source";
   let trashed: string | undefined;
+  // Why the moved entry did not reach the workspace trash, from where it goes back.
+  let notStaged: unknown;
   if (change.moved) {
     if (caseOnly) {
       const back = await rename(target, source).then(() => true, () => false);
       where = () => back ? "source" : "target";
     } else {
-      trashed = await moveIntoWorkspaceTrash(workspace, target).catch(() => undefined);
+      trashed = await moveIntoWorkspaceTrash(workspace, target).catch((error: unknown) => { notStaged = error; return undefined; });
       const notBack = trashed === undefined ? [""] : await placeBack(rootPath, trashed, source);
       const inTrash = trashed === undefined || !notBack.length ? [] : await placeBack(rootPath, trashed, target);
       where = file => !stayed(notBack, subOf(file)) ? "source" : trashed !== undefined && stayed(inTrash, subOf(file)) ? "trash" : "target";
@@ -508,7 +511,12 @@ async function undoMove(workspace: PathChangeWorkspace, engine: AuthoredPathChan
       sourceDeleted.push(file);
     }
   }
-  if (fromFiles.some(file => where(file) === "target")) notes.push(`Part of it stays at ${input.toPath}, because something new is at ${input.fromPath}.`);
+  if (notStaged !== undefined) {
+    const because = notStaged instanceof ICloudCheckRefusal ? notStaged.because : "dohc could not move it to the workspace trash to put it back";
+    notes.push(`It stays at ${input.toPath}, because ${because}. ${moveBack(moveWord(input.fromPath, input.toPath))}`);
+  } else if (fromFiles.some(file => where(file) === "target")) {
+    notes.push(`Part of it stays at ${input.toPath}, because something new is at ${input.fromPath}.`);
+  }
   if (trashed !== undefined && fromFiles.some(file => where(file) === "trash")) {
     notes.push(`Part of it stays in the workspace trash as ${workspaceTrashPath(trashed)}, because something new is at both paths.`);
   }
