@@ -30,13 +30,14 @@ async function runnerFixture(platform: NodeJS.Platform) {
     },
     () => undefined,
   );
-  const spawn = (command: string) =>
+  const spawn = (command: string, assertMayStart = () => undefined) =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
       logPath: join(root, "logs", "run.log"),
       command,
       prompt: "",
+      assertMayStart,
     });
   return { calls, root, spawn };
 }
@@ -100,6 +101,13 @@ describe("chat runner process", () => {
     },
   );
 
+  it("starts no runner when the last check before spawn refuses, and says why in the run's log", async () => {
+    const { calls, root, spawn } = await runnerFixture("linux");
+    expect(() => spawn("dohc-runner", () => { throw new Error("Restricted"); })).toThrow("Restricted");
+    expect(calls).toEqual([]);
+    expect(readFileSync(join(root, "logs", "run.log"), "utf8")).toBe("Restricted\n");
+  });
+
   it("passes a bare runner name to the system elsewhere", async () => {
     const { calls, spawn } = await runnerFixture("linux");
     spawn("dohc-missing-runner");
@@ -137,6 +145,7 @@ describe("chat runner process", () => {
         logPath: join(shims, "run.log"),
         command: `"${shim}"`,
         prompt: "",
+        assertMayStart: () => undefined,
       });
       const exitCode = await new Promise<number | null>((resolveExit) => child.onExit(resolveExit));
       expect(exitCode).toBe(0);

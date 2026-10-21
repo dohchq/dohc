@@ -79,8 +79,9 @@ export function useWorkspaceTrust(
   }, [workspaceId]);
 
   // Opens main's dialog. Only the person's answer there trusts the workspace.
+  // Automatic: a send asked for it, so main opens it only once.
   const requestTrust = useCallback(
-    () => act((id) => bridge().requestWorkspaceTrust({ workspaceId: id })),
+    (automatic?: true) => act((id) => bridge().requestWorkspaceTrust({ workspaceId: id, ...(automatic ? { automatic } : {}) })),
     [act],
   );
   const restrict = useCallback(

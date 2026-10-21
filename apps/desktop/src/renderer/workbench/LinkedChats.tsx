@@ -117,6 +117,9 @@ export function LinkedChatsPanel(props: {
   // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
   onError: (message: string, cause?: unknown) => void;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   // The file's History, where this workspace records it. A shared view
   // records none, so it passes nothing and About shows no History.
   history?: {
@@ -366,6 +369,7 @@ export function LinkedChatsPanel(props: {
         body,
       });
       if (token !== liveToken.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       setMessages((current) => [...current, result.message]);
       setComposer("");
       listRef.current?.scrollToEnd();
@@ -380,7 +384,7 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props.onError, sending, workspaceId]);
+  }, [activeThread, composer, props.onAgentWaitsForTrust, props.onError, sending, workspaceId]);
 
   // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.

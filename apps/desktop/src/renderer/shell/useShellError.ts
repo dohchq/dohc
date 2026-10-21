@@ -42,6 +42,7 @@ export type ShellErrorKind =
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
+  | "chat-restricted"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"

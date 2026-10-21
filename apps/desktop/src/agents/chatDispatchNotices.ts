@@ -23,6 +23,15 @@ export function createChatDispatchNotices(
       revision += 1;
       publish(snapshot(workspaceId));
     },
+    // Takes back a notice whose cause ended, such as Restricted Mode once
+    // the workspace is trusted.
+    clear(workspaceId: string, reason: ChatDispatchNotice["reason"]) {
+      const notices = workspaces.get(workspaceId);
+      if (!notices?.delete(reason)) return;
+      if (notices.size === 0) workspaces.delete(workspaceId);
+      revision += 1;
+      publish(snapshot(workspaceId));
+    },
     dismiss(workspaceId: string, id: string) {
       const notices = workspaces.get(workspaceId);
       if (!notices) return;

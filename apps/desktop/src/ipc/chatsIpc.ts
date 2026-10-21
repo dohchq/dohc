@@ -196,6 +196,8 @@ export function registerChatsIpcHandlers<
   automationCollectionOf(workspaceId: string): AutomationCollectionOf;
   // A group is a folder. Main creates it when the group is created.
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
+  // Whether the person's message asks an agent that Restricted Mode holds.
+  agentWaitsForTrust(workspaceId: string, messageId: string): Promise<boolean>;
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
@@ -203,7 +205,7 @@ export function registerChatsIpcHandlers<
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
-    notifyRenderer, ensureGroupFolder, automationCollectionOf,
+    notifyRenderer, ensureGroupFolder, automationCollectionOf, agentWaitsForTrust,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
@@ -388,6 +390,16 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   };
 
+  // The message is saved whatever this answers, so a failed answer is none.
+  async function waitsForTrust(workspaceId: string, messageId: string): Promise<{ waitsForTrust?: true }> {
+    try {
+      return await agentWaitsForTrust(workspaceId, messageId) ? { waitsForTrust: true } : {};
+    } catch (error) {
+      console.warn("[desktop] could not read whether a message waits for workspace trust", error);
+      return {};
+    }
+  }
+
   const sendChatMessage: ChatHandler<"sendChatMessage"> = async (input, { event, operation }) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
@@ -410,6 +422,7 @@ export function registerChatsIpcHandlers<
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+      ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   };
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
@@ -908,6 +921,7 @@ export function registerChatsIpcHandlers<
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
       ...await askedDecision(linkedChatStoreFor(workspace), workspace.workspaceId, input, started.message),
+      ...await waitsForTrust(workspace.workspaceId, started.message.id),
     });
   };
   const markChatThreadRead: ChatHandler<"markChatThreadRead"> = async (input) => {
