@@ -165,9 +165,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const recorded = readTestRecord(record);
       const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
       if (flaky.length) row.flaky = flaky;
-      // What a vitest test threw on the try that failed, which its log no longer shows.
-      const errors = recorded.filter(test => test.flaky && test.error);
-      if (errors.length) row.flakyErrors = Object.fromEntries(errors.map(test => [test.test, test.error]));
+      // What a vitest test threw on a try that failed, which its log no longer shows once a retry or a run alone passes.
+      const errors = recorded.filter(test => (test.flaky || test.failed) && test.error);
+      if (errors.length) row.testErrors = Object.fromEntries(errors.map(test => [test.test, test.error]));
       // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
       const last = readLog(row.retryLog ?? row.log);
       const failed = [...new Set([...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : []), ...failedAlone])]
@@ -266,8 +266,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const stopped = stopper.unfinished(report.steps, [...(onlyPackage !== null ? [] : ["repository"]), ...(report.packages ?? []).map(task => task.name),
       ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
     if (stopped) report.stopped = stopped;
-    report.flaky = report.steps.flatMap(step => [...(step.flaky ?? []).map(test => ({ step: step.name, test, ...(step.flakyErrors?.[test] ? { error: step.flakyErrors[test] } : {}) })),
-      ...(step.passedAlone ?? []).map(test => ({ step: step.name, test, passedAlone: true }))]);
+    const error = (step, test) => step.testErrors?.[test] ? { error: step.testErrors[test] } : {};
+    report.flaky = report.steps.flatMap(step => [...(step.flaky ?? []).map(test => ({ step: step.name, test, ...error(step, test) })),
+      ...(step.passedAlone ?? []).map(test => ({ step: step.name, test, passedAlone: true, ...error(step, test) }))]);
     report.failed = report.steps.flatMap(step => (step.failed ?? []).map(test => ({ step: step.name, test })));
     report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();

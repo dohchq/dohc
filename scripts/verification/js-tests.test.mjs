@@ -230,7 +230,7 @@ function isolatedRetry(t) {
     const record=(env,...lines)=>appendFileSync(env.DOHC_TEST_RECORD,lines.map(line=>JSON.stringify(line)+'\n').join(''));
     const failure=()=>Object.assign(Error('tests failed'),{commandExitFailure:true});
     const failing=(...tests)=>tests.map(([,name])=>'✖ '+name+' (30231ms)\n').join('')+'✖ failing tests:\n\n'+tests.map(([file,name])=>'test at '+file+':3:1\n✖ '+name+' (30231ms)\n').join('\n');
-    const failed=test=>({test,flaky:false,failed:true,passed:false,seconds:0.1});
+    const failed=(test,error)=>({test,flaky:false,failed:true,passed:false,seconds:0.1,...(error?{error}:{})});
     const passed=test=>({test,flaky:false,failed:false,passed:true,seconds:0.1});
     // The tests the tail fails both tries.
     const tailFailed=scenario==='inexact'?['fails without a file']
@@ -275,7 +275,7 @@ function isolatedRetry(t) {
       }
       if(step==='@dohc/tail'&&!alone&&!scenario.startsWith('node-')){
         if(scenario==='fails-alone')await until('sibling-started',signal);
-        record(env,...tailFailed.map(failed),{run:'failed',outside:scenario==='outside'?1:0});
+        record(env,...tailFailed.map(test=>failed(test,scenario==='pass-alone'?'EBUSY: '+test:undefined)),{run:'failed',outside:scenario==='outside'?1:0});
         throw failure();
       }
       if(step==='@dohc/tail'&&alone&&scenario==='skipped-alone'){
@@ -292,7 +292,7 @@ function isolatedRetry(t) {
         const mine=tailFailed.filter(test=>test.startsWith(args[5]+' › '));
         // In "order", an earlier test in the file leaves state behind that fails this one, so it passes only when filtered to itself.
         if(scenario==='fails-alone'||scenario==='order'&&!args.includes('-t')){
-          record(env,...mine.map(failed),...scenario==='fails-alone'?[failed('src/a.test.ts › load > checks its setup')]:[],{run:'failed',outside:0});
+          record(env,...mine.map(test=>failed(test)),...scenario==='fails-alone'?[failed('src/a.test.ts › load > checks its setup')]:[],{run:'failed',outside:0});
           throw failure();
         }
         record(env,...scenario==='unmatched'?[]:mine.map(passed),{run:'passed',outside:0});
@@ -337,8 +337,9 @@ test("vitest files whose tests failed both tries pass alone, so the step passes 
   assert.equal(passed.error, null);
   assert.equal(passed.verdict, "PASS");
   assert.deepEqual(passed.steps, { repository: "PASS", "@dohc/sibling": "PASS", "@dohc/tail": "PASS" });
+  // Each keeps what it threw when it failed both tries.
   assert.deepEqual(passed.flaky, [underLoad, "src/a.test.ts › load > also fails under load", "src/c.test.ts › waits under load"]
-    .map(test => ({ step: "@dohc/tail", test, passedAlone: true })));
+    .map(test => ({ step: "@dohc/tail", test, passedAlone: true, error: `EBUSY: ${test}` })));
   assert.deepEqual(passed.failed, [], "a test that passed alone did not fail");
   assert.deepEqual(passed.alone.map(call => call.args.split(" --reporter=")[0]), ["src/a.test.ts", "src/c.test.ts"]
     .map(file => `--filter @dohc/tail exec vitest run ${file} --maxWorkers=1 --no-file-parallelism --retry=0`), "each file runs once, whole, with one worker");
