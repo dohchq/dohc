@@ -1,12 +1,15 @@
 import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
 import { mkdirSync } from "node:fs";
 import {
+  appendFile,
   copyFile,
   link,
   mkdir,
   readFile,
+  rename,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -500,6 +503,49 @@ describe("workspace database worker", () => {
 
     expect(edited.version).toBe(5);
     expect((await logOperations(paths.logPath)).map((entry) => entry.version)).toEqual([1, 2, 4, 5]);
+  });
+
+  it("gives the next number after both its counter and every number another computer added to the log", async () => {
+    const root = await createTestScratch("dohc-db-worker-other-computer-");
+    const databasePath = join(root, "data.sqlite");
+    seedDatabase(databasePath);
+    const paths = editPaths(root);
+    await mkdir(dirname(paths.logPath), { recursive: true });
+    const lines = (versions: number[]) => versions.map((version) => `${JSON.stringify({ version })}\n`).join("");
+    const upTo = (last: number) => Array.from({ length: last }, (_, index) => index + 1);
+    // What a sync does: the other computer's copy replaces the log.
+    const synced = async (versions: number[]) => {
+      await writeFile(`${paths.logPath}.synced`, lines(versions));
+      await rename(`${paths.logPath}.synced`, paths.logPath);
+    };
+    await writeFile(paths.logPath, lines(upTo(10)));
+    const counter = new DatabaseSync(paths.statePath);
+    try {
+      counter.exec("CREATE TABLE database_operation_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO database_operation_state VALUES ('last_version', 10);");
+    } finally { counter.close(); }
+    const databaseWorker = owner();
+    const edit = async (operationId: string) => (await databaseWorker.editPath({
+      absolutePath: databasePath, path: "data.sqlite", ...paths, edit: UPDATE, operation: operation(operationId),
+    })).version;
+
+    // This computer's counter is at 10, and the other computer's 11 and 12 arrive.
+    await appendFile(paths.logPath, lines([11, 12]));
+    expect(await edit("after-other-computer")).toBe(13);
+    // The log grows in place after this computer last read it.
+    await appendFile(paths.logPath, lines([14]));
+    expect(await edit("after-append")).toBe(15);
+    // A synced copy without this computer's 13 and 15, with the other's 16.
+    await synced([...upTo(12), 14, 16]);
+    expect(await edit("after-sync")).toBe(17);
+    // A synced copy that lost every number past 12: the counter still covers them.
+    await synced(upTo(12));
+    expect(await edit("after-loss")).toBe(18);
+    // A change in place that keeps the log's size, made later.
+    const text = await readFile(paths.logPath, "utf8");
+    await writeFile(paths.logPath, text.replace('{"version":12}', '{"version":99}'));
+    const later = new Date(Date.now() + 60_000);
+    await utimes(paths.logPath, later, later);
+    expect(await edit("after-rewrite")).toBe(100);
   });
 
   it("refuses a number past the safe range rather than give one out again", async () => {

@@ -235,10 +235,11 @@ export async function importToDatabase(
 
 // This computer numbers each visible database's operations with its own
 // counter in `.dohc/local`, which iCloud Drive skips. The operations log stays
-// in `.dohc/databases`, which syncs. A missing counter starts after the log's
-// highest number. A counter dohc can't trust could make it give a number out
-// again, so the edit refuses and leaves it in place. Once the person removes
-// its folder, the next edit starts after the log.
+// in `.dohc/databases`, which syncs. Each number comes after both the counter
+// and the highest number in the log, which another computer may have raised.
+// A counter dohc can't trust could make it give a number out again, so the
+// edit refuses and leaves it in place. Once the person removes its folder, the
+// next edit starts after the log.
 async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
   const name = `databases/${databaseFolderName(databasePath)}`;
   const folder = async () => {
