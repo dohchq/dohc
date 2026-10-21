@@ -6596,6 +6596,8 @@ struct HostedFeed {
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     /// Rows an earlier feed placed, which the relay still knows.
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
+    /// The relay position of the feed's first row.
+    first: i64,
     /// How many pages the host pulled.
     pulls: std::sync::atomic::AtomicUsize,
 }
@@ -6613,6 +6615,7 @@ impl HostedFeed {
             rows: Default::default(),
             blobs: Default::default(),
             placed: Vec::new(),
+            first: 10,
             pulls: Default::default(),
         }
     }
@@ -6627,7 +6630,7 @@ impl HostedFeed {
         bytes: Vec<u8>,
     ) -> dohc_engine_sync::ReplicationEnvelope {
         let mut rows = self.rows.lock().unwrap();
-        op.relay_seq = Some(10 + rows.len() as i64);
+        op.relay_seq = Some(self.first + rows.len() as i64);
         rows.push(op.clone());
         self.blobs.lock().unwrap().insert(hex_sha256(&bytes), bytes);
         op
@@ -7770,24 +7773,21 @@ const APPLIED_EXACTLY: &str = "INSERT INTO live_device_update_applications (rela
 #[path = "owner_publication/released_window_measure.rs"]
 mod released_window_measure;
 
-/// The tails each decision of [`released_window_measure`] reads: kept for
-/// one open store, as the actor keeps them.
-fn measured_tails(store: &EngineStore) -> ReleasedTails {
-    ReleasedTails::default().bound_to(store)
-}
-
-/// A decision run to its end as the actor's relay coordinator runs it: each
-/// attempt, with the request for the validation it waits for, is one actor
-/// operation, and the worker validates between them.
+/// A decision of [`released_window_measure`] on `tails`, kept for one open
+/// store as the actor keeps them, run to its end as the actor's relay
+/// coordinator runs it: each attempt, with the request for the validation it
+/// waits for, is one actor operation, and the worker validates between them.
+/// The retained work its protecting binding lists.
 fn measured_protection(
     store: &EngineStore,
     key: &ProtectionKey<'_>,
     tails: &mut ReleasedTails,
-) -> Protection {
-    loop {
+) -> usize {
+    let tails = tails.bound_to(store);
+    let protected = loop {
         let decided = released_window_measure::operation(|| {
             match store
-                .read_with(|conn| protection(conn, key, tails))
+                .read_with(|conn| protection(conn, key, &tails))
                 .unwrap()
             {
                 Protection::Pending(pending) => Err(pending.validate()),
@@ -7795,13 +7795,26 @@ fn measured_protection(
             }
         });
         match decided {
-            Ok(decided) => return decided,
+            Ok(decided) => break decided,
             Err(validation) => validation.wait().unwrap(),
         }
-    }
+    };
+    let Protection::Protected { binding, .. } = protected else {
+        panic!("protected");
+    };
+    let ProtectedTails::Listed(tails) = &*binding.tails else {
+        panic!("listed");
+    };
+    tails
+        .iter()
+        .map(|tail| match &tail.coverage {
+            RetainedCoverage::Unproven(unproven) => unproven.count as usize,
+            RetainedCoverage::Invalid => panic!("readable"),
+        })
+        .sum()
 }
 
-/// A hosted pass run to its end the same way.
+/// A hosted pass of [`released_window_measure`] run to its end the same way.
 fn measured_pull(
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
@@ -7825,6 +7838,37 @@ fn measured_pull(
         });
         match attempt {
             Ok(pass) => return pass,
+            Err(validation) => validation.wait().unwrap(),
+        }
+    }
+}
+
+/// The commit that completes a pass of [`released_window_measure`], with
+/// the tails the actor keeps, run to its end the same way.
+fn measured_commit(
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    store: &mut EngineStore,
+    cache: &dohc_engine_collab::WriterDocCache,
+    cursor: &dohc_engine_sync::HostedCursor,
+) -> dohc_engine_sync::HostedCommit {
+    loop {
+        let attempt = released_window_measure::operation(|| {
+            match client.commit_hosted_cursor(
+                store,
+                "workspace",
+                cursor,
+                &cache.released_tails(store),
+                &NoFaults,
+            ) {
+                Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                    Err(pending.validate())
+                }
+                commit => Ok(commit.unwrap()),
+            }
+        });
+        match attempt {
+            Ok(dohc_engine_storage::TxnOutcome::Committed(commit)) => return commit,
+            Ok(_) => panic!("crashed"),
             Err(validation) => validation.wait().unwrap(),
         }
     }

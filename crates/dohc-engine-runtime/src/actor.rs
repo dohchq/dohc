@@ -541,6 +541,20 @@ impl ActorHandle {
             .await
     }
 
+    /// Run `hook` on the actor's own connection, for measurements that
+    /// attribute its statements.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn on_connection(&self, hook: fn(&rusqlite::Connection)) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                hook(conn);
+                Ok(())
+            })
+        })
+        .await
+    }
+
     /// The released tails the actor decides synced rows on, for tests that
     /// hold or count its validations.
     #[doc(hidden)]

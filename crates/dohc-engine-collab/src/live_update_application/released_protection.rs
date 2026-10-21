@@ -1007,6 +1007,13 @@ fn open_reader(path: &std::path::Path) -> Result<Connection, ApplicationError> {
             dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
         )))
         .map_err(read_sql)?;
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(hook) = *READER_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        hook(&reader);
+    }
     Ok(reader)
 }
 
@@ -1088,6 +1095,19 @@ pub fn released_tail_scans() -> u64 {
 
 #[cfg(any(test, feature = "test-support"))]
 static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Run `hook` on each connection a validation opens of its own, before it
+/// reads, for measurements that attribute its statements; none stops.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn on_released_tail_reader(hook: Option<fn(&Connection)>) {
+    *READER_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static READER_HOOK: std::sync::Mutex<Option<fn(&Connection)>> = std::sync::Mutex::new(None);
 
 /// How many times the calling thread read a released window's tails: a
 /// thread that decides on a worker's validations reads none.
