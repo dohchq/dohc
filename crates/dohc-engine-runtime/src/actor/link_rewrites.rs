@@ -34,6 +34,7 @@ pub(super) struct RewriteState {
     pub undo_gate: Arc<tokio::sync::Mutex<()>>,
     stops: Mutex<HashMap<String, usize>>,
     publishers: Mutex<HashSet<(String, String)>>,
+    deferred_placements: Mutex<HashSet<String>>,
 }
 pub(super) struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {

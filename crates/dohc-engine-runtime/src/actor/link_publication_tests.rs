@@ -538,7 +538,7 @@ async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reopen() {
-    let f = Fixture::new(2, 2);
+    let mut f = Fixture::new(2, 2);
     let gate = f.capture.clone().lock_owned().await;
     f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
     let path = f.root.join("source-0000.md");
@@ -577,5 +577,34 @@ async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reop
         std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
         "[[new#part|label]] [[./new.md]] [old](old.md)"
     );
+    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
+                break;
+            }
+            f.actor.run(|_, _| Ok(())).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("receipt replay must skip deferred jobs");
+    assert_eq!(
+        placements().lock().unwrap()[&f.ws]
+            .turns
+            .iter()
+            .map(|(n, _)| n)
+            .sum::<usize>(),
+        2,
+        "receipt replay must not retry a hard failure"
+    );
+    #[cfg(windows)]
+    std::fs::remove_dir(&path).unwrap();
+    #[cfg(not(windows))]
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, BODY).unwrap();
+    f.restart().await;
+    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
+    f.wait_disk(2).await;
     f.close().await;
 }

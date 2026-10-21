@@ -25,7 +25,6 @@ impl ActorHandle {
         let actor = self.clone();
         tokio::spawn(async move {
             let mut cursor = 0;
-            let deferred = Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
             let mut backoff = Duration::from_millis(25);
             while actor.lifecycle() == super::super::LifecycleState::Ready {
                 // Close may hold a gate while it drains the actor.
@@ -39,7 +38,6 @@ impl ActorHandle {
                 let p = publication.clone();
                 let state = actor.link_rewrites.clone();
                 let turn_key = key.clone();
-                let deferred = deferred.clone();
                 let outcome = actor.run(move |store, _| {
                     let _gates = gates;
                     #[cfg(test)]
@@ -62,7 +60,7 @@ impl ActorHandle {
                              AND j.job_id NOT IN (SELECT value FROM json_each(?5))
                              ORDER BY m.moment_order LIMIT 1").map_err(StorageError::corrupt_public)?;
                             stmt.query_row(params![p.workspace,p.operation,version,cursor,
-                                serde_json::to_string(&*deferred.lock().unwrap()).unwrap()],
+                                serde_json::to_string(&*state.deferred_placements.lock().unwrap()).unwrap()],
                                 |r| Ok((r.get(0)?,r.get(1)?)))
                             .optional().map_err(StorageError::corrupt_public)
                         })?
@@ -92,7 +90,7 @@ impl ActorHandle {
                             crate::links::now_ms(), faults.as_ref(), Some(&selected), false,
                         )
                     })?;
-                    deferred.lock().unwrap().extend(summary.deferred);
+                    state.deferred_placements.lock().unwrap().extend(summary.deferred);
                     let completed = store.load_materialization_job(&id)?
                         .is_none_or(|job| job.status != dohc_engine_storage::JobStatus::Pending);
                     Ok(Some((order, completed)))
