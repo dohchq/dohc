@@ -216,6 +216,8 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
+          linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
+            history: {rewriteHistoryLinks: operationHistory.rewriteHistoryLinks!}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
       });

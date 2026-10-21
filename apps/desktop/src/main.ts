@@ -418,6 +418,7 @@ import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
+import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
@@ -3668,6 +3669,7 @@ async function openWorkspaceActivityForOperation(
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
     reconcileLocalCollectionApps(canonicalWorkspace);
+    resumeLinkRewrites(canonicalWorkspace, operation.signal);
   }
   return result;
 }
@@ -3677,6 +3679,16 @@ async function openWorkspaceActivityForOperation(
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
     .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
+}
+
+function resumeLinkRewrites(workspace: EngineWorkspace & {readOnly?: boolean; shareView?: unknown}, signal: AbortSignal): void {
+  if (workspace.readOnly || workspace.shareView !== undefined) return;
+  void resumeWorkspaceLinkRewrites(workspace.rootPath, {workspaceId: workspace.workspaceId, signal,
+    history: {rewriteHistoryLinks: input => withEngineAdapter(workspace, adapter => adapter.rewriteHistoryLinks(input)).then(result => {
+      if (!result) throw new Error("The workspace engine is not running.");
+      return result;
+    })},
+  }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
 }
 
 function openWorkspaceActivityWith(
@@ -4997,6 +5009,9 @@ const desktopEngine = createDesktopEngine({
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
     if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
+    if (workspace) void withPhysicalWorkspaceOperation(workspaceId, async operation => {
+      resumeLinkRewrites(operation.workspace, operation.signal);
+    }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });

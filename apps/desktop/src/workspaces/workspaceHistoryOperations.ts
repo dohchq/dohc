@@ -13,9 +13,10 @@ import { withExclusiveWorkspaceOperation, withSharedWorkspaceOperation } from ".
 import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { waitForRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { pauseLinkRewrite, scheduleLinkRewrite } from "./workspaceLinkRewrites";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; signal?: AbortSignal; assertCurrent(): void };
-export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation">;
+export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation"> & Partial<Pick<VersionedLiveAdapter, "rewriteHistoryLinks">>;
 export function createOperationHistory(withAdapter: <T>(work: (adapter: OperationHistory) => Promise<T>) => Promise<T | null>): OperationHistory {
   const requireResult = <T>(result: T | null): T => {
     if (result === null) throw new Error("The workspace engine is not running.");
@@ -25,6 +26,10 @@ export function createOperationHistory(withAdapter: <T>(work: (adapter: Operatio
     readHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.readHistoryOperation(input))),
     readHistoryPage: async input => requireResult(await withAdapter(adapter => adapter.readHistoryPage(input))),
     undoHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.undoHistoryOperation(input))),
+    rewriteHistoryLinks: async input => requireResult(await withAdapter(adapter => {
+      if (!adapter.rewriteHistoryLinks) throw new Error("The workspace engine cannot update links.");
+      return adapter.rewriteHistoryLinks(input);
+    })),
   };
 }
 
@@ -145,12 +150,14 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
       const move = cursor ? undefined : await readMoveRecovery(rootPath, input.operationId);
       const floor = await agentFloor(rootPath, !record?.result);
       if (move) await moveRecoveryFloor(move, floor);
+      if (move && "links" in move && move.links?.state === "done") for (const path of move.links.unchecked) await floor(path);
       if (record) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       const result = await history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
       for (const member of result.moments) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
       if (!record && !move && !result.moments.length && !input.cursor) throw new Error("This operation is not in History.");
       operation.assertCurrent();
       return { ok: true as const, operationId: input.operationId,
+        ...(move && "links" in move && move.links ? {links: move.links} : {}),
         members: result.moments.map(member => ({ momentId: member.momentId, operation: member.operation, path: member.path, ...(member.beforePath ? { beforePath: member.beforePath } : {}) })),
         ...(record ? { withoutHistory: record.paths } : move && !("noUndo" in move) ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
     });
@@ -158,10 +165,14 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
 }
 export async function undoWorkspaceHistoryOperation(operation: Operation & { signal: AbortSignal }, input: { operationId: string }, author: MomentWriteAuthor,
   options: { history: OperationHistory; agent: boolean }): Promise<DeleteUndoResult> {
+  let release: (() => void) | undefined;
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
-    await waitForRecovery(input.operationId, operation.signal);
+    const paused = pauseLinkRewrite(rootPath, input.operationId);
+    const recovery = waitForRecovery(input.operationId, operation.signal);
+    release = await paused;
+    await recovery;
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
@@ -187,7 +198,14 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
-        const result = await options.history.undoHistoryOperation(input);
+        let result;
+        try { result = await options.history.undoHistoryOperation(input); }
+        catch (error) {
+          const path = error instanceof Error ? /^Undo refused: (?:link changed after rename|linking document removed): (.+)$/su.exec(error.message)?.[1] : undefined;
+          if (path && floor) try { await floor(path); }
+          catch (denied) { throw new Error(denied instanceof Error ? denied.message : "Cannot undo this operation.", {cause: error}); }
+          throw error;
+        }
         try { if (floor) for (const path of result.notRestored) await floor(path); }
         catch (error) { markChanged(); throw error; }
         return result;
@@ -214,5 +232,15 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     return failure(error, "undo");
+  } finally {
+    release?.();
+    if (release && !operation.signal.aborted && options.history.rewriteHistoryLinks) {
+      await withExclusiveWorkspaceOperation(operation.workspace.rootPath, async () => {
+        const record = await readMoveRecovery(operation.workspace.rootPath, input.operationId);
+        if (record && !("noUndo" in record)) scheduleLinkRewrite(operation.workspace.rootPath, record, {
+          workspaceId: operation.workspace.workspaceId, signal: operation.signal, history: {rewriteHistoryLinks: options.history.rewriteHistoryLinks!},
+        });
+      }, {markOnSuccess: false}).catch(() => undefined);
+    }
   }
 }

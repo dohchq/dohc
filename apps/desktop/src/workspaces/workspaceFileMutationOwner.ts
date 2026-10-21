@@ -322,6 +322,10 @@ export function createWorkspaceFileMutationOwner<
           assertWritableWorkspace(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            linkRewrites: dependencies.historyFor(workspace).rewriteHistoryLinks ? {
+              workspaceId: workspace.workspaceId, signal,
+              history: {rewriteHistoryLinks: dependencies.historyFor(workspace).rewriteHistoryLinks!},
+            } : undefined,
             onRecorded: (path, operationId) => {
               const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
               const release = beginPendingRecovery(operationId, { signal, waitForReads: true });

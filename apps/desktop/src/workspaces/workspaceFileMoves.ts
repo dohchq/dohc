@@ -15,13 +15,15 @@ import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, pre
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason, readMoveRecovery } from "./workspaceMoveRecovery";
+import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
 
 export interface PathChangeOptions {
   capture: Pick<WorkspaceEngineCapture, "changePathsAs">;
   requestId: string;
+  linkRewrites?: LinkRewriteContext;
   trashItem(absolutePath: string): Promise<void>;
   // Tells open editors that the documents at or under a path are gone.
   markDeleted(path: string): void;
@@ -424,7 +426,12 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
       if (!recovery) return { ...changed, done: { ...done, ...await finishFolderMoveRecovery(rootPath, operationId, from, to) } };
       const release = recovery.record && !recovery.noUndo ? options.onRecorded?.(done.toPath, operationId) : undefined;
       try {
-        const saved = await finishMoveRecovery(rootPath, recovery, from, to, overwritten);
+        const saved = await finishMoveRecovery(rootPath, recovery, from, to, overwritten,
+          options.linkRewrites ? {requestId: `move-links:${operationId}`, author} : undefined);
+        if (saved.undo.available && options.linkRewrites) {
+          const record = await readMoveRecovery(rootPath, operationId);
+          if (record && !("noUndo" in record)) scheduleLinkRewrite(rootPath, record, options.linkRewrites);
+        }
         return { ...changed, done: { ...done, ...saved } };
       } finally { release?.(); }
     };

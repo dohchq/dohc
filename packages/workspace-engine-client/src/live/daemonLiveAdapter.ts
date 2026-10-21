@@ -43,6 +43,7 @@ export interface DaemonWireError extends Omit<WireError, "code"> {
 
 export interface DaemonRequesterClient {
   sendRequest(request: Request): Promise<Response>;
+  cancelRequest?(callerId: number): Promise<void>;
   readonly helloAck?: {
     readonly capabilities: readonly string[];
   };
@@ -493,10 +494,20 @@ export class WorkspaceDaemonRequester {
       workspace?: WorkspaceHandle;
       idempotencyKey?: string;
       deadlineMs?: number;
+      cancelSignal?: AbortSignal;
     },
   ): Promise<Response["result"]> {
     const id = this.allocateRequestId();
-    return this.send(id, method, params, options);
+    if (options?.cancelSignal && !this.client.cancelRequest) {
+      throw new DaemonProtocolError("The daemon client cannot cancel requests.");
+    }
+    const answer = this.send(id, method, params, options);
+    // Cancellation asks the daemon to stop; only its original answer ends the call.
+    const cancel = () => { void this.client.cancelRequest!(id).catch(() => undefined); };
+    options?.cancelSignal?.addEventListener("abort", cancel, { once: true });
+    if (options?.cancelSignal?.aborted) cancel();
+    try { return await answer; }
+    finally { options?.cancelSignal?.removeEventListener("abort", cancel); }
   }
 
   async requestWithBlob(

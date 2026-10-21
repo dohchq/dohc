@@ -137,18 +137,18 @@ Returns `{ ok: true, operationId, undo: { available: true } | { available: false
 
 ### `dohc_read_operation`
 
-List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
+List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.
 
 Operation reads require the owning workspace. Shared profiles do not offer this read.
 
 - `operationId`: `string`. Required.
 - `cursor`: `string`
 
-Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, links?: { state: "updating" } | { state: "done", documents, unchecked, uncheckedCount }, nextCursor }`.
 
 ### `dohc_undo_operation`
 
-Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.
+Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -288,7 +288,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Moving a file also updates [[links]] to it in other documents after the result returns. dohc_read_operation lists the documents it could not update. A folder move updates no links. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1576,7 +1576,7 @@ List the paths changed by one operation.
 
 - `--cursor <cursor>`: Continue from the cursor on the previous operation page.
 
-With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, links?: { state: "updating" } | { state: "done", documents, unchecked, uncheckedCount }, nextCursor }`.
 
 #### `dohc history undo`
 

@@ -12,6 +12,8 @@ import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
+import { resumeWorkspaceLinkRewrites } from "./workspaceLinkRewrites";
+import { readMoveRecovery } from "./workspaceMoveRecovery";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -21,13 +23,15 @@ afterEach(() => vi.restoreAllMocks());
 const person = { kind: "human", humanId: "local:move-owner" } as const;
 const agent = { kind: "agent", agentId: "move-agent", onBehalfOf: "local:move-owner" } as const;
 const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
-async function fixture() {
+const linkReceipt = {documents: 3, links: 3, unchecked: ["adopted.md"], uncheckedCount: 1, complete: true};
+const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
+async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewriteHistoryLinks"]>) {
   const rootPath = await createTestScratch("move-undo-");
   const write = async (path: string, text = path) => { await mkdir(dirname(join(rootPath, path)), { recursive: true }); await writeFile(join(rootPath, path), text); };
   const retirement = new AbortController();
   const operation = { workspace: { rootPath, workspaceId: "move-test", attachmentId: Symbol("move-test"), readOnly: false, shareView: undefined as unknown },
     signal: retirement.signal, state: {}, assertCurrent: vi.fn() };
-  const members: { path: string; beforePath: string; operation: "rename"; momentId: string }[] = [];
+  const members: { path: string; beforePath: string; operation: "rename" | "write"; momentId: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
   const capture: PathChangeOptions["capture"] & Pick<import("./workspaceEngineCapture").WorkspaceEngineCapture, "beginFileRename"> = { beginFileRename: async () => async () => undefined, changePathsAs: async (_paths, authored, work) => {
@@ -47,6 +51,7 @@ async function fixture() {
     if (!deduped) compensationCount++;
     if (!restoring && !placed) {
       for (const member of members) {
+        if (member.operation !== "rename") continue;
         await mkdir(dirname(join(rootPath, member.beforePath)), { recursive: true });
         await rename(join(rootPath, member.path), join(rootPath, member.beforePath));
         objects.set(member.beforePath, objects.get(member.path)!); objects.delete(member.path);
@@ -55,8 +60,9 @@ async function fixture() {
     }
     return { operationId: input.operationId, versionId: "main", notRestored: [], compensationOperationId: id, momentCount: members.length, deduped, materialized: !restoring };
   });
-  const history = { readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation };
-  const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn() };
+  const history = { readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation, ...(rewriteHistoryLinks ? {rewriteHistoryLinks} : {}) };
+  const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn(),
+    ...(rewriteHistoryLinks ? {linkRewrites: {workspaceId: "move-test", signal: retirement.signal, history: {rewriteHistoryLinks}}} : {}) };
   const logError = vi.fn();
   let afterMutation = () => {};
   const owner = createWorkspaceFileMutationOwner({ historyFor: () => history, assertTrustedSender: () => undefined,
@@ -87,6 +93,123 @@ async function queuedUndo(f: Awaited<ReturnType<typeof fixture>>, byAgent = fals
     release.resolve(); await holding;
     return { result: await undoing, follower: await follower };
   }
+
+it.each([false, true])("returns a rename before its pass, reads updating without waiting, then saves done, agent=%s", async byAgent => {
+  const receipt = deferred<typeof linkReceipt>(), started = deferred<void>();
+  let visible = false;
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => {
+    expect(visible).toBe(true); started.resolve(); return receipt.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md");
+  const result = await (byAgent ? f.moveAsAgent("old.md", "new.md") : f.move("old.md", "new.md"));
+  visible = true;
+  expect(rewrite).not.toHaveBeenCalled();
+  await started.promise;
+  const read = () => readWorkspaceHistoryOperation(f.operation, {operationId: result.operationId!}, f.history);
+  expect(await read()).toMatchObject({ok: true, links: {state: "updating"}});
+  expect(rewrite.mock.calls[0]![0]).toMatchObject({requestId: `move-links:${result.operationId}`, author: byAgent ? agent : person});
+  receipt.resolve(linkReceipt);
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ok: true, links: {state: "done", documents: 3, unchecked: ["adopted.md"], uncheckedCount: 1}}), {timeout: 30_000});
+  f.retirement.abort();
+});
+
+it("cancels the in-flight pass and waits for its last committed member before floors and Undo", async () => {
+  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<never>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
+    input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
+    started.resolve(); return ended.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md");
+  const moved = await f.move("old.md", "new.md"); await started.promise;
+  f.history.readHistoryPage.mockClear();
+  const undoing = f.undo(); await cancelled.promise; await nextTurn();
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled();
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  f.members.push({path: "last.md", beforePath: "last.md", operation: "write", momentId: "last"});
+  ended.reject(new Error("Cancelled"));
+  expect(await undoing).toMatchObject({ok: true, tracked: {momentCount: 2}});
+  expect(f.history.readHistoryPage).toHaveBeenCalled();
+  expect(rewrite).toHaveBeenCalledTimes(1);
+  await resumeWorkspaceLinkRewrites(f.rootPath, f.options.linkRewrites!);
+  await nextTurn(); expect(rewrite).toHaveBeenCalledTimes(1);
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("engine");
+  f.retirement.abort();
+});
+
+it("refuses an agent floor before every inverse and resumes with the same key and mover", async () => {
+  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<never>(), resumed = deferred<void>(), receipt = deferred<typeof linkReceipt>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
+    if (rewrite.mock.calls.length === 1) {
+      input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
+      started.resolve(); return ended.promise;
+    }
+    resumed.resolve(); return receipt.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md");
+  const moved = await f.moveAsAgent("old.md", "new.md"); await started.promise;
+  const undoing = f.undo(undefined, true); await cancelled.promise;
+  f.members.push({path: "private/.env", beforePath: "private/.env", operation: "write", momentId: "secret"});
+  ended.reject(new Error("Cancelled"));
+  expect(await undoing).toMatchObject({ok: false, reason: expect.stringContaining("private contains a link or a reserved, secret, or excluded path")});
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await resumed.promise;
+  const [first, second] = rewrite.mock.calls.map(call => call[0]);
+  expect(second).toMatchObject({requestId: first!.requestId, author: agent});
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "updating");
+  receipt.resolve(linkReceipt);
+  await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  f.retirement.abort();
+});
+
+it.each(["link changed after rename", "linking document removed"])("maps only the preflight refusal %s and resumes updating", async reason => {
+  const started = deferred<void>(), cancelled = deferred<void>(), ended = deferred<never>(), resumed = deferred<void>();
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async input => {
+    if (rewrite.mock.calls.length > 1) {resumed.resolve(); return linkReceipt;}
+    input.cancelSignal!.addEventListener("abort", () => cancelled.resolve(), {once: true});
+    started.resolve(); return ended.promise;
+  });
+  const f = await fixture(rewrite); await f.write("old.md"); await f.move("old.md", "new.md"); await started.promise;
+  f.history.undoHistoryOperation.mockRejectedValue(new Error(`Undo refused: ${reason}: source.md`));
+  const undoing = f.undo(); await cancelled.promise; ended.reject(new Error("Cancelled"));
+  expect(await undoing).toEqual({ok: false, reason: reason === "link changed after rename"
+    ? "Cannot undo the rename. The link in source.md changed after the rename. Rename it back yourself."
+    : "Cannot undo the rename. source.md is no longer in this workspace. Rename it back yourself."});
+  await resumed.promise;
+  expect(rewrite.mock.calls[1]![0]).toMatchObject({author: person, requestId: rewrite.mock.calls[0]![0].requestId});
+  await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, rewrite.mock.calls[0]![0].operationId)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  f.retirement.abort();
+});
+
+it.each(["updating", "begun", "finished"])("resumes an open record only before Undo has begun: %s", async phase => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
+  const record = await readMoveRecovery(f.rootPath, moved.operationId!);
+  if (!record || "noUndo" in record) throw new Error("missing file record");
+  record.links = {state: "updating"}; record.linkRewrite = {requestId: "original-key", author: agent};
+  if (phase === "begun") record.engine = {requested: true};
+  if (phase === "finished") record.result = {ok: true, tracked: {state: "restored", momentCount: 1}, restored: [], remaining: []};
+  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
+  await resumeWorkspaceLinkRewrites(f.rootPath, {workspaceId: "move-test", signal: f.retirement.signal, history: {rewriteHistoryLinks: rewrite}});
+  await nextTurn();
+  expect(rewrite).toHaveBeenCalledTimes(phase === "updating" ? 1 : 0);
+  if (phase === "updating") {
+    expect(rewrite.mock.calls[0]![0]).toMatchObject({requestId: "original-key", author: agent});
+    await vi.waitFor(async () => expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("links.state", "done"), {timeout: 30_000});
+  }
+  f.retirement.abort();
+});
+
+it.each(["folder", "case", "untracked", "replaced", "unsaved"])("does not dispatch a pass for a %s move", async kind => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(rewrite);
+  const from = kind === "folder" ? "folder" : kind === "untracked" ? "oversized.bin" : "old.md";
+  await f.write(kind === "folder" ? "folder/a.md" : from);
+  if (kind === "replaced") await f.write("new.md");
+  if (kind === "unsaved") vi.spyOn(recovery, "saveRecoveryRecord").mockRejectedValue(new Error("save refused"));
+  const finish = await prepareMoveWorkspacePathAs(f.operation, {fromPath: from, toPath: kind === "case" ? "OLD.md" : "new.md", overwrite: kind === "replaced"}, agent, f.options);
+  expect(await finish()).toMatchObject({ok: true});
+  await nextTurn(); expect(rewrite).not.toHaveBeenCalled(); f.retirement.abort();
+});
 it("keeps a skipped rename at its current path and replays the remaining result", async () => {
   const f = await fixture(); await f.write("a.txt");
   await f.move("a.txt", "b.txt");
