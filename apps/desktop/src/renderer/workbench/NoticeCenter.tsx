@@ -206,7 +206,7 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
 
 // The notice, and the ⚡ panel, when dohc cannot read which steps were allowed.
 export const AUTOMATION_HOLDS_UNREADABLE =
-  "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
+  "dohc cannot read .dohc/local/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
 
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial

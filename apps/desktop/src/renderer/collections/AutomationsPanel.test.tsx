@@ -392,7 +392,7 @@ describe("the ⚡ panel", () => {
     const user = userEvent.setup();
     render(<Panel />);
     const line = await screen.findByTestId("automation-holds-unreadable");
-    expect(line.textContent).toContain("dohc cannot read .dohc/automations/reach.json");
+    expect(line.textContent).toContain("dohc cannot read .dohc/local/automations/reach.json");
     await user.click(within(line).getByRole("button", { name: "Open folder" }));
     expect(bridge.revealAutomationHolds).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     await user.click(within(line).getByRole("button", { name: "Reset holds" }));

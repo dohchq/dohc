@@ -6,7 +6,7 @@ import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { AutomationScope } from "@dohc/app-backend-runtime/automation";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
-import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createTestScratch, testStoreFolder } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   AutomationChatSessionWait,
@@ -152,7 +152,7 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
 
 describe("a dataset automation run", () => {
   it("resends a stopped effect under the same key with the same content, and fails once the saved rules no longer resolve", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const input = (stopped: AbortSignal) => ({
       held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped,
@@ -203,7 +203,7 @@ describe("a dataset automation run", () => {
           Status: '=record.Status + "!"'
         operation: invoices.edit
 `);
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const run = (surface: DatasetRunHost) => runWithRoster({
       withHost: async (work) => await work(surface),
       // The second step's formula meets a busy evaluator, so the run waits once the first step landed.
@@ -243,7 +243,7 @@ describe("a due time on a dataset", () => {
   };
 
   it("resumes its saved edit under the same key, and stops before any write once its Collection keeps another dataset", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const dependencies = (surface: DatasetRunHost) => ({
       withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
       evaluator: { runCode: noCode, evaluate: async () => "busy" as const }, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
@@ -276,7 +276,7 @@ describe("a due time on a dataset", () => {
     do:
       - run: return 1
 `);
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     // The code closes record a in the dataset's only table.
     const dependencies = (surface: DatasetRunHost) => ({
       withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
@@ -315,7 +315,7 @@ describe("a due time on a dataset", () => {
       - notify: '{open.length} open'
         to: [user-owner]
 `);
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const stop = new AbortController();
     const spy = chatSpy({ notice: () => { stop.abort(); throw new Error("The workspace closed."); } });
     const attempt = async (datasetId: string, stopped: AbortSignal) => await runWithRoster(
@@ -330,7 +330,7 @@ describe("a due time on a dataset", () => {
   });
 
   it("skips a due time once its automation starts from a record change instead", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
     expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       held: { source: "engine", claim: dueTime, datasetId: definition.datasetId }, automation, collection: { path: "Budget", name: "Budget" },
@@ -359,7 +359,7 @@ describe("a Group message on a dataset", () => {
         message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "Hi", authorUserId: "user-ana" },
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const stop = new AbortController();
     const spy = chatSpy({ notice: () => { stop.abort(); throw new Error("The workspace closed."); } });
     const attempt = async (channels: ChatDirectoryChannel[], stopped: AbortSignal) => await runWithRoster(
@@ -407,7 +407,7 @@ describe("a Find's formulas", () => {
       },
     };
     const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     // The Find's formula gives "12", and the Find's guard is true.
     const evaluate = async (_id: string, _scope: AutomationScope, formulas: readonly { kind: string; source?: string }[]) =>
       formulas.map((formula) => ({ ok: true as const, value: formula.source === "true" ? true : "12" }));
@@ -433,7 +433,7 @@ describe("the rules a dataset run uses", () => {
 
   it.each([false, true])("stops a replaced destination before reads or effects, afterRead=%s", async (afterRead) => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("Must not write"); } });
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-destination-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-destination-")));
     let resolutions = 0;
     const outcome = await runWithRoster({
       withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store,
@@ -458,7 +458,7 @@ describe("the rules a dataset run uses", () => {
     const script = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
     let reads = 0;
     const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     expect(await runWithRoster({ withHost: async (work) => await work(surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
@@ -481,7 +481,7 @@ describe("the rules a dataset run uses", () => {
         operation: invoices.edit
 `);
     const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       held: fromLedger(claim), automation: scheduled, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
@@ -519,7 +519,7 @@ automations:
         return { result: { rows, nextCursor: { id: "r49", value: "r49" } }, revision: 7, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     expect(await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { runCode: noCode, evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
@@ -573,7 +573,7 @@ automations:
   const runConflicting = async (script: ReturnType<typeof conflicting>, signal = new AbortController().signal) => runWithRoster({
     withHost: async (work) => await work(script.surface),
     evaluator: { runCode: noCode, evaluate: async (_automationId, _scope, formulas, spent) => { budgets.add(spent); requests += 1; return formulas.map(() => ({ ok: true as const, value: "Closed" })); } },
-    store: createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
+    store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-"))), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
   }, {
     held: fromLedger(claim), automation: script.automation, collection: { path: "Budget", name: "Budget" },
     roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: new AbortController().signal,
@@ -664,7 +664,7 @@ automations:
         return { result: { id: body.id, version: body.expectedVersion + 1, priorValues: prior }, revision: 8, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const added: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ship",
       fact: { kind: "added", datasetId: definition.datasetId, tableId: A, recordId: "1", version: 5, fields: [{ fieldId: A_STATUS, previous: null, next: "New" }] } };
     expect(await runWithRoster({ withHost: async (work) => await work(surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
@@ -720,7 +720,7 @@ automations:
     const outcome = await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { runCode: noCode, evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "x" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
+      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-reach-"))), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
     }, {
       held: fromLedger({ ...claim, fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } }),
       automation: stamp, collection: { path: "Budget", name: "Budget" },
@@ -743,7 +743,7 @@ automations:
   });
 
   it("stops a resumed plan once an editor can no longer read a field it was planned with, and keeps what landed", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-narrowed-")));
     const stop = new AbortController();
     const host = (edit: () => Promise<JsonValue>): DatasetRunHost => ({
       context: (input) => Object.freeze({ ...input }),
@@ -795,7 +795,7 @@ automations:
     expect(await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { runCode: noCode, evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "Added" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
+      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-reach-"))), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
     }, {
       held: fromLedger({ ...claim, automationId: "collection:Budget#tell", fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } }),
       automation: post, collection: { path: "Budget", name: "Budget" },
@@ -848,7 +848,7 @@ describe("chat steps in a dataset run", () => {
   it("posts, sends a direct message, and notifies as the automation, one chain step deeper, each keyed by its claim, definition, and step", async () => {
     const script = edits();
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
     expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       held: fromLedger({ ...told, depth: 2 }), automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -872,7 +872,7 @@ describe("chat steps in a dataset run", () => {
 
   it("sends a message that may have landed again under the same ids, and Try again sends only what did not go", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
     const attempt = async (spy: ReturnType<typeof chatSpy>, run: number, stopped: AbortSignal) => await runWithRoster(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { held: fromLedger({ ...told, run }), automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped });
@@ -899,7 +899,7 @@ describe("chat steps in a dataset run", () => {
 
   it("waits for a session to post in a synced workspace, then posts under the same id", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
     const attempt = async (spy: ReturnType<typeof chatSpy>) => await runWithRoster(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { held: fromLedger(told), automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal });
@@ -923,7 +923,7 @@ describe("chat steps in a dataset run", () => {
       ({ result: { rows: [{ id: "a ", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }) };
     const spy = chatSpy();
     expect(await runWithRoster({
-      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir),
+      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-"))),
       nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
     }, {
       held: fromLedger({ ...claim, automationId: "collection:Budget#notify", fact: { ...added, recordId: "a " } }), automation: notify, collection: BUDGET,
@@ -935,7 +935,7 @@ describe("chat steps in a dataset run", () => {
   it("stops before it reads anything when an editor cannot post in the Group", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("A stopped run writes nothing."); } });
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
     expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       held: fromLedger(told), automation: tell, collection: BUDGET, roster: owner([...ANA, BOB]), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "failed", error: "bob@dohc.test cannot post in Team.", timedOut: false });
@@ -966,7 +966,7 @@ describe("chat steps in a dataset run", () => {
     const spy = chatSpy();
     expect(await runWithRoster({
       withHost: async (work) => work(surface), evaluator,
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-button-"), testMetadataDir),
+      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-button-"))),
       nowMs: () => 1, personName: (id) => id, ...spy.dependencies,
     }, { held: fromLedger(stale), automation: ask, collection: BUDGET, roster: owner([]),
       signal: new AbortController().signal, stopped: new AbortController().signal }))
@@ -981,7 +981,7 @@ describe("chat steps in a dataset run", () => {
     const run = async (grants: RosterGrant[]) => {
       const spy = chatSpy();
       const outcome = await runWithRoster({
-        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir),
+        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-wake-"))),
         nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
       }, { held: fromLedger(pressed), automation: ask, collection: BUDGET, roster: owner(grants), signal: new AbortController().signal, stopped: new AbortController().signal });
       return { outcome, messages: spy.messages };
@@ -997,7 +997,7 @@ describe("chat steps in a dataset run", () => {
   });
 
   it("does not resume a saved wake once the automation no longer resolves under the rules", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-wake-")));
     let rules = withButton;
     const surface: DatasetRunHost = { ...host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } }).surface,
       revision: () => ({ ...revision, definition: rules }) };
@@ -1061,7 +1061,7 @@ describe("a dataset action a run invokes", () => {
 
   it("does not count an approved read-only action, while counting a later write action", async () => {
     const calls: Array<{ capabilityId: string; door: string }> = [];
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-read-usage-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-read-usage-")));
     const host = actionHost(async () => ({ result: null, revision: 9, replayed: false }));
     let readOnly = true;
     host.surface.revision = () => ({ ...actionRevision, definition: { ...withAction,
@@ -1080,7 +1080,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("counts a successful no-op invocation of a write-capable action once", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-noop-usage-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-noop-usage-")));
     const calls: Array<{ capabilityId: string; door: string }> = [];
     const record = { id: 12, status: "Paid" };
     const before = structuredClone(record);
@@ -1104,7 +1104,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("counts dataset.operation.invoke once on success, excluding refusal, failure and run replay", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-usage-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-usage-")));
     const calls: Array<{ capabilityId: string; door: string }> = [];
     let problem: "refused" | "failed" | null = "refused";
     const host = actionHost(async () => {
@@ -1137,7 +1137,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("sends the action its input once per claim, with the record's id as its operations take it, and resumes under the same key", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
     const dependencies = (surface: DatasetRunHost) => ({
       withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
       evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
@@ -1168,7 +1168,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("stops a planned action only you can use once someone else can edit the automation, before it commits", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
     const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     let roster: ReachRoster = alone;
@@ -1206,7 +1206,7 @@ describe("a dataset action a run invokes", () => {
     const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const attempt = async (roster: ReachRoster, host: ReturnType<typeof actionHost>) => await runWithRoster({
-      withHost: async (work) => await work(host.surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir),
+      withHost: async (work) => await work(host.surface), evaluator, store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-"))),
       nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing, cachedRoster: async () => roster,
     }, {
       held: { source: "engine", claim: dueTime, datasetId: definition.datasetId }, automation: nightly, collection: { path: "Budget", name: "Budget" },
@@ -1222,7 +1222,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("waits to run a planned action when it cannot check who can edit the Collection", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
     const host = actionHost(async () => { throw new Error("The action must not run."); });
     expect(await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
@@ -1235,7 +1235,7 @@ describe("a dataset action a run invokes", () => {
   });
 
   it("fails a run the action refuses with the action's own words, and sends it again under the same key on Try again", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
     const dependencies = (surface: DatasetRunHost) => ({
       withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
       evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
@@ -1270,7 +1270,7 @@ describe("a dataset action a run invokes", () => {
 `);
     const run = async (automation: ReturnType<typeof coded>, host: ReturnType<typeof actionHost>) => await runWithRoster({
       withHost: async (work) => await work(host.surface), evaluator: shared.forWorkspace("workspace"),
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir), nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-"))), nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
       recipientVerdicts: async () => [],
     }, {
       held: fromLedger(numbered), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },

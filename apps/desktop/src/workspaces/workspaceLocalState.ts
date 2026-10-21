@@ -1,5 +1,4 @@
-import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -36,73 +35,6 @@ export class LocalStateUnavailableError extends Error {
   constructor(readonly refusal: LocalStateRefusal, message = REFUSAL_WORDS[refusal]) {
     super(message);
     this.name = "LocalStateUnavailableError";
-  }
-}
-
-export type OwnedFileRead =
-  | { readonly status: "read"; readonly content: string }
-  | {
-      readonly status:
-        | "missing"
-        | "not-file"
-        | "other-owner"
-        | "writable-by-others"
-        | "linked"
-        | "too-large";
-    };
-
-/**
- * Read one file of this computer's state whose content changes what dohc
- * does, such as settings, and trust it only if this user owns the file, no
- * other user can write it, and it has no other name. The file is opened once
- * without following a link at its name, and checked on that same handle
- * before it is read, so a folder or path swapped meanwhile changes nothing:
- * another local user can't make a file this user owns. That is the only
- * protection. A file that came from a zip, a git checkout or a sync app
- * belongs to this user and is read. Windows reports no owner or mode, so
- * there only the link count is checked. A caller that writes such a file
- * gives it mode 0600, whatever the umask.
- */
-export async function readOwnedFile(path: string, maxBytes: number): Promise<OwnedFileRead> {
-  // Windows has neither flag, so there a link at the name is refused first.
-  const noFollow: number | undefined = constants.O_NOFOLLOW;
-  const nonBlock: number | undefined = constants.O_NONBLOCK;
-  if (noFollow === undefined) {
-    const named = await lstat(path).catch(() => null);
-    if (named?.isSymbolicLink()) return { status: "not-file" };
-  }
-  // O_NONBLOCK keeps a FIFO at the name from holding the open.
-  const flags = constants.O_RDONLY | (noFollow ?? 0) | (nonBlock ?? 0);
-  const handle = await open(path, flags).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return "missing" as const;
-    if (error.code === "ELOOP" || error.code === "EISDIR") return "not-file" as const;
-    throw error;
-  });
-  if (typeof handle === "string") return { status: handle };
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) return { status: "not-file" };
-    const uid = process.getuid?.();
-    if (uid !== undefined && stats.uid !== uid) return { status: "other-owner" };
-    // Group or other write lets another user rewrite it in place; on a Mac
-    // every local user is in staff.
-    if (uid !== undefined && (stats.mode & 0o022) !== 0) return { status: "writable-by-others" };
-    // A second name is a second way to change it. More than one, not "not
-    // one": a volume that reports no links would refuse every file.
-    if (stats.nlink > 1) return { status: "linked" };
-    // Read one byte past the cap, so a file that grew since the check is
-    // still refused instead of cut short.
-    const buffer = Buffer.alloc(maxBytes + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    if (length > maxBytes) return { status: "too-large" };
-    return { status: "read", content: buffer.toString("utf8", 0, length) };
-  } finally {
-    await handle.close();
   }
 }
 
@@ -150,4 +82,56 @@ export async function existingLocalStateDir(rootPath: string): Promise<string | 
   const dir = join(metadata, "local");
   const stats = await lstat(dir).catch(() => null);
   return stats?.isDirectory() ? dir : null;
+}
+
+/** What keeps dohc from trusting `.dohc` or `.dohc/local` itself. */
+export type LocalFolderProblem = "link" | "not-folder" | "other-owner";
+
+// In the words the engine's open refuses the workspace with. Each names its
+// own way out, because replacing a file in the folder can't fix the folder.
+export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: string, fix: string]> = {
+  link: ["is a link", "Put what it links to in its place, then try again."],
+  "not-folder": ["is not a folder", "Rename or move it, then try again."],
+  "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
+};
+
+/** `.dohc` or `.dohc/local` is not a folder this user owns, so dohc trusts nothing in it. */
+export class LocalStateFolderError extends Error {
+  constructor(readonly shown: ".dohc" | ".dohc/local", readonly problem: LocalFolderProblem) {
+    const [fact, fix] = LOCAL_FOLDER_WORDS[problem];
+    super(`This workspace's ${shown} ${fact}. ${fix}`);
+    this.name = "LocalStateFolderError";
+  }
+}
+
+// Null for a folder of this user's.
+async function folderProblem(path: string): Promise<LocalFolderProblem | "missing" | null> {
+  const stats = await lstat(path).catch(() => null);
+  if (stats === null) return "missing";
+  if (stats.isSymbolicLink()) return "link";
+  if (!stats.isDirectory()) return "not-folder";
+  const uid = process.getuid?.();
+  return uid !== undefined && stats.uid !== uid ? "other-owner" : null;
+}
+
+/**
+ * The workspace's `.dohc/local` for a reader of state that changes what dohc
+ * does, such as settings, or null when it or `.dohc` is missing. Both folders
+ * are checked on every read, before any file in them: a link at either one
+ * would be followed by the file's open. Throws LocalStateFolderError when
+ * either is not a folder this user owns, and the metadata resolver's refusal
+ * when `.dohc` leads out of the workspace, which only a mount can do. Does
+ * not wait for the engine, and creates nothing.
+ */
+export async function ownedLocalStateDir(rootPath: string): Promise<string | null> {
+  const dohc = await folderProblem(join(rootPath, ".dohc"));
+  if (dohc === "missing") return null;
+  if (dohc) throw new LocalStateFolderError(".dohc", dohc);
+  const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+  if (metadata === null) return null;
+  const dir = join(metadata, "local");
+  const local = await folderProblem(dir);
+  if (local === "missing") return null;
+  if (local) throw new LocalStateFolderError(".dohc/local", local);
+  return dir;
 }

@@ -21,11 +21,11 @@ import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, Ydo
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
 import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
 import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
-import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -858,7 +858,7 @@ it.skipIf(engine.missing).each([
           createdAtMs: Date.now(), updatedAtMs: Date.now(),
           change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         };
-        const store = createAutomationRunStore(rootA, resolveWorkspaceMetadataDir);
+        const store = createAutomationRunStore(preparedAutomationStoreFolder(rootA));
         const signal = new AbortController().signal;
         const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({
           capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local-person"},
