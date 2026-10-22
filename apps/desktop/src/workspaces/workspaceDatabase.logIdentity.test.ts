@@ -121,11 +121,44 @@ it("accepts a log on a volume that reports zero links", async () => {
   await expect(editDatabaseAtPath(input)).resolves.toMatchObject({ version: 1 });
 });
 
-it.each([false, true])("preserves rollback and the edit error when log close fails (invalid edit: %s)", async (invalid) => {
+it("commits the row and matching log line when close fails after a successful sync", async () => {
+  const { input } = await editFixture();
+  const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+  const closeError = new Error("log close failed");
+  let synced = false;
+  const open = fs.open;
+  vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    const sync = handle.sync.bind(handle);
+    vi.spyOn(handle, "sync").mockImplementationOnce(async () => {
+      await sync();
+      synced = true;
+    });
+    const close = handle.close.bind(handle);
+    vi.spyOn(handle, "close").mockImplementationOnce(async () => {
+      expect(synced).toBe(true);
+      await close();
+      throw closeError;
+    });
+    return handle;
+  });
+  const result = await editDatabaseAtPath(input);
+  expect(result.version).toBe(1);
+  expect(result.page.rows[0]?.value).toBe("changed");
+  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("changed");
+  const lines = (await fs.readFile(input.logPath, "utf8")).trimEnd().split("\n");
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0]!)).toEqual({ ...input.operation, version: result.version });
+  expect(reported).toHaveBeenCalledExactlyOnceWith("[desktop] database operation log close failed after sync:", closeError);
+  await expect(editDatabaseAtPath(input)).resolves.toMatchObject({ version: 2 });
+});
+
+it.each(["edit", "sync"])("preserves rollback and the %s error when log close also fails", async (failure) => {
   const { input } = await editFixture();
   const open = fs.open;
   vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
     const handle = await open(...args);
+    if (failure === "sync") vi.spyOn(handle, "sync").mockRejectedValueOnce(new Error("log sync failed"));
     const close = handle.close.bind(handle);
     vi.spyOn(handle, "close").mockImplementationOnce(async () => {
       await close();
@@ -134,7 +167,7 @@ it.each([false, true])("preserves rollback and the edit error when log close fai
     return handle;
   });
   await expect(editDatabaseAtPath({
-    ...input, edit: { ...input.edit, table: invalid ? "missing" : "items" },
-  })).rejects.toThrow(invalid ? /no such table: missing/ : /log close failed/);
+    ...input, edit: { ...input.edit, table: failure === "edit" ? "missing" : "items" },
+  })).rejects.toThrow(failure === "edit" ? /no such table: missing/ : /log sync failed/);
   expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
 });

@@ -415,17 +415,14 @@ async function withOperationLog<T>(
       await checkLog();
       await handle.appendFile(`${JSON.stringify(operation)}\n`, "utf8");
       await handle.sync();
-      await closeLog();
+      await closeLog().catch((error) => {
+        console.error("[desktop] database operation log close failed after sync:", error);
+      });
     });
-  } catch (error) {
-    try {
-      await closeLog();
-    } catch {
-      // Preserve the edit or append error through cleanup.
-    }
-    throw error;
   } finally {
-    await closeLog();
+    await closeLog().catch(() => {
+      // Preserve the edit or append error through cleanup.
+    });
   }
 }
 
