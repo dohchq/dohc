@@ -37,7 +37,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     const field = (table:string,column:string)=>datasetColumnFields(revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!).find(field=>field.sqlColumn===column)!.fieldId;
     const ownerRead = (name:string,input:Record<string,any>={})=>host.query({...selection,operationId:operation(name),input,idempotencyKey:randomUUID()});
     const publish = async (appRoot:string) => {
-      const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
+      const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,deferredWrites:[],compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
       expect(source.candidate.inputs.some(file=>file.path.endsWith("backend.ts")||file.path.endsWith("schema.sql"))).toBe(false);
       return host.apps.activate(source,lifetime.signal);
     };
