@@ -1050,6 +1050,8 @@ describe("the window's title and menu commands", () => {
     render(<DesktopRoot />);
     await screen.findByText("dohc couldn't read its workspace registry");
     expect(document.title).toBe("dohc");
+    // The screen subscribes to menu commands in an effect after it paints.
+    await waitFor(() => expect(root.listening()).toBe(true));
 
     root.send("check-updates");
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("No update check was started.");
