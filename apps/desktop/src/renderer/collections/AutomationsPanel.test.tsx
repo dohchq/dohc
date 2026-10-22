@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import type {
   GetCollectionAutomationRunResult,
   ListCollectionAutomationRunsResult,
@@ -72,8 +73,8 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
 
 const NOTHING_UNDONE = { status: "undone" as const, reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
 
-function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsResult {
-  return { status: "read", contentHash: HASH, automations, addsStay: [] };
+function read(automations: ValidAutomationSummary[], onServer?: { runs: boolean | null }): ListCollectionAutomationsResult {
+  return { status: "read", contentHash: HASH, automations, addsStay: [], ...(onServer ? { onServer } : {}) };
 }
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
@@ -1064,6 +1065,27 @@ describe("a schedule's next run", () => {
     for (const id of ["off", "stuck", "stamp"]) {
       expect(screen.getByTestId(`automation-${id}`).textContent).not.toContain("Next run");
     }
+  });
+
+  it("says a Collection on the server runs there, with its next run on the server, and never asks which computer runs schedules", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge, replaceFile } = makeBridge(read([summary(daily), summary(stamp)], { runs: true }));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-report");
+    expect(screen.getByTestId("automations-on-server").textContent).toBe("Your server runs these automations.");
+    expect(within(row).getByText(`${tomorrow} on your server`)).toBeTruthy();
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    // A server that runs no automations: each says so, and no next run or note claims otherwise.
+    replaceFile(read([summary(daily, { cannotRun: AUTOMATION_SERVER_OFF }), summary(stamp, { cannotRun: AUTOMATION_SERVER_OFF })], { runs: false }));
+    await waitFor(() => expect(screen.queryByTestId("automations-on-server")).toBeNull());
+    expect(screen.getByTestId("automation-report").textContent).toContain(AUTOMATION_SERVER_OFF);
+    expect(screen.getByTestId("automation-report").textContent).not.toContain("Next run");
+    // Unknown, as offline: no claim either way.
+    replaceFile(read([summary(daily)], { runs: null }));
+    await waitFor(() => expect(screen.getByTestId("automation-report").textContent).not.toContain(AUTOMATION_SERVER_OFF));
+    expect(screen.queryByTestId("automations-on-server")).toBeNull();
+    expect(screen.getByTestId("automation-report").textContent).not.toContain("Next run");
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
   });
 
   it("does not ask which computer runs schedules when nothing here is scheduled", async () => {

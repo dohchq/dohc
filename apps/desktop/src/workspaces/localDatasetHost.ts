@@ -398,7 +398,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       approveMigrationCandidate: input => host.approveMigration(owner, input),
       discardMigrationCandidate: input => host.discardMigration(owner, input) });
     const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory: () => existingLocalDatasetExports(options.workspaceRoot), limits: { maxTotalBytes: maxStoredBytes },
-      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }) });
+      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }),
+      fenced: () => changed(undefined) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
       return tracked(async () => {
         const abort = signal(input.signal);
@@ -518,8 +519,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
+      // Each end, failed or not, tells the automation runner, which reads the transfer record again.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
+          .then(changed, (error: unknown) => { changed(undefined); throw error; });
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
@@ -579,12 +582,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
               operationId: input.operationId, input: input.input, idempotencyKey: input.idempotencyKey, signal: signal(input.signal) });
           });
         },
-        /** Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read. */
+        /**
+         * Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read.
+         * A dataset moving or moved to a server is not here: the server runs its automations.
+         */
         datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> } {
           assertCurrent();
           const definitions: DatasetDefinition[] = [], failures: Array<{ datasetId: string; error: unknown }> = [];
           // Each dataset's rules are read on their own, so one that cannot be read hides no other.
           for (const datasetId of host.datasetIds(owner, { workspaceId })) {
+            if (transfers.status(datasetId) !== null) continue;
             try { definitions.push(host.approvedRevision(owner, { workspaceId, datasetId }).definition); }
             catch (error) { failures.push({ datasetId, error }); }
           }
