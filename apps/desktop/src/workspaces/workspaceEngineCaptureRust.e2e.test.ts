@@ -1364,6 +1364,7 @@ it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
         try {
           await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
             fromPath: "other.md", toPath: "moved.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+          await rename(join(opened.root, "other.md"), join(opened.root, "moved.md"));
         } finally { await engine.releaseCapture(hold.holdId); }
         await engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId, requestId: `undo-other-${style}` });
         expect(await engine.watcherStatus()).toMatchObject({ deferredWrites: ["note.md"] });
@@ -1456,6 +1457,7 @@ it.skip("keeps an outside write when a rename rewrites the open note's links (#2
       try {
         await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
           fromPath: "old.md", toPath: "new.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+        await rename(join(opened.root, "old.md"), join(opened.root, "new.md"));
       } finally { await engine.releaseCapture(hold.holdId); }
     });
     const rewritten = await opened.withEngine((engine) => engine.rewriteHistoryLinks({ workspaceId: opened.workspaceId, operationId, requestId: "rewrite-deferred" }));
