@@ -113,8 +113,8 @@ describe("FileInspector when an open note changed outside dohc", () => {
   });
 
   // The note as the person has it: its file read, and its session bound.
-  async function openNote(props: { onButtonError?: ReportButtonError } = {}): Promise<void> {
-    engine.state = engineState(markdownToYDoc("# Plan\n"), null);
+  async function openNote(props: { onButtonError?: ReportButtonError; markdown?: string } = {}): Promise<void> {
+    engine.state = engineState(markdownToYDoc(props.markdown ?? "# Plan\n"), null);
     render(<FileInspector workspaceId="ws-1" path="a.md" onButtonError={props.onButtonError} />);
     await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"));
     await act(async () => {
@@ -164,6 +164,35 @@ describe("FileInspector when an open note changed outside dohc", () => {
     await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
     expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
     setEngine(engineState(markdownToYDoc("---\ntitle: Trip\n---\n# Plan for Lisbon\n"), null));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+  });
+
+  // Frontmatter keeps int64 values past the safe range as bigints, and
+  // negative zero as its own value. The reload compares them as the model does.
+  it("reloads by itself over bigint frontmatter, before and after the reload", async () => {
+    const before = "---\nexact: 9007199254740993\nnested:\n  exact: 9007199254740995\n---\n# Plan\n";
+    await openNote({ markdown: before });
+    setEngine(engineState(markdownToYDoc(before), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    const after = "---\nexact: 9007199254740997\nnested:\n  exact: 9007199254740999\n---\n# Plan\n";
+    setEngine(engineState(markdownToYDoc(after), null));
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+    setEngine(engineState(markdownToYDoc(after), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+  });
+
+  it("reloads by itself after a change from -0.0 to 0.0 alone, and again for a body change", async () => {
+    await openNote({ markdown: "---\nvalue: -0.0\n---\n# Plan\n" });
+    setEngine(engineState(markdownToYDoc("---\nvalue: -0.0\n---\n# Plan\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    setEngine(engineState(markdownToYDoc("---\nvalue: 0.0\n---\n# Plan\n"), null));
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+    setEngine(engineState(markdownToYDoc("---\nvalue: 0.0\n---\n# Plan\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    setEngine(engineState(markdownToYDoc("---\nvalue: 0.0\n---\n# Plan for Lisbon\n"), null));
     expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
   });

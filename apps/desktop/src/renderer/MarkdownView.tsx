@@ -31,6 +31,8 @@ import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { outsideVersionWaitingMessage } from "../ipc/errorWords";
+import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
@@ -160,14 +162,19 @@ export const CHANGED_OUTSIDE_NOTICE =
 const RELOADED_SIGN_MS = 4_000;
 
 // A note's content, to tell a reload that took in a change from one that
-// came back the same: its body and its frontmatter, with keys in order.
-function noteContent(doc: Y.Doc | null): string | null {
-  if (!doc) return null;
-  const sortKeys = (_key: string, value: unknown) =>
-    value !== null && typeof value === "object" && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)))
-      : value;
-  return JSON.stringify([doc.getXmlFragment("body").toString(), doc.getMap("frontmatter").toJSON()], sortKeys);
+// came back the same: its body, and its frontmatter values as the model
+// holds them, bigints and negative zero included.
+type NoteContent = { body: string; frontmatter: Record<string, unknown> };
+
+function noteContent(doc: Y.Doc | null): NoteContent | null {
+  return doc
+    ? { body: doc.getXmlFragment("body").toString(), frontmatter: frontmatterMapValues(doc.getMap("frontmatter")) }
+    : null;
+}
+
+function sameNoteContent(left: NoteContent | null, right: NoteContent | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.body === right.body && sameFrontmatterValue(left.frontmatter, right.frontmatter);
 }
 
 function ChangedOutsideNotice(props: { onReload: () => void }) {
@@ -746,7 +753,7 @@ export function MarkdownView(props: {
   // again after a refused open keeps the earlier snapshot.
   const engineDocRef = useRef(engine.doc);
   engineDocRef.current = engine.doc;
-  const replacedText = useRef<string | null>(null);
+  const replacedText = useRef<NoteContent | null>(null);
   const reloadChangedOutside = useCallback(() => {
     replacedText.current = noteContent(engineDocRef.current) ?? replacedText.current;
     setReloading(true);
@@ -768,7 +775,7 @@ export function MarkdownView(props: {
     if (!reloadedBound) return;
     setReloading(false);
     setReloadedSign((count) => count + 1);
-    if (noteContent(engine.doc) !== replacedText.current) setReloadedItself(false);
+    if (!sameNoteContent(noteContent(engine.doc), replacedText.current)) setReloadedItself(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
