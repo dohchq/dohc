@@ -2158,13 +2158,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// response under a new scope applies nothing; the pass adopts the scope
     /// and returns no cursor. The returned cursor stays pending until the
     /// caller materializes the pass and commits it. `relay_namespace` is the
-    /// feed's, as the host's trusted configuration names it.
+    /// feed's, as the host's trusted configuration names it: a hosted pass
+    /// never runs without one.
     pub fn pull_hosted_workspace(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
         workspace_id: &str,
-        relay_namespace: Option<&str>,
+        relay_namespace: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
@@ -2189,7 +2190,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &fetch.queued,
             &fetch.ordered,
             progress,
-            relay_namespace,
+            Some(relay_namespace),
             faults,
             leases,
         )? {
@@ -2718,7 +2719,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 push_sharing_declined_once(&mut p.pass.sharing_declined, declined);
             }
             p.pass.conflicts_opened += recovered.conflicts_opened;
-            p.pass.drain_holds.extend(recovered.holds);
+            p.pass.replace_drain_holds(recovered.holds);
             match recovered.waiting {
                 Some(pending) => return Ok(Applying::Suspended(pending, Box::new(progress))),
                 None => p.recovering = false,
@@ -2813,9 +2814,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let released =
                 crate::ydoc_apply::drain_released_holds(store, cache, workspace_id, faults, leases)
                     .map_err(local)?;
-            for (object_id, hold) in released.holds {
-                p.pass.drain_holds.insert(object_id, hold);
-            }
+            p.pass.replace_drain_holds(released.holds);
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
@@ -5011,6 +5010,20 @@ struct AppliedPass {
     /// Each document whose queued work the pass's drain held for released
     /// retained work, with that hold.
     drain_holds: BTreeMap<String, crate::HostedHold>,
+}
+
+impl AppliedPass {
+    /// Take what a drain decided for each document it examined: the hold it
+    /// left, or none, which clears the hold an earlier drain of the pass
+    /// reported. A document it did not examine keeps its entry.
+    fn replace_drain_holds(&mut self, examined: BTreeMap<String, Option<crate::HostedHold>>) {
+        for (object_id, hold) in examined {
+            match hold {
+                Some(hold) => self.drain_holds.insert(object_id, hold),
+                None => self.drain_holds.remove(&object_id),
+            };
+        }
+    }
 }
 
 type ReleasedStop = (

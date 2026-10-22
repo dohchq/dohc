@@ -173,10 +173,11 @@ fn inband_settled_content(content: String) -> Option<String> {
     (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
+/// Where a close writes the files its drain changed.
 #[derive(Clone)]
-struct YdocCloseMaterialization {
-    root_dir: PathBuf,
-    self_writes: Arc<dyn SelfWriteRecorder>,
+pub struct YdocCloseMaterialization {
+    pub root_dir: PathBuf,
+    pub self_writes: Arc<dyn SelfWriteRecorder>,
 }
 
 impl ActorHandle {
@@ -1080,50 +1081,78 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
-        let (closing_key, closing_faults, closing_token, closing_root) = (
-            key.clone(),
-            Arc::clone(&faults),
-            token.clone(),
-            materialization
-                .as_ref()
-                .map(|materialization| materialization.root_dir.clone()),
-        );
+        let root_dir = materialization
+            .as_ref()
+            .map(|materialization| materialization.root_dir.clone());
         let (outcome, drains) = self
-            .run(move |store, cache| {
-                ydoc_close_session_on_store(
-                    store,
-                    cache,
-                    &closing_key,
-                    closing_root.as_deref(),
-                    now_ms,
-                    closing_faults.as_ref(),
-                    &closing_token,
-                )
-            })
+            .ydoc_close_commit(
+                key.clone(),
+                root_dir,
+                now_ms,
+                Arc::clone(&faults),
+                token.clone(),
+            )
             .await?;
-        if !drains {
-            return Ok(YdocCloseSessionOutcome {
-                outcome,
-                record_facts: Vec::new(),
-            });
-        }
-        let record_facts = self
-            .run_draining(token.clone(), move |store, cache| {
-                ydoc_close_drain_on_store(
-                    store,
-                    cache,
-                    &key,
-                    materialization.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                )
-            })
-            .await?;
+        let record_facts = if drains {
+            self.ydoc_close_drain(key, materialization, now_ms, faults, token)
+                .await?
+        } else {
+            Vec::new()
+        };
         Ok(YdocCloseSessionOutcome {
             outcome,
             record_facts,
         })
+    }
+
+    /// Commit the close of the session on `key`: its outcome, and whether
+    /// what it deferred drains next through [`Self::ydoc_close_drain`]. A
+    /// failure here committed nothing; the session still stands.
+    pub async fn ydoc_close_commit(
+        &self,
+        key: DocKey,
+        root_dir: Option<PathBuf>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(Option<CloseOutcome>, bool), RuntimeError> {
+        self.run(move |store, cache| {
+            ydoc_close_session_on_store(
+                store,
+                cache,
+                &key,
+                root_dir.as_deref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
+    }
+
+    /// Drain, materialize and clean up what the committed close of `key`
+    /// deferred, and answer the record facts it committed. Runs again after
+    /// each validation it waits for; never closes again.
+    pub async fn ydoc_close_drain(
+        &self,
+        key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, RuntimeError> {
+        self.run_draining(token.clone(), move |store, cache| {
+            ydoc_close_drain_on_store(
+                store,
+                cache,
+                &key,
+                materialization.as_ref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     /// Run `stage` on the actor until no drain in it waits for released-tail
@@ -1740,17 +1769,23 @@ pub(super) fn ydoc_open_state_on_store(
     // with the same reason the settle freeze uses; resolution lifts both.
     // Refuse an existing conflict before changing the lineage or draining.
     // If the drain opens a conflict, return its record facts with the refusal.
+    // A conflict a queued row opened before its drain waited is that drain's
+    // own, so this open drains first and reports it the same way.
     if expected_key_matches
-        && store
-            .read_with(|conn| {
+        && store.read_with(|conn| {
+            Ok::<_, RuntimeError>(
                 dohc_engine_sync::open_sync_conflict_for_object(
                     conn,
                     &key.workspace_id,
                     &key.version_id,
                     &key.object_id,
-                )
-            })?
-            .is_some()
+                )?
+                .is_some()
+                    && !(drain_deferred
+                        && restore_generation.is_none()
+                        && dohc_engine_sync::deferred_ydoc_opened_conflict(conn, &key)?),
+            )
+        })?
     {
         return Err(dohc_engine_domain::DomainError::InvalidInput {
             reason: "ydoc-conflict-open",
@@ -3527,12 +3562,17 @@ fn ydoc_close_drain_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let unfenced = store.read_with(|conn| {
+    match store.read_with(|conn| {
         dohc_engine_collab::live_update_application::restore_generation(conn, key)
-    });
-    if !matches!(unfenced, Ok(None))
-        || !dohc_engine_collab::read_marker(store, key)?
-            .is_some_and(|marker| marker.regime == Regime::Replicated)
+    }) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(dohc_engine_collab::CollabError::RestoreFenced) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if !dohc_engine_collab::read_marker(store, key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
     {
         return Ok(Vec::new());
     }

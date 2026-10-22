@@ -1491,6 +1491,16 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
+    /// The namespace of the feed a hosted pull reads: the configured live
+    /// host's, or none, which refuses the pull.
+    fn hosted_feed_namespace(&self) -> Option<String> {
+        #[cfg(feature = "harness")]
+        if let Some(namespace) = &self.hosted_feed_for_harness {
+            return Some(namespace.clone());
+        }
+        self.configured_relay_namespace()
+    }
+
     /// `sync.pullHosted`: one pass of the hosted feed. A pass that adopted a
     /// new scope applies nothing and has no `pendingCursor`: pull again.
     /// Otherwise materialize its `pendingCursor` with
@@ -1506,6 +1516,12 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        // The feed's namespace comes only from the configured host, and a
+        // hosted pass records it with everything it keeps. Without one the
+        // pull is refused before it reads or changes anything.
+        let relay_namespace = self
+            .hosted_feed_namespace()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .hosted_execute(
@@ -1515,7 +1531,7 @@ impl EngineService {
                 RelayOperation::PullHosted {
                     workspace_id: open.workspace_id.clone(),
                     root: open.root.clone(),
-                    relay_namespace: self.configured_relay_namespace(),
+                    relay_namespace,
                     now_ms: now_ms()?,
                 },
                 "sync.pullHosted",

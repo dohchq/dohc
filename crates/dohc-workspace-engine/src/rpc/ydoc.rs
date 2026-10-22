@@ -31,6 +31,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_runtime::actor::YdocCloseMaterialization;
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1761,38 +1762,57 @@ impl EngineService {
         let close_workspace_id = open.workspace_id.clone();
         let close_task = tokio::spawn(async move {
             let _serial = serial;
-            let close_result = actor
-                .ydoc_close_session_materialized(
-                    close_root,
-                    session_key,
-                    close_self_writes,
+            let committed = actor
+                .ydoc_close_commit(
+                    session_key.clone(),
+                    Some(close_root.clone()),
                     now,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
                 )
                 .await;
+            let drains = match committed {
+                Ok((_, drains)) => drains,
+                // Reinsert only on a genuine close refusal (UnsettledClose
+                // and friends), which committed nothing — an
+                // ActorUnavailable/WorkerPanicked error means the workspace
+                // was torn down while this task ran, and resurrecting the
+                // entry would keep its embedded lease alive past the
+                // eviction, leaving the doc ydoc-session-busy for the next
+                // workspace open.
+                Err(error) => {
+                    if matches!(error, RuntimeError::Collab(_) | RuntimeError::Domain(_))
+                        && let Some(entry) = taken
+                    {
+                        lock(&sessions).insert(session_id, entry);
+                    }
+                    return Err(error);
+                }
+            };
+            if !drains {
+                return Ok(());
+            }
+            // The close committed, so the session stays closed whatever its
+            // drain answers; a retried close finds no session to close.
+            let record_facts = actor
+                .ydoc_close_drain(
+                    session_key,
+                    Some(YdocCloseMaterialization {
+                        root_dir: close_root,
+                        self_writes: close_self_writes,
+                    }),
+                    now,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await?;
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
             // committed these history rows.
-            if let Ok(closed) = &close_result {
-                for facts in &closed.record_facts {
-                    emit_record_events(&close_events, &close_workspace_id, facts);
-                }
+            for facts in &record_facts {
+                emit_record_events(&close_events, &close_workspace_id, facts);
             }
-            // Reinsert only on a genuine close refusal (UnsettledClose and
-            // friends) — an ActorUnavailable/WorkerPanicked error means the
-            // workspace was torn down while this task ran, and resurrecting
-            // the entry would keep its embedded lease alive past the
-            // eviction, leaving the doc ydoc-session-busy for the next
-            // workspace open.
-            if matches!(
-                close_result,
-                Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
-            ) && let Some(entry) = taken
-            {
-                lock(&sessions).insert(session_id, entry);
-            }
-            close_result
+            Ok(())
         });
         let close_result = close_task
             .await

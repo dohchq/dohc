@@ -1085,6 +1085,170 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
     assert!(idle.record_facts.is_empty());
 }
 
+/// Sol's first and Opus's third findings: a queued update whose bytes a
+/// drain applies and whose path its document no longer has is refused, and
+/// the refusal deleted its row at once, with the record facts its apply
+/// parked there. A drain that then stops before its cleanup, as one that
+/// waits for validation does, lost those facts. The row now leaves only
+/// with the cleanup, so after a stopped drain that its caller abandons, as
+/// a cancelled one, and again after a restart, the drain that removes it
+/// reports its facts and its refusal once, and history holds one row.
+#[test]
+fn an_applied_then_refused_update_reports_its_facts_once_after_its_drain_stopped() {
+    for restart in [false, true] {
+        an_applied_then_refused_update_after_a_stopped_drain(restart);
+    }
+}
+
+fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
+    const RECORD_ID: &str = "rec_dddddddddddddddddddddddddd";
+    const OBJECT_ID: &str = "refused-record-object";
+    const PATH: &str = "tasks/refused.md";
+
+    let (_scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "refused-record-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+        base_snapshot_sha: claim_id,
+    }) = dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    else {
+        panic!("the base is claimed");
+    };
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let update_sha = engine
+        .put_binary_blob(&remote.frontmatter_set("title", "Remote").unwrap())
+        .expect("store remote update");
+    let operation = envelope(
+        "refused-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id, "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            ..
+        })
+    ));
+    // The queued payload names a path its document does not have.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','tasks/elsewhere.md') \
+                 WHERE origin_id='refused-peer'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("name another path");
+    let state = |engine: &EngineStore| -> (i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals \
+                        WHERE origin_id='refused-peer')",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("state")
+    };
+
+    // The drain applies the bytes and refuses the row, then stops before
+    // its cleanup.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    assert_eq!(stopped.record_facts.len(), 1, "{stopped:?}");
+    assert_eq!(stopped.refusals.len(), 1, "{stopped:?}");
+    assert_eq!(
+        state(&engine),
+        (1, 1, 0),
+        "the row keeps its facts, and nothing refused it yet"
+    );
+
+    if restart {
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain after restart");
+    assert_eq!(drained.record_facts, stopped.record_facts);
+    assert_eq!(
+        drained
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_id.as_str(), refusal.origin_seq))
+            .collect::<Vec<_>>(),
+        [("refused-peer", 0)]
+    );
+    assert_eq!(state(&engine), (1, 0, 1));
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
+}
+
 #[test]
 fn resolution_fold_refuses_while_deferred_updates_are_parked() {
     // Acked-but-parked remote updates were never part of

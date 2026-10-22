@@ -173,7 +173,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && normalized.as_deref() == Some(payload.path.as_str())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct YdocLineageReplacement {
     pub winner_lineage_claim_id: String,
     pub recovered_paths: Vec<String>,
@@ -463,6 +463,10 @@ fn apply_deferred_base(
     let outcome = store.write_with(faults, move |tx| {
         if let Some(leases)=recovery_leases { require_recovery_closed(tx,&key,leases)?; }
         gate(tx)?;
+        // The queued row keeps the replacement its first apply derived, so a
+        // drain that applied it and then waited, crashed or was cancelled
+        // reports it once from the drain that removes the row.
+        let replacement = (|| -> Result<Option<YdocLineageReplacement>, SyncError> {
         let already_preserved: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict')",
             [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
@@ -668,11 +672,55 @@ fn apply_deferred_base(
             winner_lineage_claim_id: winner_claim_id,
             recovered_paths,
         }))
+        })()?;
+        park_lineage_replacement(tx, &key.workspace_id, &origin_id, origin_seq, replacement)
     })?;
     match outcome {
         TxnOutcome::Committed(replacement) => Ok(replacement),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
+}
+
+/// Keep the lineage replacement a queued base's apply derived on its queued
+/// row, or, when this apply derived none because an earlier one committed,
+/// answer the one that apply kept.
+fn park_lineage_replacement(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    replacement: Option<YdocLineageReplacement>,
+) -> Result<Option<YdocLineageReplacement>, SyncError> {
+    if let Some(replacement) = &replacement {
+        tx.execute(
+            "UPDATE ydoc_deferred_updates SET lineage_replacement_json=?4 \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                workspace_id,
+                origin_id,
+                origin_seq,
+                serde_json::to_string(replacement).map_err(SyncError::corrupt)?
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        return Ok(Some(replacement.clone()));
+    }
+    let parked: Option<String> = tx
+        .query_row(
+            "SELECT lineage_replacement_json FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![workspace_id, origin_id, origin_seq],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    parked
+        .map(|json| {
+            serde_json::from_str(&json)
+                .map_err(|_| local_corruption("a parked lineage replacement is malformed"))
+        })
+        .transpose()
 }
 
 /// Drain acked Y.Doc envelopes deferred while `key` was leased. The
@@ -694,21 +742,23 @@ pub fn drain_deferred_ydoc_for_key(
     complete_drain(store, drained, cleanup, faults)
 }
 
-/// What [`drain_released_holds`] did: the hold each drained document is left
-/// with, by object id, what its drains committed, and the heads they wrote.
+/// What [`drain_released_holds`] did: the hold each document it examined is
+/// left with, by object id, none once nothing its drain decided holds it,
+/// what its drains committed, and the heads they wrote.
 #[derive(Default)]
 pub(crate) struct ReleasedDrains {
-    pub(crate) holds: std::collections::BTreeMap<String, crate::HostedHold>,
+    pub(crate) holds: std::collections::BTreeMap<String, Option<crate::HostedHold>>,
     pub(crate) drained: YdocDrainResult,
     pub(crate) changes: Vec<crate::MomentMaterializationChange>,
 }
 
-/// Drain again each hosted document of the scope a drain held for released
-/// retained work, so a fresh decision admits what no longer needs holding.
-/// A document a live session holds keeps the hold its row records, and its
-/// queued work waits for the session. Everything a drain applies is refused
-/// or materialized as any drain's is, and reported once. A drain that waits
-/// for validation stops the rest, and the answer carries that wait.
+/// Drain again each held hosted document of the scope that still has queued
+/// application work, so a fresh decision admits what no longer needs
+/// holding. A document a live session holds, or whose drain stops before
+/// its held update, keeps the hold its row records, marked stale, and its
+/// queued work waits. Everything a drain applies is refused or materialized
+/// as any drain's is, and reported once. A drain that waits for validation
+/// stops the rest, and the answer carries that wait.
 pub(crate) fn drain_released_holds(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -717,17 +767,23 @@ pub(crate) fn drain_released_holds(
     leases: &dyn LeaseProbe,
 ) -> Result<ReleasedDrains, SyncError> {
     let keys = store.read_with(|conn| {
-        conn.prepare(
+        conn.prepare(&format!(
             "SELECT DISTINCT u.version_id,u.object_id FROM hosted_documents d \
              JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
                AND h.scope_generation=d.scope_generation \
              JOIN ydoc_deferred_updates u ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
-             WHERE d.workspace_id=?1 AND d.held_reason=?2 ORDER BY u.object_id,u.version_id",
-        )
+             WHERE d.workspace_id=?1 AND d.state='held' AND d.held_reason IN (?2,?3) \
+               AND {} ORDER BY u.object_id,u.version_id",
+            crate::hosted::OUTSTANDING_YDOC_UPDATE
+        ))
         .and_then(|mut statement| {
             statement
                 .query_map(
-                    params![workspace_id, crate::hosted::RELEASED_LINEAGE_UNSETTLED],
+                    params![
+                        workspace_id,
+                        crate::hosted::RELEASED_LINEAGE_UNSETTLED,
+                        crate::HostedHold::WorkWaiting.reason()
+                    ],
                     |row| {
                         Ok(DocKey {
                             workspace_id: workspace_id.to_owned(),
@@ -741,30 +797,24 @@ pub(crate) fn drain_released_holds(
         .map_err(SyncError::corrupt)
     })?;
     let mut result = ReleasedDrains::default();
+    // A hold any version of a document leaves stands for the document.
+    fn examined(
+        holds: &mut std::collections::BTreeMap<String, Option<crate::HostedHold>>,
+        object_id: String,
+        hold: Option<crate::HostedHold>,
+    ) {
+        let entry = holds.entry(object_id).or_insert(None);
+        if hold.is_some() {
+            *entry = hold;
+        }
+    }
     for key in keys {
         if leases.is_live(&key) {
-            let recorded = store.read_with(|conn| {
-                crate::hosted::recorded_hold(conn, workspace_id, &key.object_id)
-            })?;
-            if let Some(hold) = recorded {
-                result.holds.insert(key.object_id, hold);
-            }
+            let standing = standing_released_hold(store, &key)?;
+            examined(&mut result.holds, key.object_id, standing);
             continue;
         }
-        // The head's path and moment, which a drain that projects changes.
-        let head = |store: &EngineStore| {
-            store.read_with(|conn| {
-                conn.query_row(
-                    "SELECT path,latest_moment_id FROM snapshots \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                    params![workspace_id, key.version_id, key.object_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(SyncError::corrupt)
-            })
-        };
-        let before = head(store)?;
+        let before = drained_head(store, &key)?;
         let (drained, cleanup) =
             drain_deferred_ydoc(store, cache, &key, DeferredDrainMode::Batch, faults, None)?;
         let mut drained = complete_drain(store, drained, cleanup, faults)?;
@@ -783,27 +833,76 @@ pub(crate) fn drain_released_holds(
                 });
             }
         }
-        if let Some((path, moment)) = head(store)?
-            && before.as_ref().is_none_or(|(_, before)| *before != moment)
-        {
-            result.changes.push(crate::MomentMaterializationChange {
-                version_id: key.version_id.clone(),
-                path,
-                operation: "write",
-                content_kind: "text",
-            });
-        }
-        match drained.released_hold.take() {
-            Some(hold) => {
-                result.holds.insert(key.object_id, hold);
-            }
-            None => {
-                result.holds.remove(&key.object_id);
-            }
-        }
+        result
+            .changes
+            .extend(drained_head_change(store, &key, before.as_ref())?);
+        let hold = match drained.released_hold.take() {
+            Some(hold) => Some(hold),
+            None => standing_released_hold(store, &key)?,
+        };
+        examined(&mut result.holds, key.object_id, hold);
         result.drained.absorb(drained);
     }
     Ok(result)
+}
+
+/// The released hold `key`'s document is left with when a drain decided
+/// nothing that holds it: the one its row records, while the queued update
+/// that hold names still stands because the drain stopped before it or a
+/// session keeps it. Nothing derived its binding again, so it claims no
+/// currency; the first drain that decides that update refreshes it.
+pub(crate) fn standing_released_hold(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<crate::HostedHold>, SyncError> {
+    Ok(store
+        .read_with(|conn| {
+            crate::hosted::queued_released_hold(conn, &key.workspace_id, &key.object_id)
+        })?
+        .map(crate::HostedHold::stale))
+}
+
+/// `key`'s head, as its path and moment.
+fn drained_head(store: &EngineStore, key: &DocKey) -> Result<Option<(String, String)>, SyncError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT path,latest_moment_id FROM snapshots \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })
+}
+
+/// A write of `key`'s head once a drain moved it from `before`, or while
+/// the projection that wrote it still waits to be written to its file: an
+/// earlier attempt of the drain may have committed it and then waited.
+pub(crate) fn drained_head_change(
+    store: &EngineStore,
+    key: &DocKey,
+    before: Option<&(String, String)>,
+) -> Result<Option<crate::MomentMaterializationChange>, SyncError> {
+    let Some((path, moment)) = drained_head(store, key)? else {
+        return Ok(None);
+    };
+    let changed = before.is_none_or(|(_, before)| *before != moment)
+        || store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 \
+                 AND job_id='ydoc-mat_' || ?2 AND status='pending')",
+                params![key.workspace_id, moment],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })?;
+    Ok(changed.then(|| crate::MomentMaterializationChange {
+        version_id: key.version_id.clone(),
+        path,
+        operation: "write",
+        content_kind: "text",
+    }))
 }
 
 /// The drain before an envelope of `key` applies. One that waits for
@@ -905,8 +1004,23 @@ fn complete_drain_cleanup(
         if let Some((key, leases)) = recovery {
             require_recovery_closed(tx, key, leases)?;
         }
-        if let Some(refusal) = cleanup.projection_refusal.as_ref() {
+        for refusal in cleanup
+            .projection_refusal
+            .iter()
+            .chain(&cleanup.applied_refusals)
+        {
             crate::apply::persist_refusal(tx, refusal)?;
+        }
+        if let Some((key, lineage)) = &cleanup.projected
+            && !cleanup.applied_refusals.is_empty()
+        {
+            crate::refusal_notices::clear_lineage_in_tx(
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                lineage,
+            )?;
         }
         for (origin_id, origin_seq) in &cleanup.coordinates {
             tx.execute(
@@ -1093,6 +1207,13 @@ pub struct YdocDrainCleanup {
     workspace_id: String,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
+    /// Refusals of rows whose bytes the drain applied first. Each persists
+    /// as its row leaves, so until then the row keeps its facts.
+    applied_refusals: Vec<crate::ReplicationRefusal>,
+    /// The document and lineage the drain's final projection wrote, which
+    /// clears the lineage's notices that projection settles, as it would
+    /// have for refusals persisted before it.
+    projected: Option<(DocKey, String)>,
     /// The drain kept a row queued for released retained work.
     released_hold: bool,
 }
@@ -1212,6 +1333,8 @@ fn drain_deferred_ydoc(
                 workspace_id: key.workspace_id.clone(),
                 coordinates: Vec::new(),
                 projection_refusal: None,
+                applied_refusals: Vec::new(),
+                projected: None,
                 released_hold: false,
             },
         )
@@ -1345,6 +1468,8 @@ fn drain_deferred_ydoc(
     let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
+    let mut applied_refusals = Vec::new();
+    let mut projected_lineage = None;
     // Rows held for released retained work while the head waits for
     // dependencies, earliest first. Each stays queued, and each row applied
     // past them brings them back to be decided against the new head.
@@ -1713,14 +1838,15 @@ fn drain_deferred_ydoc(
         projection_coordinates.push((origin_id.clone(), origin_seq));
         if let Some(reason) = content_kind_refusal.or(identity_refusal) {
             // The CRDT bytes landed even though the established path identity
-            // forbids projection. Count the coordinate as drained before its
-            // already-ACKed queue row is converted into a refusal: a live
+            // forbids projection. Count the coordinate as drained: a live
             // client's doc has not integrated these bytes, so settle must
             // force a resync instead of materializing unseen remote content.
-            drained_coordinates.push((origin_id.clone(), origin_seq));
-            refusals.push(refuse_deferred_ydoc(
-                store, key, &origin_id, origin_seq, reason, faults,
-            )?);
+            // Its already-ACKed queue row becomes a refusal in the cleanup,
+            // so a drain that stops first leaves it, and its facts, queued.
+            let refusal = deferred_ydoc_refusal(key, &origin_id, origin_seq, reason);
+            refusals.push(refusal.clone());
+            applied_refusals.push(refusal);
+            drained_coordinates.push((origin_id, origin_seq));
             continue;
         }
         // The payload tracks for DEDUPED rows too: a crash between an
@@ -1737,12 +1863,15 @@ fn drain_deferred_ydoc(
     // an already-acked coordinate skips its mutation closure — if the drain
     // did not project, the snapshot/materialization would stay stale until
     // some unrelated open/settle. Same idempotent-by-sha write as the pull
-    // path; skipped while cross-origin dependencies are still pending.
+    // path; skipped while cross-origin dependencies are still pending. A
+    // drain that waits projects nothing: its applied rows stay queued, and
+    // the drain that removes them projects and reports the head once.
     let (drain_origin, drain_seq) = match &last_coordinate {
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
     };
-    if let Some(payload) = last_payload
+    if waiting.is_none()
+        && let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
             store,
             cache,
@@ -1757,6 +1886,12 @@ fn drain_deferred_ydoc(
             recovery_leases,
         )?
     {
+        if let Ok(TxnOutcome::Committed(_)) = &projected {
+            projected_lineage = dohc_engine_collab::read_marker(store, key)
+                .map_err(map_collab_hard_error)?
+                .and_then(|marker| marker.lineage_claim_id)
+                .map(|lineage| (key.clone(), lineage));
+        }
         match projected {
             Ok(TxnOutcome::Committed(crate::BaseOrigination::Declined(declined))) => {
                 sharing_declined.push(declined);
@@ -1826,9 +1961,50 @@ fn drain_deferred_ydoc(
             workspace_id: key.workspace_id.clone(),
             coordinates: drained_coordinates,
             projection_refusal,
+            applied_refusals,
+            projected: projected_lineage,
             released_hold: !held_rows.is_empty(),
         },
     ))
+}
+
+/// Whether a queued update of `key` already opened a conflict: a drain
+/// applied it and stopped before removing its row, so the next drain still
+/// owes that drain's report.
+pub fn deferred_ydoc_opened_conflict(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT origin_id,origin_seq FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        )
+        .map_err(SyncError::corrupt)?;
+    let coordinates = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    for (origin_id, origin_seq) in coordinates {
+        let opened: Option<String> = conn
+            .query_row(
+                "SELECT payload_hash FROM engine_requests \
+                 WHERE request_id=?1 AND kind='sync-ydoc-conflict'",
+                [ydoc_conflict_coordinate_id(
+                    &key.workspace_id,
+                    &origin_id,
+                    origin_seq,
+                )],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        if opened.is_some_and(|count| count != "0") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether the queued update at this coordinate is still queued.

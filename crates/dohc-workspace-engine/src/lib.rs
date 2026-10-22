@@ -82,6 +82,8 @@ pub struct EngineService {
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+    #[cfg(feature = "harness")]
+    hosted_feed_for_harness: Option<String>,
     #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
@@ -196,6 +198,8 @@ impl EngineService {
             },
             events: EngineEvents::default(),
             capture_apply_probe: None,
+            #[cfg(feature = "harness")]
+            hosted_feed_for_harness: None,
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]
@@ -208,6 +212,16 @@ impl EngineService {
     pub fn with_capture_apply_probe_for_harness(probe: CaptureApplyProbe) -> Self {
         let mut service = Self::new();
         service.capture_apply_probe = Some(probe);
+        service
+    }
+
+    /// Harness-only hosted feed for a service no live host configures, so a
+    /// test can pull a hosted replica through the ordinary daemon methods.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub fn with_hosted_feed_for_harness(namespace: impl Into<String>) -> Self {
+        let mut service = Self::new();
+        service.hosted_feed_for_harness = Some(namespace.into());
         service
     }
 }

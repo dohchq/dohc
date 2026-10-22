@@ -3787,6 +3787,8 @@ ALTER TABLE ydoc_deferred_updates ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 
         AND stream_identity IS NOT NULL AND relay_seq IS NOT NULL AND relay_seq > 0)));
 UPDATE ydoc_deferred_updates SET ingress_kind='local'
   WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=ydoc_deferred_updates.workspace_id);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN lineage_replacement_json TEXT
+    CHECK (lineage_replacement_json IS NULL OR json_valid(lineage_replacement_json));
 ALTER TABLE relay_deferred_ops ADD COLUMN relay_namespace TEXT
     CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
 ALTER TABLE relay_deferred_ops ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
@@ -4849,7 +4851,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "bf5221160dadf8277eaa3f75420b83a376ed92da8c0486055c9740aeb688f8d5",
+                "42a14fcc86e1232b0fa2bd88b73c94522939f206e70d95889cdccbaeb2e796d9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5663,6 +5665,7 @@ mod tests {
              VALUES ('hosted','main','held','peer',2,6,4,'hosted','relay','epoch','stream')",
             "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
              recorded_at_ms,ingress_kind) VALUES ('ordinary','main','doc','peer',2,6,'local')",
+            "UPDATE ydoc_deferred_updates SET lineage_replacement_json='{}' WHERE origin_seq=2",
             "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
              stream_identity,envelope_json,retained_bytes,ingress_kind,relay_namespace) \
              VALUES ('hosted','peer',2,'epoch','stream','{\"relaySeq\":4}',1,'hosted','relay')",
@@ -5695,6 +5698,7 @@ mod tests {
             "UPDATE ydoc_deferred_updates SET stream_identity=NULL WHERE ingress_kind='hosted'",
             "UPDATE ydoc_deferred_updates SET relay_seq=NULL WHERE ingress_kind='hosted'",
             "UPDATE ydoc_deferred_updates SET relay_seq=0 WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET lineage_replacement_json='not json' WHERE origin_seq=1",
             "UPDATE relay_deferred_ops SET ingress_kind='hosted' WHERE origin_seq=1",
             "UPDATE relay_deferred_ops SET ingress_kind='remote' WHERE origin_seq=1",
             "UPDATE relay_deferred_ops SET relay_namespace=NULL WHERE ingress_kind='hosted'",

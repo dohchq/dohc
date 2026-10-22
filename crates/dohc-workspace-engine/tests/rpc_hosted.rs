@@ -549,6 +549,12 @@ fn write_response(stream: &mut TcpStream, response: TestResponse) -> std::io::Re
     stream.flush()
 }
 
+/// A daemon that pulls the hosted feed under the namespace a configured
+/// live host would name, while its ordinary methods stay open to the test.
+fn hosted_service() -> EngineService {
+    EngineService::with_hosted_feed_for_harness("hosted-relay")
+}
+
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
     scratch: &ScratchDir,
@@ -725,7 +731,7 @@ fn rotated_relay() -> FakeRelay {
 async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_hosted_feed() {
     let relay = rotated_relay();
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -834,7 +840,7 @@ const HOSTED_FEED_ONLY: &str = "invalid-input: a hosted replica uses only its ho
 async fn ordinary_relay_rpcs_leave_a_hosted_replica_untouched() {
     let relay = rotated_relay();
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -910,7 +916,7 @@ async fn a_departed_document_parks_and_frees_its_file_for_its_replacement() {
     relay.share("doc-b", "a.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1010,7 +1016,7 @@ async fn a_parked_document_comes_back_with_its_file_when_it_returns() {
     relay.share("doc-b", "notes/a.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1059,7 +1065,7 @@ async fn a_retired_file_leaves_no_folder_in_its_replacements_way() {
     relay.share("doc-b", "a.md/x/c.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1108,7 +1114,7 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     relay.share("doc-b", "a.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1144,7 +1150,7 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     host.call("workspace.close", json!({})).await;
     drop(host);
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1218,7 +1224,7 @@ async fn retired_file_holds_its_path_while_a_folder_is_locked(locked: &str) {
     relay.share("doc-b", "a.md/x/c.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1300,7 +1306,7 @@ async fn a_returning_document_is_held_off_another_documents_path_until_it_moves(
     relay.share("doc-b", "a.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1383,7 +1389,7 @@ async fn a_return_whose_old_path_became_a_folder_holds_only_its_document() {
     relay.share("doc-b", "a.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1457,7 +1463,7 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     relay.share("doc-b", "x.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1490,7 +1496,7 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     assert!(host.pull().await["pendingCursor"].is_object());
     host.call("workspace.close", json!({})).await;
     drop(host);
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1575,7 +1581,7 @@ async fn a_held_returns_nested_history_clears_its_files_and_their_folder() {
     relay.share("doc-b", "x.md/child.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1608,7 +1614,7 @@ async fn a_held_returns_nested_history_clears_its_files_and_their_folder() {
     assert!(host.pull().await["pendingCursor"].is_object());
     host.call("workspace.close", json!({})).await;
     drop(host);
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -1924,7 +1930,7 @@ async fn reopen(host: Host, scratch: &ScratchDir, relay: &FakeRelay) -> Host {
     let mut host = host;
     host.call("workspace.close", json!({})).await;
     drop(host);
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, scratch, relay).await;
     Host {
         transport,
@@ -1963,7 +1969,7 @@ async fn returning_document_matrix(stop: Stop) {
     }
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -2216,7 +2222,7 @@ async fn a_deletion_applied_before_a_restart_lands_when_its_document_parks() {
     relay.share("doc-x", "x.md");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -2260,7 +2266,7 @@ async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart
     relay.share("doc-b", "a.txt");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -2328,7 +2334,7 @@ async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart
     host.call("workspace.close", json!({})).await;
     drop(host);
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -2373,7 +2379,7 @@ async fn a_departed_document_keeps_its_head_until_its_session_settles() {
     relay.share("doc-b", "a.txt");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -2561,7 +2567,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     relay.share("doc-b", "b.txt");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(hosted_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
@@ -2711,7 +2717,7 @@ async fn a_commit_cancelled_after_it_lands_answers_committed_once_its_close_runs
     relay.share("doc-a", "a.txt");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().expect("scratch");
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(hosted_service());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
@@ -3244,7 +3250,7 @@ async fn a_held_document_leaves_the_push_running_and_registers_once_it_departs()
 async fn hosted_rpcs_refuse_a_replica_that_is_not_hosted_with_the_reason() {
     let relay = rotated_relay();
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,
@@ -3285,4 +3291,71 @@ async fn hosted_rpcs_refuse_a_replica_that_is_not_hosted_with_the_reason() {
         relay.relay().requests.is_empty(),
         "no refusal reached the relay"
     );
+}
+
+/// What a hosted replica's store holds that a pass can change: its scope,
+/// cursor and commits, its documents, and the work it journaled or keeps.
+fn hosted_store_state(scratch: &ScratchDir) -> String {
+    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    conn.query_row(
+        "SELECT json_array( \
+           (SELECT json_group_array(json_array(scope_token,scope_generation,main_cursor,cursor_commits)) \
+            FROM hosted_replicas), \
+           (SELECT json_group_array(json_array(object_id,state,backfill_cursor)) FROM hosted_documents), \
+           (SELECT COUNT(*) FROM replication_log), \
+           (SELECT COUNT(*) FROM relay_deferred_ops), \
+           (SELECT COUNT(*) FROM ydoc_deferred_updates))",
+        [],
+        |row| row.get(0),
+    )
+    .expect("hosted store state")
+}
+
+/// Sol's sixth and Opus's eighth findings: a hosted pull no live host names a
+/// feed for could adopt a scope and apply work before it failed. It is
+/// refused before it reads the feed or changes the store, and the same
+/// replica pulls once a feed is named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hosted_pull_no_live_host_configures_is_refused_before_it_reads_or_changes_anything() {
+    let relay = rotated_relay();
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    assert_eq!(host.create().await, json!({"hosted": true}));
+    let requests = relay.relay().requests.len();
+    let before = hosted_store_state(&scratch);
+    assert_eq!(
+        host.error("sync.pullHosted").await,
+        (
+            ErrorCode::Forbidden,
+            "live host is not configured".to_owned()
+        )
+    );
+    assert_eq!(
+        relay.relay().requests.len(),
+        requests,
+        "the refused pull read nothing"
+    );
+    assert_eq!(
+        hosted_store_state(&scratch),
+        before,
+        "the refused pull changed nothing"
+    );
+
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
 }

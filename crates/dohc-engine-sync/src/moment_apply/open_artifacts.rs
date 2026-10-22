@@ -13,9 +13,10 @@ pub struct OpenArtifactDrain {
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub conflicts_opened: i64,
-    /// Each recovered document a drain left held for released retained
-    /// work, by object id. Its queued work stays queued.
-    pub holds: std::collections::BTreeMap<String, crate::HostedHold>,
+    /// The hold each document whose recovery drained is left with, by object
+    /// id: one a drain left held for released retained work keeps its queued
+    /// work queued, and none clears any hold an earlier drain reported.
+    pub holds: std::collections::BTreeMap<String, Option<crate::HostedHold>>,
     /// Recovery stopped at a document whose drain waits for released-tail
     /// validation; the documents before it recovered. Once it completes,
     /// recovery runs again for the rest.
@@ -180,37 +181,50 @@ pub fn drain_open_document_artifacts(
             let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
                 store, cache, &key, leases, faults,
             )?;
-            let after = store.read_with(|conn| {
-                select_snapshot_by_object(conn, workspace_id, &key.version_id, &key.object_id)
-            })?;
-            let change = after
-                .filter(|after| {
-                    before
-                        .as_ref()
-                        .is_none_or(|before| before.latest_moment_id != after.latest_moment_id)
-                })
-                .map(|head| MomentMaterializationChange {
-                    version_id: key.version_id.clone(),
-                    path: head.path,
-                    operation: "write",
-                    content_kind: "text",
-                });
-            Ok(Some((drained, change)))
+            if drained.waiting.is_some() {
+                return Ok(Some((drained, Vec::new())));
+            }
+            let mut changes = Vec::new();
+            for replacement in &drained.lineage_replacements {
+                for path in &replacement.recovered_paths {
+                    changes.push(MomentMaterializationChange {
+                        version_id: key.version_id.clone(),
+                        path: path.clone(),
+                        operation: "write",
+                        content_kind: "text",
+                    });
+                }
+            }
+            let before = before.map(|head| (head.path, head.latest_moment_id));
+            changes.extend(crate::ydoc_apply::drained_head_change(
+                store,
+                &key,
+                before.as_ref(),
+            )?);
+            Ok(Some((drained, changes)))
         })();
         match attempt {
-            Ok(Some((drained, change))) => {
-                result.changes.extend(change);
-                result.record_facts.extend(drained.record_facts);
-                result.refusals.extend(drained.refusals);
-                result.sharing_declined.extend(drained.sharing_declined);
-                result.conflicts_opened += drained.conflicts_opened;
-                if let Some(hold) = drained.released_hold {
-                    result.holds.insert(key.object_id.clone(), hold);
-                }
+            Ok(Some((drained, changes))) => {
+                // A drain that waits committed nothing it reports: its rows
+                // stay queued for the recovery that runs after validation.
                 if drained.waiting.is_some() {
                     result.waiting = drained.waiting;
                     cache.remove(&key);
                     break;
+                }
+                let left = match drained.released_hold {
+                    Some(hold) => Some(hold),
+                    None => crate::ydoc_apply::standing_released_hold(store, &key)?,
+                };
+                result.changes.extend(changes);
+                result.record_facts.extend(drained.record_facts);
+                result.refusals.extend(drained.refusals);
+                result.sharing_declined.extend(drained.sharing_declined);
+                result.conflicts_opened += drained.conflicts_opened;
+                // A hold any version of a document leaves stands for it.
+                let hold = result.holds.entry(key.object_id.clone()).or_insert(None);
+                if left.is_some() {
+                    *hold = left;
                 }
             }
             Ok(None) => continue,

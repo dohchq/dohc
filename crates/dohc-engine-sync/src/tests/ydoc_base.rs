@@ -5069,6 +5069,134 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
     }
 }
 
+/// Sol's second finding: a queued base replaced its document's lineage and
+/// opened a conflict, then its drain stopped before removing the row, as a
+/// drain that waits for validation does. The drain that removes the row
+/// after a restart reports the replacement and the conflict once, though
+/// the base's apply derives neither again, and changes nothing twice.
+#[test]
+fn a_queued_base_reports_its_replacement_once_after_its_drain_stopped_before_cleanup() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let (_scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/seed-conflict.md";
+    seed_text_head(&mut engine, "seed-conflict", path, "local seed");
+    let key = DocKey::new("ws", "main", "seed-conflict").unwrap();
+    let local = Ydoc::wire();
+    local.richdoc_append_paragraph("local seed");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Richdoc,
+        &local.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256=?1 WHERE object_id='seed-conflict'",
+                [dohc_engine_storage::hex_sha256(b"local seed")],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "local".into(),
+            origin_seq: 1,
+            bytes: local.richdoc_append_paragraph("unsaved local edit"),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_200,
+    )
+    .unwrap();
+    let remote = Ydoc::wire();
+    remote.richdoc_append_paragraph("remote seed");
+    let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+    let mut base_op = envelope(
+        "remote",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "richdoc", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    let deferred = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .unwrap();
+    assert!(matches!(
+        deferred.primary,
+        ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })
+    ));
+    let state = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM conflicts WHERE status='open'), \
+                       (SELECT COUNT(*) FROM moments), (SELECT COUNT(*) FROM ydoc_updates), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap()
+    };
+    // The drain applies the base, then stops before its cleanup.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(stopped.conflicts_opened, 1);
+    assert_eq!(stopped.lineage_replacements.len(), 1);
+    let (conflicts, moments, updates, queued): (i64, i64, i64, i64) = state(&engine);
+    assert_eq!((conflicts, queued), (1, 1), "the base's row stays queued");
+
+    drop(engine);
+    let mut engine = EngineStore::open(&store_path, 3_000).unwrap();
+    let drained =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(drained.conflicts_opened, 1, "{drained:?}");
+    assert_eq!(
+        drained.lineage_replacements, stopped.lineage_replacements,
+        "the replacement its first apply derived"
+    );
+    assert_eq!(
+        state(&engine),
+        (conflicts, moments, updates, 0),
+        "nothing applied twice"
+    );
+    let idle =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(
+        (idle.conflicts_opened, idle.lineage_replacements.len()),
+        (0, 0)
+    );
+}
+
 fn resolve_seed_conflict(
     engine: &mut EngineStore,
     key: &dohc_engine_collab::DocKey,

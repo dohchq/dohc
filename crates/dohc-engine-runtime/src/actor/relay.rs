@@ -166,7 +166,7 @@ pub enum RelayOperation {
     PullHosted {
         workspace_id: String,
         root: std::path::PathBuf,
-        relay_namespace: Option<String>,
+        relay_namespace: String,
         now_ms: i64,
     },
     CommitHostedCursor {
@@ -2829,7 +2829,7 @@ fn run_relay_operation(
                 store,
                 doc_cache,
                 &workspace_id,
-                relay_namespace.as_deref(),
+                &relay_namespace,
                 &NoFaults,
                 leases,
             )?;

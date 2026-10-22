@@ -676,6 +676,23 @@ impl HostedHold {
         }
     }
 
+    /// This hold, claiming no currency for a released-lineage binding: its
+    /// document changed, or may change, since the binding was derived.
+    pub(crate) fn stale(self) -> Self {
+        match self {
+            Self::ReleasedLineageUnsettled {
+                binding,
+                continuation,
+                ..
+            } => Self::ReleasedLineageUnsettled {
+                binding,
+                continuation,
+                binding_stale: true,
+            },
+            hold => hold,
+        }
+    }
+
     /// The binding's canonical JSON, continuation and staleness a
     /// released-lineage hold stores; none and fresh for any other.
     fn released(&self) -> Result<(Option<String>, Option<&'static str>, bool), SyncError> {
@@ -1079,8 +1096,13 @@ pub fn commit_hosted_cursor(
         if generation != cursor.scope_generation || commits != cursor.cursor_commits {
             return stale();
         }
+        // A stale-marked binding claims nothing current to check.
         for read in cursor.reads.values() {
-            if let Some(HostedHold::ReleasedLineageUnsettled { binding, .. }) = &read.stopped
+            if let Some(HostedHold::ReleasedLineageUnsettled {
+                binding,
+                binding_stale: false,
+                ..
+            }) = &read.stopped
                 && !crate::ydoc_apply::released_binding_current(tx, binding, tails)?
             {
                 return stale();
@@ -1207,9 +1229,9 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: heads still parked, retained work of it still waiting, a live edit
-/// it refused, or a head away from the path its scope names. `None` once
-/// nothing does.
+/// ready: heads still parked, retained or queued work of it still waiting, a
+/// live edit it refused, or a head away from the path its scope names.
+/// `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1227,13 +1249,14 @@ fn completed_hold(
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
-    if matches!(
-        recorded_hold(conn, workspace_id, object_id)?,
-        Some(HostedHold::ReleasedLineageUnsettled { .. })
-    ) && conn
+    // Queued Y.Doc work it still owes keeps it waiting, whatever held it
+    // before; the end-of-pass drain takes that work up again.
+    if conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
-             WHERE workspace_id=?1 AND object_id=?2)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
+                 WHERE u.workspace_id=?1 AND u.object_id=?2 AND {OUTSTANDING_YDOC_UPDATE})"
+            ),
             params![workspace_id, object_id],
             |row| row.get::<_, bool>(0),
         )
@@ -1409,6 +1432,17 @@ pub(crate) fn hold_released_in_tx(
     .map_err(SyncError::persist)?;
     Ok(true)
 }
+
+/// Whether the queued Y.Doc update `u` is application work this replica
+/// still owes: a base, or an update of a document whose lineage a base
+/// established. An update of a document with no base yet waits for that
+/// base, which arrives as its own row, and owes nothing until then.
+pub(crate) const OUTSTANDING_YDOC_UPDATE: &str = "(EXISTS(SELECT 1 FROM ydoc_docs o \
+     WHERE o.workspace_id=u.workspace_id AND o.version_id=u.version_id \
+       AND o.object_id=u.object_id AND o.lineage_claim_id IS NOT NULL) \
+   OR EXISTS(SELECT 1 FROM replication_log l WHERE l.workspace_id=u.workspace_id \
+     AND l.origin_id=u.origin_id AND l.origin_seq=u.origin_seq \
+     AND json_extract(l.payload_json,'$.isBaseState')))";
 
 /// The released-lineage hold `object_id`'s row records, while the queued
 /// Y.Doc update its binding names is still queued: a drain's hold, which

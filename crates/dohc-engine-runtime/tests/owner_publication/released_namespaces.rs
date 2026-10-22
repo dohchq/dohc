@@ -119,7 +119,7 @@ fn pass_elsewhere(
             store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             "workspace",
-            Some(ELSEWHERE),
+            ELSEWHERE,
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,
         ) {
