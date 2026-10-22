@@ -18,6 +18,7 @@ import {
   ShareViewMountRollbackError,
   type ResolvedShareViewFilesTarget,
   type PreparedShareViewFilesMount,
+  type ShareViewFileChange,
   type ShareViewFilesDependencies,
   type ShareViewFilesStore,
   type ShareViewFilesTarget,
@@ -332,6 +333,35 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  // On a disk that ignores case, notes.md owns the one file and Notes.md is
+  // held behind it (#2416). Saving, deleting or moving Notes.md would write
+  // over notes.md's file, so each change is refused and nothing changes.
+  it("refuses a change to a spelling held behind another one's file", async (context) => {
+    const rootPath = await workspaceRoot();
+    await writeFile(join(rootPath, "probe.md"), "");
+    const ignoresCase = await lstat(join(rootPath, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootPath, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const registered = target(rootPath);
+    const store = mutableTextStore({ initial: [{ path: "notes.md", text: "n\n" }, { path: "Notes.md", text: "N\n" }] });
+    await writeFile(join(rootPath, "notes.md"), "n\n");
+    await writeRecord(rootPath, "share-collision-record.json", JSON.stringify({ shareId: registered.shareId, paths: ["Notes.md"] }));
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    const changes: ShareViewFileChange[] = [
+      { kind: "save", path: "Notes.md", text: "edited\n", expectedContentHash: createHash("sha256").update("N\n").digest("hex") },
+      { kind: "delete", path: "Notes.md" },
+      { kind: "move", fromPath: "Notes.md", toPath: "moved.md" },
+    ];
+    for (const change of changes) {
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change)))
+        .rejects.toThrow("dohc did not change Notes.md. This machine treats Notes.md and notes.md as the same name.");
+    }
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    expect(store.deleteTextFile).not.toHaveBeenCalled();
+    expect(await readFile(join(rootPath, "notes.md"), "utf8")).toBe("n\n");
+  });
+
   it.each(["end", "narrow"] as const)("lists unconfirmed changes without protecting them after %s", async restriction => {
     const rootPath = await workspaceRoot();
     const yaml = "tasks/automations.yaml";

@@ -1564,6 +1564,11 @@ describe("ui-state merge-on-load", () => {
             path: "docs/local.md",
             reason: "local-collision" as const,
           },
+          {
+            path: "docs/Notes.md",
+            reason: "spelling-collision" as const,
+            owner: "docs/notes.md",
+          },
           { path: "docs/locked.md", reason: "unreadable" as const },
         ],
         refusedOps: 0,
@@ -1623,6 +1628,10 @@ describe("ui-state merge-on-load", () => {
     );
     expect(notice.textContent).toContain(
       "Move or remove the file, then refresh.",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not receive docs/Notes.md. This machine treats docs/Notes.md and docs/notes.md as the same name. " +
+        "Ask the person who shared the files to rename one of them.",
     );
     expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
     expect(notice.textContent).toContain(

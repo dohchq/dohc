@@ -789,7 +789,8 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         let read = async move {
             tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)?;
+                let store =
+                    dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
@@ -3352,8 +3353,8 @@ mod tests {
             };
             let doc = dohc_engine_collab::Ydoc::wire();
             doc.plaintext_insert(0, "before");
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let base = store
                 .put_binary_blob(&doc.encode_full_state())
                 .expect("base blob");
@@ -3380,8 +3381,8 @@ mod tests {
             } else {
                 None
             };
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let update = store
                 .put_binary_blob(&doc.plaintext_insert(6, " parked"))
                 .expect("update blob");
@@ -3398,7 +3399,7 @@ mod tests {
                 _scratch: scratch,
                 service,
                 handle,
-                db_path: open.db_path.clone(),
+                db_path: open.actor.database_path().to_path_buf(),
                 session,
             };
             assert_eq!(parked.parked(), 1, "the pulled edit starts parked");
@@ -3629,7 +3630,12 @@ mod tests {
                 .expect("workspace open");
             let handle: WorkspaceHandle =
                 serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-            let db_path = service.open(Some(&handle)).expect("open").db_path.clone();
+            let db_path = service
+                .open(Some(&handle))
+                .expect("open")
+                .actor
+                .database_path()
+                .to_path_buf();
             let db = rusqlite::Connection::open(&db_path).expect("engine db");
             db.execute_batch(&format!(
                 "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \

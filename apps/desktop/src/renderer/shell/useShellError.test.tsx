@@ -276,6 +276,41 @@ describe("useShellError", () => {
     expect(result.current.shellErrors.map((error) => error.message)).toEqual(["Could not load History."]);
   });
 
+  it("offers to keep the Collections here, then retries what was refused, unless the person cancels", async () => {
+    const keepCollectionsHere = vi.fn(async () => ({ kept: true }));
+    vi.stubGlobal("dohcDesktop", { keepCollectionsHere });
+    try {
+      const retry = vi.fn();
+      const { result } = renderHook(() => useShellError("ws-a"));
+      const words = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-unclaimed]: ${words}`), retry));
+      const row = result.current.shellErrors[0]!;
+      expect(row.message).toBe(`Could not create the Collection. ${words}`);
+      expect(row.action?.label).toBe("Keep the Collections on this computer");
+      await act(async () => { result.current.runShellErrorAction(row.id); });
+      expect(keepCollectionsHere).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+      expect(retry).toHaveBeenCalledOnce();
+      expect(result.current.shellErrors).toEqual([]);
+      // Collections another computer keeps offer it too, behind main's question; a cancelled question retries nothing.
+      keepCollectionsHere.mockResolvedValueOnce({ kept: false });
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error("Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]: These Collections are on Laptop."), retry));
+      const elsewhere = result.current.shellErrors[0]!;
+      expect(elsewhere.action?.label).toBe("Keep the Collections on this computer");
+      await act(async () => { result.current.runShellErrorAction(elsewhere.id); });
+      expect(retry).toHaveBeenCalledOnce();
+      // A store that is gone, or a record that changed, offers no such step.
+      for (const code of ["collections-missing", "collections-changed"]) {
+        act(() => result.current.reportShellError("Could not create the Collection.",
+          new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]: Words.`)));
+        expect(result.current.shellErrors.at(-1)!.action).toBeUndefined();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {
     const send = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));

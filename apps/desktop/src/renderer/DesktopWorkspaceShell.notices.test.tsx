@@ -1163,6 +1163,69 @@ describe("crash report notice", () => {
   });
 });
 
+describe("offline copies a previous account left", () => {
+  const none = { workspaces: [], recordUnreadable: false, sweepPending: false };
+  const removeFailure = "dohc could not remove offline copies of Collections from a previous account.";
+  // Try again closes Notices, so each row is read from Notices opened again.
+  async function rowOf(user: ReturnType<typeof userEvent.setup>, text: string) {
+    await waitFor(() => expect(screen.getAllByText(text).length).toBeGreaterThan(0));
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    return (await within(screen.getByTestId("notice-center")).findByText(text)).closest("li")!;
+  }
+
+  it("names the workspaces that still hold them, with Try again and Copy", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.readCollectionCopiesLeft).toHaveBeenCalledOnce());
+    // The sign-out's cleanup fails after the shell opened, and main says so.
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, workspaces: ["/Users/ana/Trip", "/Users/ana/Fundraiser"] });
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    const message = `${removeFailure} They are still in Trip and Fundraiser.`;
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+    const row = await rowOf(user, message);
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    // Try again that still leaves one says which, and one that removes them all ends the row.
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, workspaces: ["/Users/ana/Trip"] });
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    const left = `${removeFailure} They are still in Trip.`;
+    const again = await rowOf(user, left);
+    expect(screen.queryByText(message)).toBeNull();
+    const removed = deferred<typeof none>();
+    bridge.removeCollectionCopiesLeft.mockImplementationOnce(() => removed.promise);
+    await user.click(within(again).getByRole("button", { name: "Try again" }));
+    await act(async () => removed.resolve(none));
+    expect(bridge.removeCollectionCopiesLeft).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(left)).toBeNull();
+    // A later account change that removes them ends a row too.
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, workspaces: ["/Users/ana/Trip"] });
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    await rowOf(user, left);
+    bridge.readCollectionCopiesLeft.mockResolvedValue(none);
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    await waitFor(() => expect(screen.queryByText(left)).toBeNull());
+  });
+
+  it("says when dohc could not read its record of them or check every workspace, until Try again does", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, recordUnreadable: true, sweepPending: true });
+    renderShell(bridge);
+    const row = await rowOf(user, "dohc could not read its list of offline copies of Collections to remove, or check every workspace for them. Some may still be on this computer.");
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, workspaces: ["/Users/ana/Trip"], sweepPending: true });
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    const both = await rowOf(user, `${removeFailure} They are still in Trip. dohc also could not check every workspace for offline copies of Collections from a previous account.`);
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, sweepPending: true });
+    await user.click(within(both).getByRole("button", { name: "Try again" }));
+    const unchecked = await rowOf(user, "dohc could not check every workspace for offline copies of Collections from a previous account. Some may still be on this computer.");
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce(none);
+    await user.click(within(unchecked).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.removeCollectionCopiesLeft).toHaveBeenCalledTimes(3));
+    await act(async () => undefined);
+    expect(screen.queryByText(/could not check every workspace/)).toBeNull();
+  });
+});
+
 describe("notices sent to you", () => {
   function sentNotices(notices: NoticeRow[]): SentNotices {
     return {
