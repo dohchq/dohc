@@ -48,6 +48,7 @@ export type ShellErrorKind =
   | "workspace-search"
   | "cloud-sync"
   | "collections-waiting"
+  | "collection-copies-left"
   | "sync-refusal"
   | "import-files"
   | "share-refresh"

@@ -137,6 +137,8 @@ export const CAPABILITIES = {
   "crash.read": capability("Read a crash report on this computer.", {ipc: ["readCrashReport"]}),
   "crash.dismiss": capability("Dismiss a crash report.", {ipc: ["dismissCrashReport"]}),
   "crash.send": capability("Send a confirmed crash report.", {ipc: ["sendCrashReport"]}),
+  "collection.copies.left.read": capability("Read which workspaces hold offline Collection copies an account change could not remove.", {ipc: ["readCollectionCopiesLeft"]}),
+  "collection.copies.left.remove": capability("Try again to remove the offline Collection copies an account change left.", {ipc: ["removeCollectionCopiesLeft"]}),
   "workspace.trust.read": capability("Read whether this computer trusts the admitted workspace to run its apps' code.", {ipc: ["readWorkspaceTrust"]}),
   "workspace.trust.request": capability("Show main's dialog that asks the person to trust the admitted workspace.", {ipc: ["requestWorkspaceTrust"]}),
   "workspace.trust.restrict": capability("Put the admitted workspace in Restricted Mode and stop its app commands.", {ipc: ["restrictWorkspace"]}),
