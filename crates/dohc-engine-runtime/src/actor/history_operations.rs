@@ -1,5 +1,5 @@
 use super::{
-    ActorHandle,
+    ActorHandle, HeldReader,
     journal::journal_moment_outbound_with_batch_in_tx,
     materialization::{
         MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
@@ -149,11 +149,11 @@ impl ActorHandle {
         request: String,
         author: Option<String>,
     ) -> Result<Option<HistoryUndoResult>, RuntimeError> {
-        let db = self
-            .run(|store, _| Ok(store.database_path().to_path_buf()))
-            .await?;
+        // Read after the actor's earlier work.
+        self.run(|_, _| Ok(())).await?;
+        let held = self.location();
         tokio::task::spawn_blocking(move || {
-            let mut store = EngineStore::open_read_only(&db)?;
+            let mut store = HeldReader::open(held)?;
             store
                 .read_with(|conn| conn.execute_batch("BEGIN"))
                 .map_err(StorageError::corrupt_public)?;

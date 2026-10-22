@@ -342,6 +342,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
+ "dohc-linux-files",
  "dohc-macos-files",
  "dohc-test-scratch",
  "getrandom 0.4.3",
@@ -438,6 +439,7 @@ dependencies = [
  "dohc-engine-sync",
  "dohc-engine-sync-http",
  "dohc-engine-testkit",
+ "dohc-linux-files",
  "dohc-macos-files",
  "file-guard",
  "file-id",
@@ -457,6 +459,7 @@ dependencies = [
 name = "dohc-engine-storage"
 version = "0.1.0"
 dependencies = [
+ "dohc-linux-files",
  "dohc-macos-files",
  "dohc-test-scratch",
  "fs4",
@@ -477,6 +480,7 @@ dependencies = [
  "dohc-engine-files",
  "dohc-engine-storage",
  "dohc-engine-testkit",
+ "dohc-linux-files",
  "dohc-macos-files",
  "quote",
  "rusqlite",
@@ -522,7 +526,10 @@ dependencies = [
 name = "dohc-linux-files"
 version = "0.1.0"
 dependencies = [
+ "dohc-test-scratch",
  "libc",
+ "rusqlite",
+ "rustix",
  "signal-hook-registry",
 ]
 
@@ -581,6 +588,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
+ "dohc-linux-files",
  "dohc-macos-files",
  "dohc-windows-files",
  "dohc-workspace-engine",
