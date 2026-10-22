@@ -8,8 +8,9 @@ import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerData
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
 // The registry's own file calls: how many are running, which folders it
-// removed, and the folders whose removal fails as a busy folder's would.
-const files = vi.hoisted(() => ({ running: 0, removed: [] as string[], busy: new Set<string>() }));
+// removed, and the folders whose removal fails as a busy folder's would,
+// once its gate opens. A busy removal waiting at its gate is blocked.
+const files = vi.hoisted(() => ({ running: 0, removed: [] as string[], busy: new Set<string>(), gates: new Map<string, Promise<void>>(), blocked: [] as string[] }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   async function counted<T>(work: Promise<T>): Promise<T> {
@@ -20,15 +21,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     lstat: ((...args: Parameters<typeof actual.lstat>) => counted(actual.lstat(...args))) as typeof actual.lstat,
     realpath: ((...args: Parameters<typeof actual.realpath>) => counted(actual.realpath(...args))) as typeof actual.realpath,
     rm: async (...args: Parameters<typeof actual.rm>) => {
-      if (files.busy.has(String(args[0]))) throw Object.assign(new Error(`EBUSY: resource busy or locked, rmdir '${String(args[0])}'`), { code: "EBUSY" });
+      if (files.busy.has(String(args[0]))) {
+        files.blocked.push(String(args[0])); await files.gates.get(String(args[0]));
+        throw Object.assign(new Error(`EBUSY: resource busy or locked, rmdir '${String(args[0])}'`), { code: "EBUSY" });
+      }
       await counted(actual.rm(...args)); files.removed.push(String(args[0]));
     } };
 });
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { files.busy.clear(); for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
+afterEach(async () => { files.busy.clear(); files.gates.clear(); files.blocked.length = 0; for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
 // The next start of dohc, with the same record.
-function restart(record: string) {
-  const registry = createOwnerDatasetCopyRegistry({ record });
+function restart(record: string, workspaces: string[] = [], onLeftover = vi.fn()) {
+  const registry = createOwnerDatasetCopyRegistry({ record, workspaces: () => workspaces, onLeftover });
   cleanups.push(() => registry.closeAll());
   return registry;
 }
@@ -36,7 +40,8 @@ async function fixture({ opened = true } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-copy-registry-")), lifetime = new AbortController();
   if (opened) await openedLocalState({ workspaceId: "w", rootPath });
   const state = await mkdtemp(join(tmpdir(), "dohc-copy-registry-state-")), record = join(state, "dataset-copy-removals.json"), onLeftover = vi.fn();
-  const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" }), registry = createOwnerDatasetCopyRegistry({ record, onLeftover });
+  const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" });
+  const registry = createOwnerDatasetCopyRegistry({ record, workspaces: () => [rootPath], onLeftover });
   cleanups.push(async () => { await registry.closeAll(); await rm(rootPath, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); });
   await registry.credentialsChanged(ownerKey);
   mocks.open.mockImplementation(async options => {
@@ -206,14 +211,15 @@ async function failedSignOut() {
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("EBUSY");
   return {...f,directory,root:await realpath(f.input.rootPath)};
 }
+const nothing={workspaces:[],recordUnreadable:false};
 it("names the workspace that still holds a copy it could not remove, and removes it on Try again",async()=>{
   const f=await failedSignOut();
-  expect(f.registry.leftover()).toEqual([f.root]);expect(f.onLeftover).toHaveBeenCalledOnce();
+  expect(f.registry.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(f.onLeftover).toHaveBeenCalledOnce();
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
   files.busy.clear();
   await f.registry.removeLeftover();
   expect(await readdir(dirname(f.directory))).toEqual([]);
-  expect(f.registry.leftover()).toEqual([]);expect(f.onLeftover).toHaveBeenCalledTimes(2);
+  expect(f.registry.leftover()).toEqual(nothing);expect(f.onLeftover).toHaveBeenCalledTimes(2);
 });
 it("records a folder it could not remove, and the next start removes it before another account's copy opens",async()=>{
   const f=await failedSignOut();
@@ -227,8 +233,72 @@ it("records a folder it could not remove, and the next start removes it before a
   });
   void next.credentialsChanged(other.ownerKey);
   await next.get(other);
-  expect(leftAtOpen).toBe(false);expect(next.leftover()).toEqual([]);
+  expect(leftAtOpen).toBe(false);expect(next.leftover()).toEqual(nothing);
   await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+});
+it("tells the windows once the start has tried its record, though a read before it saw nothing left",async()=>{
+  const f=await failedSignOut(),onLeftover=vi.fn(),next=restart(f.record,[],onLeftover);
+  expect(next.leftover()).toEqual(nothing);
+  // An unchanged owner answers with the start's own removal.
+  await expect(next.credentialsChanged(null)).rejects.toThrow("EBUSY");
+  expect(next.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(onLeftover).toHaveBeenCalledOnce();
+});
+it.skipIf(process.platform==="win32"||process.getuid?.()===0)("says when it cannot read its record, writes nothing over it, and reads it again on Try again",async()=>{
+  const f=await failedSignOut();files.busy.clear();
+  const text=await readFile(f.record,"utf8"),elsewhere=await mkdtemp(join(tmpdir(),"dohc-copy-registry-elsewhere-"));
+  cleanups.push(()=>rm(elsewhere,{recursive:true,force:true}));
+  await chmod(f.record,0o000);cleanups.push(()=>chmod(f.record,0o600).catch(()=>undefined));
+  const onLeftover=vi.fn(),next=restart(f.record,[elsewhere],onLeftover);
+  await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
+  expect(next.leftover()).toEqual({workspaces:[],recordUnreadable:true});expect(onLeftover).toHaveBeenCalledOnce();
+  // Leaving an account meanwhile names folders of its own, and still writes nothing over the record.
+  await next.credentialsChanged(f.input.ownerKey).catch(()=>undefined);
+  await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
+  await chmod(f.record,0o600);expect(await readFile(f.record,"utf8")).toBe(text);
+  await next.removeLeftover();
+  expect(await readdir(dirname(f.directory))).toEqual([]);
+  expect(next.leftover()).toEqual(nothing);expect(onLeftover).toHaveBeenCalledTimes(2);
+  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+});
+it("records what a sign-out will remove before any copy closes, so a stop part way leaves it for the next start",async()=>{
+  const f=await fixture(),copy=await f.registry.get(f.input),{directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  const closing=deferred<void>(),closeCalled=deferred<void>();
+  vi.mocked(copy.close).mockImplementationOnce(()=>{closeCalled.resolve();return closing.promise;});
+  const removal=f.registry.credentialsChanged(null);
+  try {
+    await closeCalled.promise;
+    // dohc stops while the copy closes. The next start removes it.
+    await restart(f.record).credentialsChanged(null);
+    expect(await readdir(dirname(directory))).toEqual([]);
+  } finally { closing.resolve(); }
+  await removal;
+});
+it("never removes the folder of a copy the signed-in account opens while Try again waits",async()=>{
+  const f=await failedSignOut(),gate=deferred<void>();files.gates.set(f.directory,gate.promise);files.blocked.length=0;
+  // The same account signs in again while the folder it left is still busy.
+  const back=f.registry.credentialsChanged(f.input.ownerKey);
+  await vi.waitFor(()=>expect(files.blocked).toEqual([f.directory]));
+  const reopened=f.registry.get({...f.input,lifetime:new AbortController().signal}),retried=f.registry.removeLeftover();
+  files.busy.clear();gate.resolve();
+  await expect(back).rejects.toThrow("EBUSY");await reopened;await retried;
+  expect(mocks.open.mock.calls[1]![0].directory).toBe(f.directory);
+  expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
+  expect(f.registry.leftover()).toEqual(nothing);
+});
+it.skipIf(process.platform==="win32")("removes copies an earlier run left in every registered workspace when the account changes, and keeps them across a restart",async()=>{
+  const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  // Another registered workspace holds a link where its copies would be.
+  const linked=await mkdtemp(join(tmpdir(),"dohc-copy-registry-linked-")),outside=await mkdtemp(join(tmpdir(),"dohc-copy-registry-outside-"));
+  cleanups.push(()=>rm(linked,{recursive:true,force:true}),()=>rm(outside,{recursive:true,force:true}));
+  await mkdir(join(outside,"0".repeat(64)));await mkdir(join(linked,".dohc","local"),{recursive:true});
+  await symlink(outside,join(linked,".dohc","local","dataset-copies"),"dir");
+  // dohc starts again signed in to the same account, and nothing opens the copy.
+  const next=restart(f.record,[f.input.rootPath,linked]);
+  await next.credentialsChanged(f.input.ownerKey);
+  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
+  await next.credentialsChanged(null);
+  expect(await readdir(dirname(directory))).toEqual([]);
+  expect(await readdir(outside)).toEqual(["0".repeat(64)]);expect(next.leftover()).toEqual(nothing);
 });
 it.each(["the next account change","Try again"])("removes what a failed cleanup left at %s, and opens another account's copies meanwhile",async when=>{
   const f=await failedSignOut(),other={...f.input,lifetime:new AbortController().signal,ownerKey:datasetCopyOwnerKey({serverUrl:"https://account",userId:"other"})};
@@ -244,7 +314,7 @@ it.each(["the next account change","Try again"])("removes what a failed cleanup 
     expect(await readdir(dirname(f.directory))).toEqual([]);
     await f.registry.get(other);expect(mocks.open).toHaveBeenCalledTimes(2);
   }
-  expect(f.registry.leftover()).toEqual([]);
+  expect(f.registry.leftover()).toEqual(nothing);
 });
 it.skipIf(process.platform==="win32")("follows no link swapped in for a recorded folder, and removes nothing a record names outside a workspace's copies",async()=>{
   const f=await failedSignOut();files.busy.clear();
@@ -258,5 +328,5 @@ it.skipIf(process.platform==="win32")("follows no link swapped in for a recorded
   await expect(next.credentialsChanged(null)).rejects.toThrow("Collection copy storage changed. Its files were not removed.");
   expect(await readFile(join(outside,"keep.txt"),"utf8")).toBe("not dohc's");expect((await lstat(f.directory)).isSymbolicLink()).toBe(true);
   expect(await readFile(join(stray,"keep.txt"),"utf8")).toBe("not dohc's");
-  expect(next.leftover()).toEqual([f.root]);expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
+  expect(next.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
 });

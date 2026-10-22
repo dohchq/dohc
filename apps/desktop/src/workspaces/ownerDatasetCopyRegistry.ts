@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
@@ -27,46 +27,73 @@ const orMissing = <T>(work: Promise<T>): Promise<T | null> => work.catch((error:
   throw error;
 });
 
-// The folders an account change removes: one copy's own in `.dohc/local`, and
-// `.dohc/dataset-copies`, where copies lived before `.dohc/local`. That old
-// folder syncs and holds the account's Collection data, so it goes too.
-// Remove it from here once no workspace has it (#2474).
-const COPIES = [".dohc", "local", "dataset-copies"], OLD_COPIES = [".dohc", "dataset-copies"];
+// The folders an account change removes: every copy in a workspace's
+// `.dohc/local/dataset-copies`, and `.dohc/dataset-copies`, where copies
+// lived before `.dohc/local`. That old folder syncs and holds the account's
+// Collection data, so it goes too. Remove it from here once no workspace has
+// it (#2474). A record names a copies folder, one copy in it, or an old folder.
+const KEY = /^[0-9a-f]{64}$/, COPIES = [".dohc", "local", "dataset-copies"], OLD_COPIES = [".dohc", "dataset-copies"];
 function placeOf(path: string): { root: string; inside: string[] } | null {
   if (!isAbsolute(path)) return null;
   const parts = resolve(path).split(sep), name = parts.at(-1)!;
-  const inside = /^[0-9a-f]{64}$/.test(name) ? [...COPIES, name] : OLD_COPIES, tail = parts.slice(-inside.length);
-  return parts.length > inside.length && inside.every((part, index) => tail[index] === part)
-    ? { root: resolve(path, ...inside.map(() => "..")), inside } : null;
+  for (const inside of KEY.test(name) ? [[...COPIES, name]] : [COPIES, OLD_COPIES]) {
+    const tail = parts.slice(-inside.length);
+    if (parts.length > inside.length && inside.every((part, index) => tail[index] === part)) {
+      return { root: resolve(path, ...inside.map(() => "..")), inside };
+    }
+  }
+  return null;
 }
 
-// Removes a real folder in its workspace, never through a link. dohc never
-// wrote an old copy through a link, so it leaves one there alone. "missing"
-// when the workspace's folder is not on this computer now.
-async function removeFolder(path: string): Promise<"done" | "missing"> {
+// A real folder in its workspace, reached through no link, or null when there
+// is none. "missing" when the workspace's folder is not on this computer now.
+async function realFolder(path: string): Promise<{ folder: string; real: boolean } | null | "missing"> {
   const { root, inside } = placeOf(path)!;
   const real = await orMissing(realpath(root));
   if (real === null) return "missing";
   const folder = join(resolve(real), ...inside);
   const info = await orMissing(lstat(folder));
-  if (!info) return "done";
-  if (!info.isDirectory() || info.isSymbolicLink() || resolve(await realpath(folder)) !== folder) {
-    if (inside === OLD_COPIES) return "done";
+  if (!info) return null;
+  return { folder, real: info.isDirectory() && !info.isSymbolicLink() && resolve(await realpath(folder)) === folder };
+}
+
+// What a recorded path stands for now: a copies folder stands for each copy
+// in it. dohc never wrote a copy through a link, so a link there stands for
+// nothing.
+async function foldersOf(path: string): Promise<string[] | "missing"> {
+  if (placeOf(path)!.inside !== COPIES) return [path];
+  const found = await realFolder(path);
+  if (found === "missing") return found;
+  if (!found?.real) return [];
+  return (await readdir(found.folder)).filter(name => KEY.test(name)).map(name => join(found.folder, name));
+}
+
+// Removes one copy, or the old folder, never through a link. A link at the
+// old folder is left alone, as above.
+async function removeFolder(path: string): Promise<"done" | "missing"> {
+  const found = await realFolder(path);
+  if (found === "missing") return found;
+  if (found === null) return "done";
+  if (!found.real) {
+    if (placeOf(path)!.inside === OLD_COPIES) return "done";
     throw Error("Collection copy storage changed. Its files were not removed.");
   }
-  await rm(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  await rm(found.folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
   return "done";
 }
 
 const Saved = z.object({ folders: z.array(z.string()) });
 const rejected = (result: PromiseSettledResult<unknown> | undefined): result is PromiseRejectedResult => result?.status === "rejected";
+const settled = (work: Promise<unknown>) => work.then((): undefined => undefined, (reason: unknown): PromiseRejectedResult => ({ status: "rejected", reason }));
 
-/** Owns replica locks across workspace lifetimes and removes known copies when the account changes. */
+/** Owns replica locks across workspace lifetimes and removes copies when the account changes. */
 export function createOwnerDatasetCopyRegistry(options: {
-  // This installation's record of the folders an account change could not
-  // remove, outside every workspace. The next start removes them first.
+  // This installation's record of the folders an account change has not
+  // removed yet, outside every workspace. The next start removes them first.
   record: string;
-  // Hears that the workspaces `leftover` names changed.
+  // The registered workspaces. Leaving an account removes the copies in each.
+  workspaces(): string[];
+  // Hears that what `leftover` answers changed.
   onLeftover?(): void;
 }) {
   // Copies that did not open but made their folder: an account change removes those too.
@@ -75,10 +102,13 @@ export function createOwnerDatasetCopyRegistry(options: {
   const requested = new Set<string>();
   // A copy an account change could not close. That change dropped it, so quit raises it again.
   let unclosed: { reason: unknown } | null = null;
-  // Folders not removed yet: true when removing one failed, false when its
-  // workspace was not here. The record holds the same paths, and keeps one
-  // until it is removed, however long its workspace is away.
-  let left = new Map<string, boolean>(), recorded: string | null = null;
+  // Folders not removed yet: true once removing one failed. False before a
+  // try, or while its workspace is not here: the record keeps it until it is
+  // removed, however long its workspace is away.
+  let left = new Map<string, boolean>();
+  // The record as last read or written. Until dohc reads it, nothing writes
+  // it, and every try reads it again.
+  let loaded = false, recorded: string | null = null, unreadable: { reason: unknown } | null = null;
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
   let ownerKey: string | null = null, stopped = false;
@@ -86,59 +116,81 @@ export function createOwnerDatasetCopyRegistry(options: {
     entry.closed = true; entry.stop.abort(); entry.detach();
     return entry.closing ??= entry.opening.then(copy => copy.close(), () => undefined);
   }
-  function leftover(): string[] {
-    return [...new Set([...left].flatMap(([path, failure]) => failure ? [placeOf(path)!.root] : []))];
+  function leftover() {
+    return { workspaces: [...new Set([...left].flatMap(([path, failure]) => failure ? [placeOf(path)!.root] : []))], recordUnreadable: unreadable !== null };
   }
   async function load() {
-    recorded = await orMissing(readFile(options.record, "utf8"));
+    try { recorded = await orMissing(readFile(options.record, "utf8")); } catch (reason) { unreadable = { reason }; return; }
+    loaded = true; unreadable = null;
     let folders: string[] = [];
-    // A record dohc cannot read names nothing. The next change replaces it.
+    // A record dohc can read but not parse names nothing. The next change replaces it.
     try { folders = recorded === null ? [] : Saved.parse(JSON.parse(recorded)).folders; } catch { /* names nothing */ }
-    for (const path of folders) if (placeOf(path)) left.set(path, true);
+    for (const path of folders) if (placeOf(path) && !left.has(path)) left.set(path, false);
   }
   async function save() {
+    if (!loaded) return;
     const folders = [...left.keys()].sort(), text = folders.length ? JSON.stringify({ folders }) : null;
     if (text === recorded) return;
     if (text === null) await rm(options.record, { force: true });
     else { await mkdir(dirname(options.record), { recursive: true }); await atomicWriteFile(options.record, text); }
     recorded = text;
   }
-  // Every copy closes before any folder goes: a copy that opened on a retry
-  // uses the folder of the attempt that failed. A copy that did not close
-  // keeps its folder. A folder the signed-in account uses again is its own,
-  // and goes at its next account change. Each removal runs whatever another
-  // one did.
-  async function sweep(prior: Entry[], roots: string[]) {
+  // Records every folder it will remove before any copy closes, so a stop
+  // part way leaves them for the next start. Every copy closes before any
+  // folder goes: a copy that opened on a retry uses the folder of the attempt
+  // that failed. A copy that did not close keeps its folder. A folder the
+  // signed-in account opened is its own, and goes at its next account
+  // change. Each removal runs whatever another one did.
+  async function sweep(prior: Entry[], roots: string[], leaving = false) {
+    if (!loaded) await load();
+    // Leaving an account removes its copies in every registered workspace,
+    // including ones from earlier runs.
+    let listing: PromiseRejectedResult | undefined;
+    try { if (leaving) roots = [...new Set([...roots, ...options.workspaces()])]; } catch (reason) { listing = { status: "rejected", reason }; }
+    for (const root of roots) for (const path of [join(resolve(root), ...COPIES), join(resolve(root), ...OLD_COPIES)]) if (!left.has(path)) left.set(path, false);
+    const intent = await settled(save());
     const closed = await Promise.allSettled(prior.map(close));
     const closeFailure = closed.find(rejected);
     if (closeFailure && !unclosed) unclosed = { reason: closeFailure.reason };
     prior.forEach((entry, index) => { if (entry.directory && rejected(closed[index])) held.add(entry.directory); });
-    const own = new Set([...entries.keys(), ...[...failed].map(entry => basename(entry.directory!))]);
-    const folders = [...new Set([...left.keys(), ...prior.flatMap(entry => entry.directory ? [entry.directory] : []),
-      ...roots.map(root => join(resolve(root), ...OLD_COPIES))])].filter(path => !held.has(path) && !own.has(basename(path)));
-    const removed = await Promise.allSettled(folders.map(removeFolder));
-    const before = leftover().join("\0");
-    left = new Map([...held].map(path => [path, true]));
-    folders.forEach((path, index) => {
-      const result = removed[index]!;
-      if (rejected(result) || result.value === "missing") left.set(path, rejected(result));
+    const paths = [...left.keys()], found = await Promise.allSettled(paths.map(foldersOf));
+    const next = new Map<string, boolean>([...held].map(path => [path, true])), folders = new Set<string>();
+    paths.forEach((path, index) => {
+      const result = found[index]!;
+      if (rejected(result) || result.value === "missing") next.set(path, rejected(result));
+      else for (const folder of result.value) folders.add(folder);
     });
-    const saved = await save().then(() => undefined, (reason: unknown): PromiseRejectedResult => ({ status: "rejected", reason }));
-    if (leftover().join("\0") !== before) options.onLeftover?.();
-    const failure = [...closed, ...removed, saved].find(rejected);
+    // Read now, after every wait: a copy asked for meanwhile is listed by now.
+    const own = new Set([...entries.keys(), ...[...failed].map(entry => basename(entry.directory!))]);
+    const tried = [...folders].filter(path => !held.has(path) && !own.has(basename(path)));
+    const removed = await Promise.allSettled(tried.map(removeFolder));
+    tried.forEach((path, index) => {
+      const result = removed[index]!;
+      if (rejected(result) || result.value === "missing") next.set(path, rejected(result));
+    });
+    left = next;
+    const saving = await settled(save());
+    const now = JSON.stringify(leftover());
+    if (now !== told) { told = now; options.onLeftover?.(); }
+    const failure = [listing, ...closed, ...found, ...removed, intent, saving].find(rejected) ?? unreadable;
     if (failure) throw failure.reason;
   }
-  // The folders the last run could not remove go before any copy opens.
-  let barrier: Promise<void> = load().then(() => sweep([], []));
+  // What the windows heard last. A folder no try has failed yet stays out of
+  // it, so each try tells them what changed, even if they read before it.
+  let told = JSON.stringify(leftover());
+  // The folders the last run did not remove go before any copy opens.
+  let barrier: Promise<void> = sweep([], []);
   return {
     credentialsChanged(nextOwner: string | null): Promise<void> {
       if (ownerKey === nextOwner) return barrier;
+      // Signing in after no account removes nothing, so copies last across a restart.
+      const leaving = ownerKey !== null;
       ownerKey = nextOwner;
       const prior = [...entries.values(), ...failed], roots = [...requested];
       for (const entry of prior) { entry.closed = true; entry.stop.abort(); entry.detach(); }
       entries.clear(); failed.clear(); requested.clear();
       // A cleanup that failed does not stop this one, which tries its folders again.
-      barrier = barrier.catch(() => undefined).then(() => sweep(prior, roots));
+      barrier = barrier.catch(() => undefined).then(() => sweep(prior, roots, leaving));
       return barrier;
     },
     // Tries again to remove the folders an account change left, as Try again asks.
@@ -146,7 +198,8 @@ export function createOwnerDatasetCopyRegistry(options: {
       barrier = barrier.catch(() => undefined).then(() => sweep([], []));
       return barrier;
     },
-    // The workspaces where dohc could not remove a folder.
+    // The workspaces where dohc could not remove a folder, and whether it
+    // could not read its record of them.
     leftover,
     async get(input: {
       workspaceId: string; rootPath: string; attachmentId?: symbol; lifetime: AbortSignal; datasetId: string; origin: string; ownerKey: string;

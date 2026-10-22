@@ -6066,9 +6066,12 @@ export const workspaceSearchOperations = {
 } satisfies OperationTable;
 
 // Offline copies of Collections that an account change could not remove, by
-// the workspaces that hold them. Empty when none are left. Remove tries again
-// and answers what is still left.
-export const CollectionCopiesLeft = z.object({ workspaces: z.array(z.string().min(1).max(4096)).max(1000) });
+// the workspaces that hold them, and whether dohc could not read its record
+// of them. Remove tries again and answers what is still left.
+export const CollectionCopiesLeft = z.object({
+  workspaces: z.array(z.string().min(1).max(4096)).max(1000),
+  recordUnreadable: z.boolean(),
+});
 export type CollectionCopiesLeft = z.infer<typeof CollectionCopiesLeft>;
 export const CollectionCopiesLeftChangedEvent = z.undefined();
 export const collectionCopiesLeftOperations = {
