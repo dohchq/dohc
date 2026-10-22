@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
-import { isLossyDocument } from "@dohc/ydoc-projection/lossy-markdown";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
+import { useBoundNoteCheck } from "../editor/lossyNote";
+import { useRecordSourceCheck } from "./recordSourceCheck";
 import { SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { ShellErrorReporter } from "../shell/useShellError";
@@ -91,11 +92,24 @@ export function CollectionRecordFieldWrite({
   onFailed: (message: string | null, recoveryOnly?: boolean) => void;
   onWaiting?: (message: string | null) => void;
 }) {
+  // The record's file is checked before its session opens, and the session's
+  // own document again once it binds. A lossy note (CONTEXT.md) refuses.
+  const source = useRecordSourceCheck(workspaceId, change.recordPath);
   const docState = useEngineDoc({
     workspaceId,
     path: change.recordPath,
-    enabled: true,
+    enabled: source.state === "clear",
   });
+  const session = useBoundNoteCheck({
+    open: change.recordPath,
+    doc: docState.doc,
+    checkedHash: source.state === "clear" ? source.contentHash : null,
+  });
+  const checkedClear = source.state === "clear" && session === "clear";
+  useEffect(() => {
+    if (source.state === "lossy" || session === "lossy") onFailed(LOSSY_RECORD_MESSAGE);
+    else if (source.state === "unreadable") onFailed(UNREAD_RECORD_MESSAGE);
+  }, [source.state, session, onFailed]);
   const applied = useRef(false);
   const sawSaving = useRef(false);
   const prepStarted = useRef(false);
@@ -117,7 +131,7 @@ export function CollectionRecordFieldWrite({
     [docState.sharedWaiting, onWaiting]);
 
   useEffect(() => {
-    if (accessRefusals.has(workspaceId)) return;
+    if (accessRefusals.has(workspaceId) || !checkedClear) return;
     if (createOption === undefined || prepStarted.current || docState.opening) return;
     if (!docState.available || !docState.doc) {
       if (docState.sharedWaiting?.state === "pending") return;
@@ -180,6 +194,7 @@ export function CollectionRecordFieldWrite({
       );
     });
   }, [
+    checkedClear,
     workspaceId,
     collectionPath,
     change.field,
@@ -199,7 +214,7 @@ export function CollectionRecordFieldWrite({
   ]);
 
   useEffect(() => {
-    if (accessRefusals.has(workspaceId)) return;
+    if (accessRefusals.has(workspaceId) || !checkedClear) return;
     // An unprepared option edit must not touch the record yet: its value is
     // valid only once the schema write lands.
     if (applied.current || createOption !== undefined || docState.opening)
@@ -225,12 +240,6 @@ export function CollectionRecordFieldWrite({
       onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
       return;
     }
-    // A lossy note (CONTEXT.md): the settle after this field would rewrite
-    // the parts dohc can't show.
-    if (isLossyDocument(doc)) {
-      onFailed(LOSSY_RECORD_MESSAGE);
-      return;
-    }
     try {
       setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
     } catch {
@@ -240,6 +249,7 @@ export function CollectionRecordFieldWrite({
     applied.current = true;
     onApplied?.();
   }, [
+    checkedClear,
     docState.opening,
     docState.available,
     docState.sharedWaiting,
@@ -396,6 +406,8 @@ const SUPERSEDED_MESSAGE =
   "A newer edit replaced this value. Copy your unsaved value before discarding it.";
 const SAVE_UNCONFIRMED_MESSAGE =
   "dohc has not confirmed this save yet. Keep dohc open until saving finishes.";
+const UNREAD_RECORD_MESSAGE =
+  "dohc did not save this change because it could not read this record to check it. Try again.";
 const LOSSY_RECORD_MESSAGE =
   "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
 const CHANGED_SELECTION_MESSAGE =
