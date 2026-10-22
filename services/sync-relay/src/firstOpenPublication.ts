@@ -89,7 +89,8 @@ const sqliteTransient = (error: unknown, readOnly = false) => {
   return typeof fault.errcode === "number" && (TRANSIENT_SQLITE.has(fault.errcode & 255) || (readOnly && TRANSIENT_READ_ONLY.has(fault.errcode)));
 };
 
-export type FirstOpenBuild = (policy: OrderedLiveUpdateCutPolicy, input: FirstOpenBaseInput, signal: AbortSignal) => Promise<FirstOpenBaseResult | {kind: "busy"}>;
+export type FirstOpenBuild = (policy: OrderedLiveUpdateCutPolicy, input: FirstOpenBaseInput, signal: AbortSignal) =>
+  Promise<FirstOpenBaseResult | {kind: "busy"} | {kind: "deadline"}>;
 export type FirstOpenPublisher = ReturnType<typeof createFirstOpenPublisher>;
 
 /**
@@ -214,6 +215,10 @@ export function createFirstOpenPublisher(options: {
       sourceByteLength: source.sourceByteLength, bounds: bounds(config, source, identity, originId)}, signal));
     signal.throwIfAborted();
     if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
+    if (built.kind === "deadline") {
+      console.error("[sync-relay] first-open build passed its deadline", source.sourceDigest);
+      return answer({kind: "unavailable", reason: "build-deadline"});
+    }
     if (built.kind === "refused") {
       switch (built.reason) {
         case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});

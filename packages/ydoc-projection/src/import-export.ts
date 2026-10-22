@@ -15,11 +15,12 @@ import {
   DohcMarkdownTable,
   DohcTaskItem,
   dohcMarkdownExtensions,
+  enterInlineText,
   escapeHighlightMarkdown,
   findInlineStart,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
   inlineStart,
-  lexInlineText,
+  leaveInlineText,
   MarkdownListItem,
   MarkdownOrderedList,
   DohcProjectedMarkdownLists,
@@ -27,6 +28,9 @@ import {
   MarkdownTaskList,
   markdownListParseState,
   measureTableCellsAs,
+  readingInlineText,
+  stepInlineText,
+  type InlineText,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -329,6 +333,45 @@ function htmlRunSource(token: Token): string {
   return generic.dohcHtmlRun === true ? String(generic.text) : token.raw
 }
 
+// The open tags among a text's tokens, in a trie of their lowercased names,
+// so a closing tag finds the earliest one it closes in one pass over its own
+// name rather than over every token before it.
+type OpenTagNode = { next: Map<string, OpenTagNode>; at: number[] }
+const openTags = new WeakMap<object, { root: OpenTagNode; order: OpenTagNode[] }>()
+
+function recordOpenTag(tokens: Token[], name: string): void {
+  let tags = openTags.get(tokens)
+  if (!tags) openTags.set(tokens, tags = { root: { next: new Map(), at: [] }, order: [] })
+  let node = tags.root
+  for (const character of name.toLowerCase()) {
+    let next = node.next.get(character)
+    if (!next) node.next.set(character, next = { next: new Map(), at: [] })
+    node = next
+  }
+  // The lexer adds the open tag's token next.
+  node.at.push(tokens.length)
+  tags.order.push(node)
+}
+
+// Where the earliest open tag sits that `raw`, a closing tag, closes: one
+// whose name, ignoring case, starts the closing name and ends at a word
+// boundary. Forgets every open tag from there on, which the caller gathers.
+function closeOpenTag(tokens: Token[], raw: string): number {
+  const tags = openTags.get(tokens)
+  const name = /^<\/\s*([\w-]+)/.exec(raw)
+  if (!tags || !name) return -1
+  const start = name[0].length - name[1].length
+  let node: OpenTagNode | undefined = tags.root
+  let opened = -1
+  for (let end = start + 1; node && end <= name[0].length; end += 1) {
+    node = node.next.get(raw[end - 1]!.toLowerCase())
+    const at = node?.at[0]
+    if (at !== undefined && (opened < 0 || at < opened) && /\w/.test(raw[end - 1]!) !== /\w/.test(raw[end] ?? '')) opened = at
+  }
+  while (opened >= 0 && (tags.order.at(-1)?.at.at(-1) ?? -1) >= opened) tags.order.pop()!.at.pop()
+  return opened
+}
+
 const UNDERLINE_START = inlineStart(/\+\+/)
 const EMPTY_LINK_START = inlineStart(/\[\]\(/)
 
@@ -344,6 +387,100 @@ const MarkdownUnderline = starterUnderline.extend({
     },
   },
 })
+
+// marked's GFM text rule stops before an email address by looking ahead
+// through the email characters after each place it may stop, so a long run of
+// them, such as `a*a*a*…`, cost quadratic time. The importer finds the first
+// address the rule could stop before from the next `@` that follows an email
+// character, searching the text once, and reads the rule without those two
+// look-aheads only up to there. They see only the text marked gives the rule,
+// so an `@` past the start of an extension does not count.
+type LinearTextRule = { lead: RegExp; plain: RegExp; emailCharacter: RegExp }
+const EMAIL_LOOKAHEAD = /\|(\[\^[^\]]*\])?\(\?=\[([^\]]*)\]\+@\)/g
+const linearTextRules = new WeakMap<RegExp, LinearTextRule | null>()
+
+function linearTextRule(rule: RegExp): LinearTextRule | null {
+  let linear = linearTextRules.get(rule)
+  if (linear === undefined) {
+    const lead = /^\^\((?:\\.|[^)\\])*\)/.exec(rule.source)?.[0]
+    const [atStart, afterOther, ...more] = [...rule.source.matchAll(EMAIL_LOOKAHEAD)]
+    const characters = atStart?.[2]
+    linear = lead && characters && !atStart[1] && afterOther?.[1] === `[^${characters}]` && afterOther[2] === characters && !more.length
+      ? {
+          lead: new RegExp(lead, rule.flags),
+          plain: new RegExp(rule.source.replace(EMAIL_LOOKAHEAD, ''), rule.flags),
+          emailCharacter: new RegExp(`[${characters}]`, 'y'),
+        }
+      : null
+    linearTextRules.set(rule, linear)
+  }
+  return linear
+}
+
+// The first `@` from `from` on in the text `read` holds that follows an email
+// character, and where that run of email characters starts.
+function nextAddress(read: InlineText, rule: LinearTextRule, from: number): { at: number; start: number } {
+  const emailCharacter = (at: number) => {
+    rule.emailCharacter.lastIndex = at
+    return at >= 0 && rule.emailCharacter.test(read.text)
+  }
+  let found = read.email
+  if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
+    let at = read.text.indexOf('@', from)
+    while (at >= 0 && !emailCharacter(at - 1)) at = read.text.indexOf('@', at + 1)
+    let start = at
+    while (start > 0 && emailCharacter(start - 1)) start -= 1
+    found = read.email = { from, at, start }
+  }
+  return found
+}
+
+// How much of `src` the text rule reads, or undefined to let marked's own rule
+// read it.
+function textEnd(tokenizer: Tokenizer, src: string): number | undefined {
+  const read = readingInlineText(tokenizer.lexer)
+  const rule = linearTextRule(tokenizer.rules.inline.text)
+  // marked gives the rule a start of the step's rest.
+  if (!read || !rule || read.step < src.length || read.step > read.text.length) return undefined
+  const offset = read.text.length - read.step
+  // The rule always reads its lead, then may stop before an address.
+  const lead = rule.lead.exec(src)![0].length
+  const address = nextAddress(read, rule, offset + lead + 1)
+  let before = -1
+  if (address.at >= 0 && address.at < offset + src.length) {
+    // The email characters run from the end of the lead to the `@`.
+    if (address.start <= offset + lead) return lead
+    before = address.start - offset - 1
+  }
+  // Each other look-ahead of the rule stops within a few characters of where
+  // the address would stop it.
+  const end = rule.plain.exec(before < 0 ? src : src.slice(0, before + 8))![0].length
+  return before >= 0 && end > before ? before + 1 : end
+}
+
+// marked 17's GFM url rule reads a link from its scheme or `www.`, or an
+// address from its local part: a run of `[A-Za-z0-9._+-]` only an `@` may
+// end. It read that run at each step, so a run cut at each `++`, as in
+// `a++a++…`, cost quadratic time. The importer finds where the run ends once
+// per text and tries the rule only where it can match.
+const MARKED_URL_RULE = String.raw`^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])`
+const URL_SCHEME = /^(?:(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)/
+const NOT_LOCAL_PART = /[^A-Za-z0-9._+-]/g
+const URL_DOMAIN = /[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/y
+
+function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
+  const read = readingInlineText(tokenizer.lexer)
+  if (tokenizer.rules.inline.url.source !== MARKED_URL_RULE || !read || read.step !== src.length || URL_SCHEME.test(src)) return true
+  const from = read.text.length - src.length
+  let found = read.localPart
+  if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
+    NOT_LOCAL_PART.lastIndex = from
+    const at = NOT_LOCAL_PART.exec(read.text)?.index ?? -1
+    URL_DOMAIN.lastIndex = at + 1
+    found = read.localPart = { from, at, address: read.text[at] === '@' && URL_DOMAIN.test(read.text) }
+  }
+  return found.at > from && found.address
+}
 
 const extensions: AnyExtension[] = [
   MarkdownHtml,
@@ -382,7 +519,9 @@ const markdownParser = new Marked({
     start(src) {
       return findInlineStart(this.lexer, src, EMPTY_LINK_START)
     },
-    tokenizer: (src) => {
+    tokenizer: (src, tokens) => {
+      // marked tries this tokenizer first at every step.
+      stepInlineText(tokens, src)
       if (!src.startsWith('[](')) return undefined
       const link = literalProbe.link(src)
       return link?.type === 'link'
@@ -420,18 +559,14 @@ const markdownParser = new Marked({
       const text = rawHtmlText(raw)
       // The tag patterns are Tiptap's own.
       if (/^<\/[\s]*[\w-]+/i.test(raw)) {
-        const opened = tokens.findIndex((token) => {
-          const name: unknown = (token as Tokens.Generic).dohcOpenTag
-          return typeof name === 'string' && new RegExp(`^<\\/\\s*${name}\\b`, 'i').test(raw)
-        })
+        const opened = closeOpenTag(tokens, raw)
         if (opened < 0) return { type: 'escape', raw, text }
         const run = rawHtmlText(tokens.splice(opened).map(htmlRunSource).join('') + raw)
         return { type: 'escape', raw, text: run, dohcHtmlRun: true }
       }
       const open = /^<[\s]*([\w-]+)(\s|>|\/|$)/i.exec(raw)
-      return open && !raw.endsWith('/>')
-        ? { type: 'escape', raw, text, dohcOpenTag: open[1] }
-        : { type: 'escape', raw, text }
+      if (open && !raw.endsWith('/>')) recordOpenTag(tokens, open[1]!)
+      return { type: 'escape', raw, text }
     },
   }],
   tokenizer: {
@@ -444,8 +579,14 @@ const markdownParser = new Marked({
       token.tag = `]${count}`
       return token
     },
+    url(src) {
+      return urlMayStart(this, src) ? Tokenizer.prototype.url.call(this, src) : undefined
+    },
     inlineText(src) {
-      const token = Tokenizer.prototype.inlineText.call(this, src)
+      const end = textEnd(this, src)
+      const token = end === undefined
+        ? Tokenizer.prototype.inlineText.call(this, src)
+        : { type: 'text' as const, raw: src.slice(0, end), text: src.slice(0, end), escaped: this.lexer.state.inRawBlock }
       if (token) token.text = fileAngles(token.text)
       return token
     },
@@ -457,7 +598,12 @@ const markdownParser = new Marked({
 class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Lexer<ParserOutput, RendererOutput> {
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
     const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
-    return lexInlineText(this, text, () => super.inlineTokens(text, tokens))
+    enterInlineText(this, text, tokens)
+    try {
+      return super.inlineTokens(text, tokens)
+    } finally {
+      leaveInlineText(this, tokens)
+    }
   }
 }
 markdownParser.Lexer = ContentTabLexer

@@ -14,6 +14,7 @@ import {
 import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
 import { encodeRichdocSeed, richdocSeedFile, seedClientId } from "@dohc/ydoc-projection/richdoc-seed";
 import * as projectionImport from "../../../packages/ydoc-projection/src/import-export.js";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import type { NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import {
   MAX_YDOC_UPDATE_BYTES,
@@ -22,7 +23,7 @@ import {
   firstOpenEncodingCap,
   type FirstOpenBaseInput,
 } from "./firstOpenBase.js";
-import { createLiveValidationExecutor } from "./liveValidation.js";
+import { createLiveValidationExecutor, FIRST_OPEN_BUILD_MS } from "./liveValidation.js";
 import { openSyncRelayStorage } from "./storage.js";
 import type { StorageContext } from "./storage/context.js";
 import {
@@ -409,8 +410,8 @@ describe("first-open candidates", () => {
 });
 
 describe("first-open worker", () => {
-  function fixture() {
-    const pool = createLiveValidationExecutor(); pools.push(pool);
+  function fixture(options?: Parameters<typeof createLiveValidationExecutor>[0]) {
+    const pool = createLiveValidationExecutor(options); pools.push(pool);
     const doc = projectionImport.markdownToYDoc("A **shared** document");
     const checkpoint = Y.encodeStateAsUpdate(doc); doc.destroy();
     const journal = { document: { ...document, lineageClaimId: "lineage" }, currentPath: "note.md", checkpoint, suffix: [], candidate: Uint8Array.of(0, 0) };
@@ -453,5 +454,31 @@ describe("first-open worker", () => {
     expect(await pool.buildFirstOpenBase(policy, input("Body"))).toEqual({ kind: "busy" });
     expect((await validate(journal)).kind).toBe("accepted");
     await vi.waitFor(built, { timeout: 10_000 });
+  });
+
+  // Each of these once held the worker for minutes to hours at this size. On
+  // a loaded host the slowest now takes about 25 s.
+  it("builds a note of each shape that once parsed slowly at the source limit, or refuses it by size, inside the deadline", async () => {
+    const { pool } = fixture();
+    const bySize = ["update-limit", "capture-budget", "read-budget", "validation-budget", "seed-worker-capacity"];
+    const outcomes = [];
+    for (const unit of ["a*", "a@", "[", "[[", "a[[", "{{atom:"]) {
+      // A started worker, so the deadline bounds only the build.
+      expect((await pool.buildFirstOpenBase(policy, input("Body"))).kind).toBe("built");
+      const built = await pool.buildFirstOpenBase(policy, input(unit.repeat(Math.floor(LIVE_MARKDOWN_MAX_BYTES / unit.length))));
+      outcomes.push({ unit, built: built.kind === "refused" ? built.reason : built.kind });
+    }
+    expect(outcomes.filter(({ built }) => built !== "built" && !bySize.includes(built))).toEqual([]);
+  }, 8 * FIRST_OPEN_BUILD_MS);
+
+  it("ends a build that passes its deadline and answers once its slot is free, while a caller's cancellation still rejects", async () => {
+    // A deadline of 0 passes long before a new worker can start and answer.
+    const { pool, journal, validate } = fixture({ firstOpenBuildMs: 0 });
+    expect(await pool.buildFirstOpenBase(policy, input("Body"))).toEqual({ kind: "deadline" });
+    expect(await pool.buildFirstOpenBase(policy, input("Body"))).toEqual({ kind: "deadline" });
+    expect((await Promise.all([validate(journal), validate(journal)])).map(result => result.kind)).toEqual(["accepted", "accepted"]);
+    const abort = new AbortController(), cancelled = pool.buildFirstOpenBase(policy, input("Body"), abort.signal);
+    abort.abort(new Error("cancelled"));
+    await expect(cancelled).rejects.toThrow("cancelled");
   });
 });

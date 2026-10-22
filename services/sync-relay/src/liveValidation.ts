@@ -44,8 +44,10 @@ type CapacityRetry = {
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
 type Slot = { worker: Worker; busy: boolean };
+/** How long a first-open build may run: about ten times the slowest real note measured. */
+export const FIRST_OPEN_BUILD_MS = 60_000;
 /** Two process-wide validation slots, with no retained waiting inputs. */
-export function createLiveValidationExecutor() {
+export function createLiveValidationExecutor({ firstOpenBuildMs = FIRST_OPEN_BUILD_MS } = {}) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false;
@@ -218,20 +220,29 @@ export function createLiveValidationExecutor() {
     /**
      * A build that runs its worker out of memory does so on every try, so it
      * is refused for good. Node emits that worker's exit right after its
-     * error, so its slot is free before the refusal answers.
+     * error, so its slot is free before the refusal answers. A build that
+     * passes its deadline says only that this host was slow this time: its
+     * worker is ended, and it answers once the slot is free.
      */
     async buildFirstOpenBase(
       policy: OrderedLiveUpdateCutPolicy,
       input: FirstOpenBaseInput,
       signal?: AbortSignal,
-    ): Promise<FirstOpenBaseResult | { kind: "busy" }> {
+    ): Promise<FirstOpenBaseResult | { kind: "busy" } | { kind: "deadline" }> {
+      const deadline = AbortSignal.timeout(firstOpenBuildMs);
       try {
-        return await firstOpen<FirstOpenBaseResult>({ kind: "first-open", policy, input }, signal);
+        return await firstOpen<FirstOpenBaseResult>(
+          { kind: "first-open", policy, input },
+          signal ? AbortSignal.any([signal, deadline]) : deadline,
+        );
       } catch (error) {
         if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ERR_WORKER_OUT_OF_MEMORY") {
           return { kind: "refused", reason: "seed-worker-capacity" };
         }
-        throw error;
+        if (!deadline.aborted || error !== deadline.reason) throw error;
+        const slot = firstOpenSlot;
+        if (slot && slots.has(slot)) await new Promise((exited) => slot.worker.once("exit", exited));
+        return { kind: "deadline" };
       }
     },
     /** Reads first-open history on the worker's own read-only connection, in the first-open slot. */

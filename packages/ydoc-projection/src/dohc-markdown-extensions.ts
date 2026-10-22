@@ -17,21 +17,49 @@ function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null 
 // marked asks each inline extension where it may start in the rest of a text
 // before each run of plain text it reads, so a search to the end each time
 // reads a paragraph of short runs, such as lines that end in hard breaks,
-// quadratically. While a lexer reads a text through `lexInlineText`, each
-// search answers from the match it last found in that text until the rest
-// passes it.
-type InlineText = { text: string; found: Map<InlineStart, { from: number; match: number; at: number }> }
+// quadratically. While a lexer reads a text between `enterInlineText` and
+// `leaveInlineText`, each search answers from the match it last found in that
+// text until the rest passes it.
+export type InlineText = {
+  text: string
+  found: Map<InlineStart, { from: number; match: number; at: number }>
+  // The length of the rest at the lexer's current step, which the importer's
+  // first tokenizer records.
+  step: number
+  searched: Map<RestSearch, { from: number; at: number }>
+  // The address the importer's text rule last found.
+  email?: { from: number; at: number; start: number }
+  // Where the run of characters an address's local part may hold, that the
+  // importer's url rule last measured, ends, and whether an address's
+  // domain follows.
+  localPart?: { from: number; at: number; address: boolean }
+}
 const inlineTexts = new WeakMap<object, InlineText[]>()
+// marked hands an extension's tokenizer the tokens of the text it reads.
+const tokenTexts = new WeakMap<object, InlineText>()
 
-export function lexInlineText<T>(lexer: object, text: string, lex: () => T): T {
-  const texts = inlineTexts.get(lexer) ?? []
-  inlineTexts.set(lexer, texts)
-  texts.push({ text, found: new Map() })
-  try {
-    return lex()
-  } finally {
-    texts.pop()
-  }
+export function enterInlineText(lexer: object, text: string, tokens: object): void {
+  const read = { text, found: new Map(), step: -1, searched: new Map() }
+  const texts = inlineTexts.get(lexer)
+  if (texts) texts.push(read)
+  else inlineTexts.set(lexer, [read])
+  tokenTexts.set(tokens, read)
+}
+
+export function leaveInlineText(lexer: object, tokens: object): void {
+  inlineTexts.get(lexer)?.pop()
+  tokenTexts.delete(tokens)
+}
+
+/** The text `lexer` is reading, when it records one. */
+export function readingInlineText(lexer: object | undefined): InlineText | undefined {
+  return lexer ? inlineTexts.get(lexer)?.at(-1) : undefined
+}
+
+/** Records `rest`, the rest of the text whose `tokens` a tokenizer is given, as the lexer's current step. */
+export function stepInlineText(tokens: object, rest: string): void {
+  const read = tokenTexts.get(tokens)
+  if (read) read.step = rest.length
 }
 
 // A start pattern may capture the character before the start as its first
@@ -44,10 +72,9 @@ export function inlineStart(pattern: RegExp): InlineStart {
 }
 
 const ESCAPE_START = inlineStart(/\\/)
-// Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose label
-// contains an escaped delimiter is still detected mid-line; the authoritative
-// bounds come from findClosingWikilink in tokenize.
-const WIKILINK_START = inlineStart(/(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/)
+// The tokenizer alone decides whether a `[[` opens a wikilink. marked's text
+// rule stops before every `[` anyway, so a run cut at any `[[` reads the same.
+const WIKILINK_START = inlineStart(/\[\[/)
 const INLINE_ATOM_START = inlineStart(/\{\{atom:/)
 const HIGHLIGHT_START = inlineStart(/(^|[^\\=])==(?!\s)(?!=)/)
 // Opening `$` must not be preceded by `\` (escaped) or another `$` (that is
@@ -61,7 +88,7 @@ export function findInlineStart(lexer: object | undefined, src: string, start: I
   start.first.lastIndex = 0
   const first = start.first.exec(src)
   if (first) return at(first)
-  const read = lexer && inlineTexts.get(lexer)?.at(-1)
+  const read = readingInlineText(lexer)
   if (!read || read.text.length < src.length) {
     start.rest.lastIndex = 1
     const match = start.rest.exec(src)
@@ -127,13 +154,35 @@ function calloutStart(source: string): number {
   return -1
 }
 
-function findClosingWikilink(src: string): number {
-  for (let index = 2; index < src.length - 1; index += 1) {
-    if (src[index] === '\\') {
-      index += 1
-      continue
-    }
-    if (src[index] === ']' && src[index + 1] === ']') return index
+// A tokenizer's search for where its token ends, which finds the same place
+// from any start before it. marked tries a tokenizer at each place in a
+// text, so a search to the end each time would read it quadratically. While
+// the importer reads a text, each search answers from its last answer until
+// the rest passes it.
+type RestSearch = (text: string, from: number) => number
+
+function searchRest(src: string, tokens: object, from: number, search: RestSearch): number {
+  const read = tokenTexts.get(tokens)
+  if (!read || read.text.length < src.length) return search(src, from)
+  const offset = read.text.length - src.length
+  let found = read.searched.get(search)
+  if (!found || found.from > offset + from || (found.at >= 0 && found.at < offset + from)) {
+    found = { from: offset + from, at: search(read.text, offset + from) }
+    read.searched.set(search, found)
+  }
+  return found.at < 0 ? -1 : found.at - offset
+}
+
+const nextBrace: RestSearch = (text, from) => text.indexOf('}', from)
+
+// The first `]]` after a wikilink's `[[` that no backslash escapes. A run of
+// backslashes cannot reach back past the `[[`, so whether one escapes a `]`
+// does not depend on where the search starts.
+function unescapedClosing(text: string, from: number): number {
+  for (let at = text.indexOf(']]', from); at >= 0; at = text.indexOf(']]', at + 1)) {
+    let backslashes = 0
+    while (at - backslashes > from && text[at - backslashes - 1] === '\\') backslashes += 1
+    if (backslashes % 2 === 0) return at
   }
   return -1
 }
@@ -383,9 +432,9 @@ const DohcWikilink = Node.create({
     start(this: { lexer?: object }, src: string) {
       return findInlineStart(this.lexer, src, WIKILINK_START)
     },
-    tokenize(src) {
+    tokenize(src, tokens) {
       if (!src.startsWith('[[')) return undefined
-      const closingIndex = findClosingWikilink(src)
+      const closingIndex = searchRest(src, tokens, 2, unescapedClosing)
       if (closingIndex === -1) return undefined
       const raw = src.slice(0, closingIndex + 2)
       const [target, label] = splitWikilinkInner(raw.slice(2, -2))
@@ -444,8 +493,13 @@ const DohcInlineAtom = Node.create({
     start(this: { lexer?: object }, src: string) {
       return findInlineStart(this.lexer, src, INLINE_ATOM_START)
     },
-    tokenize(src) {
-      const match = firstTokenMatch(src, /^\{\{atom:([^}\s]+)([^}]*)\}\}/)
+    tokenize(src, tokens) {
+      if (!src.startsWith('{{atom:')) return undefined
+      // An atom ends at its first `}`, which must open its `}}`. Without one
+      // there, the pattern below would backtrack through the whole rest.
+      const brace = searchRest(src, tokens, 7, nextBrace)
+      if (brace < 0 || src[brace + 1] !== '}') return undefined
+      const match = firstTokenMatch(src.slice(0, brace + 2), /^\{\{atom:([^}\s]+)([^}]*)\}\}/)
       if (!match) return undefined
       const [raw, atomId = '', params = ''] = match
       return {

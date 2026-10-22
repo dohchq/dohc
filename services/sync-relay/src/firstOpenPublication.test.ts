@@ -676,6 +676,33 @@ it("refuses for good a note whose seed runs the first-open worker out of memory,
   expect((await g.open()).kind).toBe("published");
 }, 60_000);
 
+// A slow host says nothing about whether the note fits, so a build that passes
+// its deadline is asked again later, never refused.
+it("answers a build that passes its deadline as transient, and frees its slot first", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  // A deadline of 0 passes long before a new worker can start and answer.
+  const f = await fixture(), pool = createLiveValidationExecutor({firstOpenBuildMs: 0});
+  pools.push(pool);
+  const validate = pool.validator(selfHostLiveProfile().service.activation.validation);
+  const live = {document: {workspaceId: WS, mainVersionId: "main" as const, objectId: OBJECT, lineageClaimId: "lineage"}, currentPath: PATH,
+    checkpoint: richdocSeed.encodeRichdocSeed(MARKDOWN, 1), suffix: [], candidate: Uint8Array.of(0, 0)};
+  // Both slots take live validation at once, as soon as the build answers.
+  let following: Promise<string[]> | undefined;
+  f.buildWith(async (policy, input, signal) => {
+    const built = await pool.buildFirstOpenBase(policy, input, signal);
+    following = Promise.all([validate(live), validate(live)]).then(results => results.map(result => result.kind));
+    return built;
+  });
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", recovery: "retry-later"});
+  expect(logged).toHaveBeenCalledWith("[sync-relay] first-open build passed its deadline", f.source.sourceDigest);
+  expect(await following).toEqual(["accepted", "accepted"]);
+  expect(f.checks).not.toHaveBeenCalled();
+  nothingAppended(f);
+  // The same source publishes once a build finishes in time.
+  f.buildWith(inThread);
+  expect((await f.open()).kind).toBe("published");
+});
+
 it("publishes nothing when the validation policy changes while the engine checks, and builds under the new policy next time", async () => {
   const f = await fixture(), validation = selfHostLiveProfile().service.activation.validation;
   const changed = {...validation, maxStructVisits: validation.maxStructVisits + 1};

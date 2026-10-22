@@ -98,14 +98,30 @@ it.each([
 })
 
 // The characters `run` reads in searches: from where each starts to the end
-// of its match, or to the end of the text when it finds none. An anchored
-// pattern reads only its match.
-function searchWork(run: () => void): number {
+// of its match, or to the end of the text when it finds none, and the items
+// each `findIndex` reads. An anchored pattern reads only its match. One `exec`
+// hides what its pattern reads past where it stops, so three patterns count
+// that too: marked's text rule looks ahead through the email characters after
+// its match, its url rule reads the characters an address's local part may
+// hold, and a wikilink start that repeats its label reads to the end of the
+// line from each `[[` it tries.
+const MARKED_TEXT_RULE = Lexer.rules.inline.gfm.text
+const EMAIL_CHARACTERS = /[a-zA-Z0-9.!#$%&'*+/=?_`{|}~-]*/y
+const MARKED_URL_RULE = Lexer.rules.inline.gfm.url
+const LOCAL_PART = /[A-Za-z0-9._+-]*/y
+function searchWork(run: () => void, searched = new Set<string>()): number {
   const { indexOf } = String.prototype
   const { exec } = RegExp.prototype
+  const { findIndex } = Array.prototype
   let work = 0
+  const findIndexSpy = vi.spyOn(Array.prototype, 'findIndex').mockImplementation(function (this: unknown[], ...args) {
+    const at = Reflect.apply(findIndex, this, args) as number
+    work += at < 0 ? this.length : at + 1
+    return at
+  })
   const indexOfSpy = vi.spyOn(String.prototype, 'indexOf').mockImplementation(function (this: string, search: string, from = 0) {
     const at = Reflect.apply(indexOf, this, [search, from]) as number
+    searched.add(search)
     work += (at < 0 ? this.length : at + search.length) - Math.max(from, 0)
     return at
   })
@@ -114,12 +130,28 @@ function searchWork(run: () => void): number {
     const match = Reflect.apply(exec, this, [input]) as RegExpExecArray | null
     if (this.sticky || (this.source.startsWith('^') && !this.multiline)) work += match?.[0].length ?? 0
     else work += (match ? match.index + match[0].length : input.length) - from
+    if (this === MARKED_TEXT_RULE && match) {
+      EMAIL_CHARACTERS.lastIndex = match[0].length
+      work += (Reflect.apply(exec, EMAIL_CHARACTERS, [input]) as RegExpExecArray)[0].length
+    }
+    if (this === MARKED_URL_RULE && !match) {
+      LOCAL_PART.lastIndex = 0
+      work += (Reflect.apply(exec, LOCAL_PART, [input]) as RegExpExecArray)[0].length
+    }
+    if (this.source.includes('\\[\\[') && /[+*]/.test(this.source.replace(/\\./g, ''))) {
+      const end = this.sticky ? from + 1 : match ? match.index + 1 : input.length
+      for (let at = Reflect.apply(indexOf, input, ['[[', from]) as number; at >= 0 && at <= end; at = Reflect.apply(indexOf, input, ['[[', at + 1]) as number) {
+        const line = Reflect.apply(indexOf, input, ['\n', at]) as number
+        work += (line < 0 ? input.length : line) - at
+      }
+    }
     return match
   })
   try {
     run()
     return work
   } finally {
+    findIndexSpy.mockRestore()
     indexOfSpy.mockRestore()
     execSpy.mockRestore()
   }
@@ -140,6 +172,70 @@ it.each([
   const small = measure(128)
   const large = measure(256)
   expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked's text rule stopped before an email address by reading the email
+// characters after each run, and its url rule read the characters an
+// address's local part may hold at each step. A spaceless paragraph is one
+// long run of them.
+it.each([
+  ['emphasis between letters', 'a*', ''],
+  ['underscores between letters', 'a_', ''],
+  ['exclamation marks between letters', 'a!', ''],
+  ['tildes between letters', 'a~', ''],
+  ['emphasis between letters before an address', 'a*', '@example.com'],
+  ['at signs between letters', 'a@', ''],
+  ['at signs between letters and spaces', 'a@ a ', ''],
+  ['addresses', 'a@b.co ', ''],
+  ['underlines between letters', 'a++', ''],
+  ['underscores between letters before an at sign with no domain', 'a_', 'a@x'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, end) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// Each `[[` searched to the end of its line for a whole wikilink, and the
+// wikilink tokenizer searched to the end of the text for its `]]`.
+it.each([
+  ['brackets', '['],
+  ['wikilink openers', '[['],
+  ['wikilink openers after letters', 'a[['],
+  ['wikilink openers with escaped brackets', '[[a\\]'],
+  ['wikilink openers across lines', '[[a\n'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const searched = new Set<string>()
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  }, searched)
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+  // The count sees the search for a wikilink's `]]` only through `indexOf`.
+  expect(searched).toContain(']]')
+})
+
+// The atom pattern backtracked through the rest of the text at each
+// `{{atom:` without a `}}`, and each closing tag read every token before it.
+it.each([
+  ['atom openers', '{{atom:', '', '}'],
+  ['atom openers after letters', 'a{{atom:', '', '}'],
+  ['atoms closed by one brace', '{{atom:a}', '', '}'],
+  ['closing tags', '</b>', '', undefined],
+  ['open tags before closing tags of another name', '<b>', '</i>', undefined],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, then, search) => {
+  const searched = new Set<string>()
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${then.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  }, searched)
+  const small = measure(512)
+  const large = measure(1_024)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+  // The count sees the search for an atom's `}` only through `indexOf`.
+  if (search) expect(searched).toContain(search)
 })
 
 it.each([
