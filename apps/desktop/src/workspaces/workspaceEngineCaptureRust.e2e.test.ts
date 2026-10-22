@@ -1439,7 +1439,7 @@ it.skipIf(engine.missing)("records a deferred outside write after the daemon res
   }
 }, 60_000);
 
-// Waits on the open-note link-rewrite gap: baseline settlement refuses an outside write.
+// Waits on #2478: baseline settlement refuses an outside write before the open note's links can be rewritten.
 it.skip("keeps an outside write when a rename rewrites the open note's links (#2463)", async () => {
   const opened = await openRealCapture("deferred-write-rename", { settleDebounceMs: 60_000 });
   const outside = "agent text [[old]]\n";
