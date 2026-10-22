@@ -252,6 +252,7 @@ export function MarkdownView(props: {
   // Whether the note is a lossy note. The inspector holds the engine open
   // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
+  onEditAnyway: () => void;
   // Reopen the engine session after `engine.engineMayHoldDocument`.
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
@@ -2187,7 +2188,7 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />

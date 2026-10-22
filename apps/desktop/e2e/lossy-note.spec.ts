@@ -16,6 +16,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -74,7 +75,7 @@ async function shoot(page: Page, name: string): Promise<void> {
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
 }
 
-test("@lossy-note a lossy note opens read-only and takes no edit it didn't choose", async () => {
+test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, and edits anyway after a warning", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -135,6 +136,45 @@ test("@lossy-note a lossy note opens read-only and takes no edit it didn't choos
     await expect(notice).toBeVisible();
     await expect.poll(async () => (await readHistoryMoments(page, opened.workspaceId, "readme.md"))?.length ?? 0)
       .toBe(before + 1);
+    const outside = await sha256(temp.rootPath, "readme.md");
+
+    // Edit anyway warns first. Escape and Cancel change nothing.
+    const editAnyway = page.getByTestId("lossy-note-edit-anyway");
+    await editAnyway.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Edit this document anyway?" });
+    await expect(dialog).toContainText("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.");
+    await shoot(page, "lossy-note-edit-anyway");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+
+    await editAnyway.click();
+    await page.getByTestId("lossy-note-edit-anyway-confirm").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toHaveAttribute("contenteditable", "true", { timeout: 15_000 });
+    await expect(notice).toHaveCount(0);
+    await editor.getByText("Changed by an agent's own tools.").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" Edited anyway.");
+    await expect(editor).toContainText("Edited anyway.");
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    await expect.poll(() => sha256(temp.rootPath, "readme.md")).not.toBe(outside);
+
+    // History gives back the file from before the edit, byte for byte.
+    await openHistoryView(page);
+    await expect.poll(async () => (await readHistoryMoments(page, opened.workspaceId, "readme.md"))?.length ?? 0)
+      .toBe(before + 2);
+    const moments = (await readHistoryMoments(page, opened.workspaceId, "readme.md"))!;
+    const edit = moments.reduce((newest, moment) => moment.momentOrder > newest.momentOrder ? moment : newest);
+    await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${edit.id}"]`).click();
+    await page.getByTestId("engine-diff-restore-file").click();
+    await page.getByTestId("engine-diff-confirm-restore").click();
+    await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
+    // On a mismatch, the assertion prints the exact difference.
+    await expect.poll(() => readFile(join(temp.rootPath, "readme.md"), "utf8")).toBe(OUTSIDE);
+    expect(await sha256(temp.rootPath, "readme.md")).toBe(outside);
+
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await desktop.close();
     desktop = null;

@@ -471,13 +471,18 @@ export const FileInspector = memo(function FileInspector(
   useEffect(() => {
     if (checksLossyNote) warmLossyNoteCheck();
   }, [checksLossyNote]);
-  const lossyNote = useLossyNote({
-    open: `${props.workspaceId}\u0000${props.path}`,
+  const lossyOpen = `${props.workspaceId}\u0000${props.path}`;
+  const checked = useLossyNote({
+    open: lossyOpen,
     applies: checksLossyNote && !truncated && !error,
     markdown: loadedPath === props.path ? text : null,
     contentHash,
     readSeq,
   });
+  // "Edit anyway" lasts for this open: the person accepted that saving
+  // rewrites the parts dohc can't show.
+  const [editAnyway, setEditAnyway] = useState<string | null>(null);
+  const lossyNote = checked === "lossy" && editAnyway === lossyOpen ? "clear" : checked;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -779,6 +784,7 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
+            onEditAnyway={() => setEditAnyway(lossyOpen)}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}

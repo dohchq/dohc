@@ -99,6 +99,25 @@ describe("a lossy note", () => {
     expect(bridge.openFileExternally).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: "a.md" });
   });
 
+  it("warns before Edit anyway, and opens the editor only once the person confirms", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.");
+    await user.click(screen.getByTestId("lossy-note-edit-anyway-cancel"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("lossy-note-edit-anyway"));
+    await user.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  });
+
   it("shows new text from disk, and opens for editing once the text is no longer lossy", async () => {
     const changed = LOSSY.replace("Hidden.", "Changed on disk.");
     const bridge = bridgeFor([

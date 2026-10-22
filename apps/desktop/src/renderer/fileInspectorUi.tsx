@@ -5,7 +5,8 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Lock, Play, Share2 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
@@ -196,7 +197,10 @@ export function LossyNoteNotice(props: {
   workspaceId: string;
   path: string;
   onError?: ReportButtonError;
+  // Binds the editor for this open, after the person confirms the warning.
+  onEditAnyway?: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -223,7 +227,36 @@ export function LossyNoteNotice(props: {
         >
           Open externally
         </button>
+        {props.onEditAnyway ? (
+          <button
+            type="button"
+            data-testid="lossy-note-edit-anyway"
+            onClick={() => setConfirming(true)}
+            className="whitespace-nowrap text-subtle hover:text-ink"
+          >
+            Edit anyway
+          </button>
+        ) : null}
       </span>
+      {confirming && props.onEditAnyway ? (
+        <ConfirmDialog
+          title="Edit this document anyway?"
+          intent="danger"
+          confirmLabel="Edit anyway"
+          testId="lossy-note-edit-anyway-dialog"
+          cancelTestId="lossy-note-edit-anyway-cancel"
+          confirmTestId="lossy-note-edit-anyway-confirm"
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            props.onEditAnyway?.();
+          }}
+        >
+          <p className="mt-2 text-[13px] text-muted">
+            Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.
+          </p>
+        </ConfirmDialog>
+      ) : null}
     </div>
   );
 }
