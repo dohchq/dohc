@@ -6528,6 +6528,9 @@ function registerIpcHandlers(): void {
         throw new Error("dohc could not capture this app. Restart dohc and try again.");
       }
       await capture.flush();
+      const result = await withEngineAdapter(workspace, adapter => adapter.flushCapture());
+      if (!result) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      return result;
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {

@@ -1415,7 +1415,7 @@ export const captureRecoveryOperations = {
     capabilityId: "capture.held.retry",
     channel: "desktop:retry-held-capture",
     payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
-    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    result: z.object({ deferredWrites: z.array(z.string().min(1)), settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },

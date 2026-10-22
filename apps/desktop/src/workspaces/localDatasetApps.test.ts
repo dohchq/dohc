@@ -62,7 +62,7 @@ async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: Collec
     const manifest = JSON.parse(files.get(`${appRoot}/app.publish.json`)!); manifest.dataset.operationIds = operationIds;
     if (!operationIds.includes(id(6))) delete manifest.dataset.createFields;
     files.set(`${appRoot}/app.publish.json`, JSON.stringify(manifest));
-    return prepareLocalAppPublication({ workspaceId: "w", appRoot }, { adapter, compile: compileClosedApp, signal: new AbortController().signal,
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot }, { deferredWrites: [], adapter, compile: compileClosedApp, signal: new AbortController().signal,
       assertCurrent() {}, async resolveDatasetRevision(binding) { return host.approvedArtifacts(binding.datasetId).revision; } });
   }
   const app = await prepareApp("app");

@@ -18,7 +18,7 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
     ["app/schema.sql", "CREATE TABLE registrations(id TEXT PRIMARY KEY);"],
   ]);
   const capturePaths: string[][] = [], listCalls: Record<string, unknown>[] = [];
-  const hooks = { onCapture: () => {} };
+  const hooks = { onCapture: () => {}, deferredWrites: [] as string[] };
   const adapter = sourceCaptureAdapter(sources, { onRequest(method, params) {
     if (method === "versionedText.list") listCalls.push(params);
     if (method === "versionedText.captureSources") { capturePaths.push(params.paths as string[]); if (capturePaths.length > 1) hooks.onCapture(); }
@@ -27,7 +27,7 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
   const controller = new AbortController();
   const prepare = (appRoot = "app", shared = [appRoot]) => prepareOwnerAppPublication({ workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
     { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
-    { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision });
+    { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision, deferredWrites: hooks.deferredWrites });
   return { declaration, sources, compile, capturePaths, listCalls, hooks, prepare, controller,
     setDeclaration(value: unknown) { invalidateDatasetAddresses({ workspaceId: "w" }); sources.set("app/app.publish.json", JSON.stringify(value)); } };
 }
@@ -35,6 +35,15 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
   await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
+  expect(h.compile).not.toHaveBeenCalled();
+});
+
+it.each(["app/index.html", "app/new-file.js", "shared/theme.css"])("refuses a waiting app source %s before reading stale sources", async (path) => {
+  const h = harness();
+  h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts", "../shared/theme.css"], packageMap: {} });
+  h.sources.set("shared/theme.css", "body {}");
+  h.hooks.deferredWrites.push(path);
+  await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(path);
   expect(h.compile).not.toHaveBeenCalled();
 });
 
@@ -181,6 +190,18 @@ describe("owner dataset publication", () => {
   const { datasetId: _, ...fields } = binding;
   const reference = { ...fields, datasetPath: "private/dataset.json" };
   const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: reference };
+
+  it("refuses a waiting Collection descriptor before reading its stale address", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    h.sources.set("private/dataset.json", JSON.stringify({ ...approved.definition, name: "Waiting Collection" }));
+    h.setDeclaration(declaration);
+    h.hooks.deferredWrites.push("private/dataset.json");
+    await expect(h.prepare()).rejects.toThrow("private/dataset.json");
+    expect(h.capturePaths.flat()).not.toContain("private/dataset.json");
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.compile).not.toHaveBeenCalled();
+  });
 
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
     const resolve = vi.fn(async () => approved);
