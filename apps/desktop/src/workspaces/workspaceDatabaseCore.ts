@@ -459,19 +459,19 @@ async function withOperationLog<T>(
       }
     };
     await checkLog();
-    // Opening the log can yield. Recheck before SQLite opens the state file.
+    // Opening the log can yield. Recheck that it opened in the folder dohc checked.
     await checkFolder();
     return await run(async (operation) => {
       await checkLog();
       const line = `${JSON.stringify(operation)}\n`;
-      const before = logVersion(fstatSync(handle.fd, { bigint: true }));
+      const beforeAppend = logVersion(fstatSync(handle.fd, { bigint: true }));
       await handle.appendFile(line, "utf8");
       await handle.sync();
       const after = fstatSync(handle.fd, { bigint: true });
       // When only this line went in since dohc last read the log, the next edit
       // needn't read it again. Anything else makes it read the whole log.
       const known = readLogs.get(logPath);
-      if (known && sameLogVersion(known.version, before) && after.size === before[2] + BigInt(Buffer.byteLength(line))) {
+      if (known && sameLogVersion(known.version, beforeAppend) && after.size === beforeAppend[2] + BigInt(Buffer.byteLength(line))) {
         readLogs.set(logPath, {
           ...known,
           lines: known.lines + 1,

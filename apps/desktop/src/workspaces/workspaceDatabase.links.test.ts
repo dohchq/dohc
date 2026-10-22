@@ -119,6 +119,7 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
         ? /A link is at .*must be a file\. Remove or rename that link\. Then retry\./
         : /dohc can't trust a file in .dohc\/local\/databases\/.*Remove that folder, then try again\./);
       if (file === "operations.jsonl") {
+        expect((outcome as Error).message).toContain(file);
         await expect(lstat(counterPath())).rejects.toMatchObject({ code: "ENOENT" });
       } else {
         await expect(lstat(logPath)).rejects.toMatchObject({ code: "ENOENT" });
