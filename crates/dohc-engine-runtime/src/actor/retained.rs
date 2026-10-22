@@ -525,10 +525,14 @@ impl ActorHandle {
                                 return Ok(false);
                             }
                             store.release_retained(row.displacement_id)?;
+                            // The copy is gone either way; a folder left
+                            // behind does not make its delete a failure.
                             if let Some(directory) =
                                 staged_directory(store.database_path(), &batch_root, &row)
+                                && let Err(error) =
+                                    cleanup_staging_directory(store, &batch_root, &directory)
                             {
-                                cleanup_staging_directory(store, &batch_root, &directory)?;
+                                eprintln!("retained copy staging cleanup: {error}");
                             }
                             Ok(true)
                         })();

@@ -753,3 +753,35 @@ fn an_explicit_delete_skips_a_row_naming_anything_but_a_staged_original() {
     }
     actor.close().unwrap();
 }
+
+/// A deleted copy counts as deleted when its emptied staging folder can't be
+/// removed.
+#[test]
+fn a_delete_counts_a_removed_copy_whose_staging_folder_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = ScratchDir::new().unwrap();
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    let mut actor = actor(&scratch);
+    let source = format!("folder/.dohc-write-displaced/{}", staged("stuck"));
+    let id = add_source_at(&actor, &scratch, "stuck", "folder/a.md", &source, b"old");
+    actor
+        .handle()
+        .run_blocking(|s, _| Ok(s.remember_staging("stuck", "folder/.dohc-write-displaced")?))
+        .unwrap();
+    // The folder that holds the staging folder refuses its removal.
+    let folder = scratch.path().join("folder");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let outcome = runtime().block_on(actor.handle().delete_retained_copies(
+        scratch.path().into(),
+        "ws".into(),
+        vec![RetainedCandidate { id, revision: 0 }],
+    ));
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outcome = outcome.unwrap();
+    assert_eq!(
+        (outcome.deleted, outcome.skipped, outcome.failed),
+        (1, 0, 0)
+    );
+    assert!(!scratch.path().join(&source).exists());
+    actor.close().unwrap();
+}
