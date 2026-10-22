@@ -462,13 +462,16 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
   expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
 });
 
+const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
 it.each([
   ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
     (root: string) => writeFile(join(root, ".dohc", "collections.json"),
-      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"]],
-  ["no record names a computer for a store already here", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.",
-    async (root: string) => { await mkdir(join(root, ".dohc", "datasets")); await writeFile(join(root, ".dohc", "datasets", "state.sqlite"), ""); }, ["datasets"]],
-] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left) => {
+      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"], null],
+  ["no record names a computer for a store already here", unclaimed, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
+  // A copy iCloud Drive has not removed from where stores were before .dohc/local.
+  ["no record names a computer for an old copy of a store", unclaimed, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
+] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left, folder) => {
   const root = await createTestScratch("dohc-dataset-ipc-holder-");
   await mkdir(join(root, ".dohc"));
   await arrange(root);
@@ -495,7 +498,7 @@ it.each([
     for (const caller of ["window", "cli"]) await expect(f.handler(caller, request), request.action).rejects.toThrow(words);
   }
   expect(await readdir(join(root, ".dohc"))).toEqual(left);
-  if ((left as readonly string[]).includes("datasets")) expect(await readdir(join(root, ".dohc", "datasets")), "not opened").toEqual(["state.sqlite"]);
+  if (folder) expect(await readdir(join(root, ...folder)), "not opened").toEqual(["state.sqlite"]);
 });
 
 it("reads a received share's Collections through its server, never the local store, whoever keeps the local one", async () => {

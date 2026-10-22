@@ -108,7 +108,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
     target.apps.request(published.publicationId, "create", { authorityRevision: revision, idempotencyKey, fields }) as Promise<{ kind: "accepted"; acceptanceId: string; objectId: string; path: string; momentId: string; acceptedAtMs: number }>;
   const list = (input: { limit: number; afterPath?: string } = { limit: 50 }, target = host, revision = published.authorityRevision) =>
     target.apps.request(published.publicationId, "list", { authorityRevision: revision, ...input }) as Promise<{ records: Array<{ path: string; recordId: string | null; fields: Record<string, unknown> }>; nextPath: string | null }>;
-  const inspect = <T>(work: (db: DatabaseSync) => T) => { const db = new DatabaseSync(join(workspaceRoot, ".dohc/datasets/state.sqlite")); try { return work(db); } finally { db.close(); } };
+  const inspect = <T>(work: (db: DatabaseSync) => T) => { const db = new DatabaseSync(join(workspaceRoot, ".dohc/local/datasets/state.sqlite")); try { return work(db); } finally { db.close(); } };
   let approvedDataset: Awaited<ReturnType<LocalDatasetHost["approve"]>> | undefined;
   const datasetApp = async (target: LocalDatasetHost) => {
     if (!approvedDataset) {

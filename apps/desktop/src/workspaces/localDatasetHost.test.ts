@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, rename, writeFile, rm, symlink } from "node:fs/promises";
 import { createReadStream, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -27,6 +27,19 @@ import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler"
 import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
+// Stops a store move as a crash would: before the copy is renamed into place,
+// with nothing cleaned up after.
+const faults = vi.hoisted(() => ({ crashBeforeRename: false, crashed: false }));
+vi.mock("node:fs/promises", async original => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  return { ...actual,
+    rename: async (from: Parameters<typeof actual.rename>[0], to: Parameters<typeof actual.rename>[1]) => {
+      if (faults.crashBeforeRename && String(from).endsWith("state.sqlite.moving")) { faults.crashed = true; throw new Error("dohc stopped"); }
+      return actual.rename(from, to);
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => (faults.crashed && String(args[0]).includes("state.sqlite.moving") ? undefined : actual.rm(...args)),
+  };
+});
 
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -81,7 +94,7 @@ const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: strin
 
 it("pages local Collection permissions live without disclosing stored grant credentials", async () => {
   const { host, workspaceRoot } = await open(), approved = await activate(host);
-  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
   try {
     const insert = db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)");
     for (let n = 0; n < 101; n++) insert.run("w", id(1), `recipient-${String(n).padStart(3, "0")}`,
@@ -106,7 +119,7 @@ it("reopens the same recovery archive after installation was interrupted before 
     // pre-commit authorization check or transaction rollback causes this failure.
     if (observer?.prepare("SELECT 1 FROM dohc_dataset_imports WHERE phase='installed'").get()) throw Error("Interrupted before claim");
   } });
-  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
   try {
     const prepared = await target.host.prepareRecovery({ sourcePath });
     await expect(target.host.claimRecovery({ ...prepared, oldHostStopped: true })).rejects.toThrow("Interrupted before claim");
@@ -131,7 +144,7 @@ it("reopens the same recovery archive after installation was interrupted before 
 
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
-  const path = join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite");
+  const path = join(first.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite");
   const db = new DatabaseSync(path);
   try {
     const transaction = <T,>(work: () => T): T => { db.exec("BEGIN IMMEDIATE"); try {const value = work(); db.exec("COMMIT"); return value;} catch(error) {db.exec("ROLLBACK"); throw error;} };
@@ -163,7 +176,7 @@ describe("local dataset owner adapter", () => {
       createSupervisor({ ...options, materializationEvents: 2 }),
     );
     const first = await open(), approved = await activate(first.host);
-    const db = new DatabaseSync(join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+    const db = new DatabaseSync(join(first.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
     const budget = () => Number(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes);
     const baseline = budget();
     let previousCheckpoint: string | undefined;
@@ -206,7 +219,7 @@ describe("local dataset owner adapter", () => {
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     await first.host.close();
-    const db = new DatabaseSync(join(first.workspaceRoot,".dohc","datasets","state.sqlite"));
+    const db = new DatabaseSync(join(first.workspaceRoot,".dohc", "local", "datasets", "state.sqlite"));
     try {
       const budget = Number(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes);
       expect(budget).toBeGreaterThan(1024*1024);
@@ -231,7 +244,7 @@ describe("local dataset owner adapter", () => {
     expect((await readFile(backupPath)).length).toBeGreaterThan(0);
     await expect(first.host.prepareRecovery({sourcePath:backupPath})).rejects.toThrow("deleted");
     await first.host.close();
-    const db = new DatabaseSync(join(first.workspaceRoot,".dohc","datasets","state.sqlite"));
+    const db = new DatabaseSync(join(first.workspaceRoot,".dohc", "local", "datasets", "state.sqlite"));
     try {
       expect(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes).toBe(0);
       for(const table of ["local_dataset_files","local_dataset_usage","dohc_dataset_journals","dohc_dataset_checkpoint_chunks"])
@@ -359,7 +372,7 @@ describe("local dataset owner adapter", () => {
       const file=await local.host.upload(upload),mutation=call(approved,id(6),"before-transfer",{name:"First",fileId:file.file.fileId});
       await local.host.action(mutation);
       await local.host.close();
-      const oldStore=new DatabaseSync(join(local.workspaceRoot,".dohc","datasets","state.sqlite"));
+      const oldStore=new DatabaseSync(join(local.workspaceRoot,".dohc", "local", "datasets", "state.sqlite"));
       oldStore.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("w",id(1),"old-helper",JSON.stringify({revision:1,revisionSha256:approved.revision.revisionSha256,operationIds:[id(5)],discover:true}),"old-grant-token");
       oldStore.close();
       const oldHost=(await open({workspaceRoot:local.workspaceRoot})).host;
@@ -560,7 +573,7 @@ describe("local dataset owner adapter", () => {
 
   it("lists every other dataset's rules when one dataset's rules cannot be read", async () => {
     const {host, workspaceRoot} = await open(), approved = await activate(host);
-    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
     try { db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run("w", "0-broken", "{", "{}"); } finally { db.close(); }
     const listed = host.automations.datasets();
     expect(listed.definitions).toEqual([approved.revision.definition]);
@@ -677,9 +690,9 @@ describe("local dataset owner adapter", () => {
   it("rejects a linked private directory before opening storage", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(),"dohc-local-dataset-test-")); roots.push(workspaceRoot);
     const target = await mkdtemp(join(tmpdir(),"dohc-local-dataset-test-")); roots.push(target);
-    await mkdir(join(workspaceRoot,".dohc"));
-    await symlink(target,join(workspaceRoot,".dohc","datasets"),process.platform === "win32" ? "junction" : "dir");
-    await expect(open({workspaceRoot})).rejects.toThrow(/inside this workspace/);
+    await mkdir(join(workspaceRoot,".dohc","local"),{recursive:true});
+    await symlink(target,join(workspaceRoot,".dohc","local","datasets"),process.platform === "win32" ? "junction" : "dir");
+    await expect(open({workspaceRoot})).rejects.toThrow("dohc could not open this workspace's Collections. A link is at .dohc/local/datasets, which must be a real folder.");
     expect(await readdir(target)).toEqual([]);
   });
 });
@@ -687,7 +700,7 @@ describe("local dataset owner adapter", () => {
 it("returns transfer metadata even when the page prunes every local head", async () => {
   const { host, workspaceRoot } = await open(); await activate(host);
   expect(await host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [], pages: [] });
-  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
   try { db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(1), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null); }
   finally { db.close(); }
   expect(await host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [id(1)], pages: [] });
@@ -695,7 +708,7 @@ it("returns transfer metadata even when the page prunes every local head", async
 
 it("selects local and transferred sources together by retained journal activity", async () => {
   const { host, workspaceRoot } = await open(); await activate(host);
-  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
   try {
     // One commit for the whole fixture; closing without COMMIT rolls it back.
     db.exec("BEGIN");
@@ -756,7 +769,7 @@ it("keeps History read errors and recovers the read transaction", async () => {
 
 it("reports a worker startup failure for one page and succeeds on the next request", async () => {
   const { host, workspaceRoot } = await open(); await activate(host);
-  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
   try {
     db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("another-workspace");
     await expect(host.historyHeads()).rejects.toThrow("This Collection store belongs to another workspace.");
@@ -766,7 +779,7 @@ it("reports a worker startup failure for one page and succeeds on the next reque
 });
 
 describe("this computer's Collection folders", () => {
-  it("keeps workers and exports in .dohc/local, ignores the old folders, and leaves the Collections in .dohc/datasets", async () => {
+  it("keeps the store, workers and exports in .dohc/local, and ignores the old worker and export folders", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(workspaceRoot);
     // What an earlier build left: a worker folder its startup would refuse to remove, and a staged export.
     const old = join(workspaceRoot, ".dohc", "datasets"), oldWorker = join(old, "workers", `worker-${id(9)}`);
@@ -776,12 +789,12 @@ describe("this computer's Collection folders", () => {
     await host.action(call(approved, id(6), "add", { name: "Camera" }));
     const archive = await host.prepareExport(id(1));
     const local = join(workspaceRoot, ".dohc", "local", "datasets");
-    expect(await readdir(local)).toEqual(["exports", "workers"]);
+    expect((await readdir(local)).filter(name => !name.startsWith("state.sqlite-"))).toEqual(["exports", "state.sqlite", "workers"]);
     expect(await readdir(join(local, "workers"))).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite", ".dohc-worker-session.json"]));
     expect((await readdir(join(local, "exports"))).filter(name => name.startsWith("export-"))).toHaveLength(1);
     if (process.platform !== "win32") for (const folder of [local, join(local, "workers"), join(local, "exports")]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
     await archive.dispose(); await host.close();
-    expect((await lstat(join(old, "state.sqlite"))).isFile()).toBe(true);
+    expect((await readdir(old)).sort()).toEqual(["exports", "workers"]);
     expect(await readdir(join(old, "workers"))).toEqual([`worker-${id(9)}`]);
     expect(await readFile(join(oldWorker, ".dohc-worker.json"), "utf8")).toBe("{}");
     expect(await readdir(join(old, "exports"))).toEqual(["export-old"]);
@@ -789,52 +802,37 @@ describe("this computer's Collection folders", () => {
 
   it.each([["not opened", false, "the workspace has not finished opening. Try again when it opens."],
     ["not kept out of iCloud Drive", true, "it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(
-    "reads Collections while .dohc/local is %s, but starts no worker or export and creates nothing", async (_state, made, why) => {
+    "does not open the Collections while .dohc/local is %s, and changes nothing", async (_state, made, why) => {
     const first = await open(), approved = await activate(first.host);
     await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
     await first.host.close();
     const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
     if (made) await opens.open(workspace, false);
-    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
-    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
-    hosts.push(host);
-    expect(host.list().datasets).toHaveLength(1);
-    expect(host.describe(id(1))).toMatchObject({ name: "Items", revision: 1 });
-    await expect(host.query(call(approved, id(5)))).rejects.toThrow(`dohc did not open this Collection's records because ${why}`);
-    await expect(host.prepareExport(id(1))).rejects.toThrow(`dohc did not prepare this Collection's recovery file because ${why}`);
-    expect(await readdir(join(first.workspaceRoot, ".dohc"))).not.toContain("local");
+    const local = join(first.workspaceRoot, ".dohc", "local", "datasets"), before = (await readdir(local)).sort();
+    const reopen = () => createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    await expect(reopen()).rejects.toThrow(`dohc did not open this workspace's Collections because ${why}`);
+    expect((await readdir(local)).sort()).toEqual(before);
     await opens.open(workspace);
+    const host = await reopen(); hosts.push(host);
     expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
   });
 
-  it("waits for an engine open under way before a worker it was asked for, but not while the host opens", async () => {
+  it("waits for an engine open under way before it opens the Collections, but never starts one", async () => {
     const first = await open(), approved = await activate(first.host);
     await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
     await first.host.close();
     const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
-    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
-    const opening = opens.start(workspace);
-    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
-    hosts.push(host);
-    expect(host.list().datasets).toHaveLength(1);
+    const reopen = () => createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    await expect(reopen(), "no open under way").rejects.toThrow("dohc did not open this workspace's Collections because the workspace has not finished opening.");
     expect(opens.waits()).toBe(0);
-    const query = host.query(call(approved, id(5)));
+    const opening = opens.start(workspace);
+    const reopened = reopen();
     await vi.waitFor(() => expect(opens.waits()).toBe(1));
     await opening.finish();
-    expect((await query).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+    const host = await reopened; hosts.push(host);
+    expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
     await (await host.prepareExport(id(1))).dispose();
     expect(opens.waits()).toBe(1);
-  });
-
-  it("refuses at once when no engine open is under way", async () => {
-    const first = await open(), approved = await activate(first.host);
-    await first.host.close();
-    const opens = fakeLocalStateOpens();
-    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
-    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
-    hosts.push(host);
-    await expect(host.query(call(approved, id(5)))).rejects.toThrow("dohc did not open this Collection's records because the workspace has not finished opening.");
-    expect(opens.waits()).toBe(0);
   });
 });
 
@@ -847,13 +845,14 @@ describe("the computer that keeps a workspace's Collections", () => {
   const writeRecord = (root: string, computer: { installId: string; label: string }, storeId: string | null) =>
     writeFile(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: computer.installId, label: computer.label, storeId }));
   const storeIdIn = (root: string) => {
-    const db = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+    const db = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"), { readOnly: true });
     try { return db.prepare("SELECT store_id FROM local_dataset_store").get()?.store_id ?? null; }
     catch { return "no table"; }
     finally { db.close(); }
   };
   const present = (path: string) => lstat(path).then(() => true, () => false);
-  const datasetFiles = (root: string) => readdir(join(root, ".dohc", "datasets")).catch(() => null);
+  // The store's files in .dohc/local, beside the worker and export folders, or null with no folder.
+  const datasetFiles = async (root: string) => (await readdir(join(root, ".dohc", "local", "datasets")).catch(() => null))?.filter(name => name.startsWith("state.sqlite")) ?? null;
   // A store made before the holder record, as every workspace from before it has.
   async function storeWithoutRecord() {
     const first = await open();
@@ -866,8 +865,8 @@ describe("the computer that keeps a workspace's Collections", () => {
   // Keep's steps as main gives them, with the person's answer.
   const keepSteps = (root: string, confirm = true): KeepSteps => ({ adoptStore: storeId => adoptLocalDatasetStore(root, "w", storeId),
     storeIdHere: () => localDatasetStoreId(root), madeBy: async () => null, confirm: async () => confirm });
-  async function refusedOpen(root: string) {
-    const error = await open({ workspaceRoot: root, holder: guarded }).then(() => null, (caught: unknown) => caught);
+  async function refusedOpen(root: string, extra: Partial<LocalDatasetHostOptions> = {}) {
+    const error = await open({ workspaceRoot: root, holder: guarded, ...extra }).then(() => null, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(CollectionsRefusalError);
     return error as CollectionsRefusalError;
   }
@@ -907,12 +906,12 @@ describe("the computer that keeps a workspace's Collections", () => {
     await mkdir(join(empty, ".dohc"));
     await writeRecord(empty, laptop, null);
     expect((await refusedOpen(empty)).message).toBe("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
-    expect(await datasetFiles(empty), "no .dohc/datasets").toBeNull();
+    expect(await datasetFiles(empty), "no .dohc/local/datasets").toBeNull();
     const { root } = await storeWithoutRecord();
     await writeRecord(root, laptop, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
     expect((await refusedOpen(root)).refusal.kind).toBe("elsewhere");
     expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
-    await expect(adoptLocalDatasetStore(empty, "w", "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f")).rejects.toThrow("dohc could not find .dohc/datasets/state.sqlite.");
+    await expect(adoptLocalDatasetStore(empty, "w", "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f")).rejects.toThrow("dohc could not find .dohc/local/datasets/state.sqlite.");
     expect(await datasetFiles(empty), "adopting creates no store either").toBeNull();
   });
 
@@ -923,14 +922,18 @@ describe("the computer that keeps a workspace's Collections", () => {
     const first = await open({ workspaceRoot: root, holder: guarded });
     await first.host.close();
     const storeId = (await readRecord(root)).storeId;
-    await rm(join(root, ".dohc", "datasets"), { recursive: true });
+    await rm(join(root, ".dohc", "local", "datasets", "state.sqlite"));
     expect((await refusedOpen(root)).refusal).toEqual({ kind: "missing" });
-    expect(await datasetFiles(root)).toBeNull();
-    // Another computer's copy, or an old one, in its place.
+    expect((await refusedOpen(root)).message).toBe("This computer keeps this workspace's Collections, but .dohc/local/datasets/state.sqlite is not there. Restore it from a backup, then try again.");
+    expect(await datasetFiles(root)).toEqual([]);
+    // Another computer's copy, or an old one, in its place, here or where stores were before .dohc/local.
     const other = await storeWithoutRecord();
     await mkdir(join(root, ".dohc", "datasets"));
-    await copyFile(join(other.root, ".dohc", "datasets", "state.sqlite"), join(root, ".dohc", "datasets", "state.sqlite"));
+    await copyFile(join(other.root, ".dohc", "local", "datasets", "state.sqlite"), join(root, ".dohc", "datasets", "state.sqlite"));
     expect((await refusedOpen(root)).message).toBe("This computer keeps this workspace's Collections, but another copy replaced .dohc/datasets/state.sqlite. Restore this computer's copy from a backup, then try again.");
+    expect(await datasetFiles(root), "nothing copied").toEqual([]);
+    await rename(join(root, ".dohc", "datasets", "state.sqlite"), join(root, ".dohc", "local", "datasets", "state.sqlite"));
+    expect((await refusedOpen(root)).message).toBe("This computer keeps this workspace's Collections, but another copy replaced .dohc/local/datasets/state.sqlite. Restore this computer's copy from a backup, then try again.");
     expect(storeIdIn(root), "the copy gains no id").toBe("no table");
     expect((await readRecord(root)).storeId).toBe(storeId);
   });
@@ -975,7 +978,7 @@ describe("the computer that keeps a workspace's Collections", () => {
     let storage!: { db: { prepare(sql: string): { run(...values: unknown[]): unknown } }; transaction<T>(run: () => T): T };
     const { host } = await open({ workspaceRoot: root, holder: guarded, resources: (given) => { storage = given; return {}; } });
     const dump = () => {
-      const db = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+      const db = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"), { readOnly: true });
       try {
         const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => String(row.name));
         return JSON.stringify(tables.map(table => [table, db.prepare(`SELECT * FROM "${table}"`).all()]));
@@ -1021,20 +1024,23 @@ describe("the computer that keeps a workspace's Collections", () => {
     expect(await readRecord(root)).toMatchObject({ installId: "install-laptop", storeId: null });
   });
 
-  it("never keeps a store with nothing in it, and never opens one for a record that names a store", async () => {
+  it.each([
+    [".dohc/datasets/state.sqlite", ".dohc/datasets/state.sqlite is empty here, and may still be syncing from another computer. Try again once it has synced."],
+    [".dohc/local/datasets/state.sqlite", ".dohc/local/datasets/state.sqlite is empty. Delete it, then try again."],
+  ])("never keeps a store with nothing in it at %s, and never opens one for a record that names a store", async (at, words) => {
     for (const empty of [async (path: string) => writeFile(path, ""), async (path: string) => { new DatabaseSync(path).close(); }]) {
       const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
-      await mkdir(join(root, ".dohc", "datasets"), { recursive: true });
-      const store = join(root, ".dohc", "datasets", "state.sqlite");
+      const store = join(root, ...at.split("/"));
+      await mkdir(join(store, ".."), { recursive: true });
       await empty(store);
       const before = await readFile(store);
-      await expect(keepCollectionsHere(root, "w", here, keepSteps(root)))
-        .rejects.toThrow(".dohc/datasets/state.sqlite is empty here, and may still be syncing from another computer. Try again once it has synced.");
+      await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow(words);
       expect(await readFile(store)).toEqual(before);
       expect(await present(recordFile(root))).toBe(false);
       await writeRecord(root, here, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
-      expect((await refusedOpen(root)).refusal).toEqual({ kind: "replaced" });
+      expect((await refusedOpen(root)).refusal).toEqual({ kind: "replaced", path: at });
       expect(await readFile(store)).toEqual(before);
+      expect((await readdir(join(store, ".."))).filter(name => name.startsWith("state.sqlite")), "nothing copied or left").toEqual(["state.sqlite"]);
     }
   });
 
@@ -1076,5 +1082,187 @@ describe("the computer that keeps a workspace's Collections", () => {
     await activate(host);
     host.held();
     expect(await present(recordFile(root))).toBe(false);
+  });
+
+  describe("a store still in .dohc/datasets, which iCloud Drive syncs", () => {
+    const oldFolder = (root: string) => join(root, ".dohc", "datasets");
+    const oldFiles = async (root: string) => (await readdir(oldFolder(root)).catch(() => null))?.filter(name => name.startsWith("state.sqlite")) ?? null;
+    const localStore = (root: string) => join(root, ".dohc", "local", "datasets", "state.sqlite");
+    // The system trash: the names put there, in order, unless it refuses.
+    function systemTrash() {
+      const trash = { items: [] as string[], refuses: false,
+        trashItem: vi.fn(async (path: string) => {
+          if (trash.refuses) throw new Error("The trash is unavailable.");
+          const folder = await mkdtemp(join(tmpdir(), "dohc-trash-test-")); roots.push(folder);
+          await rename(path, join(folder, basename(path)));
+          trash.items.push(basename(path));
+        }) };
+      return trash;
+    }
+    // A workspace from before .dohc/local, whose record names this computer's
+    // store. Copied while the host was open, as a synced folder holds it, so
+    // its -wal holds commits its database file does not.
+    async function storeInOldPlace() {
+      const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+      await mkdir(join(root, ".dohc"));
+      await recordNewCollectionsHolder(root, "w", here);
+      const first = await open({ workspaceRoot: root, holder: guarded });
+      const approved = await activate(first.host);
+      await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+      await mkdir(oldFolder(root));
+      for (const file of ["state.sqlite", "state.sqlite-wal"]) await copyFile(`${localStore(root)}${file.slice("state.sqlite".length)}`, join(oldFolder(root), file));
+      await first.host.close(); hosts.splice(hosts.indexOf(first.host), 1);
+      await rm(localStore(root));
+      // The database file alone has none of the Collection's tables yet.
+      const alone = join(await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")), "state.sqlite"); roots.push(join(alone, ".."));
+      await copyFile(join(oldFolder(root), "state.sqlite"), alone);
+      const db = new DatabaseSync(alone);
+      try { expect(db.prepare("SELECT 1 FROM sqlite_master WHERE name='local_dataset_identity'").get()).toBeUndefined(); } finally { db.close(); }
+      return { root, approved, storeId: (await readRecord(root)).storeId };
+    }
+    const names = async (host: LocalDatasetHost, approved: Awaited<ReturnType<typeof activate>>) =>
+      ((await host.query(call(approved, id(5)))).result as Array<{ name: string }>).map(row => row.name).sort();
+
+    it("copies the store the record names into .dohc/local, with its -wal, then puts the old files in the trash", async () => {
+      const { root, approved, storeId } = await storeInOldPlace();
+      const trash = systemTrash();
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(storeIdIn(root)).toBe(storeId);
+      expect(trash.items[0]).toBe("state.sqlite");
+      expect(await oldFiles(root)).toEqual([]);
+      expect((await datasetFiles(root))!.filter(name => name.includes("moving"))).toEqual([]);
+      await host.action(call(approved, id(6), "after-move", { name: "Lens" }));
+      expect(await names(host, approved)).toEqual(["Camera", "Lens"]);
+    });
+
+    it("keeps the old store in use when dohc stops before the copy is in place, and copies it again next time", async () => {
+      const { root, approved, storeId } = await storeInOldPlace();
+      const trash = systemTrash();
+      faults.crashBeforeRename = true;
+      try {
+        await expect(open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem }))
+          .rejects.toThrow("dohc could not copy this workspace's Collections to .dohc/local/datasets/state.sqlite, so they stay in .dohc/datasets/state.sqlite. Try again.");
+      } finally { faults.crashBeforeRename = false; faults.crashed = false; }
+      // The checked copy never took the store's place, and nothing left .dohc/datasets.
+      expect(await datasetFiles(root)).toEqual(["state.sqlite.moving"]);
+      expect(await oldFiles(root)).toContain("state.sqlite");
+      expect(trash.trashItem).not.toHaveBeenCalled();
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(storeIdIn(root)).toBe(storeId);
+      expect((await datasetFiles(root))!.filter(name => name.includes("moving"))).toEqual([]);
+      expect(await oldFiles(root)).toEqual([]);
+    });
+
+    it("throws away a copy that dohc stopped while making, and copies the store again", async () => {
+      const { root, approved } = await storeInOldPlace();
+      await writeFile(`${localStore(root)}.moving`, "SQLite format 3\0 cut short");
+      await writeFile(`${localStore(root)}.moving-journal`, "");
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: systemTrash().trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect((await datasetFiles(root))!.filter(name => name.includes("moving"))).toEqual([]);
+    });
+
+    it("opens the moved store when the old one is still there with its id, and trashes the old one, whenever dohc stopped after the rename", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const saved = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(saved);
+      for (const file of await oldFiles(root) ?? []) await copyFile(join(oldFolder(root), file), join(saved, file));
+      const trash = systemTrash();
+      const moved = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      await moved.host.action(call(approved, id(6), "after-move", { name: "Lens" }));
+      await moved.host.close(); hosts.splice(hosts.indexOf(moved.host), 1);
+      // The old files as they were before the trash: what a stop after the rename leaves, or iCloud Drive brings back.
+      for (const file of await readdir(saved)) await copyFile(join(saved, file), join(oldFolder(root), file));
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera", "Lens"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items.filter(name => name === "state.sqlite")).toHaveLength(2);
+    });
+
+    it("trashes a -wal or -shm left without its store, as a stop between trashing them leaves", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const trash = systemTrash();
+      const moved = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      await moved.host.close(); hosts.splice(hosts.indexOf(moved.host), 1);
+      for (const file of ["state.sqlite-wal", "state.sqlite-shm"]) await writeFile(join(oldFolder(root), file), "left behind");
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items.slice(-2).sort()).toEqual(["state.sqlite-shm", "state.sqlite-wal"]);
+    });
+
+    it("refuses, touching nothing, when the store in .dohc/local has another id", async () => {
+      const { root } = await storeInOldPlace();
+      const other = await storeWithoutRecord();
+      await copyFile(localStore(other.root), localStore(root));
+      const read = async () => Promise.all([readFile(localStore(root)), ...(await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file)))]);
+      const before = await read();
+      const trash = systemTrash();
+      expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal).toEqual({ kind: "replaced", path: ".dohc/local/datasets/state.sqlite" });
+      expect(await read()).toEqual(before);
+      expect(await oldFiles(root)).toEqual(["state.sqlite", "state.sqlite-wal"]);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
+    it("leaves the old files where they are when the trash refuses them, and trashes them at the next open", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const trash = systemTrash();
+      trash.refuses = true;
+      const first = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(first.host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toContain("state.sqlite");
+      expect(warned).toHaveBeenCalled();
+      await first.host.close(); hosts.splice(hosts.indexOf(first.host), 1);
+      trash.refuses = false;
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items[0]).toBe("state.sqlite");
+    });
+
+    it("never copies, trashes or opens an old copy on a computer that does not keep the Collections", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const trash = systemTrash();
+      const before = await Promise.all((await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file))));
+      for (const [computer, named] of [[laptop, storeId], [laptop, null]] as const) {
+        await writeRecord(root, computer, named);
+        expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal.kind).toBe("elsewhere");
+        // Keep asks nothing and changes nothing while the record names no store and a copy is here.
+        if (named === null) await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow("These Collections are on Laptop.");
+      }
+      await rm(recordFile(root));
+      expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal).toEqual({ kind: "unclaimed" });
+      expect(await Promise.all((await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file))))).toEqual(before);
+      expect(await datasetFiles(root)).toEqual([]);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
+    it("keeps an earlier installation's store that is still there, and moves it at the next open", async () => {
+      const { root, approved, storeId } = await storeInOldPlace();
+      await writeRecord(root, { installId: "install-before", label: "Studio" }, storeId);
+      expect(await localDatasetStoreId(root)).toBe(storeId);
+      expect(await keepCollectionsHere(root, "w", here, keepSteps(root))).toBe(true);
+      expect(await readRecord(root)).toMatchObject({ installId: "install-here", storeId });
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: systemTrash().trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+    });
+
+    it("moves a store from before the record once a person keeps the Collections here", async () => {
+      const { root, approved } = await storeWithoutRecord();
+      await mkdir(oldFolder(root));
+      await rename(localStore(root), join(oldFolder(root), "state.sqlite"));
+      expect((await refusedOpen(root)).refusal).toEqual({ kind: "unclaimed" });
+      expect(await oldFiles(root)).toEqual(["state.sqlite"]);
+      await keepCollectionsHere(root, "w", here, keepSteps(root));
+      const { storeId } = await readRecord(root);
+      const trash = systemTrash();
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(storeIdIn(root)).toBe(storeId);
+      expect(await oldFiles(root)).toEqual([]);
+    });
   });
 });
