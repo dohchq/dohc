@@ -17,12 +17,14 @@ export function SettingRow(props: {
   // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
   // A row of a long list that only shows a value, such as a shortcut's keys.
-  // It keeps the value beside the title in a narrow pane.
+  // Its title needs less room than a description, so the value stays beside it
+  // in a narrower pane.
   compact?: boolean;
 }) {
-  // The controls keep their size and the text takes what is left, from 15rem,
-  // a readable width. Controls that don't fit beside that wrap under the text.
-  const first = props.compact ? "min-w-0 flex-1" : "min-w-0 flex-[1_1_15rem]";
+  // The controls keep their size and the text takes what is left, from a
+  // readable width: 15rem, or 8rem for a compact row's title. Controls that
+  // don't fit beside that wrap under the text.
+  const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
   const text = (
     <div className={props.lead ? "min-w-0 flex-1" : first}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
