@@ -13,6 +13,7 @@ import { invalidateDatasetAddresses } from "./datasetAddress";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -32,7 +33,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false, 
   const root = await mkdtemp(join(tmpdir(), "dohc-history-restore-"));
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: root });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
   const files = new Map(Object.entries(generateDatasetSources(initial).files));
   const adapter = sourceCaptureAdapter(files);

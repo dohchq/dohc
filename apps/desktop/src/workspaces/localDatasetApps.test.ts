@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,8 @@ import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
+import { recordNewCollectionsHolder, type CollectionsHolderCheck } from "./collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -37,11 +39,12 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
-async function fixture(agentRun?: () => LocalDatasetAgent | null) {
+async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
+  if (holder.required()) await recordNewCollectionsHolder(workspaceRoot, "w", holder.here());
+  const host = await createLocalDatasetHost({ holder, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
   files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
@@ -94,6 +97,15 @@ function approveAsOlderBuild(db: DatabaseSync, app: Awaited<ReturnType<typeof fi
 }
 
 describe("local approved dataset apps", () => {
+  it("refuses a running app's next write once another computer keeps the Collections, with nothing else asked first", async () => {
+    const f = await fixture(undefined, { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true });
+    expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
+    await writeFile(join(f.workspaceRoot, ".dohc", "collections.json"),
+      JSON.stringify({ version: 1, workspaceId: "w", installId: "install-laptop", label: "Laptop", storeId: null }));
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation("Blake", "submit-two"))).rejects.toThrow("These Collections are on Laptop.");
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow("These Collections are on Laptop.");
+  });
+
   it("persists approval provenance with the captured candidate without changing app authority", async () => {
     const f = await fixture();
     await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
@@ -109,7 +121,7 @@ describe("local approved dataset apps", () => {
     expect(await f.host.apps.activate(f.app, new AbortController().signal, null)).toEqual(publication);
     expect(f.host.apps.list("app")).toMatchObject([{ active: true, authorityRevision: publication.authorityRevision }]);
     await f.host.close();
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(reopened.apps.list("app")).toMatchObject([{ active: true, authorityRevision: publication.authorityRevision }]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     try {
@@ -127,7 +139,7 @@ describe("local approved dataset apps", () => {
     const budget = db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes;
     expect(before.length).toBeGreaterThan(0);
     db.close();
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(reopened.apps.browserPublication(f.published.publicationId).files.length).toBe(before.length);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     try {
@@ -167,7 +179,7 @@ describe("local approved dataset apps", () => {
     const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     db.prepare("UPDATE local_dataset_apps SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(f.published.publicationId);
     db.close();
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(() => reopened.apps.assertBrowserPublication(f.published.publicationId, f.published.authorityRevision)).toThrow(/approval changed/);
     expect(reopened.apps.list("app")).toMatchObject([{ active: false, authorityRevision: 2 }]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
@@ -183,7 +195,7 @@ describe("local approved dataset apps", () => {
     db.prepare("DELETE FROM local_dataset_apps WHERE dataset_id=?").run(id(1));
     expect(db.prepare("SELECT count(*) AS n FROM local_dataset_app_artifacts").get()!.n).toBe(0);
     db.close();
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(reopened.apps.list("app")).toEqual([]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     try {
@@ -209,7 +221,7 @@ describe("local approved dataset apps", () => {
       db.prepare("INSERT INTO local_dataset_apps VALUES(?,?,?,?,?,?,1)").run(old.publication_id, old.app_root, old.dataset_id, 1, old.candidate, old.storage_bytes);
       for (const file of f.app.files) db.prepare("INSERT INTO local_dataset_app_artifacts VALUES(?,?,?)").run(f.published.publicationId, file.path, file.bytes);
     } finally { db.close(); }
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     const [adopted] = reopened.apps.list("app");
     expect(adopted.active).toBe(true);
     expect(adopted.authorityRevision).toBeGreaterThan(prior.authorityRevision);
@@ -218,7 +230,7 @@ describe("local approved dataset apps", () => {
     expect(await reopened.apps.activate(f.app, new AbortController().signal)).toEqual({ publicationId: adopted.publicationId, authorityRevision: adopted.authorityRevision });
     expect(await reopened.apps.request(adopted.publicationId, "invoke", { ...f.invocation(), authorityRevision: adopted.authorityRevision })).toMatchObject({ replayed: false });
     await reopened.close();
-    const again = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(again);
+    const again = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(again);
     expect(again.apps.list("app")).toMatchObject([{ active: true, authorityRevision: adopted.authorityRevision }]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     try {
@@ -239,7 +251,7 @@ describe("local approved dataset apps", () => {
       oldApproval = approveAsOlderBuild(db, f.app);
       expect(oldApproval).toEqual({ publicationId: f.published.publicationId, authorityRevision: 3 });
     } finally { db.close(); }
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     const [adopted] = reopened.apps.list("app");
     expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
     expect(adopted.authorityRevision).toBeGreaterThan(oldApproval.authorityRevision);
@@ -263,7 +275,7 @@ describe("local approved dataset apps", () => {
       expect(oldApproval.authorityRevision).toBe(2);
       expect(db.prepare("SELECT active_publication_id FROM local_app_roots WHERE app_root='app'").get()!.active_publication_id).toBe(f.published.publicationId);
     } finally { db.close(); }
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     const [adopted] = reopened.apps.list("app");
     expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
     expect(adopted.authorityRevision).toBeGreaterThan(oldApproval.authorityRevision);
@@ -285,7 +297,7 @@ describe("local approved dataset apps", () => {
       expect(oldApproval.authorityRevision).toBe(1);
       expect(db.prepare("SELECT * FROM local_app_roots WHERE app_root='app'").get()).toMatchObject({ revision: withdrawn.authorityRevision, active_kind: null, active_publication_id: null });
     } finally { db.close(); }
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     const [adopted] = reopened.apps.list("app");
     expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
     expect(adopted.authorityRevision).toBeGreaterThan(withdrawn.authorityRevision);
@@ -334,7 +346,7 @@ describe("local approved dataset apps", () => {
     const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     db.prepare("UPDATE local_dataset_apps SET candidate='{}' WHERE publication_id=?").run(f.published.publicationId);
     db.close();
-    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(reopened.describe(id(1)).name).toBe("Registrations");
     const preview = reopened.deletePreview({ datasetId: id(1) });
     await reopened.deleteDataset({ datasetId: id(1), expected: preview.cursor, reviewToken: preview.reviewToken, acknowledge: true });
@@ -357,7 +369,7 @@ describe("local approved dataset apps", () => {
     await expect(f.host.apps.activate(await f.prepareApp("replacement"), new AbortController().signal)).rejects.toThrow(/response is pending/);
     expect(await f.host.apps.request(other.publicationId, "attempt", { authorityRevision: other.authorityRevision, operation: "submit", action: "get" })).toEqual({ attempt: null });
     await f.host.close();
-    const restarted = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
+    const restarted = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).toEqual(first);
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "clear", token: first.attempt.token })).toEqual({ attempt: null });
     await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, operation: "list", action: "get" })).rejects.toThrow(/not approved/);
@@ -395,7 +407,7 @@ describe("local approved dataset apps", () => {
     const f = await fixture();
     const first = await f.host.apps.request(f.published.publicationId, "invoke", f.invocation());
     await f.host.close();
-    const restarted = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
+    const restarted = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
     expect(restarted.apps.list("app")).toMatchObject([{ active: true, datasetCapability: { operationIds: [id(6)] } }]);
     expect(await restarted.apps.request(f.published.publicationId, "invoke", f.invocation())).toEqual({ ...first as object, replayed: true });
     await expect(restarted.apps.request(f.published.publicationId, "invoke", { ...f.invocation(), operation: "list" })).rejects.toThrow(/not approved/);
@@ -494,7 +506,7 @@ it("keeps local form uploads, submissions and selected fields working through re
   const invoke=f.invocation(); invoke.input.values[id(5)]=uploaded.file.fileId;
   const first=await f.host.apps.request(f.published.publicationId,"invoke",invoke);
   await f.host.close();
-  const restarted=await createLocalDatasetHost({localPersonId:()=>"person-local",workspaceId:"w",workspaceRoot:f.workspaceRoot}); hosts.push(restarted);
+  const restarted=await createLocalDatasetHost({holder:unguardedCollections,localPersonId:()=>"person-local",workspaceId:"w",workspaceRoot:f.workspaceRoot}); hosts.push(restarted);
   expect(restarted.apps.browserPublication(f.published.publicationId)).toBeDefined();
   expect(await restarted.apps.request(f.published.publicationId,"invoke",invoke)).toEqual({...first as object,replayed:true});
   await expect(restarted.apps.request(restricted.publicationId,"invoke",{...invoke,authorityRevision:restricted.authorityRevision})).rejects.toThrow("cannot submit those fields");

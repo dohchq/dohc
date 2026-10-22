@@ -54,11 +54,13 @@ export function createLocalDatasetTransfers(options: {
   exportRecovery(datasetId: string, signal?: AbortSignal): Promise<PreparedExport>;
 }) {
   const { db, journal, transaction, workspaceId } = options;
-  transaction(() => initializeDatasetAttempts(db));
-  db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_transfers(
-    workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,transfer_id TEXT NOT NULL UNIQUE,target_origin TEXT NOT NULL,
-    source_cursor TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ready','imported')),
-    manifest_sha256 TEXT,archive TEXT,receipt TEXT,PRIMARY KEY(workspace_id,dataset_id)) STRICT;`);
+  transaction(() => {
+    initializeDatasetAttempts(db);
+    db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_transfers(
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,transfer_id TEXT NOT NULL UNIQUE,target_origin TEXT NOT NULL,
+      source_cursor TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ready','imported')),
+      manifest_sha256 TEXT,archive TEXT,receipt TEXT,PRIMARY KEY(workspace_id,dataset_id)) STRICT;`);
+  });
   const inFlight = new Map<string, Promise<DatasetTransferStatus>>();
   function authorize(signal?: AbortSignal) { options.assertCurrent(); signal?.throwIfAborted(); }
   function read(datasetId: string): StoredTransfer | null {
@@ -86,9 +88,11 @@ export function createLocalDatasetTransfers(options: {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      options.assertCurrent();
-      db.prepare("UPDATE local_dataset_transfers SET archive=NULL WHERE workspace_id=? AND dataset_id=? AND transfer_id=? AND state='imported'")
-        .run(workspaceId, marker.datasetId, marker.transferId);
+      transaction(() => {
+        options.assertCurrent();
+        db.prepare("UPDATE local_dataset_transfers SET archive=NULL WHERE workspace_id=? AND dataset_id=? AND transfer_id=? AND state='imported'")
+          .run(workspaceId, marker.datasetId, marker.transferId);
+      });
     }
     return status(marker);
   }

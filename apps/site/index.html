@@ -87,7 +87,6 @@
           </a>
           <a class="download-other" href="#downloads">Other platforms</a>
         </div>
-        <p class="download-stage">dohc is in alpha. Each download is the newest nightly build.</p>
       </div>
       <ul class="hero-facts reveal d4" aria-label="At a glance">
         <li>Open source</li>
@@ -114,7 +113,6 @@
         </div>
       </div>
     </div>
-    <p class="demo-caption">This demo runs in your browser and keeps your edits there. The desktop app keeps them in files on your computer.</p>
   </section>
 
   <!-- ============ capabilities ============ -->
@@ -379,14 +377,15 @@
       </div>
       <div class="sync-controls">
         <label class="sync-switch">
-          <input type="checkbox" checked data-sync-toggle />
+          <input type="checkbox" role="switch" checked data-sync-toggle aria-label="Online" />
+          <span class="sync-switch-side" data-sync-side="offline" aria-hidden="true">offline</span>
           <span class="sync-switch-track theme-track" aria-hidden="true">
             <span class="theme-dial">
               <svg class="sync-on" viewBox="0 0 24 24"><path d="M12 6v12"/></svg>
               <svg class="sync-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>
             </span>
           </span>
-          <span>online</span>
+          <span class="sync-switch-side" data-sync-side="online" aria-hidden="true">online</span>
         </label>
         <span class="sync-hint" data-sync-hint>watching. click or type to take over.</span>
       </div>
@@ -442,7 +441,6 @@
     <div class="downloads-inner">
       <div class="downloads-heading reveal">
         <h2 id="downloads-title">Runs on your machine.</h2>
-        <p class="download-stage">dohc is in alpha. Each download is the newest nightly build.</p>
       </div>
 
       <div class="download-grid reveal d1">

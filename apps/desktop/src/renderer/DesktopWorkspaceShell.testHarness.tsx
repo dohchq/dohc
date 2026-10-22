@@ -18,6 +18,7 @@ import type {
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
+  CollectionCopiesLeft,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationButtonsResult,
@@ -316,6 +317,7 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const collectionCopiesLeftCallbacks = new Set<() => void>();
   const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
@@ -731,6 +733,15 @@ function makeBaseBridge(
     onCrashReportChanged: vi.fn((listener: () => void) => {
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
+    }),
+    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    emitCollectionCopiesLeftChanged: () => {
+      for (const callback of [...collectionCopiesLeftCallbacks]) callback();
+    },
+    onCollectionCopiesLeftChanged: vi.fn((listener: () => void) => {
+      collectionCopiesLeftCallbacks.add(listener);
+      return () => collectionCopiesLeftCallbacks.delete(listener);
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
     readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
