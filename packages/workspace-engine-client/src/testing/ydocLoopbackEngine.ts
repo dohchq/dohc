@@ -47,7 +47,7 @@ interface Lineage {
   // the durable close guard's coverage check.
   lastSettledSha: string | null;
   // How many updates this lineage journaled — the loopback's stand-in for the
-  // daemon's exactly-one-update proof (`seed_only_lineage_source`,
+  // daemon's exactly-one-update proof (`pristine_seed_lineage_source`,
   // crates/dohc-engine-collab/src/durable.rs).
   journaledUpdates: number;
   // How many journaled updates the last settle covered, or `null` —
@@ -838,7 +838,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         capturedFile.head === "present" &&
         sha256(capturedFile.content) === currentSha;
       // Third proof, mirroring `close_session` (durable.rs): a
-      // seed-only lineage whose recorded source is still the captured head
+      // pristine seed lineage whose recorded source is still the captured head
       // holds nothing the file does not — pruning discards a cache of the
       // file, not content.
       const coveredBySeedOnly =

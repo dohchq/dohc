@@ -247,6 +247,33 @@ async fn pristine_seed_edits_still_settle_after_repeated_opens() {
 }
 
 #[tokio::test]
+async fn closed_pristine_synced_seed_unloads_without_pending_settlement() {
+    let scratch = pristine_cycles(true, false).await;
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 50).expect("actor").actor;
+    let owner = actor
+        .live_application_owner(WS.to_owned())
+        .await
+        .expect("live application owner");
+    let key = dohc_engine_collab::DocKey::new(WS, "main", "note").expect("document key");
+    let pending = owner
+        .unload(
+            key.object_id.clone(),
+            vec![key],
+            scratch.path().to_path_buf(),
+            51,
+        )
+        .await
+        .expect("unload pristine synced note");
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        pending, None,
+        "an untouched seed has no settlement to await"
+    );
+}
+
+#[tokio::test]
 async fn closed_pristine_synced_seed_allows_a_named_version() {
     let scratch = pristine_cycles(true, false).await;
     let db = engine_db_path(&scratch).expect("database");

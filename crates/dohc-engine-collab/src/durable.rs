@@ -2667,6 +2667,7 @@ pub struct CloseProjection {
 /// has to write them. A doc with no edits (`head_update_seq == 0`) has nothing
 /// to lose. The close hook asks the same question before it claims a lineage
 /// for the relay, so a dirty close keeps refusing instead of claiming.
+/// Unload also uses this check in every regime.
 pub fn local_close_is_covered(
     store: &EngineStore,
     key: &DocKey,
@@ -2722,7 +2723,7 @@ pub fn local_close_is_covered(
             {
                 return Ok(true);
             }
-            // Third proof: a seed-only lineage whose recorded source
+            // Third proof: a pristine seed lineage whose recorded source
             // is still the captured head. The projection sha cannot match —
             // projecting normalizes — but everything the doc contains was
             // imported from bytes the captured head (and the version store's
