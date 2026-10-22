@@ -1,6 +1,9 @@
 use super::{ActorHandle, RuntimeError};
-use dohc_engine_files::materialize::cleanup_staging_directory;
-use dohc_engine_files::retained::{Inspection, inspect};
+use dohc_engine_files::materialize::{cleanup_staging_directory, stored_path};
+use dohc_engine_files::retained::{
+    DeleteCheck, Inspection, QUIET_PERIOD_MS, check_for_delete, inspect,
+};
+use dohc_engine_storage::{EngineStore, RetainedDisplacement, RetainedSummary};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -24,6 +27,8 @@ struct State {
     #[cfg(test)]
     import_gate: Option<(std::sync::mpsc::SyncSender<()>, Arc<std::sync::Barrier>)>,
     #[cfg(test)]
+    unlink_gate: Option<(std::sync::mpsc::SyncSender<()>, Arc<std::sync::Barrier>)>,
+    #[cfg(test)]
     joining: bool,
 }
 #[derive(Clone, Default)]
@@ -41,6 +46,14 @@ impl Root {
     #[cfg(test)]
     fn before_import(&self) {
         let gate = self.0.0.lock().unwrap().import_gate.take();
+        if let Some((ready, commit)) = gate {
+            ready.send(()).unwrap();
+            commit.wait();
+        }
+    }
+    #[cfg(test)]
+    fn before_unlink(&self) {
+        let gate = self.0.0.lock().unwrap().unlink_gate.take();
         if let Some((ready, commit)) = gate {
             ready.send(()).unwrap();
             commit.wait();
@@ -142,8 +155,12 @@ impl Worker {
                             let retry_at = backoff.get(&id).map_or(0, |&(_, at)| at);
                             let database = handle.database_path();
                             let inspection = inspect(&path, database, &row, now, held, retry_at);
-                            if !matches!(inspection, Ok(Inspection::Release(_) | Inspection::Keep))
-                            {
+                            if !matches!(
+                                inspection,
+                                Ok(Inspection::Release(_)
+                                    | Inspection::Keep
+                                    | Inspection::BusyCheck { .. })
+                            ) {
                                 backoff.remove(&id);
                             }
                             let result = match inspection {
@@ -177,6 +194,11 @@ impl Worker {
                                 }
                                 Ok(Inspection::Missing) => {
                                     release(&handle, &path, row, None).map(|_| ())
+                                }
+                                Ok(Inspection::BusyCheck { unsupported }) => {
+                                    handle.run_blocking(move |s, _| {
+                                        Ok(s.record_retained_busy_check(&row, unsupported)?)
+                                    })
                                 }
                                 Ok(Inspection::Keep) => Ok(()),
                                 Err(e) => Err(RuntimeError::Materialize(e)),
@@ -229,14 +251,11 @@ enum Released {
 fn release(
     handle: &ActorHandle,
     root: &std::path::Path,
-    row: dohc_engine_storage::RetainedDisplacement,
+    row: RetainedDisplacement,
     source: Option<dohc_engine_files::retained::Release>,
 ) -> Result<Released, RuntimeError> {
     let root = root.to_path_buf();
-    let directory = root
-        .join(&row.source_path)
-        .parent()
-        .map(std::path::Path::to_path_buf);
+    let directory = staged_directory(handle.database_path(), &root, &row);
     handle.run_blocking(move |s, _| {
         // Serialize hold creation with the last check and unlink. Changed reads
         // still import above; only source release waits for the hold to clear.
@@ -255,6 +274,230 @@ fn release(
         Ok(Released::Done)
     })
 }
+/// The folder that holds `row`'s source, through the engine folder the store
+/// at `database` opened through.
+fn staged_directory(
+    database: &std::path::Path,
+    root: &std::path::Path,
+    row: &RetainedDisplacement,
+) -> Option<PathBuf> {
+    let (_, source) = stored_path(database, root, std::path::Path::new(&row.source_path));
+    source.parent().map(std::path::Path::to_path_buf)
+}
+
+/// The most candidates one [`ActorHandle::list_retained_copies`] returns.
+pub const RETAINED_COPIES_LIST_LIMIT: usize = 10_000;
+/// The most candidates one [`ActorHandle::delete_retained_copies`] takes.
+pub const RETAINED_COPIES_DELETE_LIMIT: usize = 100;
+/// How many candidates one actor turn of a delete checks and unlinks, so a
+/// delete never holds the writer for long.
+const DELETE_BATCH: usize = 25;
+
+/// A retained original an explicit delete may remove, as listed: its row and
+/// the row's revision, which any recorded change to its source moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedCandidate {
+    pub id: i64,
+    pub revision: i64,
+}
+
+/// What [`ActorHandle::delete_retained_copies`] did, and what remains.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetainedDeletion {
+    pub deleted: u64,
+    pub skipped: u64,
+    pub failed: u64,
+    pub remaining: RetainedSummary,
+}
+
+/// `row` if an explicit delete may remove its source now: it belongs to
+/// `workspace_id`, only its volume blocks the sweep, it is unchanged since
+/// `revision` and quiet, recovery cannot need it, and no hold covers its
+/// file.
+fn eligible(
+    store: &EngineStore,
+    workspace_id: &str,
+    candidate: RetainedCandidate,
+    now_ms: i64,
+) -> Result<Option<RetainedDisplacement>, RuntimeError> {
+    let Some(row) = store.retained_displacement(candidate.id)? else {
+        return Ok(None);
+    };
+    let eligible = row.workspace_id == workspace_id
+        && row.busy_check_unsupported
+        && row.changed_at_ms == candidate.revision
+        && now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS
+        && !store.retained_original_needed(&row)?
+        && !dohc_engine_files::placement_is_held_in(store, workspace_id, &row.target_path)?;
+    Ok(eligible.then_some(row))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+impl ActorHandle {
+    /// How many of the workspace's retained originals the sweep can never
+    /// release, because their volume cannot refuse to unlink an open file,
+    /// and their logical size. Read from the rows; no file is opened.
+    pub async fn retained_copies_summary(
+        &self,
+        workspace_id: String,
+    ) -> Result<RetainedSummary, RuntimeError> {
+        self.run(move |store, _| Ok(store.retained_summary(&workspace_id)?))
+            .await
+    }
+
+    /// The workspace's retained originals an explicit delete may remove now,
+    /// oldest first, at most [`RETAINED_COPIES_LIST_LIMIT`], and whether
+    /// there are more.
+    pub async fn list_retained_copies(
+        &self,
+        workspace_id: String,
+    ) -> Result<(Vec<RetainedCandidate>, bool), RuntimeError> {
+        self.run(move |store, _| {
+            let now = now_ms();
+            let held = store.held_paths(&workspace_id)?;
+            let mut candidates = Vec::new();
+            let mut after = 0;
+            loop {
+                let rows = store.blocked_retained_displacements(
+                    &workspace_id,
+                    now.saturating_sub(QUIET_PERIOD_MS),
+                    after,
+                    512,
+                )?;
+                let Some(last) = rows.last() else {
+                    return Ok((candidates, false));
+                };
+                after = last.displacement_id;
+                for row in rows {
+                    if store.retained_original_needed(&row)?
+                        || held.iter().any(|path| {
+                            dohc_engine_files::materialize::path_is_held(path, &row.target_path)
+                        })
+                    {
+                        continue;
+                    }
+                    if candidates.len() == RETAINED_COPIES_LIST_LIMIT {
+                        return Ok((candidates, true));
+                    }
+                    candidates.push(RetainedCandidate {
+                        id: row.displacement_id,
+                        revision: row.changed_at_ms,
+                    });
+                }
+            }
+        })
+        .await
+    }
+
+    /// Delete the sources of `candidates`, as listed, in bounded batches.
+    /// Their volume cannot tell whether a process has one open, so a program
+    /// that still has one open may lose what it writes next; the caller has
+    /// the person's or agent's acknowledgement of that. Each source is read
+    /// first: changed bytes are recorded and the source stays. A hold is
+    /// checked again on the writer just before the unlink, and the row goes
+    /// only after its source.
+    pub async fn delete_retained_copies(
+        &self,
+        root: PathBuf,
+        workspace_id: String,
+        candidates: Vec<RetainedCandidate>,
+    ) -> Result<RetainedDeletion, RuntimeError> {
+        let mut outcome = RetainedDeletion::default();
+        let database = self.database_path().to_path_buf();
+        for batch in candidates.chunks(DELETE_BATCH) {
+            let batch = batch.to_vec();
+            let listed = batch.len() as u64;
+            let workspace = workspace_id.clone();
+            let rows = self
+                .run(move |store, _| {
+                    let now = now_ms();
+                    let mut rows = Vec::new();
+                    for candidate in batch {
+                        if let Some(row) = eligible(store, &workspace, candidate, now)? {
+                            rows.push(row);
+                        }
+                    }
+                    Ok(rows)
+                })
+                .await?;
+            outcome.skipped += listed - rows.len() as u64;
+            let (checked_root, checked_database) = (root.clone(), database.clone());
+            let checks = tokio::task::spawn_blocking(move || {
+                rows.into_iter()
+                    .map(|row| {
+                        let check = check_for_delete(&checked_root, &checked_database, &row);
+                        (row, check)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+            #[cfg(test)]
+            self.retained_root.before_unlink();
+            let (batch_root, workspace) = (root.clone(), workspace_id.clone());
+            let counted = self
+                .run(move |store, _| {
+                    let now = now_ms();
+                    let mut counted = RetainedDeletion::default();
+                    for (row, check) in checks {
+                        let result = (|| -> Result<bool, RuntimeError> {
+                            match check.map_err(RuntimeError::Materialize)? {
+                                DeleteCheck::Skip => Ok(false),
+                                DeleteCheck::Changed { current, bytes } => {
+                                    store.record_retained_read(&row, &current, &bytes, now)?;
+                                    Ok(false)
+                                }
+                                check @ (DeleteCheck::Missing | DeleteCheck::Delete(_)) => {
+                                    let candidate = RetainedCandidate {
+                                        id: row.displacement_id,
+                                        revision: row.changed_at_ms,
+                                    };
+                                    if eligible(store, &workspace, candidate, now)?.is_none() {
+                                        return Ok(false);
+                                    }
+                                    if let DeleteCheck::Delete(source) = check
+                                        && !source.remove().map_err(RuntimeError::Materialize)?
+                                    {
+                                        return Ok(false);
+                                    }
+                                    store.release_retained(row.displacement_id)?;
+                                    if let Some(directory) =
+                                        staged_directory(store.database_path(), &batch_root, &row)
+                                    {
+                                        cleanup_staging_directory(store, &batch_root, &directory)?;
+                                    }
+                                    Ok(true)
+                                }
+                            }
+                        })();
+                        match result {
+                            Ok(true) => counted.deleted += 1,
+                            Ok(false) => counted.skipped += 1,
+                            Err(error) => {
+                                eprintln!("retained copy delete: {error}");
+                                counted.failed += 1;
+                            }
+                        }
+                    }
+                    Ok(counted)
+                })
+                .await?;
+            outcome.deleted += counted.deleted;
+            outcome.skipped += counted.skipped;
+            outcome.failed += counted.failed;
+        }
+        outcome.remaining = self.retained_copies_summary(workspace_id).await?;
+        Ok(outcome)
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop();

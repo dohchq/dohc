@@ -37,6 +37,7 @@ fn add_sources(actor: &WorkspaceActor, scratch: &ScratchDir, count: usize) {
             mtime: format!("{}:{}", m.mtime(), m.mtime_nsec()),
             ctime: format!("{}:{}", m.ctime(), m.ctime_nsec()),
             changed_at_ms: 0,
+            busy_check_unsupported: false,
         });
     }
     actor
@@ -412,4 +413,226 @@ fn refused_releases_back_off_from_thirty_seconds_to_fifteen_minutes() {
         wait = Some(next);
     }
     assert_eq!(waits, [30, 60, 120, 240, 480, 900, 900, 900]);
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A retained original named `name` for `target`, on an unchecked volume.
+fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, name: &str, target: &str) -> i64 {
+    let directory = scratch.path().join(".dohc/engine/displaced");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(name);
+    std::fs::write(&path, b"known").unwrap();
+    let m = std::fs::metadata(&path).unwrap();
+    let row = RetainedDisplacement {
+        displacement_id: 0,
+        job_id: name.into(),
+        workspace_id: "ws".into(),
+        target_path: target.into(),
+        source_path: format!(".dohc/engine/displaced/{name}"),
+        device: m.dev().to_string(),
+        inode: m.ino().to_string(),
+        digest: hex_sha256(b"known"),
+        size: m.len() as i64,
+        mtime: format!("{}:{}", m.mtime(), m.mtime_nsec()),
+        ctime: format!("{}:{}", m.ctime(), m.ctime_nsec()),
+        changed_at_ms: 0,
+        busy_check_unsupported: true,
+    };
+    actor
+        .handle()
+        .run_blocking(move |s, _| {
+            s.put_binary_blob(b"known")?;
+            Ok(s.retain_displacement(&row)?)
+        })
+        .unwrap()
+}
+
+/// #2205: the sweep records that a volume cannot refuse to unlink an open
+/// file, keeps every original there, and counts them by workspace.
+#[test]
+fn the_sweep_records_an_unchecked_volume_and_keeps_its_originals() {
+    let scratch = ScratchDir::new().unwrap();
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    let mut actor = actor(&scratch);
+    add_sources(&actor, &scratch, 2);
+    bind(&actor, &scratch);
+    wait_for(&actor.retention_root, |p| {
+        p.iter().filter(|v| v.0 == 2).count() >= 2
+    });
+    let (rows, summary) = actor
+        .handle()
+        .run_blocking(|s, _| {
+            Ok((
+                s.retained_displacements_after(0)?,
+                s.retained_summary("ws")?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.busy_check_unsupported));
+    assert_eq!(
+        summary,
+        dohc_engine_storage::RetainedSummary {
+            count: 2,
+            bytes: 10
+        }
+    );
+    assert_eq!(
+        std::fs::read_dir(scratch.path().join(".dohc/engine/displaced"))
+            .unwrap()
+            .count(),
+        2
+    );
+    actor.close().unwrap();
+}
+
+/// #2205: an explicit delete lists and removes only quiet, finished,
+/// unheld originals on an unchecked volume. A changed source is recorded and
+/// kept, a hold taken after the check keeps its source, and an unfinished
+/// job's original and a kept recovery file stay.
+#[test]
+fn an_explicit_delete_removes_only_eligible_originals() {
+    let scratch = ScratchDir::new().unwrap();
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    let mut actor = actor(&scratch);
+    let displaced = scratch.path().join(".dohc/engine/displaced");
+    let eligible = add_source(&actor, &scratch, "eligible", "a.md");
+    let changed = add_source(&actor, &scratch, "changed", "b.md");
+    let unfinished = add_source(&actor, &scratch, "unfinished", "c.md");
+    let kept_name = add_source(&actor, &scratch, "kept-name", "d.md");
+    let held = add_source(&actor, &scratch, "held", "held.md");
+    let checked = add_source(&actor, &scratch, "checked", "e.md");
+    let recent = add_source(&actor, &scratch, "recent", "f.md");
+    let legacy = add_source(&actor, &scratch, "legacy", "g.md");
+    std::fs::write(displaced.join("kept-file"), b"another program's bytes").unwrap();
+    actor
+        .handle()
+        .run_blocking(move |s, _| {
+            s.read_with(|c| {
+                c.execute_batch(&format!(
+                    "UPDATE materialization_retained SET release_blocked=NULL WHERE displacement_id={checked};
+                     UPDATE materialization_retained SET changed_at_ms=9223372036854775000 WHERE displacement_id={recent};
+                     UPDATE materialization_retained SET workspace_id='' WHERE displacement_id={legacy};
+                     INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms,operation,workspace_id)
+                       VALUES('unfinished','c.md','{}',0,1,'pending',1,'write','ws');",
+                    hex_sha256(b"known")
+                ))
+            })
+            .unwrap();
+            for (job, name) in [("kept-name", "kept-name"), ("kept-file", "kept-file")] {
+                s.keep_displacement(
+                    &dohc_engine_storage::DisplacementSpec {
+                        job_id: job.into(),
+                        workspace_id: "ws".into(),
+                        target_path: "d.md".into(),
+                        displaced_name: name.into(),
+                        expected_sha256: String::new(),
+                        content_sha256: None,
+                        now_ms: 1,
+                    },
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (listed, more) = runtime()
+        .block_on(actor.handle().list_retained_copies("ws".into()))
+        .unwrap();
+    assert!(!more);
+    assert_eq!(
+        listed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [eligible, changed, held],
+        "unfinished, kept, checked, recent and other-workspace originals are not listed"
+    );
+    std::fs::write(displaced.join("changed"), b"outside").unwrap();
+    let mut requested = listed.clone();
+    for id in [unfinished, kept_name, checked, recent, legacy] {
+        requested.push(RetainedCandidate { id, revision: 0 });
+    }
+    let commit = Arc::new(std::sync::Barrier::new(2));
+    let (ready, checked_sources) = std::sync::mpsc::sync_channel(1);
+    actor.retention_root.0.0.lock().unwrap().unlink_gate = Some((ready, commit.clone()));
+    let (handle, root) = (actor.handle(), scratch.path().to_path_buf());
+    let deleting = std::thread::spawn(move || {
+        runtime().block_on(handle.delete_retained_copies(root, "ws".into(), requested))
+    });
+    checked_sources.recv_timeout(MAX_BACKOFF * 4).unwrap();
+    actor
+        .handle()
+        .run_blocking(|s, _| {
+            s.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1); INSERT INTO file_objects VALUES ('ws','held-object',1);").map_err(dohc_engine_storage::StorageError::persist_public)?;
+                dohc_engine_storage::capture_file_holds::record_in(tx, &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                    workspace_id: "ws".into(), source_version_id: "main".into(), object_id: "held-object".into(), path: "held.md".into(), observed_sha256: hex_sha256(b"held"), observed_size: 4, reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(), observed_at_ms: 0, attempt_count: 1, retry_requested: false,
+                })
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    commit.wait();
+    let outcome = deleting.join().unwrap().unwrap();
+    assert_eq!(
+        (outcome.deleted, outcome.skipped, outcome.failed),
+        (1, 7, 0),
+        "{outcome:?}"
+    );
+    let mut left: Vec<String> = std::fs::read_dir(&displaced)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "changed",
+            "checked",
+            "held",
+            "kept-file",
+            "kept-name",
+            "legacy",
+            "recent",
+            "unfinished"
+        ]
+    );
+    let rows = actor
+        .handle()
+        .run_blocking(|s, _| Ok(s.retained_displacements_after(0)?))
+        .unwrap();
+    assert!(rows.iter().all(|row| row.displacement_id != eligible));
+    let changed_row = rows
+        .iter()
+        .find(|row| row.displacement_id == changed)
+        .unwrap();
+    assert_eq!(changed_row.digest, hex_sha256(b"outside"));
+    assert!(changed_row.busy_check_unsupported);
+    let recorded: Vec<u8> = actor
+        .handle()
+        .run_blocking(|s, _| {
+            Ok(s.read_with(|c| {
+                c.query_row(
+                    "SELECT bytes FROM materialization_displacement_reads",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap())
+        })
+        .unwrap();
+    assert_eq!(recorded, b"outside");
+    // changed (7 bytes), unfinished, kept-name, held and recent (5 each).
+    assert_eq!(
+        outcome.remaining,
+        dohc_engine_storage::RetainedSummary {
+            count: 5,
+            bytes: 27
+        }
+    );
+    actor.close().unwrap();
 }
