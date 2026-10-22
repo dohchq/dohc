@@ -1173,7 +1173,7 @@ fn materialize_one_inner(
     // first, so every check below sees the target as it was or as it ended.
     // Bytes the store lacks that cannot return to their path make the job
     // conflict, so the person is told.
-    let (staging, kept) = recover_job_displacements(store, &canonical_root, job, options)?;
+    let (staging, kept) = recover_job_displacements(store, &canonical_root, &target, job, options)?;
     if kept {
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
@@ -2238,7 +2238,7 @@ fn job_staging_dir(
     create: bool,
 ) -> Result<PathBuf, MaterializeError> {
     let Some(rel) = store.staging_location(job_id)? else {
-        return staging_dir(store.database_path(), root, create);
+        return checked_staging_dir(store.database_path(), root, create);
     };
     let path = Path::new(&rel);
     if path.is_absolute()
@@ -3036,14 +3036,30 @@ fn sync_staged(
 /// engine folder of [`staging_base`]. Every component must be a real
 /// directory; `create` makes the missing ones.
 fn staging_dir(database: &Path, root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = checked_staging_dir(database, root, create)?;
+    #[cfg(windows)]
+    readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
+    Ok(dir)
+}
+
+fn checked_staging_dir(
+    database: &Path,
+    root: &Path,
+    create: bool,
+) -> Result<PathBuf, MaterializeError> {
     let (base, dir) = staging_base(database, root);
     if create {
         walk_target_components(&base, &dir, ensure_real_directory)?;
     } else {
         ensure_target_symlink_free(&base, &dir)?;
     }
+    // Check access without walking other jobs' entries.
     #[cfg(windows)]
-    readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
+    if let Err(err) = std::fs::read_dir(&dir)
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(MaterializeError::io(&dir, &err));
+    }
     Ok(dir)
 }
 
@@ -3154,6 +3170,8 @@ fn rowless_staged(
     let mut found = Vec::new();
     let names = store.displacement_names()?;
     for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
         let entry = entry.map_err(|err| MaterializeError::io(staging, &err))?;
         let Ok(name) = entry.file_name().into_string() else {
             continue;
@@ -3989,6 +4007,7 @@ fn job_targets(job: &MaterializationJob, workspace_id: &str, path: &str) -> bool
 fn recover_job_displacements(
     store: &EngineStore,
     root: &Path,
+    _target: &Path,
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<(Staging, bool), MaterializeError> {
@@ -4022,6 +4041,9 @@ fn recover_job_displacements(
     let mut rowless = Vec::new();
     for n in 0..MAX_DISPLACED_NAMES {
         let name = staged_name(&job.job_id, n);
+        #[cfg(windows)]
+        readonly_link::recover_one(&dir.join(&name), _target)
+            .map_err(|err| MaterializeError::io(&dir, &err))?;
         if !taken.contains(&name) && entry_exists(&dir.join(&name))? {
             rowless.push(name);
         }
@@ -7074,6 +7096,69 @@ mod tests {
                 attributes
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_job_recovers_readonly_journal_with_resolved_folder_case() {
+        use std::os::windows::fs::MetadataExt;
+
+        let scratch = Scratch::new("readonly-folder-case");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::create_dir(root.join("Notes")).unwrap();
+        let target = root.join("Notes/a.md");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"outside").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "folder-case".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes/a.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let job = store
+            .load_materialization_job("folder-case")
+            .unwrap()
+            .unwrap();
+        let incoming = staging_dir(&scratch.db(), &root, true)
+            .unwrap()
+            .join(staged_name(&job.job_id, 0));
+        std::fs::write(&incoming, b"outside").unwrap();
+        let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&incoming, permissions).unwrap();
+        let attributes = std::fs::metadata(&incoming).unwrap().file_attributes();
+        std::fs::hard_link(&incoming, &target).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = readonly_link::remove(&incoming, &target, || {
+                    std::fs::remove_file(&incoming)?;
+                    panic!("crash before attribute restoration");
+                });
+            })
+            .is_err()
+        );
+        assert!(!incoming.exists());
+        assert!(!std::fs::metadata(&target).unwrap().permissions().readonly());
+
+        // Exercise selected placement without the workspace-wide journal sweep.
+        materialize_one(&store, &root, &job, &options_with(&StdReplacer)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().file_attributes(),
+            attributes
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+        assert_eq!(store.pending_materialization_count().unwrap(), 0);
+        assert!(!incoming.with_extension("0.restore-attributes").exists());
     }
 
     /// The inverse: a real sharing violation that survives every attempt
