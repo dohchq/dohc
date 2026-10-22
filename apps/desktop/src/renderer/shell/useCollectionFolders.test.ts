@@ -44,3 +44,18 @@ it.each(["refresh", "load more"])("discards an old %s response across end and re
   expect(result.current.datasets).toEqual([]);
   expect(result.current.nextDataset).toBeNull();
 });
+
+it("keeps a refusal to list the Collections here as the list's state, and reports nothing else that way", async () => {
+  const { result, dataset } = setup();
+  const words = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+  dataset.mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]: ${words}`));
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.collectionsRefusal).toEqual({ workspaceId: "share", kind: "elsewhere", words });
+  expect(result.current.datasets).toEqual([]);
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.collectionsRefusal).toBeNull();
+  expect(result.current.datasets).toEqual(page.datasets);
+  dataset.mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:dataset': Error: Collection storage is full."));
+  await expect(act(async () => result.current.refreshDatasets())).rejects.toThrow("Collection storage is full.");
+  expect(result.current.collectionsRefusal).toBeNull();
+});

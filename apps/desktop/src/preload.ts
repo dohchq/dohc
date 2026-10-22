@@ -41,6 +41,7 @@ import {
   ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
+  CollectionCopiesLeftChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
@@ -55,6 +56,7 @@ import {
   WorkspacePathOpenFailedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
+  collectionCopiesLeftOperations,
   workspaceTrustOperations,
   WorkspaceTrustChangedEvent,
   captureRecoveryOperations,
@@ -349,6 +351,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.usageRecordStopped, UsageRecordStoppedEvent, () => listener()),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
+  ...operationBridge(collectionCopiesLeftOperations, invoke),
+  onCollectionCopiesLeftChanged: (listener) =>
+    onEvent(CHANNELS.collectionCopiesLeftChanged, CollectionCopiesLeftChangedEvent, () => listener()),
   ...operationBridge(workspaceTrustOperations, invoke),
   onWorkspaceTrustChanged: (listener) =>
     onEvent(CHANNELS.workspaceTrustChanged, WorkspaceTrustChangedEvent, listener),

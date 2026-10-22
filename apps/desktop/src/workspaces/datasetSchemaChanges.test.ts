@@ -14,6 +14,7 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHos
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -34,7 +35,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: root });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
   const files = new Map(Object.entries(generateDatasetSources(initial).files));
   const adapter = sourceCaptureAdapter(files);

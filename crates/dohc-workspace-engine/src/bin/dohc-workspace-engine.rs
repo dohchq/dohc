@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use dohc_engine_protocol::{
-    cancel::CancelSignal,
+    cancel::{CancelSignal, Cancelled},
     error::{EnvelopeDecodeError, ErrorCode, Retryability, WireError},
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
     limits::WireLimits,
@@ -860,12 +860,16 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 let mut fenced = GuardedBlobWriter {
                     output: &mut output,
                     guard: &guard,
+                    cancelled: cancel.cancelled(),
                     wrote: false,
                     frame_pending: false,
                 };
+                // A Cancel stops a blob only between frames, where the writer
+                // refuses the next frame's first byte. A started frame must
+                // finish, or the broken stream ends the connection. Retirement,
+                // a workspace close, or the deadline still end it.
                 let result = tokio::select! {
                     biased;
-                    ()=cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output cancelled")),
                     ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
                     ()=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline.into()).await,None=>std::future::pending().await}}=>Err(io::Error::new(io::ErrorKind::TimedOut,"native restore output expired")),
                     result=write_blob_egress(&mut fenced,response,egress,limits)=>result,
@@ -951,6 +955,8 @@ async fn write_envelope<W: AsyncWrite + Unpin>(
 struct GuardedBlobWriter<'a, W> {
     output: &'a mut W,
     guard: &'a Arc<dyn OutputGuard>,
+    /// Wakes a writer waiting to start a frame when its request is cancelled.
+    cancelled: Cancelled,
     wrote: bool,
     /// Bytes from the current frame remain unflushed.
     frame_pending: bool,
@@ -962,8 +968,12 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
         bytes: &[u8],
     ) -> std::task::Poll<Result<usize, io::Error>> {
         let this = self.get_mut();
+        let cancellable = !this.frame_pending;
+        if cancellable {
+            let _ = std::future::Future::poll(std::pin::Pin::new(&mut this.cancelled), cx);
+        }
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(true, &mut || {
+        if !this.guard.with_current(cancellable, &mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_write(cx, bytes);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -983,7 +993,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
     ) -> std::task::Poll<Result<(), io::Error>> {
         let this = self.get_mut();
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(true, &mut || {
+        if !this.guard.with_current(false, &mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_flush(cx);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -2035,8 +2045,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guarded_blob_interruption_during_partial_frame_closes_output() {
-        for retire in [false, true] {
+    async fn guarded_blob_cancel_during_partial_frame_stops_at_frame_boundary() {
+        for flushing in [false, true] {
+            let cancel = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: CancelSignal::new(),
+                deadline: None,
+                dropped: dropped.clone(),
+            })))
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
+            let limits = WireLimits {
+                max_blob_chunk_bytes: 1024,
+                ..WireLimits::default()
+            };
+            let (writer, mut reader) = eight_byte_pipe(flushing);
+            let writer_limits = limits.clone();
+            let writer_active = active.clone();
+            let task = tokio::spawn(async move {
+                write_output(writer, &mut rx, &writer_limits, writer_active).await
+            });
+            // Cancel once the first chunk's first byte is out.
+            let header_len = dohc_engine_protocol::frame::FRAME_HEADER_LEN;
+            let mut transcript = vec![0; header_len];
+            reader.read_exact(&mut transcript).await.unwrap();
+            let start_len =
+                header_len + u32::from_le_bytes(transcript[8..12].try_into().unwrap()) as usize;
+            transcript.resize(start_len + 1, 0);
+            reader
+                .read_exact(&mut transcript[header_len..])
+                .await
+                .unwrap();
+            cancel.cancel();
+            reader.read_to_end(&mut transcript).await.unwrap();
+            task.await
+                .unwrap()
+                .expect("a Cancel lets the started frame finish");
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(lock(&active).is_empty());
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("BlobStart missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::BlobStart(start) if start.request_id == 9)
+            );
+            let Some(Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            }) = decoder.next_frame().unwrap()
+            else {
+                panic!("started chunk missing");
+            };
+            assert_eq!(stream_id, 9);
+            assert!(!fin);
+            assert_eq!(bytes, vec![42; limits.max_blob_chunk_bytes as usize]);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("request interruption missing");
+            };
+            let Envelope::Error(error) = decode_control(&payload, &limits).unwrap() else {
+                panic!("blob data continued after the started chunk");
+            };
+            assert_eq!(error.id, Some(9));
+            assert_eq!(error.error.code, ErrorCode::Cancelled);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_blob_retirement_during_partial_frame_closes_output() {
+        for cancelled in [false, true] {
             let cancel = CancelSignal::new();
             let retired = CancelSignal::new();
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
@@ -2067,11 +2164,10 @@ mod tests {
             });
             let mut prefix = [0; 8];
             reader.read_exact(&mut prefix).await.unwrap();
-            if retire {
-                retired.cancel();
-            } else {
+            if cancelled {
                 cancel.cancel();
             }
+            retired.cancel();
             assert_eq!(
                 task.await.unwrap().unwrap_err().kind(),
                 io::ErrorKind::ConnectionAborted
@@ -2091,6 +2187,11 @@ mod tests {
     async fn guarded_blob_releases_reservation_on_cancelled_write_and_flush() {
         for flush_only in [false, true] {
             for retire in [false, true] {
+                if flush_only && !retire {
+                    // A Cancel lets a started flush finish.
+                    // `guarded_blob_cancel_during_partial_frame_stops_at_frame_boundary` covers it.
+                    continue;
+                }
                 let cancel = CancelSignal::new();
                 let retired = CancelSignal::new();
                 let dropped = Arc::new(AtomicBool::new(false));

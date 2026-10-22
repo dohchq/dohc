@@ -7,6 +7,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
 import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
+import { unguardedCollections } from "../../../apps/desktop/src/testing/collectionsHolder";
 import { createLocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
@@ -19,7 +20,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
   test.setTimeout(90000);
   const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));
   await openedLocalState({ workspaceId: "stock-workspace", rootPath: directory });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId:"stock-workspace",workspaceRoot:directory});
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId:"stock-workspace",workspaceRoot:directory});
   const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
   const context = await browser.newContext();
   const root = fileURLToPath(new URL("../../../examples/stock-orders",import.meta.url));
@@ -36,7 +37,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     const field = (table:string,column:string)=>datasetColumnFields(revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!).find(field=>field.sqlColumn===column)!.fieldId;
     const ownerRead = (name:string,input:Record<string,any>={})=>host.query({...selection,operationId:operation(name),input,idempotencyKey:randomUUID()});
     const publish = async (appRoot:string) => {
-      const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
+      const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,deferredWrites:[],compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
       expect(source.candidate.inputs.some(file=>file.path.endsWith("backend.ts")||file.path.endsWith("schema.sql"))).toBe(false);
       return host.apps.activate(source,lifetime.signal);
     };

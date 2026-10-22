@@ -103,6 +103,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
+import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
@@ -476,6 +477,7 @@ function shareUnjournalableNotice(
     "non-utf8",
     "non-file-replacement",
     "local-collision",
+    "spelling-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -511,6 +513,14 @@ function shareUnjournalableNotice(
         `dohc could not receive ${names}. ` +
           `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
           `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
+      );
+    } else if (reason === "spelling-collision") {
+      const owner = one ? group[0]!.owner : undefined;
+      lines.push(
+        `dohc could not receive ${names}. ` +
+          (owner === undefined
+            ? "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."
+            : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`),
       );
     } else {
       lines.push(
@@ -861,10 +871,16 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
     clearIdentity,
     privacySettingsAction,
+    keepCollectionsHere,
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
+  const reportCollectionCopiesLeft = useCallback((notice: { message: string; toast: boolean; retry: () => void }) =>
+    reportShellFailure({ message: notice.message, retry: notice.retry, quiet: !notice.toast, kind: "collection-copies-left" }),
+  [reportShellFailure]);
+  const clearCollectionCopiesLeft = useCallback(() => clearKind("collection-copies-left"), [clearKind]);
+  const collectionCopiesLeftNotice = useCollectionCopiesLeftNotice({ report: reportCollectionCopiesLeft, clear: clearCollectionCopiesLeft });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
@@ -1662,7 +1678,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -1699,6 +1715,16 @@ export function DesktopWorkspaceShell(props: {
     };
     refresh();
   }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportShellError]);
+  // Reads the Collections list again, as Try again beside a list that could not be read.
+  const retryCollectionsList = useCallback(() => {
+    void refreshDatasets().catch(error => {
+      if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error);
+    });
+  }, [refreshDatasets, reportShellError, workspaceAdmission]);
+  // Keeps Collections no computer keeps yet on this one, then reads the list, and runs `then`, such as a tab's own read.
+  const keepCollectionsWithList = useCallback((then?: () => void) => {
+    keepCollectionsHere(() => { retryCollectionsList(); then?.(); });
+  }, [keepCollectionsHere, retryCollectionsList]);
   // One issue counter for every engine read the shell orders: the history
   // page, the status lanes, the workspace open, the agent observation, and
   // the version callbacks. Bumped on unmount, so a slow response for one
@@ -4660,6 +4686,9 @@ export function DesktopWorkspaceShell(props: {
         onOpenDataCollection={openDataCollection}
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
         onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
+        collectionsRefusal={collectionsRefusal}
+        onKeepCollections={keepCollectionsWithList}
+        onRetryCollections={retryCollectionsList}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -5045,6 +5074,7 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
+      if (kind === "collection-copies-left") collectionCopiesLeftNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
         const askedFor = workspaceId;
         const state = shareCaptureNoticeState(shareView.unsavedPaths, shareView.unconfirmedChanges, shareView.ended === true);
@@ -5063,7 +5093,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
@@ -5722,6 +5752,7 @@ export function DesktopWorkspaceShell(props: {
                   owner={!shareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={collectionReports.onError}
+                  onKeepCollections={keepCollectionsWithList}
                   onSettled={collectionReports.onSettled}
                   onNotice={collectionReports.onNotice}
                   historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}
