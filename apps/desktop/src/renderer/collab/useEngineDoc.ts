@@ -123,7 +123,7 @@ export type UseEngineDoc = {
   // changed outside dohc yet, so the document did not open again.
   outsideWriteWaiting: boolean;
   // Asked right before a reload: edits main has not confirmed yet.
-  localEditsPending: () => boolean;
+  unsavedEditsPending: () => boolean;
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
@@ -355,7 +355,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     permanentFailureWhileEditing,
     changedOutside,
     outsideWriteWaiting,
-    localEditsPending: () => committedRequestRef.current?.lease?.localEditsPending() ?? false,
+    unsavedEditsPending: () => committedRequestRef.current?.lease?.unsavedEditsPending() ?? false,
     readOnlyWhileEditing,
     readOnlyDraftId,
     readOnlyCause,

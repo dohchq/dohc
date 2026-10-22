@@ -53,7 +53,7 @@ const engineDocState: UseEngineDoc = {
   permanentFailureWhileEditing: false,
   changedOutside: null,
   outsideWriteWaiting: false,
-  localEditsPending: () => false,
+  unsavedEditsPending: () => false,
   readOnlyWhileEditing: false,
   readOnlyDraftId: null,
   readOnlyCause: null,

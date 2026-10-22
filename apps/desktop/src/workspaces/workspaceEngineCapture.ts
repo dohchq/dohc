@@ -5599,7 +5599,7 @@ export function createWorkspaceEngineCapture(
           if (liveYDocSessions.get(input.path) === liveEntry) {
             liveYDocSessions.delete(input.path);
           }
-          if (changedOutside && !shuttingDown) await recordOutsideWrite();
+          if (changedOutside && keepsTextInHistory && !shuttingDown) await recordOutsideWrite();
         };
         const liveEntry: LiveYDocSession = {
           path: input.path,

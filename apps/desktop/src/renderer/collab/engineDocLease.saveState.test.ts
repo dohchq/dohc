@@ -268,7 +268,7 @@ it("makes a change outside dohc unsaved when an agent's edit lands after it", as
   harness.emitChangedOutside(false, 0);
   harness.emitRemoteEdit(" agent", 1);
   expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
-  expect(retained.lease.localEditsPending()).toBe(true);
+  expect(retained.lease.unsavedEditsPending()).toBe(true);
 });
 
 it("keeps a change outside dohc reported while a history replacement installs", async () => {

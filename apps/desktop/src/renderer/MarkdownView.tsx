@@ -159,6 +159,17 @@ export const CHANGED_OUTSIDE_NOTICE =
 // made outside dohc.
 const RELOADED_SIGN_MS = 4_000;
 
+// A note's content, to tell a reload that took in a change from one that
+// came back the same: its body and its frontmatter, with keys in order.
+function noteContent(doc: Y.Doc | null): string | null {
+  if (!doc) return null;
+  const sortKeys = (_key: string, value: unknown) =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)))
+      : value;
+  return JSON.stringify([doc.getXmlFragment("body").toString(), doc.getMap("frontmatter").toJSON()], sortKeys);
+}
+
 function ChangedOutsideNotice(props: { onReload: () => void }) {
   return (
     <div
@@ -729,14 +740,15 @@ export function MarkdownView(props: {
   const { onRetryEngineOpen, onButtonError } = props;
   const [reloading, setReloading] = useState(false);
   const [reloadedItself, setReloadedItself] = useState(false);
-  // The text a reload replaced. A reopened note with other text took in the
-  // change, so it may reload by itself again. One with the same text did
-  // not, and reloading it again would only repeat that.
+  // The content a reload replaced. A reopened note with other content took
+  // in the change, so it may reload by itself again. One with the same
+  // content did not, and reloading it again would only repeat that. A Try
+  // again after a refused open keeps the earlier snapshot.
   const engineDocRef = useRef(engine.doc);
   engineDocRef.current = engine.doc;
   const replacedText = useRef<string | null>(null);
   const reloadChangedOutside = useCallback(() => {
-    replacedText.current = engineDocRef.current?.getXmlFragment("body").toString() ?? null;
+    replacedText.current = noteContent(engineDocRef.current) ?? replacedText.current;
     setReloading(true);
     onRetryEngineOpen();
   }, [onRetryEngineOpen]);
@@ -744,7 +756,7 @@ export function MarkdownView(props: {
   useEffect(() => {
     if (!reloadsItself) return;
     setReloadedItself(true);
-    if (!engine.localEditsPending()) reloadChangedOutside();
+    if (!engine.unsavedEditsPending()) reloadChangedOutside();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadsItself, reloadChangedOutside]);
   const changedOutsideNotice = engine.outsideWriteWaiting || engine.changedOutside === "unsaved" ||
@@ -756,7 +768,7 @@ export function MarkdownView(props: {
     if (!reloadedBound) return;
     setReloading(false);
     setReloadedSign((count) => count + 1);
-    if (engine.doc?.getXmlFragment("body").toString() !== replacedText.current) setReloadedItself(false);
+    if (noteContent(engine.doc) !== replacedText.current) setReloadedItself(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);

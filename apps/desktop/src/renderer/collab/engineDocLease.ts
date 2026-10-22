@@ -347,7 +347,7 @@ type EngineDocSession = {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => EngineDocLeaseSnapshot;
   // Edits this editor made that main has not confirmed, asked at the moment.
-  localEditsPending: () => boolean;
+  unsavedEditsPending: () => boolean;
   start: () => void;
   dispose: () => Promise<void>;
   whenClosed: () => Promise<void>;
@@ -555,7 +555,7 @@ function createEngineDocSession(
   // A change to the document from any origin, an agent's edit through main
   // included, after main said nothing was unsaved.
   let changedSinceCleanSignal = false;
-  const localEditsPending = (): boolean =>
+  const unsavedEditsPending = (): boolean =>
     deliveryPending || localSeq.current > confirmedLocalSeq || changedSinceCleanSignal;
   // The file changed outside dohc. Edits main has not confirmed are unsaved
   // whatever main counted, so the document must not reload over them.
@@ -1058,7 +1058,7 @@ function createEngineDocSession(
       captureDeletion(doc, cause);
       return;
     }
-    if (event.changedOutside) noteChangedOutside(event.changedOutside.unsaved || localEditsPending());
+    if (event.changedOutside) noteChangedOutside(event.changedOutside.unsaved || unsavedEditsPending());
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
@@ -1336,7 +1336,7 @@ function createEngineDocSession(
     getSnapshot() {
       return snapshot;
     },
-    localEditsPending,
+    unsavedEditsPending,
     start() {
       if (started) return;
       started = true;
@@ -1633,8 +1633,8 @@ function createEngineDocLease(
     getSnapshot() {
       return snapshot;
     },
-    localEditsPending() {
-      return activeSession?.localEditsPending() ?? false;
+    unsavedEditsPending() {
+      return activeSession?.unsavedEditsPending() ?? false;
     },
     startAfter(barrier) {
       if (started) return;

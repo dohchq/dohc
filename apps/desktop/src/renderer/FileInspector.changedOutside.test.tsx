@@ -70,7 +70,7 @@ function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"])
     permanentFailureWhileEditing: false,
     changedOutside,
     outsideWriteWaiting: false,
-    localEditsPending: () => false,
+    unsavedEditsPending: () => false,
     readOnlyWhileEditing: false,
     readOnlyDraftId: null,
     readOnlyCause: null,
@@ -153,6 +153,21 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
   });
 
+  it("reloads by itself after a frontmatter-only change, and again for a body change", async () => {
+    await openNote();
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    // The first outside change touched only the frontmatter.
+    setEngine(engineState(markdownToYDoc("---\ntitle: Trip\n---\n# Plan\n"), null));
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+    setEngine(engineState(markdownToYDoc("---\ntitle: Trip\n---\n# Plan\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    setEngine(engineState(markdownToYDoc("---\ntitle: Trip\n---\n# Plan for Lisbon\n"), null));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+  });
+
   it("asks instead of reloading again when the reopened note shows the same text", async () => {
     await openNote();
     setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
@@ -165,7 +180,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
 
   it("does not reload by itself over an edit main has not confirmed", async () => {
     await openNote();
-    setEngine({ ...engineState(markdownToYDoc("# Plan typed\n"), "saved"), localEditsPending: () => true });
+    setEngine({ ...engineState(markdownToYDoc("# Plan typed\n"), "saved"), unsavedEditsPending: () => true });
     expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
     expect(retryKeys).toEqual([0]);
   });
