@@ -44,6 +44,8 @@ import {
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
+import { SERVER_TRIGGERS_ELSEWHERE, type ServerDataset } from "@dohc/automation-executor/collection-automations";
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import { PERSONAL_NEEDS_ACCOUNT } from "@dohc/automation-executor/automation-reach";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
@@ -1825,6 +1827,7 @@ ${step}`;
       pressedBy: async () => PRESSER,
       relayPress: async () => { throw new Error("Nothing relays here."); },
       relayInspect: async () => { throw new Error("Nothing relays here."); },
+      serverCollection: async () => null,
       inspectionAccount: async () => null,
       inspectionChanged: () => undefined,
       pressWindows: createPressWindows(() => null),
@@ -2197,6 +2200,68 @@ ${step}`;
     await expect(press(f, { recordId: invoice, pressId: pressId(10) })).rejects.toThrow(moved);
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
+  });
+
+  it("shows a Collection moved to the server as the server's, and never subscribes, schedules or presses it here", async () => {
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    // Each would run here if this computer still kept the Collection.
+    await f.writeAutomations(markPaid(settle) + closePaid("      - invoke: invoices.hold\n        input:\n          id: '=record.id'\n") + `  - id: nightly
+    name: Nightly
+    when: {schedule: day, timezone: UTC}
+    do:
+      - notify: Invoices to close
+        to: [user-owner]
+`);
+    // What the server answers: its approved rules and grants, and what it runs.
+    const server = { approved: f.host.automations.revision(BUDGET), generated: f.host.automations.generated(BUDGET), grants: f.host.automations.dataGrants(BUDGET) };
+    let runs: ServerDataset["runs"] = "all";
+    const asked: string[] = [];
+    // The Collection moved, so this computer's store keeps its transfer record.
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'imported',NULL,NULL,'{}')").run("workspace", BUDGET, id(400), "https://relay.example", "{}");
+    } finally { store.close(); }
+    // This computer runs the workspace's schedules, as the one that keeps the other Collections may.
+    const executor = f.makeExecutor({ groupHost: async () => 0,
+      serverDataset: async (datasetId) => { asked.push(datasetId); return datasetId === BUDGET ? { ...server, runs } : null; } });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    await executor.idle();
+    // Nothing here claims its record changes or its schedule, and a person asked nothing yet.
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    expect(executor.schedules()).toEqual([]);
+    expect(executor.hasHostTriggers()).toBe(false);
+    expect(asked).toEqual([]);
+    const { id: invoice } = await f.create({ [PAID]: false });
+    await f.edit(invoice, { [PAID]: true });
+    await executor.idle();
+    expect(f.claims()).toEqual([]);
+
+    const listed = await executor.automationsIn("Budget");
+    expect(listed).toMatchObject({ status: "read", onServer: { runs: true }, automations: [
+      { valid: true, automationId: BUTTON_AUTOMATION, cannotRun: null, lastRun: null, reach: { kind: "checked" } },
+      { valid: true, automationId: AUTOMATION, cannotRun: null, lastRun: null },
+      { valid: true, automationId: `collection:${BUDGET}#nightly`, cannotRun: null },
+    ] });
+    expect(await executor.datasetCollection(BUDGET)).toEqual({ status: "found", collectionPath: "Budget" });
+    const button = () => executor.datasetButtons(BUDGET, [{ field: "Mark paid", table: "Invoices" }], async () => owner(f));
+    // The button runs on the server, which takes the press after the person confirms what can't be undone.
+    expect(await button()).toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION, irreversible: [{ name: "invoices.settle", label: "Settle" }] }]);
+    await expect(press(f, { recordId: invoice, pressId: pressId(40), confirmed: ["invoices.settle"] })).rejects.toThrow("not approved");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
+
+    // The server runs schedules only when Schedules run on names it.
+    runs = "no-schedules";
+    expect(await executor.automationsIn("Budget")).toMatchObject({ onServer: { runs: true }, automations: [
+      { cannotRun: null }, { cannotRun: null }, { cannotRun: SERVER_TRIGGERS_ELSEWHERE },
+    ] });
+    // A server that runs no automations runs none of them.
+    runs = "off";
+    expect(await executor.automationsIn("Budget")).toMatchObject({ onServer: { runs: false }, automations: [
+      { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF },
+    ] });
+    expect(await button()).toEqual([{ kind: "disabled", reason: AUTOMATION_SERVER_OFF }]);
+    expect(f.errors).toEqual([]);
   });
 
   it("runs a failed press again only for the person who pressed it or the owner", async () => {

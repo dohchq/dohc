@@ -15,6 +15,8 @@ import type { CollectionsRefusalError } from "./collectionsHolder";
 import { ipcWireError, SERVER_COLLECTIONS_UNAVAILABLE } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
+import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
+import type { AutomationPressActor } from "@dohc/workspace-engine-client";
 
 type RuntimeDatasetHost = ReturnType<typeof createDatasetHost>;
 
@@ -48,7 +50,25 @@ export interface OwnerDatasetData {
   file(input: Extract<DatasetRequest, { action: "file" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; bytesBase64: string }>;
   permissions?(input: Extract<DatasetRequest, { action: "permissions" }>): Promise<DatasetPermissionsPage>;
   setGrant?(input: Extract<DatasetRequest, { action: "setGrant" | "removeGrant" }>): Promise<void>;
+  /** Presses a button on the server, which runs its automation. The owner's route only. */
+  press?(input: DatasetServerPressInput): Promise<CollectionAutomationPress>;
 }
+
+/** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
+export type RemoteDatasetData = OwnerDatasetData & Required<Pick<OwnerDatasetData, "permissions" | "press">>;
+
+/** A press the server runs: who pressed is the server's to know; an agent that pressed for them is provenance. */
+export interface DatasetServerPressInput {
+  datasetId: string; table: string; field: string; recordId: string; pressId: string;
+  /** The names of the actions the person was told can't be undone and chose to run. */
+  confirmed: readonly string[];
+  by: AutomationPressActor;
+}
+const PressAnswer = z.union([
+  z.object({ busy: z.literal(true) }).strict(),
+  z.object({ busy: z.literal(false), claimId: z.string().min(1).max(256),
+    settled: z.object({ outcome: z.enum(["done", "skipped", "failed", "ended"]), error: z.string().max(4096).nullable() }).strict().nullable() }).strict(),
+]);
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const artifacts = z.object({
@@ -65,7 +85,7 @@ export function createRemoteDatasetData(input: {
   shareId?: string;
   currentCredentialGeneration(): number; assertCurrent(): void;
   relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
-}): OwnerDatasetData {
+}): RemoteDatasetData {
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration,
     currentGeneration: input.currentCredentialGeneration, assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
   const base = input.shareId === undefined ? `/sync/${encodeURIComponent(input.workspaceId)}/datasets` : `/sync/shares/${encodeURIComponent(input.shareId)}/datasets`;
@@ -121,6 +141,12 @@ export function createRemoteDatasetData(input: {
       if (value.after) query.set("after", value.after);
       if (value.limit) query.set("limit", String(value.limit));
       return DatasetPermissionsPage.parse(await request(`${path(value.datasetId)}/permissions${query.size ? `?${query}` : ""}`));
+    },
+    async press(value) {
+      if (input.shareId !== undefined) throw new Error("Open the original workspace to press this button.");
+      const { datasetId, table, field, recordId, pressId, confirmed, by } = value;
+      return PressAnswer.parse(await request(`${path(datasetId)}/press`, { table, field, recordId, pressId, confirmed: [...confirmed],
+        ...(by.kind === "agent" ? { agent: { originId: by.originId, depth: by.depth } } : {}) }));
     },
     async setGrant(value) {
       const result = await request(`${path(value.datasetId)}/grants`, value.action === "setGrant"
@@ -264,7 +290,7 @@ export function createServerCollectionsData(input: Omit<Parameters<typeof create
   /** "missing" when the server answers that it has no such workspace or Collection for this account. */
   relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }>;
   elsewhere: CollectionsRefusalError;
-}): OwnerDatasetData {
+}): RemoteDatasetData {
   const { elsewhere, relayJson, ...remote } = input;
   if (!remote.credentials.relayUrl) throw elsewhere;
   const data = createRemoteDatasetData({ ...remote, async relayJson(credentials, path, init) {

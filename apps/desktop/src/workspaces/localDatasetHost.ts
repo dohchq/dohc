@@ -579,12 +579,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
               operationId: input.operationId, input: input.input, idempotencyKey: input.idempotencyKey, signal: signal(input.signal) });
           });
         },
-        /** Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read. */
+        /**
+         * Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read.
+         * A dataset moving or moved to a server is not here: the server runs its automations.
+         */
         datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> } {
           assertCurrent();
           const definitions: DatasetDefinition[] = [], failures: Array<{ datasetId: string; error: unknown }> = [];
           // Each dataset's rules are read on their own, so one that cannot be read hides no other.
           for (const datasetId of host.datasetIds(owner, { workspaceId })) {
+            if (transfers.status(datasetId) !== null) continue;
             try { definitions.push(host.approvedRevision(owner, { workspaceId, datasetId }).definition); }
             catch (error) { failures.push({ datasetId, error }); }
           }

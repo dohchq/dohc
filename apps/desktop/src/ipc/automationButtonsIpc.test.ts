@@ -9,10 +9,14 @@ import type { RelayButtonInspection, RelayButtonTarget } from "@dohc/workspace-c
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc, type NamedPress, type PressCaller } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
+import { createServerCollectionsData } from "../workspaces/remoteDataset";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRESS_ID = "4f2d3c1a-9b8e-4c7d-a6f5-0e1d2c3b4a59";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const SERVER_SESSION = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "user-main", token: "test-only", email: "main@example.test" };
+const KEPT_ELSEWHERE = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-studio", label: "Studio Mac" }, sameName: false });
 const ownerButtonId = (target: RelayButtonTarget) => `collection:${target.collectionPath.replaceAll("/", "-")}#${target.automationId}`;
 
 class FakeWindow {
@@ -54,6 +58,8 @@ function fixture(options: {
   inspection?: RelayButtonInspection;
   inspect?: (targets: readonly RelayButtonTarget[]) => Promise<RelayButtonInspection[]>;
   fields?: string[];
+  /** The dataset is on the workspace's server: this fake relay answers its presses. */
+  server?: (path: string, body: unknown) => unknown;
 } = {}) {
   const handlers = new Map<string, (event: { sender: FakeWindow }, payload: unknown) => unknown>();
   const window = new FakeWindow();
@@ -78,6 +84,8 @@ function fixture(options: {
       return pressed;
     }),
   };
+  const serverRelay = options.server === undefined ? null : vi.fn(async (_credentials: unknown, path: string, init: RequestInit) =>
+    ({ kind: "success" as const, body: options.server!(path, JSON.parse(String(init.body))) }));
   const buttonFields = vi.fn(async () => options.fields ?? ["Mark paid"]);
   const relayPress = vi.fn(async (_operation: unknown, _input: { pressId: string; automationId: string; recordId: string }) => undefined);
   const relayInspect = vi.fn(async (_operation: unknown, targets: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]> =>
@@ -128,6 +136,10 @@ function fixture(options: {
     relayInspect,
     inspectionAccount: async () => account,
     inspectionChanged: () => window.send(CHANNELS.collectionAutomationsChanged, { workspaceId: WORKSPACE_ID }),
+    // The server's data as main makes it on a computer that doesn't keep the Collections.
+    serverCollection: async () => serverRelay === null ? null : { data: createServerCollectionsData({
+      workspaceId: WORKSPACE_ID, credentials: SERVER_SESSION, credentialGeneration: 1, signal: new AbortController().signal,
+      currentCredentialGeneration: () => 1, assertCurrent() {}, relayJson: serverRelay, elsewhere: KEPT_ELSEWHERE }) },
     recordAt,
     describeDataset,
     pressedBy: async () => "user-main",
@@ -161,7 +173,7 @@ function fixture(options: {
     account = next;
     refreshSharedButtonInspections(presses.clearInspections, [WORKSPACE_ID], workspaceId => window.send(CHANNELS.collectionAutomationsChanged, { workspaceId }));
   };
-  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, readText, relayPress, relayInspect, describeDataset, window, pressWindows, invoice, changeAccount, credentialsChanged };
+  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, readText, relayPress, relayInspect, describeDataset, window, pressWindows, invoice, changeAccount, credentialsChanged, serverRelay };
 }
 
 async function expectCallerDescriptions(
@@ -605,6 +617,40 @@ describe("pressing a button", () => {
     expect(f.executor.press).not.toHaveBeenCalled();
     const busy = fixture({ described: ["list", "add"], pressed: { busy: true } });
     await expect(busy.pressDataset()).resolves.toEqual({ busy: true, reason: "Running for this record." });
+  });
+
+  it("sends a press on a Collection on the server to the server, for the person or their agent, and runs nothing here", async () => {
+    const claimId = "b".repeat(64);
+    const bodies: unknown[] = [];
+    const f = fixture({ datasetIn: id(1), described: ["list", "add"], buttons: { Invoices: ["Mark paid"] },
+      server: (_path, body) => { bodies.push(body); return { busy: false, claimId, settled: null }; } });
+    // The window's button is free again at once: the server runs it, and a failure arrives as the server's notice.
+    await expect(f.pressDataset({ recordId: "12", confirmed: ["sendInvoice"] })).resolves.toEqual({ busy: false, relayed: true });
+    // An agent's press names the agent and its depth, and the server answers with its run.
+    await expect(f.named({}, { kind: "agent", originId: "agent-run-7", depth: 2 })).resolves.toEqual({ busy: false, claimId, settled: null });
+    expect(f.serverRelay!.mock.calls.map(([, path, init]) => [path, init.method, init.redirect])).toEqual([
+      [`/sync/${WORKSPACE_ID}/datasets/${id(1)}/press`, "POST", "error"],
+      [`/sync/${WORKSPACE_ID}/datasets/${id(1)}/press`, "POST", "error"],
+    ]);
+    // Who pressed is the server's to know from the session; the body never names a person.
+    expect(bodies).toEqual([
+      { table: "Invoices", field: "Mark paid", recordId: "12", pressId: PRESS_ID, confirmed: ["sendInvoice"] },
+      { table: "Invoices", field: "Mark paid", recordId: "12", pressId: expect.stringMatching(/^[0-9a-f-]{36}$/u), confirmed: [],
+        agent: { originId: "agent-run-7", depth: 2 } },
+    ]);
+    // The server remembers its presses, so the CLI's checks the button as a new press.
+    expect(f.executor.datasetPressed).not.toHaveBeenCalled();
+    expect(f.executor.datasetButtons).toHaveBeenCalledOnce();
+    expect(f.executor.pressDataset).not.toHaveBeenCalled();
+    expect(f.window.sent).toEqual([]);
+    // A run the server already ended says how; one busy for someone else says so.
+    const ended = fixture({ server: () => ({ busy: false, claimId, settled: { outcome: "done", error: null } }) });
+    await expect(ended.pressDataset()).resolves.toEqual({ busy: false, claimId, settled: { outcome: "done", error: null } });
+    const busy = fixture({ server: () => ({ busy: true }) });
+    await expect(busy.pressDataset()).resolves.toEqual({ busy: true, reason: "Running for this record." });
+    // An answer that is not a press is refused.
+    const odd = fixture({ server: () => ({ busy: false, claimId, settled: null, pressedBy: "someone" }) });
+    await expect(odd.pressDataset()).rejects.toThrow();
   });
 
   it("refuses a press that names both a folder and a dataset, a dataset press with no table, and one that names a person", async () => {
