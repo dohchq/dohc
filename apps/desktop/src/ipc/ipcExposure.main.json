@@ -122,6 +122,7 @@
     "desktop:import-workspace-files",
     "desktop:install-update",
     "desktop:join-shared-channel",
+    "desktop:keep-collections-here",
     "desktop:leave-dm",
     "desktop:leave-shared-channel",
     "desktop:links-edges",
@@ -364,6 +365,7 @@
     "desktop:retry-automation-notice": "trusted-sender",
     "desktop:undo-history-operation": "trusted-sender",
     "desktop:set-agent-color": "active-workspace",
+    "desktop:keep-collections-here": "active-workspace",
     "desktop:links-in": "active-workspace",
     "desktop:links-resolve": "active-workspace",
     "desktop:links-edges": "active-workspace"

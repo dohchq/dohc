@@ -963,12 +963,14 @@ Each verb takes one JSON object that names workspaceId. Find workspaceId in .doh
 
 List Collections.
 
+On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others.
+
 - `workspaceId`: `string`. Required.
 - `after`: `UUID`
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
 
 #### `dohc dataset describe`
 

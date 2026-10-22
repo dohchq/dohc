@@ -477,6 +477,7 @@ function shareUnjournalableNotice(
     "non-utf8",
     "non-file-replacement",
     "local-collision",
+    "spelling-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -512,6 +513,14 @@ function shareUnjournalableNotice(
         `dohc could not receive ${names}. ` +
           `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
           `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
+      );
+    } else if (reason === "spelling-collision") {
+      const owner = one ? group[0]!.owner : undefined;
+      lines.push(
+        `dohc could not receive ${names}. ` +
+          (owner === undefined
+            ? "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."
+            : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`),
       );
     } else {
       lines.push(
@@ -862,6 +871,7 @@ export function DesktopWorkspaceShell(props: {
     runShellErrorAction,
     clearIdentity,
     privacySettingsAction,
+    keepCollectionsHere,
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
@@ -1668,7 +1678,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -1705,6 +1715,16 @@ export function DesktopWorkspaceShell(props: {
     };
     refresh();
   }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportShellError]);
+  // Reads the Collections list again, as Try again beside a list that could not be read.
+  const retryCollectionsList = useCallback(() => {
+    void refreshDatasets().catch(error => {
+      if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error);
+    });
+  }, [refreshDatasets, reportShellError, workspaceAdmission]);
+  // Keeps Collections no computer keeps yet on this one, then reads the list, and runs `then`, such as a tab's own read.
+  const keepCollectionsWithList = useCallback((then?: () => void) => {
+    keepCollectionsHere(() => { retryCollectionsList(); then?.(); });
+  }, [keepCollectionsHere, retryCollectionsList]);
   // One issue counter for every engine read the shell orders: the history
   // page, the status lanes, the workspace open, the agent observation, and
   // the version callbacks. Bumped on unmount, so a slow response for one
@@ -4666,6 +4686,10 @@ export function DesktopWorkspaceShell(props: {
         onOpenDataCollection={openDataCollection}
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
         onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
+        collectionsRefusal={collectionsRefusal}
+        collectionsElsewhere={collectionsElsewhere}
+        onKeepCollections={keepCollectionsWithList}
+        onRetryCollections={retryCollectionsList}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -5729,6 +5753,7 @@ export function DesktopWorkspaceShell(props: {
                   owner={!shareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={collectionReports.onError}
+                  onKeepCollections={keepCollectionsWithList}
                   onSettled={collectionReports.onSettled}
                   onNotice={collectionReports.onNotice}
                   historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}

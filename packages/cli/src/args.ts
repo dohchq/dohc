@@ -793,7 +793,10 @@ const migrationApproval = "Review the result, then approve it with approveMigrat
 const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
-  list: { summary: "List Collections." },
+  list: {
+    summary: "List Collections.",
+    notes: ["On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others."],
+  },
   describe: {
     summary: "Show a Collection's tables, fields, and operations.",
     notes: ["Use describe to find approved operation IDs."],

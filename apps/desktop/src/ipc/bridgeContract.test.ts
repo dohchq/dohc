@@ -1387,6 +1387,7 @@ describe("shared view refresh IPC contract", () => {
         unjournalablePaths: [
           { path: "docs/oversized.md", reason: "oversized-text" },
           { path: "docs/local.md", reason: "local-collision" },
+          { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
         ],
         refusedOps: 0,
         refusedDetail: null,
@@ -1399,6 +1400,7 @@ describe("shared view refresh IPC contract", () => {
       unjournalablePaths: [
         { path: "docs/oversized.md", reason: "oversized-text" },
         { path: "docs/local.md", reason: "local-collision" },
+        { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
       ],
       refusedOps: 0,
       refusedDetail: null,
