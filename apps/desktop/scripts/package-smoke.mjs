@@ -175,6 +175,23 @@ if (config) {
   for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
     check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
   }
+  // deb.depends replaces electron-builder's default list (app-builder-lib's
+  // FpmTarget.getDefaultDepends), so it must repeat that list. A missing
+  // library still installs, then the app does not start.
+  for (const dependency of [
+    "libgtk-3-0",
+    "libnotify4",
+    "libnss3",
+    "libxss1",
+    "libxtst6",
+    "xdg-utils",
+    "libatspi2.0-0",
+    "libuuid1",
+    "libsecret-1-0",
+    "libasound2t64 | libasound2",
+  ]) {
+    check(config.deb?.depends?.includes(dependency), `the .deb depends on ${dependency}`);
+  }
   check(
     Array.isArray(config.protocols) &&
       config.protocols.length === 1 &&

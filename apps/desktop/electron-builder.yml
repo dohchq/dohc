@@ -161,6 +161,20 @@ appImage:
 deb:
   # A package names who answers for it. The homepage is package.json's.
   maintainer: dohc <sup@dohc.computer>
+  # electron-builder's default list, plus ALSA. Electron links libasound.so.2,
+  # which a minimal or server Ubuntu lacks, and setting depends replaces the
+  # default list. Ubuntu 24.04 renamed the package libasound2t64.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libasound2t64 | libasound2
 
 # macOS ranks: dohc edits Markdown as its own documents, so it may be their
 # default app, but it never claims to own the type. For text, CSV and JSON it
