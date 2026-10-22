@@ -192,10 +192,14 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     return commit(work);
   }
   /**
-   * Without the session check, so admitted Collection creates still record
-   * their outcomes while the host closes. The record check stays, before
-   * the work and again after it: a record that changed while the work ran
-   * rolls the work back, savepoint or transaction.
+   * Every write to the store, its schema too, runs through here: through
+   * `transaction`, or directly where it must skip the session check, so
+   * admitted Collection creates still record their outcomes while the host
+   * closes. Only the claims, in openHeldStore and adoptLocalDatasetStore,
+   * write outside it, before the record names the store, and the read-only
+   * History thread reads through its own connection. The record check runs
+   * before the work and again after it: a record that changed while the
+   * work ran rolls the work back, savepoint or transaction.
    */
   function commit<T>(work: () => T): T {
     assertHeld();
