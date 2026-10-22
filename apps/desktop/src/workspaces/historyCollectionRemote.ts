@@ -32,3 +32,29 @@ export function createHistoryCollectionRemote(options: {
     }
   });
 }
+
+/**
+ * History's Collections on a computer that doesn't keep the workspace's
+ * own: the ones its server lists, each read from there. If the server
+ * doesn't list them, History shows files and documents without them, as
+ * it does when this computer isn't signed in.
+ */
+export function serverHistorySources(data: Pick<OwnerDatasetData, "list">, current: () => void): TimelineReads["local"] {
+  const heads = (sourceIds: string[], sourceCount: number) => ({ transferred: sourceIds, sourceIds, sourceCount, pages: [] });
+  return async (_positions, _limit, sourceIds) => {
+    if (sourceIds) return heads(sourceIds, 0);
+    const listed: string[] = [];
+    try {
+      let after: string | undefined;
+      do {
+        const page = await data.list({ after, limit: 100 }); current();
+        listed.push(...page.datasets.map(dataset => dataset.datasetId));
+        after = page.nextCursor ?? undefined;
+      } while (after);
+    } catch {
+      current();
+      return heads([], 0);
+    }
+    return heads(listed, listed.length);
+  };
+}

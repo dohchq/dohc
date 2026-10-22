@@ -39,6 +39,25 @@ describe("dataset CLI", () => {
     const revision = { datasetId: id(1), revision: 1, revisionSha256: "d".repeat(64), definition: { ...definition, schemaPath: "../equipment/schema.sql", operationsPath: "../equipment/actions.ts" }, definitionSha256: "a".repeat(64), schemaSha256: "b".repeat(64), operationsSha256: "c".repeat(64) };
     expect(DatasetResult.parse({ kind: "approved", revision })).toEqual({ kind: "approved", revision });
   });
+  it("names the server it asked and the computer that keeps the other Collections, apart from an empty list or a failure", async () => {
+    const dataset = { datasetId: id(1), name: "Equipment", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [], datasetPath: "equipment/dataset.json" };
+    const elsewhere = { server: "https://relay.example", computer: { label: "Laptop", sameName: false } };
+    const listed = { kind: "list", datasets: [dataset], nextCursor: null, elsewhere };
+    expect(DatasetResult.parse(listed)).toEqual(listed);
+    for (const invalid of [{ ...elsewhere, server: "relay" }, { ...elsewhere, computer: { label: "", sameName: false } }, { ...elsewhere, computer: { label: "Laptop" } },
+      { ...elsewhere, installId: "install-laptop" }, { ...elsewhere, computer: { ...elsewhere.computer, installId: "install-laptop" } }]) {
+      expect(DatasetResult.safeParse({ ...listed, elsewhere: invalid }).success).toBe(false);
+    }
+    const list = (answer: () => Promise<unknown>) => executeCli({ argv: ["dataset", "list", JSON.stringify({ workspaceId: "workspace" }), "--json"], env: {}, request: answer });
+    const server = await list(async () => listed);
+    expect(server.exitCode).toBe(0);
+    expect(JSON.parse(server.stdout)).toMatchObject({ kind: "list", elsewhere });
+    const empty = await list(async () => ({ kind: "list", datasets: [], nextCursor: null, elsewhere }));
+    expect(empty.exitCode).toBe(0);
+    expect(JSON.parse(empty.stdout)).toMatchObject({ datasets: [], elsewhere });
+    const failed = await list(async () => { throw new Error("dohc could not reach the server."); });
+    expect(failed).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc could not reach the server.\n" });
+  });
   it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
       retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };

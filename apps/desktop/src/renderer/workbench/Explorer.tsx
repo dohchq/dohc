@@ -126,6 +126,9 @@ export interface ExplorerProps {
   // words, such as another computer keeping them. The section says so in
   // place of the list.
   collectionsRefusal?: { kind: CollectionsRefusalKind; words: string } | null;
+  // Another computer keeps the workspace's Collections, and the list holds
+  // the ones on this computer's server. These words name that computer.
+  collectionsElsewhere?: string | null;
   onKeepCollections?: () => void;
   onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -1646,7 +1649,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
           {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
@@ -1655,8 +1658,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
+          {props.collectionsElsewhere && <CollectionsElsewhereRow words={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
           </>}
         </section>}
         <section
@@ -2037,6 +2041,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 });
 
+// Below the Collections on this computer's server: the computer that keeps
+// the workspace's other Collections, where a move to a server starts.
+function CollectionsElsewhereRow({ words, onKeep }: { words: string; onKeep?: () => void }) {
+  return (
+    <div data-testid="collections-elsewhere" className="flex flex-col items-start gap-1.5 px-2 py-1">
+      <p className="m-0 flex gap-1.5 text-[12px] text-muted">
+        <Laptop size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
+        <span className="wrap-anywhere">{words}</span>
+      </p>
+      {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+    </div>
+  );
+}
+
 // The Collections section when this computer cannot use them: where they
 // are, or what went wrong, and the one step that helps.
 function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
@@ -2053,8 +2071,8 @@ function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
         <span className="wrap-anywhere">{refusal.words}</span>
       </p>
       <div className="flex flex-wrap gap-1.5">
-        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton size="compact" data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
-        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton size="compact" onClick={() => onRetry()}>Try again</SecondaryButton>}
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>}
       </div>
     </div>
   );

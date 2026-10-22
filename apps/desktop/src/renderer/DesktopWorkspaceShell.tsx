@@ -1678,7 +1678,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -4687,6 +4687,7 @@ export function DesktopWorkspaceShell(props: {
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
         onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
         collectionsRefusal={collectionsRefusal}
+        collectionsElsewhere={collectionsElsewhere}
         onKeepCollections={keepCollectionsWithList}
         onRetryCollections={retryCollectionsList}
         onBeginChanges={beginDraftOperation}
