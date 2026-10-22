@@ -72,6 +72,8 @@
   "desktop:resolve-workspace-version-conflict": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-kept-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:save-kept-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-retained-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:delete-retained-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:try-in-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-try-in-version-state": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-try-in-version-review": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

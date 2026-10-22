@@ -81,8 +81,8 @@ pub use limits::{
 pub use materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, JobStatus,
     MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    RetainedDisplacement, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
-    pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
+    RetainedDisplacement, RetainedSummary, cancel_pending_jobs_for_path, enqueue_delete_job,
+    enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
     upsert_projection_job,
 };
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};

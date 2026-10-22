@@ -42,6 +42,8 @@ const captureRequests = [
   [ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" }],
   [ops.listKeptCopies.channel, { workspaceId }],
   [ops.saveKeptCopy.channel, { workspaceId, id: 7 }],
+  [ops.listRetainedCopies.channel, { workspaceId }],
+  [ops.deleteRetainedCopies.channel, { workspaceId, copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
 ] as const;
 const allRequests = [
   ...captureRequests,
@@ -62,6 +64,8 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
     listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
     saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return { status: "saved", path: "notes (kept copy).md" }; }),
+    listRetainedCopies: vi.fn<Operations["listRetainedCopies"]>(async () => { steps.push("retained"); return { copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }; }),
+    deleteRetainedCopies: vi.fn<Operations["deleteRetainedCopies"]>(async () => { steps.push("delete retained"); return { deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } }; }),
   };
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");
@@ -106,7 +110,7 @@ describe("registered workspace version handlers", () => {
   it.each(allRequests)("refuses %s from a window showing another workspace", async (channel, payload) => {
     const h = harness();
     await expect(h.invoke(channel, payload, "other-workspace")).rejects.toThrow(
-      ops.listWorkspaceVersions.inactiveMessage,
+      Object.values(ops).find(op => op.channel === channel)!.inactiveMessage,
     );
     expect(h.steps).toEqual([]);
   });
@@ -172,6 +176,23 @@ describe("registered workspace version handlers", () => {
     await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 }))
       .resolves.toEqual({ status: "no-valid-name" });
     expect(h.notifyRenderer).toHaveBeenCalledOnce();
+  });
+
+  it("lists old file copies and deletes only listed ones with the late-write risk accepted", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.listRetainedCopies.channel, { workspaceId }))
+      .resolves.toEqual({ copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } });
+    for (const payload of [
+      { workspaceId, copies: [{ id: 3, revision: 10 }] },
+      { workspaceId, copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: false },
+      { workspaceId, copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })), acceptLateWriteRisk: true },
+    ]) {
+      await expect(h.invoke(ops.deleteRetainedCopies.channel, payload)).rejects.toThrow();
+    }
+    expect(h.operations.deleteRetainedCopies).not.toHaveBeenCalled();
+    await expect(h.invoke(ops.deleteRetainedCopies.channel, { workspaceId, copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }))
+      .resolves.toEqual({ deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } });
+    expect(h.operations.deleteRetainedCopies).toHaveBeenCalledExactlyOnceWith([{ id: 3, revision: 10 }]);
   });
 
   it("switches through the capture owner and returns its changed-file count", async () => {

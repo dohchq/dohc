@@ -117,6 +117,7 @@ import { useUsageRecordStops } from "./shell/usageRecordStops";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
+import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -853,6 +854,7 @@ export function DesktopWorkspaceShell(props: {
     reportDriveLimit,
     reportNetworkShare,
     reportKeptFiles,
+    showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -5064,6 +5066,15 @@ export function DesktopWorkspaceShell(props: {
     report: reportKeptFiles,
     openFolder: revealRecoveryWorkspace,
   });
+  const retainedCopiesDialog = useRetainedCopiesNotice({
+    workspaceId,
+    workspaceName: workspaceName(props.workspace),
+    summary: syncStatus?.retainedCopies,
+    show: showRetainedCopies,
+    showDone: showSuccessNotice,
+    report: reportShellFailure,
+    reportError: reportShellError,
+  });
   // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
@@ -6544,6 +6555,7 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
+      {retainedCopiesDialog}
     </div>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>

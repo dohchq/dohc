@@ -196,6 +196,27 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
 
+### `dohc_list_retained_copies`
+
+List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.
+
+A shared view keeps no old file copies, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, copies: { id, revision }[], more, total: { count, bytes } } | { ok: false, reason }`.
+
+### `dohc_delete_retained_copies`
+
+Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `copies`: `({ id: integer, revision: integer })[]`. Required.
+- `acceptLateWriteRisk`: `true`. Required.
+
+Returns `{ ok: true, deleted, skipped, failed, remaining: { count, bytes } } | { ok: false, reason }`.
+
 ### `dohc_read_change`
 
 Read one history entry by id: a workspace-engine moment with its full before/after payload.

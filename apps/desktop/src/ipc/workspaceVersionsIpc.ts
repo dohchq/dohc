@@ -17,6 +17,8 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "resolveConflict"
   | "listKeptCopies"
   | "saveKeptCopy"
+  | "listRetainedCopies"
+  | "deleteRetainedCopies"
 >;
 
 export function workspaceVersionHandlers(dependencies: {
@@ -119,6 +121,16 @@ export function workspaceVersionHandlers(dependencies: {
       const saved = await capture.saveKeptCopy(input.id);
       if (saved.status === "saved") notifyRenderer({ workspaceId: input.workspaceId });
       return saved;
+    },
+
+    async listRetainedCopies(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.listRetainedCopies();
+    },
+
+    async deleteRetainedCopies(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.deleteRetainedCopies(input.copies);
     },
 
     async listWorkspaceVersionConflicts(input) {

@@ -76,6 +76,10 @@ import {
   type ChangeAttributionWire,
   type KeptCopy,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopiesSummary,
+  type RetainedCopy,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
@@ -655,6 +659,11 @@ export interface WorkspaceEngineCapture {
   // visible copy beside its file.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Old versions of files kept on a drive that cannot tell dohc whether a
+  // program still has one open. dohc never deletes them itself; these list
+  // and delete them for a person or agent who accepted that risk.
+  listRetainedCopies(): Promise<RetainedCopiesListResult>;
+  deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
@@ -838,6 +847,7 @@ export interface WorkspaceEngineCaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
+  onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
@@ -4247,6 +4257,7 @@ export function createWorkspaceEngineCapture(
         if (status?.noAtomicPlacement) options.onAtomicPlacementUnavailable?.();
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
+          options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onHeldFiles?.(status.heldFiles);
         }
@@ -6632,6 +6643,14 @@ export function createWorkspaceEngineCapture(
 
     async saveKeptCopy(id) {
       return await (await engineStore()).saveKeptCopy(id);
+    },
+
+    async listRetainedCopies() {
+      return await (await engineStore()).listRetainedCopies();
+    },
+
+    async deleteRetainedCopies(copies) {
+      return await (await engineStore()).deleteRetainedCopies(copies);
     },
 
     resolveConflict(conflictId, resolution) {

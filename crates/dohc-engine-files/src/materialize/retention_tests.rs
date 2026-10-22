@@ -94,6 +94,9 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                     }
                 }
                 Inspection::Oversized => store.keep_oversized_retained(&row, now).unwrap(),
+                Inspection::BusyCheck { unsupported } => {
+                    store.record_retained_busy_check(&row, unsupported).unwrap()
+                }
                 Inspection::Keep => {}
             }
         }
@@ -151,6 +154,43 @@ fn p0_thousand_settles_bound_staging_and_save_latency() {
         late <= early * 3 + 1000,
         "save latency grew: {early} -> {late}us"
     );
+}
+/// #2205: on a volume that cannot refuse to unlink an open file, a replace
+/// records why its original stays, and the sweep never releases it.
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn an_unchecked_volume_keeps_every_original_and_counts_it() {
+    let scratch = ScratchDir::new_named("unchecked-originals").unwrap();
+    let root = scratch.path();
+    let _simulated = crate::retained::unchecked::simulate(root);
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"v0").unwrap();
+    for n in 1..=3 {
+        let before = format!("v{}", n - 1);
+        let after = format!("v{n}");
+        let j = job(
+            &mut store,
+            &format!("settle-{n}"),
+            "notes.md",
+            before.as_bytes(),
+            after.as_bytes(),
+            n,
+        );
+        assert_eq!(
+            materialize_one(&store, root, &j, &options(n, &StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+    }
+    let rows = store.retained_displacements_after(0).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.busy_check_unsupported));
+    sweep(&store, root, 1_000_000);
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 3);
+    assert_eq!(
+        store.retained_summary("ws").unwrap(),
+        dohc_engine_storage::RetainedSummary { count: 3, bytes: 6 }
+    );
+    assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"v3");
 }
 #[cfg(unix)]
 #[test]
@@ -568,10 +608,38 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         })
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
+    // The same bytes under a new identity are recorded once (#2205); the
+    // source is then released after its quiet period.
+    match inspect(root, store.database_path(), &row, 30_000, false, 0).unwrap() {
+        Inspection::Changed { current, bytes } => {
+            assert_eq!(bytes, b"before");
+            assert_eq!(current.digest, row.digest);
+            assert_ne!(current.device, row.device);
+            store
+                .record_retained_read(&row, &current, &bytes, 30_000)
+                .unwrap();
+        }
+        _ => panic!("a new identity is recorded once"),
+    }
+    let refreshed = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, store.database_path(), &row, 30_000, false, 0).unwrap(),
+        inspect(root, store.database_path(), &refreshed, 30_001, false, 0).unwrap(),
+        Inspection::Keep
+    ));
+    assert!(matches!(
+        inspect(root, store.database_path(), &refreshed, 60_000, false, 0).unwrap(),
         Inspection::Release(_)
     ));
+    // Another remount, with bytes changed meanwhile.
+    store
+        .read_with(|c| {
+            c.execute(
+                "UPDATE materialization_retained SET device='changed-device'",
+                [],
+            )
+        })
+        .unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
     match inspect(root, store.database_path(), &row, 30_001, false, 0).unwrap() {
@@ -1470,6 +1538,7 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
         mtime: "0:0".into(),
         ctime: "0:0".into(),
         changed_at_ms: 0,
+        busy_check_unsupported: false,
     };
     retained.displacement_id = store.retain_displacement(&retained).unwrap();
     let sibling = root.join(".dohc-write-displaced");

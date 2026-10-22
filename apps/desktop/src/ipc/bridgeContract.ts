@@ -1307,6 +1307,13 @@ const SYNC_STATUS_BASE_FIELDS = {
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
+  // Old versions of files the engine keeps on a drive that cannot tell it
+  // whether a program still has one open, so it never deletes them: how
+  // many, and their logical size in bytes. Omitted until the engine reports.
+  retainedCopies: z.object({
+    count: z.number().int().nonnegative(),
+    bytes: z.number().int().nonnegative(),
+  }).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
@@ -3014,12 +3021,55 @@ export const SaveKeptCopyResult = z.discriminatedUnion("status", [
 ]);
 export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
 
+// Old versions of files the engine keeps on a drive that cannot tell it
+// whether a program still has one open. dohc never deletes them itself. A
+// list names those a delete may remove now, each with the revision the
+// delete must match; a delete takes at most 100 and accepts that a program
+// still using one may lose what it writes next.
+const RetainedCopiesSummary = z.object({
+  count: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+});
+export type RetainedCopiesSummary = z.infer<typeof RetainedCopiesSummary>;
+export const RetainedCopy = z.object({
+  id: z.number().int(),
+  revision: z.number().int(),
+});
+export type RetainedCopy = z.infer<typeof RetainedCopy>;
+export const ListRetainedCopiesResult = z.object({
+  copies: z.array(RetainedCopy),
+  more: z.boolean(),
+  total: RetainedCopiesSummary,
+});
+export type ListRetainedCopiesResult = z.infer<typeof ListRetainedCopiesResult>;
+export const MAX_RETAINED_COPIES_PER_DELETE = 100;
+export const DeleteRetainedCopiesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  copies: z.array(RetainedCopy).max(MAX_RETAINED_COPIES_PER_DELETE),
+  acceptLateWriteRisk: z.literal(true),
+});
+export const DeleteRetainedCopiesResult = z.object({
+  deleted: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  remaining: RetainedCopiesSummary,
+});
+export type DeleteRetainedCopiesResult = z.infer<typeof DeleteRetainedCopiesResult>;
+
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {
   scope: "workspace",
   guard: "active-workspace",
   inactiveMessage:
     "Versions stopped because this window changed workspaces. Open the workspace and try again.",
+} as const;
+
+// A window deletes old file copies only in the workspace open in it.
+const retainedCopiesGuard = {
+  scope: "workspace",
+  guard: "active-workspace",
+  inactiveMessage:
+    "dohc stopped deleting old file copies because this window changed workspaces. Open the workspace and try again.",
 } as const;
 
 export const workspaceVersionOperations = {
@@ -3067,6 +3117,16 @@ export const workspaceVersionOperations = {
     capabilityId: "file.kept.save",
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
+  },
+  listRetainedCopies: {
+    capabilityId: "file.retained.list",
+    channel: "desktop:list-retained-copies",
+    payload: WorkspaceIdPayload, result: ListRetainedCopiesResult, ...retainedCopiesGuard,
+  },
+  deleteRetainedCopies: {
+    capabilityId: "file.retained.delete",
+    channel: "desktop:delete-retained-copies",
+    payload: DeleteRetainedCopiesPayload, result: DeleteRetainedCopiesResult, ...retainedCopiesGuard,
   },
   tryInWorkspaceVersion: {
     capabilityId: "version.try",

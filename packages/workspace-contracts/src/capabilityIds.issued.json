@@ -252,5 +252,7 @@
   "file.duplicate",
   "collection.copies.left.read",
   "collection.copies.left.remove",
-  "dataset.holder.keep"
+  "dataset.holder.keep",
+  "file.retained.list",
+  "file.retained.delete"
 ]

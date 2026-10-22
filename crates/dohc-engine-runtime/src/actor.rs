@@ -45,6 +45,10 @@ mod materialization;
 mod relay;
 #[cfg(unix)]
 mod retained;
+#[cfg(unix)]
+pub use retained::{
+    RETAINED_COPIES_DELETE_LIMIT, RETAINED_COPIES_LIST_LIMIT, RetainedCandidate, RetainedDeletion,
+};
 mod search;
 mod secrets;
 mod versioned;

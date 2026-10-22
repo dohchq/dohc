@@ -84,6 +84,12 @@
     "saveKeptCopy": [
       "file.kept.save"
     ],
+    "retainedCopies": [
+      "file.retained.list"
+    ],
+    "deleteRetainedCopies": [
+      "file.retained.delete"
+    ],
     "documentEdit": [
       "document.edit"
     ],
