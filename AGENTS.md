@@ -200,7 +200,7 @@ Run the smallest check that proves the change.
 ## Pull requests and merging
 
 Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABLED`.
-While off, run PR verification locally. Manual GitHub checks use self-hosted Linux runners.
+While off, run PR verification locally. Manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
 When enabled, ready PRs from this repository use Blacksmith. Fork PRs still need local verification.
 Use passing cloud evidence instead of repeating full gates locally when it covers the change.
 Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).

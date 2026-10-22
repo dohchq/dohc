@@ -3,11 +3,11 @@
 This procedure is for the maintainer enabling paid CI at launch.
 Track the remaining public-contributor setup in [issue #1193](https://github.com/dohchq/dohc/issues/1193).
 
-## Keep cloud execution off
+## Keep automatic PR checks off
 
 The repository variable `BLACKSMITH_ENABLED` controls runner allocation in `PR checks`.
 An absent variable or `false` skips every PR job before a runner starts.
-Manual dispatch still uses registered self-hosted Linux x64 runners.
+While Blacksmith is off, manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.
 
 Inspect the switch:
 
@@ -123,8 +123,8 @@ Record the run URL and verification scope in the PR before artifacts expire.
 
 ## Turn it off
 
-Remove `PR verification` from required checks before turning cloud CI off.
+Remove `PR verification` from required checks before turning Blacksmith off.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-Resume local verification. Manual dispatch returns to self-hosted runners.
+Resume local verification. Manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.
