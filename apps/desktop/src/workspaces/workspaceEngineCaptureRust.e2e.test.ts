@@ -15,7 +15,6 @@ import type {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   VersionedLiveAdapter,
-  YdocReleasedWithSettleFailureError,
   isWorkspaceUpdatingRefusal,
   openEngineYdocProviderSession,
   type EngineTransport,
@@ -978,14 +977,12 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // deferred outside edit as above, but the user has unsettled edits when the
 // close runs: the close-settle refuses ConflictStaleTarget, and then the
 // release refuses too — a local-only prune needs the CRDT projection to equal
-// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
-// daemon reinserts the session entry on that refusal
-// (crates/dohc-workspace-engine/src/lib.rs, ydoc_close_inner). The doc stays
-// reserved, live, and unsaved, so the failure must stay loud. Deciding this
-// at the refusal instead of after the release reported "changed on disk" over
-// exactly this state.
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs). The outside
+// edit waits for this session, so the close evicts it: the disk version
+// stands and the unsettled text comes back as a recovered copy (#2463). The
+// save refusal still reads as an error, never as "changed on disk".
 it.skipIf(engine.missing)(
-  "keeps the close loud when unsettled edits meet a deferred outside edit",
+  "keeps unsettled edits in a recovered copy when their close meets a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
     const lifecycle = createRealDaemonLifecycle({
@@ -1045,40 +1042,13 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      const closeError = await session.close().then(
-        () => null,
-        (error: unknown) => error,
-      );
-      // The sharpest statement of the fix. The error the release throws here
-      // carries the stale-target message — the escalated settling release
-      // refuses the same way the settle did — while not being the
-      // released-with-settle-failure signal, because nothing was released.
-      // A downgrade keyed on the refusal's message would fire on exactly
-      // this; keyed on the type, it cannot.
-      expect(closeError).not.toBeNull();
-      expect(closeError).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
-      expect(String(closeError)).toContain("conflict-stale-target");
+      await expect(session.close()).resolves.toBeUndefined();
       expect(states.at(-1)).toBe("error");
       expect(states).not.toContain("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
 
-      // The refused close kept the session usable and its lease held. A
-      // second settle reaches the same stale target, and no capture moment
-      // can appear over that still-unsaved Y.Doc state.
-      await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-      expect(
-        await listDaemonPathMoments(sessions, workspace, "note.md"),
-      ).toHaveLength(2);
-
-      // The outside author still owns the file, and the unsettled text is not
-      // in it — which is why "changed on disk" would have been a lie.
-      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
-
-      // Workspace teardown is the safe eviction boundary after the caller
-      // has observed the loud refusal. Reopening rebuilds capture and ingests
-      // the queued disk edit without letting the failed Y.Doc close overwrite
-      // it.
-      await sessions.closeWorkspace(workspace);
+      // The close recorded the queued disk edit without letting the refused
+      // Y.Doc save overwrite it.
       const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
       expect(capturedMoments).toHaveLength(4);
       const recovery = capturedMoments.find(moment => moment.metadata.origin === "capture-recovery");
@@ -1419,10 +1389,13 @@ async function openNote(capture: Awaited<ReturnType<typeof openRealCapture>>["ca
     onChangedOutside: (unsaved) => changedOutside.push(unsaved),
   });
   Y.applyUpdate(editor, session.initialUpdate);
-  const type = (text: string) => {
+  // An agent's edit through dohc reaches the same session with its origin.
+  const type = (text: string, author: "person" | "agent" = "person") => {
     const vector = Y.encodeStateVector(editor);
     editor.getText("plainText").insert(0, text);
-    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector));
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector), undefined, author === "agent"
+      ? { actorOriginId: "test-agent", attribution: { actorKind: "agent", onBehalfOf: "local-person", depth: 0 } }
+      : undefined);
   };
   return { editor, session, states, changedOutside, type, text: () => editor.getText("plainText").toString() };
 }
@@ -1461,17 +1434,18 @@ it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
 );
 
 it.skipIf(engine.missing).each([
-  ["reload", "rename"], ["reload", "in-place"], ["close", "rename"], ["close", "in-place"],
+  ["person", "reload", "rename"], ["person", "reload", "in-place"], ["person", "close", "rename"], ["person", "close", "in-place"],
+  ["agent", "reload", "rename"], ["agent", "close", "in-place"],
 ] as const)(
-  "keeps unsaved typing in a copy when the person chooses %s after a %s write outside dohc (#2463)",
-  async (action, style) => {
-    const opened = await openRealCapture(`reload-unsaved-${action}-${style}`, { settleDebounceMs: 60_000 });
+  "keeps a %s's unsaved edit in a copy on %s after a %s write outside dohc (#2463)",
+  async (author, action, style) => {
+    const opened = await openRealCapture(`reload-unsaved-${author}-${action}-${style}`, { settleDebounceMs: 60_000 });
     try {
       const absolute = join(opened.root, "note.md");
       await writeFile(absolute, "base\n", "utf8");
       await waitForPathMoments(opened.capture, "note.md", 1);
       const note = await openNote(opened.capture);
-      note.type("typed ");
+      note.type("typed ", author);
       await writeOutside(absolute, "written outside dohc\n", style);
       opened.capture.start();
       await vi.waitFor(() => expect(note.changedOutside).toEqual([true]), { timeout: REAL_DAEMON_DEADLINE_MS });
