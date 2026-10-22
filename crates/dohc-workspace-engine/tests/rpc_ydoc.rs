@@ -5611,6 +5611,15 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     // live lease keeps the head at the session's base.
     write_file(scratch.path(), PATH, TYPED.as_bytes());
     wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_000).await;
+    for method in ["capture.flush", "capture.reconcile"] {
+        let capture = call(&transport, &handle, 2_050, method, json!({})).await;
+        assert_eq!(capture["settled"], json!(true));
+        assert_eq!(
+            capture["deferredWrites"],
+            json!([PATH]),
+            "{method} must expose waiting source"
+        );
+    }
     let captured = call(
         &transport,
         &handle,

@@ -1000,9 +1000,9 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
-  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
-  [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
-  [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
+  ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
+  [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.watcherStatus, {
     running: true,
     degraded: false,
@@ -1017,6 +1017,13 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
 ];
 
 for (const [method, base] of holdReplies) {
+  it(`decodes ${method} waiting paths and rejects malformed lists`, () => {
+    const result = { ...base, heldFiles: [], deferredWrites: ["notes/open.md"] };
+    expect(decodeWorkspaceResult(method, result)).toEqual(result);
+    for (const deferredWrites of [null, [""], [1]]) {
+      expect(() => decodeWorkspaceResult(method, { ...result, deferredWrites })).toThrow(ProtocolShapeError);
+    }
+  });
   it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
     `decodes ${method} held files (%j)`,
     ({ heldFiles }) => {

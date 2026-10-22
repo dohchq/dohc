@@ -313,7 +313,7 @@ export function createFakeDaemonCapture(input: {
         case "capture.flush":
         case "capture.reconcile": {
           await ingest(await activeVersionId());
-          return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
+          return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
         }
         case VERSIONED_METHOD.textWrite:
         case VERSIONED_METHOD.textWriteBlob:

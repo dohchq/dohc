@@ -1353,8 +1353,20 @@ it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
       // Part (a) keeps this editor unchanged. Part (b) takes in the edit.
       expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
       expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.flushCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.reconcileCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
       await writeFile(join(opened.root, "other.md"), "other file\n");
       await waitForPathMoments(opened.capture, "other.md", 1);
+      await opened.withEngine(async (engine) => {
+        const operationId = `dohc-operation:other-during-${style}`;
+        const hold = await engine.holdCapture({ operationId });
+        try {
+          await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
+            fromPath: "other.md", toPath: "moved.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+        } finally { await engine.releaseCapture(hold.holdId); }
+        await engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId, requestId: `undo-other-${style}` });
+        expect(await engine.watcherStatus()).toMatchObject({ deferredWrites: ["note.md"] });
+      });
       expect.soft(await readFile(absolute, "utf8")).toBe(outside);
       // A refused pre-close save must still release the session's lease.
       await session.close().catch(() => undefined);

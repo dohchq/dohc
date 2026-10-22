@@ -20,7 +20,7 @@ use dohc_engine_runtime::{
     MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard,
 };
 use dohc_engine_storage::hex_sha256;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -89,6 +89,14 @@ pub struct CaptureProvenance {
     pub summary: Option<String>,
     pub correlation_id: Option<String>,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredWrite {
+    sha256: String,
+    author_json: Option<String>,
+}
+
+pub(crate) type DeferredWrites = BTreeMap<String, DeferredWrite>;
 
 /// Single-shot identities of daemon-materialized Y.Doc projections. Capture
 /// consumes a matching `(workspace, path, sha)` observation instead of
@@ -304,6 +312,7 @@ pub struct StoreCaptureSink {
     captured_root: Result<Arc<CapturedRoot>, CaptureError>,
     now_ms: i64,
     author_json: Option<String>,
+    deferred_writes: std::cell::RefCell<DeferredWrites>,
     search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
     /// Set when any op this run was held on an unavailable policy. The driver
@@ -415,6 +424,7 @@ impl StoreCaptureSink {
             now_ms,
             author_json,
             search_policy: snapshot,
+            deferred_writes: std::cell::RefCell::new(DeferredWrites::new()),
             files_policy,
             policy_held: std::cell::Cell::new(false),
             automation_claims: std::cell::RefCell::new(Vec::new()),
@@ -423,6 +433,32 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    pub(crate) fn set_deferred_writes(&mut self, writes: DeferredWrites) {
+        *self.deferred_writes.get_mut() = writes;
+    }
+
+    pub(crate) fn take_deferred_writes(&mut self) -> DeferredWrites {
+        std::mem::take(self.deferred_writes.get_mut())
+    }
+
+    fn author_for_write(&self, path: &str, sha256: &str) -> Option<String> {
+        match self.deferred_writes.borrow().get(path) {
+            Some(waiting) if waiting.sha256 == sha256 => waiting.author_json.clone(),
+            _ => self.author_json.clone(),
+        }
+    }
+
+    fn remember_deferred_write(&self, path: &str, sha256: &str) {
+        let author_json = self.author_for_write(path, sha256);
+        self.deferred_writes.borrow_mut().insert(
+            path.to_owned(),
+            DeferredWrite {
+                sha256: sha256.to_owned(),
+                author_json,
+            },
+        );
     }
 
     #[cfg(test)]
@@ -619,6 +655,7 @@ impl StoreCaptureSink {
         &self,
         path: &str,
         text: String,
+        sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
         let result = self.actor.capture_ingest_with_search_policy_blocking(
@@ -630,7 +667,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(path, sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head,
@@ -687,6 +724,7 @@ impl StoreCaptureSink {
         &self,
         path: &str,
         bytes: Vec<u8>,
+        sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
         let result = self.actor.capture_ingest_binary_blocking(
@@ -698,7 +736,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(path, sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head,
@@ -1038,6 +1076,7 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    /// A recorded file's outside bytes wait for its live session to release.
     WriteDeferred,
     Held,
 }
@@ -1052,12 +1091,8 @@ fn held_new_file_outcome(size: u64) -> Result<IngestOutcome, CaptureError> {
     }
 }
 
-/// The store refuses to capture a path whose document a live session holds.
-/// For a file the store has no head for, the session owns the content and its
-/// settle creates the head, whether capture sees the file for the first time
-/// or saw an earlier file at the path whose head was since deleted; see
-/// [`held_new_file_outcome`]. Every other refusal stays a failure, so disk
-/// text nothing records keeps the layer unsettled.
+/// A session holds a file without a store head. Empty files wait for its first
+/// settle; outside bytes wait for release. Internal leases fail and retry.
 fn held_as_new_file(error: &RuntimeError) -> bool {
     matches!(
         error,
@@ -1255,7 +1290,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(candidate.path, &prepared.sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head: false,
@@ -1302,8 +1337,8 @@ impl StoreCaptureSink {
         let mut inputs = Vec::with_capacity(batch.len());
         let mut identities = Vec::with_capacity(batch.len());
         for prepared in batch {
+            identities.push((prepared.input.path.clone(), prepared.size, prepared.sha256));
             inputs.push(prepared.input);
-            identities.push((prepared.size, prepared.sha256));
         }
         // Each attempt rechecks live leases and preserves uncovered Y.Doc recovery.
         // The receipt records these bytes' hash, so the watcher or next scan
@@ -1327,7 +1362,7 @@ impl StoreCaptureSink {
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
-                for (result, (size, sha256)) in results.into_iter().zip(identities) {
+                for (result, (path, size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(result) => {
                             if result.pending_placement {
@@ -1358,8 +1393,14 @@ impl StoreCaptureSink {
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                             Ok(IngestOutcome::NotOwned)
                         }
-                        Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(error) if held_as_new_file(&error) => {
+                            if size > 0 {
+                                self.remember_deferred_write(&path, &sha256);
+                            }
+                            held_new_file_outcome(size)
+                        }
                         Err(error) if write_waits_for_session(&error) => {
+                            self.remember_deferred_write(&path, &sha256);
                             Ok(IngestOutcome::WriteDeferred)
                         }
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
@@ -1565,7 +1606,13 @@ impl CaptureSink for StoreCaptureSink {
                 if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
-                match self.ingest_text(path, text, claim_foreign_head)? {
+                let disposition = self.ingest_text(path, text, &sha256, claim_foreign_head)?;
+                if matches!(disposition, DomainIngest::WriteDeferred)
+                    || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
+                {
+                    self.remember_deferred_write(path, &sha256);
+                }
+                match disposition {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     // Foreign head left intact: track the disk identity so the
@@ -1642,7 +1689,13 @@ impl CaptureSink for StoreCaptureSink {
                 // same file bytes.
                 let size = bytes.len() as u64;
                 let sha256 = hex_sha256(&bytes);
-                match self.ingest_binary(path, bytes, claim_foreign_head)? {
+                let disposition = self.ingest_binary(path, bytes, &sha256, claim_foreign_head)?;
+                if matches!(disposition, DomainIngest::WriteDeferred)
+                    || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
+                {
+                    self.remember_deferred_write(path, &sha256);
+                }
+                match disposition {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),

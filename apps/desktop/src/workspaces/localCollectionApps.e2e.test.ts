@@ -70,7 +70,7 @@ async function tripWorkspace(name: string) {
     get capture() { return running.capture; },
     async approve() {
       const host = await open();
-      const prepared = await prepareLocalAppPublication({ workspaceId, appRoot: "trip" }, { adapter: await running.adapter(), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
+      const prepared = await prepareLocalAppPublication({ workspaceId, appRoot: "trip" }, { deferredWrites: [], adapter: await running.adapter(), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
       return { host, published: await host.apps.activate(prepared, signal()) };
     },
     async restartEngine() { await running.stop(); running = await startEngine(); },

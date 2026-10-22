@@ -668,7 +668,7 @@ impl Harness {
             &self.self_writes,
         );
         context.author_json = self.author_json.clone();
-        apply_bound_run_with_handle(context, files, run, &CancellationToken::new())
+        apply_run(context, files, run, &CancellationToken::new())
             .await
             .clean
     }
@@ -1856,6 +1856,7 @@ async fn an_outside_write_to_a_held_new_file_defers_until_recorded() {
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
     assert_eq!(head_count(&harness.db, NEW_FILE), 0);
 
+    harness.author_json = None;
     drop(lease);
     files.handle().request_rescan();
     assert!(
@@ -1874,6 +1875,151 @@ async fn an_outside_write_to_a_held_new_file_defers_until_recorded() {
         .expect("the write's head and moment");
     assert_eq!(recorded, (NEW_FILE.to_owned(), Some(author.to_owned())));
 
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_reconcile_on_another_file_keeps_live_deferred_writes() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NOTE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    std::fs::write(harness.root.join("notes/other.md"), "Other.\n").unwrap();
+    files.handle().request_rescan();
+    let run = reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+        .await
+        .unwrap();
+    let mut context = apply_context(
+        &harness.root,
+        &harness.actor,
+        &harness.leases,
+        &harness.status,
+        &harness.self_writes,
+    );
+    let operation = "dohc-operation:unrelated";
+    context.provenance.correlation_id = Some(operation.into());
+    assert!(
+        apply_bound_run_with_handle(context, &files.handle(), run, &CancellationToken::new())
+            .await
+            .clean
+    );
+    let object = derive_capture_object_id(WORKSPACE_ID, "main", NOTE);
+    let _lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+    std::fs::write(harness.root.join(NOTE), OUTSIDE).unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(harness.status.deferred_writes(), vec![NOTE]);
+    let excluded = std::collections::HashSet::new();
+    reconcile_full_for_switch(
+        &harness.root,
+        &harness.actor,
+        WORKSPACE_ID,
+        &harness.leases,
+        &harness.status,
+        &harness.self_writes,
+        None,
+        Some((operation, &excluded)),
+        CaptureProvenance::default(),
+        EngineEvents::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        harness.status.deferred_writes(),
+        vec![NOTE],
+        "undo's partial scan must not replace the live list"
+    );
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_write_author_follows_the_observed_bytes_not_the_next_run() {
+    for recorded in [false, true] {
+        for changed in [false, true] {
+            let mut harness = Harness::new();
+            std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+            let files = FilesActorCloseGuard::new(
+                FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                    .await
+                    .unwrap(),
+            );
+            if recorded {
+                assert!(harness.capture(&files.handle()).await);
+            }
+            let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+            let lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+            let first = r#"[{"kind":"agent","agentId":"first","onBehalfOf":"local"}]"#;
+            let next = r#"[{"kind":"agent","agentId":"next","onBehalfOf":"local"}]"#;
+            harness.author_json = Some(first.into());
+            std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            harness.author_json = Some(next.into());
+            if changed {
+                std::fs::write(harness.root.join(NEW_FILE), FOREIGN).unwrap();
+            }
+            std::fs::write(harness.root.join("notes/other.md"), "Other.\n").unwrap();
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            harness.author_json = None;
+            drop(lease);
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            let observer = rusqlite::Connection::open(&harness.db).unwrap();
+            for (path, author) in [
+                (NEW_FILE, if changed { next } else { first }),
+                ("notes/other.md", next),
+            ] {
+                let actual: Option<String> = observer.query_row(
+                    "SELECT m.author_json FROM snapshots s JOIN moments m ON m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
+                    [WORKSPACE_ID, path], |row| row.get(0)).unwrap();
+                assert_eq!(
+                    actual.as_deref(),
+                    Some(author),
+                    "recorded={recorded}, changed={changed}, path={path}"
+                );
+            }
+            assert_eq!(
+                head_text(&harness.db, NEW_FILE),
+                if changed { FOREIGN } else { OUTSIDE }
+            );
+            assert!(harness.status.deferred_writes().is_empty());
+            drop(observer);
+            files.close().await;
+            harness.close();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecorded_file_an_internal_attempt_holds_fails_and_retries() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+    let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire_internal(&harness.key(&object))
+        .unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.deferred_writes().is_empty());
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
+    drop(lease);
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_text(&harness.db, NEW_FILE), OUTSIDE);
     files.close().await;
     harness.close();
 }
@@ -2210,7 +2356,7 @@ async fn recorded_outside_write_after_release(restart: bool) {
                 .await
                 .unwrap();
         assert!(
-            apply_bound_run_with_handle(
+            apply_run(
                 apply_context(
                     &harness.root,
                     &actor,

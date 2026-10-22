@@ -36,7 +36,7 @@ const READY_WATCHER_STATUS = {
  */
 export function daemonCaptureLifecycleAnswer(
   request: Request,
-  captureFlushResult: () => CaptureFlushResult = () => ({
+  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,
@@ -89,7 +89,7 @@ export function daemonCaptureLifecycleAnswer(
 export function mockLiveSessions(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
-  captureFlushResult: () => CaptureFlushResult = () => ({
+  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,

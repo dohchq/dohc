@@ -18,7 +18,7 @@ const strict = ({ children }: { children: ReactNode }) => (
 
 describe("useShellError", () => {
   it("keeps a held source error in Notices with the repair words and retry", async () => {
-    const capture = { running: true, settled: true, degraded: false, heldFiles: [{
+    const capture = { deferredWrites: [], running: true, settled: true, degraded: false, heldFiles: [{
       workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
       observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
       observedAtMs: 1, attemptCount: 1, retryRequested: false,

@@ -350,7 +350,7 @@ describe("probeEngineStoreRefusal", () => {
     const sessions = mockLiveSessions(
       new VersionedLoopbackEngine(),
       undefined,
-      () => ({ settled: true, running: true, degraded: false, heldFiles: [] }),
+      () => ({ deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] }),
       async () => {
         throw probeError;
       },
@@ -1758,7 +1758,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let settled = true;
     const sessions = mockLiveSessions(loopback, requests, () => {
       if (!settled) polling.resolve();
-      return { settled, running: true, heldFiles: [], degraded: !settled };
+      return { deferredWrites: [], settled, running: true, heldFiles: [], degraded: !settled };
     });
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, { rustEngineSessions: sessions });
@@ -1783,7 +1783,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
-    const sessions = mockLiveSessions(loopback, undefined, () => ({
+    const sessions = mockLiveSessions(loopback, undefined, () => ({ deferredWrites: [],
       settled,
       running: true,
       heldFiles: [], degraded: !settled,
@@ -2967,7 +2967,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       const requests: Request[] = [];
       let settled = true;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,
@@ -3863,7 +3863,7 @@ describe("workspaceEngineCapture agent attribution", () => {
       const loopback = new VersionedLoopbackEngine();
       let settled = false;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,
