@@ -1,4 +1,6 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import type {FirstOpenOutcome,FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
+import {FirstOpenAnswers,type FirstOpenAnswerContext} from "./firstOpenAnswers";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
@@ -84,6 +86,9 @@ export class ServiceActivationDriver {
   readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
+  // The relay's first-open answers, which hold under this driver's validation policy and bounds. A Y.Doc update lifts none of them.
+  readonly #firstOpen=new FirstOpenAnswers();
+  readonly #firstOpenContext:FirstOpenAnswerContext;
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
     workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica}|undefined;config:ServiceActivationConfig;
@@ -93,6 +98,8 @@ export class ServiceActivationDriver {
     this.#store=options.storage.createServiceActivationStore(options.history);
     this.#delivery=options.storage.createLiveCommittedDeliveryStore(options.history);
     this.#targets=options.config.targets;
+    const c=options.config;
+    this.#firstOpenContext=Object.freeze({policy:JSON.stringify(c.validation),bounds:JSON.stringify([c.maxCaptureBytes,c.maxBytesPerDrain,c.validation])});
   }
   /** The documents activation passes visit, in pass order. */
   get targets(){return this.#targets;}
@@ -133,8 +140,18 @@ export class ServiceActivationDriver {
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{return this.#blocked.get(targetKey(target))?.reason;}
-  /** Allows a blocked target one more capture. Returns whether it was blocked. */
-  unblock(target:ServiceActivationTarget){return this.#blocked.delete(targetKey(target));}
+  /** Allows a blocked target one more capture, and a refused first open one more request. Returns whether either stood. */
+  unblock(target:ServiceActivationTarget){
+    const key=targetKey(target),objectId=this.#objects.get(key);
+    const retried=objectId!==undefined && this.#firstOpen.retry({workspaceId:target.workspaceId,objectId});
+    return this.#blocked.delete(key) || retried;
+  }
+  /** Keeps the relay's answer to a first-open request, which decides whether this host asks again and what the owner sees. */
+  firstOpenAnswered(outcome:FirstOpenOutcome){this.#firstOpen.record(outcome,this.#firstOpenContext);}
+  /** The answer that still holds for a source, or undefined to ask the relay now. It spends the owner's Try again. */
+  firstOpenStanding(source:FirstOpenSourceIdentity){return this.#firstOpen.standing(source,this.#firstOpenContext);}
+  /** The first-open refusal the owner sees for a document's current source, if one stands. */
+  firstOpenRefusal(source:FirstOpenSourceIdentity){return this.#firstOpen.refusal(source,this.#firstOpenContext);}
   // A document with no Y.Doc lineage has nothing to activate until one reaches the relay, a held
   // document whose live edit was never admitted cannot become ready, and a retained activation
   // the engine refuses as diverged cannot resume. Each blocks after its failed capture. A document

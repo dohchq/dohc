@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineClientError, EngineRequestDeadlineError, EngineRequestError, InvalidFirstOpenCandidateCheck } from "@dohc/workspace-engine-client/daemon";
+import { firstOpenOutcome } from "@dohc/workspace-contracts/first-open";
 import { NativeRequestQueueError } from "./liveHostRequests.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -1624,6 +1625,31 @@ it("activates a document without lineage once a Y.Doc update for it reaches the 
   expect(captures()).toBe(2);
   expect(o.host.blocked(o.sibling)).toBeUndefined();
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a hosted document's first-open refusal reads through the host while
+// it holds. A Y.Doc update for the document does not lift a deletion, as it
+// lifts a block for missing lineage, nor does a later source. Resume lets
+// exactly one request through.
+it("holds a first-open refusal past later Y.Doc updates until its owner tries again", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], activations = vi.mocked(ServiceActivationDriver.prototype.activate).mock.contexts;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const driver = activations.at(-1) as ServiceActivationDriver;
+  const source = {workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId, path: o.sibling.path, sourceMomentId: "moment-1", sourceDigest: "a".repeat(64)};
+  const later = {...source, sourceMomentId: "moment-2", sourceDigest: "b".repeat(64)};
+  driver.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "deletion"}));
+  expect(o.host.firstOpenRefusal(source)).toMatchObject({reason: "deletion", recovery: "none"});
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await o.nextPull(); await o.nextPull();
+  expect(o.host.firstOpenRefusal(later)).toMatchObject({reason: "deletion", source});
+  expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
+  expect(o.host.firstOpenRefusal({...source, objectId: "object-unhosted"})).toBeUndefined();
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  expect(o.host.firstOpenRefusal(later)).toBeUndefined();
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
+  expect(o.host.unblock(o.other)).toBe(false);
 });
 
 // Proves: a document still without lineage after the update that lifted its

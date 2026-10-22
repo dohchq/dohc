@@ -14,10 +14,11 @@ import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {parseServiceActivationConfig, type ServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {firstOpenCandidateBinding, type FirstOpenCandidateInput, type FirstOpenCandidateRefusal} from "@dohc/workspace-engine-client/daemon";
+import {firstOpenCandidateBinding, type FirstOpenCandidateInput} from "@dohc/workspace-engine-client/daemon";
+import {firstOpenRecovery, type FirstOpenCandidateRefusal, type FirstOpenOutcome} from "@dohc/workspace-contracts/first-open";
+import {FirstOpenAnswers} from "./firstOpenAnswers";
 import {buildFirstOpenBase, MAX_YDOC_UPDATE_BYTES} from "./firstOpenBase";
 import {createFirstOpenPublisher, FIRST_OPEN_DEADLINE_WAIT_MS, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication";
-import {firstOpenRecovery, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {createLiveValidationExecutor} from "./liveValidation";
 import {FIRST_OPEN_ORIGIN_PREFIX} from "./relayLogInputs";
 import {readFirstOpenHistoryFile, type FirstOpenHistoryReader} from "./storage/firstOpenHistory";
@@ -410,6 +411,26 @@ it("refuses a deleted and restored document for good", async () => {
     payloadBeforePath: PATH, payloadBeforeBlobSha256: f.source.sourceDigest, payloadAfterPath: null, payloadAfterBlobSha256: null, recordedAtMs: 1_100});
   f.source = f.writeText(MARKDOWN);
   expect(await f.open()).toMatchObject({kind: "refused", reason: "deletion", recovery: "none"});
+  nothingAppended(f);
+});
+
+// Proves: a host that restarted holds no answers, so it asks once, and the
+// relay's history alone answers deletion again. That exclusion then holds for
+// a later edit, which the host never asks about.
+it("rebuilds a deletion's exclusion from relay history after its host restarts", async () => {
+  const f = await fixture(), context = {policy: "policy", bounds: "bounds"};
+  f.append("moment.append", {momentId: "delete-1", objectId: OBJECT, versionId: "main", operation: "delete", path: PATH, beforePath: PATH,
+    payloadBeforePath: PATH, payloadBeforeBlobSha256: f.source.sourceDigest, payloadAfterPath: null, payloadAfterBlobSha256: null, recordedAtMs: 1_100});
+  f.source = f.writeText(MARKDOWN);
+  const source = () => ({workspaceId: WS, objectId: OBJECT, path: PATH, ...f.source});
+  new FirstOpenAnswers().record(await f.open(), context);
+  const restarted = new FirstOpenAnswers(), reads = f.reads;
+  expect(restarted.standing(source(), context)).toBeUndefined();
+  restarted.record(await f.open(), context);
+  expect(f.reads).toBe(reads + 1);
+  f.source = f.writeText("# Plan\n\nRestored, then edited.\n");
+  expect(restarted.standing(source(), context)).toMatchObject({kind: "refused", reason: "deletion"});
+  expect(restarted.refusal(source(), context)).toMatchObject({reason: "deletion", recovery: "none"});
   nothingAppended(f);
 });
 

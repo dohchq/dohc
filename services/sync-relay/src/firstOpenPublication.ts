@@ -2,13 +2,13 @@ import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {LIVE_MARKDOWN_MAX_BYTES} from "@dohc/live-session-contract/limits";
 import {validateUserWritePath} from "@dohc/workspace-core";
+import {firstOpenOutcome, type FirstOpenBaseBound, type FirstOpenFailure, type FirstOpenHostFailure, type FirstOpenOutcome} from "@dohc/workspace-contracts/first-open";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import {firstOpenCandidateBinding, type FirstOpenCandidateCheck, type FirstOpenCandidateInput} from "@dohc/workspace-engine-client/daemon";
 import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/live-journal-validation";
 import {badRequest, notFound, RelayError} from "./errors";
-import {firstOpenBaseExceeds, firstOpenEncodingCap, type FirstOpenBaseBound, type FirstOpenBaseBounds, type FirstOpenBaseInput,
+import {firstOpenBaseExceeds, firstOpenEncodingCap, type FirstOpenBaseBounds, type FirstOpenBaseInput,
   type FirstOpenBaseResult, type FirstOpenBaseSizes} from "./firstOpenBase";
-import {firstOpenOutcome, type FirstOpenFailure, type FirstOpenHostFailure, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {liveValidation} from "./liveValidation";
 import {assertSha256, parseString} from "./requestInputs";
 import type {ServiceActivationConfig} from "./serviceActivationDriver";

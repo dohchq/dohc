@@ -19,7 +19,7 @@ import {parseServiceActivationConfig, type ServiceActivationConfig} from "./serv
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {buildFirstOpenBase, type FirstOpenBaseInput} from "./firstOpenBase";
 import {createFirstOpenPublisher, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication";
-import type {FirstOpenOutcome} from "./firstOpenOutcome";
+import type {FirstOpenOutcome} from "@dohc/workspace-contracts/first-open";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import {readFirstOpenHistoryFile} from "./storage/firstOpenHistory";
 import {activationCaptureBytes, ordinaryActivationReadBytes} from "./storage/ordinaryActivationSource";

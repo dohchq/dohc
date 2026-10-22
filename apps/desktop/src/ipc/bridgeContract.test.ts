@@ -31,6 +31,15 @@ import {
 } from "./channels";
 import { UPDATE_STATUSES } from "../updates/updateMachine";
 import {
+  FIRST_OPEN_INTEGRITY_CODES,
+  FIRST_OPEN_REFUSAL_REASONS,
+  FIRST_OPEN_TOO_LARGE_CODES,
+  FIRST_OPEN_UNSUPPORTED_CAUSES,
+  firstOpenOutcome,
+  firstOpenRefusal,
+  firstOpenReport,
+} from "@dohc/workspace-contracts/first-open";
+import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
   ChatFileMentionsPageResult,
@@ -95,6 +104,7 @@ import {
   SyncDmsResult,
   SyncStatusResult,
   OwnerLiveDocument,
+  OwnerLiveFirstOpen,
   engineStoreRefusalCopy,
   engineStoreRefusalRecovery,
   ListWorkspaceVersionsResult,
@@ -3390,6 +3400,43 @@ describe("sync status IPC contract", () => {
     }
     expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
     expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);
+  });
+  // Every refusal the shared contract reports reaches the owner's status and
+  // agents through IPC with its reason, code, source and recovery; no answer
+  // that stops nothing does, and no code the contract does not name.
+  it("carries every first-open refusal reason and code to the status and the live documents list", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    const source = { workspaceId: "workspace-1", objectId: "object-1", path: "docs/a.md", sourceMomentId: "moment-1", sourceDigest: "a".repeat(64) };
+    const receipt = { originId: "service-host:first-open:origin", originSeq: 0, relaySeq: 2 } as const;
+    const answers: Parameters<typeof firstOpenOutcome>[1][] = [
+      { kind: "published", receipt }, { kind: "existing-history", reason: "prior-authority" }, { kind: "refused", reason: "stale-source" },
+      { kind: "unavailable", reason: "busy" }, { kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000 },
+      { kind: "refused", reason: "deletion" },
+      ...FIRST_OPEN_UNSUPPORTED_CAUSES.map((cause) => ({ kind: "refused", reason: "unsupported-source", cause }) as const),
+      ...FIRST_OPEN_TOO_LARGE_CODES.map((code) => ({ kind: "refused", reason: "too-large", code }) as const),
+      { kind: "refused", reason: "ordinary-activation-refused" }, { kind: "refused", reason: "ordinary-activation-refused", code: "native-disagreement" },
+      ...FIRST_OPEN_INTEGRITY_CODES.map((reason) => ({ kind: "integrity", reason }) as const),
+    ];
+    const reported = new Set<string>();
+    for (const answer of answers) {
+      const outcome = firstOpenOutcome(source, answer), refusal = firstOpenRefusal(outcome), report = firstOpenReport(outcome);
+      if (!refusal) {
+        expect(OwnerLiveFirstOpen.safeParse(report).success).toBe(false);
+        continue;
+      }
+      reported.add(refusal.reason);
+      expect(OwnerLiveFirstOpen.parse(refusal)).toStrictEqual(refusal);
+      expect(OwnerLiveDocument.parse({ path: source.path, status: "unavailable", canResume: true, reason: "live-first-open-refused", firstOpen: refusal }).firstOpen)
+        .toStrictEqual(refusal);
+      expect(SyncStatusResult.parse({ ...status, ownerLiveFirstOpen: [refusal] }).ownerLiveFirstOpen).toStrictEqual([refusal]);
+    }
+    expect([...reported].sort()).toEqual([...FIRST_OPEN_REFUSAL_REASONS].sort());
+    const unsupported = { reason: "unsupported-source", code: "settlement-mismatch", source, recovery: "none" };
+    for (const invalid of [{ ...unsupported, code: "unknown-cause" }, { ...unsupported, reason: "too-large" }, { ...unsupported, message: "parse me" },
+      { ...unsupported, source: { ...source, sourceDigest: "not-a-digest" } }, { reason: "deletion", code: "source-limit", source, recovery: "none" }]) {
+      expect(OwnerLiveFirstOpen.safeParse(invalid).success).toBe(false);
+    }
   });
   it("refuses a status that cannot say why history is off", () => {
     const status = {

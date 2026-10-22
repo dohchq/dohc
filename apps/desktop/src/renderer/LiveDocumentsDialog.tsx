@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "live-first-open-refused";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -142,6 +142,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
   if (row.reason === "live-edit-unadmitted") return "Can't resume";
+  if (row.reason === "live-first-open-refused") return "Can't start";
   switch (row.status) {
     case "ready":
       return "Live";

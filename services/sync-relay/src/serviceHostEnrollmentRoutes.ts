@@ -76,7 +76,7 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged" | "firstOpenRefusal">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
@@ -91,6 +91,11 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
     if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
+    // A refused first open names its reason, code and source for the owner and their agents, until the file or the host's checks change.
+    const head = storage.readFirstOpenMoment(row.workspaceId, row.objectId);
+    const firstOpen = head?.path && head.sourceDigest ? host.firstOpenRefusal({workspaceId: row.workspaceId, objectId: row.objectId,
+      path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest}) : undefined;
+    if (firstOpen) return {...base, status: "unavailable", reason: "live-first-open-refused", firstOpen};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first, and a Resume
     // cannot continue one whose host copy misses an edit made while live editing was off.
@@ -156,7 +161,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
-      // A Resume gives a blocked document one more attempt in the store it has.
+      // A Resume gives a blocked document one more attempt in the store it has, and a refused first open one more request.
       if (input.path !== undefined) host.unblock(rows[0]!);
       host.reconcile();
       const documents = rows.map(state);

@@ -2549,6 +2549,7 @@ const activity = {
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
+      ownerLiveFirstOpen: desktopEngine.ownerLiveFirstOpenRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
     workspaceId: string,

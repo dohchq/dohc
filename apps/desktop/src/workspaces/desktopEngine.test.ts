@@ -962,6 +962,42 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
+  // Proves: each file whose first open the server refused reaches the
+  // workspace's status with its typed refusal, without making the workspace's
+  // delivery retry, and leaves once the server no longer reports it. A row for
+  // another workspace never reaches this one.
+  it("reports each refused first open on its own, without making delivery retry", async () => {
+    const f = fixture(), credentials = new AbortController(), changed = vi.fn();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-first-open-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    f.dependencies.notifyOwnerDeliveryChanged = changed;
+    const firstOpen = (workspaceId: string) => ({reason: "unsupported-source", code: "settlement-mismatch", recovery: "none",
+      source: {workspaceId, objectId: "object", path: "notes.md", sourceMomentId: "moment", sourceDigest: "a".repeat(64)}});
+    const refused = (workspaceId = "owner") => ({path: "notes.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: firstOpen(workspaceId)});
+    let rows: unknown[] = [refused()];
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: rows})})};
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("owner")]));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+      expect(changed).toHaveBeenCalledWith("owner");
+      rows = [refused(), {path: "changed.md", status: "unavailable", reason: "workspace-changed"}]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
+      expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("owner")]);
+      rows = [refused("elsewhere")]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toBeUndefined());
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
+    } finally {credentials.abort(); await f.close();}
+  });
+
   it.each(["credentials", "daemon", "workspace"])("discovers ready documents and holds the session until %s cancellation settles", async mode => {
     const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

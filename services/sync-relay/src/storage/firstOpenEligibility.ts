@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
 import {isAsyncFunction} from "node:util/types";
+import type {FirstOpenReceipt} from "@dohc/workspace-contracts/first-open";
 import type {StorageContext} from "./context";
 import type {SqliteDb, SyncRelayLogInput} from "./types";
 import {accountIsFenced, workspaceIsDeleted} from "./accountDeletion";
@@ -28,8 +29,6 @@ export type FirstOpenPreparation =
   | {kind: "prepared"; proof: FirstOpenProof}
   | {kind: "refused"; reason: "prior-authority" | "deletion" | "stale-source"}
   | {kind: "busy"};
-/** Where a first-open base sits in the relay log: always the first coordinate of its reserved origin. */
-export interface FirstOpenReceipt {readonly originId: string; readonly originSeq: 0; readonly relaySeq: number}
 export type FirstOpenWrite =
   | {kind: "published"; receipt: FirstOpenReceipt}
   /** The workspace log moved since preparation. Catch up outside the writer, then write again. */

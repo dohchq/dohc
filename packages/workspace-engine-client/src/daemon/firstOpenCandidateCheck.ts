@@ -1,3 +1,5 @@
+import { FIRST_OPEN_CANDIDATE_REFUSALS, type FirstOpenCandidateRefusal } from "@dohc/workspace-contracts/first-open";
+
 /** `dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES`. */
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 /** `dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES`. */
@@ -31,9 +33,7 @@ export interface FirstOpenCandidateInput {
   readonly maxFullStateBytes: number;
 }
 
-const REFUSALS = ["malformed-candidate", "incomplete-candidate", "invalid-public-baseline", "projection-failed", "settlement-mismatch"] as const;
-export type FirstOpenCandidateRefusal = (typeof REFUSALS)[number];
-const isRefusal = (value: unknown): value is FirstOpenCandidateRefusal => (REFUSALS as readonly unknown[]).includes(value);
+const isRefusal = (value: unknown): value is FirstOpenCandidateRefusal => (FIRST_OPEN_CANDIDATE_REFUSALS as readonly unknown[]).includes(value);
 
 /**
  * The engine's verdict. The full-state digest names the encoding measured

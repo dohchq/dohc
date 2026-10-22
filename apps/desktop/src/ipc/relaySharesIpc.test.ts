@@ -305,6 +305,27 @@ describe("owner live document enrollment", () => {
     ]);
   });
 
+  // A refused first open keeps its typed refusal for the owner and their
+  // agents, and Resume is its checked retry. A row that claims the reason
+  // without the refusal, or carries one for another reason, is refused.
+  it("lists a refused first open with its refusal and lets the owner resume it", async () => {
+    const h = harness();
+    const firstOpen = {reason: "too-large", code: "capture-budget", recovery: "none",
+      source: {workspaceId, objectId: "object", path: "large.md", sourceMomentId: "moment", sourceDigest: "a".repeat(64)}};
+    const list = (documents: unknown[]) => {
+      h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+        ? {ok: true, documents: [], nextCursor: null} : {ok: true, documents});
+      return h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
+    };
+    await expect(list([{path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen}])).resolves.toEqual({
+      documents: [{path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen, canResume: true}], nextCursor: null,
+    });
+    for (const row of [{path: "large.md", status: "unavailable", reason: "live-first-open-refused"},
+      {path: "large.md", status: "unavailable", reason: "session-host-refused", firstOpen}]) {
+      await expect(list([row])).rejects.toThrow();
+    }
+  });
+
   it("uses the server owner credential session for retire and resume", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path, init) => {

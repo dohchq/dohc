@@ -20,6 +20,7 @@ import * as Scope from "effect/Scope";
 import { createEngineClient, EngineClientError, EngineRequestDeadlineError, EngineRequestError, firstOpenCandidateBinding, firstOpenCandidateUploadBytes,
   InvalidFirstOpenCandidateCheck, isHostedDocumentUnready, type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
 import type {FirstOpenNativeCheck} from "./firstOpenPublication.js";
+import type {FirstOpenRefusal, FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
 import { VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -883,6 +884,10 @@ export async function startServiceLiveHost(options: {
       unblock(document: {workspaceId: string; objectId: string}): boolean {
         const key = hostedKey(document);
         return key !== undefined && activation!.unblock(hosted.get(key)!.target);
+      },
+      /** The first-open refusal the owner sees for a hosted document's current source, if one stands. */
+      firstOpenRefusal(source: FirstOpenSourceIdentity): FirstOpenRefusal | undefined {
+        return hostedKey(source) === undefined ? undefined : activation!.firstOpenRefusal(source);
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {

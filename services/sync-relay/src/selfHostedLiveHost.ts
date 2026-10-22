@@ -10,6 +10,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
+import type {FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor} from "./storage/serviceHostEnrollment";
@@ -314,6 +315,8 @@ export async function startSelfHostedLiveHost(options: {
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
+    /** The first-open refusal the owner sees for a document's current source, if the running daemon holds one. */
+    firstOpenRefusal(source: FirstOpenSourceIdentity) {return current?.firstOpenRefusal(source);},
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
     diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return diverged.has(storeName(row));},
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */

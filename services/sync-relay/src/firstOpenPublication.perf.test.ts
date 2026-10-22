@@ -9,7 +9,7 @@ import {parseServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {firstOpenCandidateBinding} from "@dohc/workspace-engine-client/daemon";
 import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenCheckHost} from "./firstOpenPublication";
-import type {FirstOpenOutcome} from "./firstOpenOutcome";
+import type {FirstOpenOutcome} from "@dohc/workspace-contracts/first-open";
 import {createLiveValidationExecutor} from "./liveValidation";
 import {refuseOp} from "./storage/relayAdmission";
 import type {SyncRelayLogInput} from "./storage";

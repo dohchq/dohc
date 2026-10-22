@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { FirstOpenBaseBound } from "@dohc/workspace-contracts/first-open";
 import {
   createLiveMarkdownRegistrationValidator,
   type OrderedLiveUpdateCutPolicy,
@@ -31,8 +32,6 @@ export interface FirstOpenBaseInput {
   sourceByteLength: number;
   bounds: FirstOpenBaseBounds;
 }
-/** `validation-budget`: the registration validator ran out of its configured policy. */
-export type FirstOpenBaseBound = "update-limit" | "capture-budget" | "read-budget" | "validation-budget";
 /** A base's length and the length of native's full-state encoding of it. */
 export interface FirstOpenBaseSizes { baseBytes: number; fullStateBytes: number }
 type RegistrationRefusal = Extract<ReturnType<ReturnType<typeof createLiveMarkdownRegistrationValidator>>, { kind: "refused" }>["reason"];

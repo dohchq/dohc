@@ -28,6 +28,13 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
+import {
+  FIRST_OPEN_INTEGRITY_CODES,
+  FIRST_OPEN_RECOVERIES,
+  FIRST_OPEN_TOO_LARGE_CODES,
+  FIRST_OPEN_UNSUPPORTED_CAUSES,
+  type FirstOpenRefusal,
+} from "@dohc/workspace-contracts/first-open";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -411,10 +418,37 @@ export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
 });
 export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 
+// A first open the server refused, as the relay reports it to the owner and
+// their agents: typed fields to act on, never text to parse.
+const OwnerLiveFirstOpenBase = z.object({
+  source: z.object({
+    workspaceId: WORKSPACE_ID,
+    objectId: z.string().min(1).max(256),
+    path: SAFE_RELATIVE_PATH,
+    sourceMomentId: z.string().min(1).max(256),
+    sourceDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  }).strict(),
+  recovery: z.enum(FIRST_OPEN_RECOVERIES),
+});
+export const OwnerLiveFirstOpen = z.discriminatedUnion("reason", [
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("deletion")}).strict(),
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("unsupported-source"), code: z.enum(FIRST_OPEN_UNSUPPORTED_CAUSES)}).strict(),
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("too-large"), code: z.enum(FIRST_OPEN_TOO_LARGE_CODES)}).strict(),
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("ordinary-activation-refused"), code: z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9-]*$/).optional()}).strict(),
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("integrity"), code: z.enum(FIRST_OPEN_INTEGRITY_CODES)}).strict(),
+]);
+export type OwnerLiveFirstOpen = z.infer<typeof OwnerLiveFirstOpen>;
+// A refusal the shared contract adds without a schema here, or a schema it does not define, fails to compile.
+type SameType<A, B> = [A] extends [B] ? [B] extends [A] ? true : false : false;
+const ownerLiveFirstOpenMatchesContract: SameType<OwnerLiveFirstOpen, FirstOpenRefusal> = true;
+void ownerLiveFirstOpenMatchesContract;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-first-open-refused"]).optional(),
+  // Present exactly when `reason` is `live-first-open-refused`.
+  firstOpen: OwnerLiveFirstOpen.optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
@@ -1323,6 +1357,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
+  // Files the server refused to start live, one per document, as owner status reported them.
+  ownerLiveFirstOpen: z.array(OwnerLiveFirstOpen).max(64).optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.

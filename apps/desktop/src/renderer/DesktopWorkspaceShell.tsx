@@ -899,6 +899,13 @@ export function DesktopWorkspaceShell(props: {
       bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
     [],
   );
+  // Try again on a file the server refused to start live is the owner's
+  // Resume: one more request, whose answer arrives in a later status.
+  const retryLiveFirstOpen = useCallback(
+    (id: string, path: string) =>
+      bridge().resumeOwnerLiveDocument({ workspaceId: id, path }).then(() => null),
+    [],
+  );
   // The dialog maps refusal codes to app-owned copy and filters diagnostics.
   const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
     const page = await bridge().listOwnerLiveRefusals({
@@ -5296,6 +5303,7 @@ export function DesktopWorkspaceShell(props: {
                 ? {}
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
+                    onRetryLiveFirstOpen: retryLiveFirstOpen,
                   })}
               {...crashReportNotice}
               automationHolds={automationHolds}

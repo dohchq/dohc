@@ -60,12 +60,15 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
+// A refused first open always names its refusal, and nothing else carries one.
+const firstOpenPaired = (document: {reason?: string; firstOpen?: unknown}) =>
+  (document.reason === "live-first-open-refused") === (document.firstOpen !== undefined);
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
   status: z.enum(["ready", "preparing", "paused", "unavailable"]),
-})).max(64)});
+}).refine(firstOpenPaired, "A refused first open must name its refusal.")).max(64)});
 const retiredLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
   status: z.literal("retired"),
-})).max(64), nextCursor: OwnerLiveDocumentsResult.shape.nextCursor});
+}).refine(firstOpenPaired, "A refused first open must name its refusal.")).max(64), nextCursor: OwnerLiveDocumentsResult.shape.nextCursor});
 
 interface RelayShareRequest {
   <Result>(credentials: CloudCredentials, path: string, init: RequestInit | undefined, options: {retainRestoreConflict: true}): Promise<Result>;
@@ -167,9 +170,10 @@ export function createRelaySharesIpcHandlers<
       // Concurrent list reads may see a document in both sets. The current
       // enrollment wins; all bindings and server-only credentials stay in main.
       // Resume is also how the owner tries again a document the server refused,
-      // or one it could not start until the owner opened it.
+      // one whose first open it refused, or one it could not start until the owner opened it.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
+          document.reason === "live-first-open-refused" ||
           (!document.reason && (document.status === "retired" || document.status === "paused")),
       }]));
       // A deferred Stop finishes through Resume, unless the server's copy diverged or misses an
