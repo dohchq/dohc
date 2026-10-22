@@ -3114,7 +3114,7 @@
     },
     {
       "name": "dohc_read_operation",
-      "description": "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
+      "description": "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3538,7 +3538,7 @@
     },
     {
       "name": "dohc_undo_operation",
-      "description": "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
+      "description": "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
       "inputSchema": {
         "type": "object",
         "properties": {
