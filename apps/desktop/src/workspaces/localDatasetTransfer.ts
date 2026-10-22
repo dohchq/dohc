@@ -52,6 +52,8 @@ export function createLocalDatasetTransfers(options: {
   transaction<T>(run: () => T): T;
   assertCurrent(): void;
   exportRecovery(datasetId: string, signal?: AbortSignal): Promise<PreparedExport>;
+  /** The fence and its transfer record are durable: this computer no longer runs the dataset's automations. */
+  fenced(): void;
 }) {
   const { db, journal, transaction, workspaceId } = options;
   transaction(() => {
@@ -130,6 +132,7 @@ export function createLocalDatasetTransfers(options: {
           return value;
         });
         retained = true;
+        options.fenced();
       } finally { if (!retained) await prepared.dispose(); }
     }
     if (marker.state === "imported") return finishImported(marker);

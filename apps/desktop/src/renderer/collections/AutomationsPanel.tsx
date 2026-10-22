@@ -1,5 +1,5 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Server, X, Zap } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
@@ -549,12 +549,23 @@ function OwnerAutomationsPanel(props: {
   // asking, such as on a workspace switch, opens again here.
   const draftKey = JSON.stringify([workspaceId, collectionPath, table?.name ?? null]);
   const [editing, setEditing] = useState<Editing | null>(() => keptDrafts.get(draftKey) ?? null);
+  // A Collection on the server: the server runs its automations, and says itself which it runs.
+  const onServer = file?.status === "read" ? file.onServer : undefined;
   // The builder shows it under a schedule it edits.
-  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0 || editing !== null, onError);
+  const scheduleHost = useScheduleHost(workspaceId, onServer === undefined && (nextRuns.size > 0 || editing !== null), onError);
   const relayHost = scheduleHost.host?.relay ?? null;
   // Without a computer to run them, schedules have no next run to show.
   const noHost = relayHost !== null && shownScheduleHost(relayHost).hostInstallId === null;
-  const runsOn = otherHostName(relayHost);
+  const runsOn = onServer ? "your server" : otherHostName(relayHost);
+  // A next run shows where it will run: on the server only once the server says it runs them.
+  const nextRunOf = (automationId: string) => (onServer ? onServer.runs === true : !noHost) ? nextRuns.get(automationId) : undefined;
+  const scheduleHostNote = onServer ? null : (
+    <ScheduleHostNote
+      host={scheduleHost.host}
+      onCheckAgain={() => void scheduleHost.read()}
+      onChooseComputer={props.onOpenScheduleSettings}
+    />
+  );
   const editingRef = useRef(editing);
   editingRef.current = editing;
   const latestDraft = useRef<{ automation: Automation; dirty: boolean } | null>(null);
@@ -991,13 +1002,7 @@ function OwnerAutomationsPanel(props: {
             onCancel={() => leave(() => setEditing(null))}
             onOpenFile={props.onOpenFile}
             onOpenFields={props.onOpenFields}
-            scheduleHost={
-              <ScheduleHostNote
-                host={scheduleHost.host}
-                onCheckAgain={() => void scheduleHost.read()}
-                onChooseComputer={props.onOpenScheduleSettings}
-              />
-            }
+            scheduleHost={scheduleHostNote}
             onError={onError}
           />
         ) : runsOf ? (
@@ -1050,11 +1055,13 @@ function OwnerAutomationsPanel(props: {
                 <SecondaryButton size="compact" className="mt-1.5" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
               </div>
             ) : null}
-            <ScheduleHostNote
-              host={scheduleHost.host}
-              onCheckAgain={() => void scheduleHost.read()}
-              onChooseComputer={props.onOpenScheduleSettings}
-            />
+            {onServer?.runs ? (
+              <div data-testid="automations-on-server" className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[12px] text-muted">
+                <Server size={13} aria-hidden className="shrink-0 text-subtle" />
+                <p className="m-0">Your server runs these automations.</p>
+              </div>
+            ) : null}
+            {scheduleHostNote}
             <ul className="m-0 list-none p-0">
               {shown.map((entry, index) =>
                 entry.valid ? (
@@ -1094,7 +1101,7 @@ function OwnerAutomationsPanel(props: {
                         collectionPath={collectionPath}
                         onAllow={(step, seq) => allow(entry.automationId, entry.definitionHash, step, seq)}
                       />
-                      <NextRun at={noHost ? undefined : nextRuns.get(entry.automationId)} runsOn={runsOn} />
+                      <NextRun at={nextRunOf(entry.automationId)} runsOn={runsOn} />
                     </div>
                     <LastRun
                       lastRun={entry.lastRun}
