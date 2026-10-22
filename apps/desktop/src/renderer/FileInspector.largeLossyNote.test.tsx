@@ -70,6 +70,15 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
   return bridgeMock;
 }
 
+// The wait: the note's text in read mode, Edit held, and the opening state.
+async function expectWaiting() {
+  await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Paragraph 1 of plain text"));
+  expect(screen.queryByTestId("markdown-editor")).toBeNull();
+  expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(true);
+  expect(screen.getByTestId("markdown-open-state").getAttribute("title"))
+    .toBe("You can edit this document when it finishes opening.");
+}
+
 describe("a note past read mode's size", () => {
   it("with no engine record opens for source editing with no check", async () => {
     expect(LARGE_LOSSY.length).toBeGreaterThan(64 * 1024);
@@ -91,12 +100,11 @@ describe("a note past read mode's size", () => {
     const bridge = bridgeFor(LARGE_LOSSY, "record");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The session binds first; its editor shows the note and takes no keys.
-    const editor = await screen.findByTestId("markdown-editor");
+    // The session binds first. Until the check answers, the note stays in read
+    // mode, opening, with no editor to take keys.
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(pending).toHaveLength(1));
-    expect(editor.getAttribute("contenteditable")).toBe("false");
-    expect(screen.getByTestId("markdown-open-state").getAttribute("title"))
-      .toBe("You can edit this document when it finishes opening.");
+    await expectWaiting();
 
     await answerChecks();
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
@@ -110,9 +118,8 @@ describe("a note past read mode's size", () => {
     const bridge = bridgeFor(clear, "record");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const editor = await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(pending).toHaveLength(1));
-    expect(editor.getAttribute("contenteditable")).toBe("false");
+    await expectWaiting();
     await answerChecks();
     await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
     expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();

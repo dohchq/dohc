@@ -639,7 +639,9 @@ export function MarkdownView(props: {
     return () => doc.destroy();
   }, [endedSnapshot]);
   const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
-  const displayDoc = engine.doc ?? readOnlyCopy;
+  // A large note's session can bind before its check answers. Until then it
+  // stays in read mode, as it opened, and its editor mounts once, editable.
+  const displayDoc = props.lossyNote === "checking" ? null : engine.doc ?? readOnlyCopy;
 
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
@@ -863,8 +865,6 @@ export function MarkdownView(props: {
     // bind — and the notice below states the reason and offers the retry.
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
-    // A large note's session binds before its check answers, and waits for it.
-    (props.lossyNote === "checking" && engine.available) ||
     (props.truncated && !engine.available);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -1956,10 +1956,6 @@ export function MarkdownView(props: {
         <ViewActions
           onShare={onShareCurrentPath}
           status={
-            <>
-            {/* A large note's session can bind before its check answers. It
-                reads until then, and says so as any opening document does. */}
-            {opening ? <OpeningState /> : null}
             <StateMark
               testId="markdown-save-state"
               truncate
@@ -1981,7 +1977,6 @@ export function MarkdownView(props: {
               }
               onRetry={engine.retryReplacement ?? undefined}
             />
-            </>
           }
           actions={
             <DocumentControls
