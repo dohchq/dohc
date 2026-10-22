@@ -108,7 +108,7 @@ describe("the component limit, and its unit", () => {
 // filesystem.
 describe("the ladder, longest name first", () => {
   const TRASH_DIR =
-    "C:\\Users\\ice\\AppData\\Local\\Temp\\dohc-mcp-test-bJMVxX\\ws\\.dohc\\trash";
+    "C:\\Users\\ice\\AppData\\Local\\Temp\\dohc-mcp-test-bJMVxX\\ws\\.dohc\\local\\trash";
 
   // The whole point: a name that fits is never shortened for a limit that did
   // not apply, and costs exactly one rename.
@@ -144,7 +144,7 @@ describe("the ladder, longest name first", () => {
     const name = `${"a".repeat(226)}.txt`;
     const plan = trashEntryPlan(name, PREFIX, {
       unit: "utf8",
-      maxEntryChars: entryCharBudget("/home/sam/ws/.dohc/trash", "linux"),
+      maxEntryChars: entryCharBudget("/home/sam/ws/.dohc/local/trash", "linux"),
     });
     expect(plan.candidates).toHaveLength(2);
     expect(plan.exhausted).toBe(false);
@@ -162,7 +162,7 @@ describe("the ladder, longest name first", () => {
   // and the caller has to refuse rather than rename onto a path the platform
   // will reject.
   it("reports exhausted when the prefix alone cannot fit", () => {
-    const deep = `C:\\${"nested\\".repeat(30)}.dohc\\trash`;
+    const deep = `C:\\${"nested\\".repeat(30)}.dohc\\local\\trash`;
     const plan = trashEntryPlan("notes.md", PREFIX, {
       unit: "utf16",
       maxEntryChars: entryCharBudget(deep, "win32"),

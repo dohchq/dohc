@@ -1,9 +1,6 @@
 import {
   classifyPath,
-  DOHC_TRASH_GUARD,
   collisionVariantPlan,
-  notARealFolderRefusal,
-  outsideWorkspaceRefusal,
   nameUnitFor,
   sameFsEntry,
   entryCharBudget,
@@ -42,8 +39,10 @@ import {
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
-import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { refuseOnlyInICloud } from "./workspaceICloudOnly";
+import { workspaceTrashForWrite } from "./workspaceTrash";
 import {
   utf8ByteLength,
   WORKSPACE_TEXT_EDITOR_MAX_BYTES,
@@ -1469,23 +1468,21 @@ export async function movePath(
 //      (Windows IFileOperation, macOS trashItemAtURL, Linux g_file_trash).
 //   2. Fallback when the OS rejects (g_file_trash refuses cross-filesystem
 //      paths without a.Trash topdir — e.g. /mnt/c under WSL): move the
-//      target into <root>/.dohc/trash/<epoch>-<leaf>. Same-filesystem by
-//      construction (the trash dir lives inside the workspace), so the
+//      target into <root>/.dohc/local/trash/<epoch>-<leaf>. Same-filesystem
+//      by construction (the trash dir lives inside the workspace), so the
 //      rename succeeds exactly where trashItem failed. .dohc is invisible
 //      to tree/watcher/sync (hasIgnoredSegment), so the entry disappears
 //      like OS trash — and the recovery story is opening
-//      <workspace>/.dohc/trash in any file manager and moving it back.
-// The metadata dir resolves through resolveWorkspaceMetadataDir (refuses a
-// symlinked .dohc), and the trash SUBDIR is re-validated after mkdir the same
-// way — a planted `.dohc/trash -> outside` symlink (the same malicious
-// attached-workspace threat, one level deeper; mkdir{recursive} is a silent
-// no-op on an existing symlink-to-dir) is refused before any rename.
+//      <workspace>/.dohc/local/trash in any file manager and moving it back.
+//      When the engine's open has not prepared .dohc/local, the fallback
+//      refuses and nothing moves.
 export async function deletePath(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   relativePath: string,
   trashItem: (absolutePath: string) => Promise<void>,
   onFallback?: (staged: string) => void,
 ): Promise<{ trashed: boolean }> {
+  const rootPath = workspace.rootPath;
   const validated = validateUserWritePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid delete path (${validated.reason}): ${relativePath}`);
@@ -1534,45 +1531,29 @@ export async function deletePath(
     await trashItem(target);
     return { trashed: true };
   } catch {
-    const staged = await moveIntoWorkspaceTrash(rootPath, target);
+    const staged = await moveIntoWorkspaceTrash(workspace, target);
     onFallback?.(staged);
     return { trashed: false };
   }
 }
 
 // The workspace's own recovery location. Moves an absolute path already proven
-// to be inside the workspace into <root>/.dohc/trash and answers where it
+// to be inside the workspace into <root>/.dohc/local/trash and answers where it
 // landed. Nothing here deletes: the recovery story is opening
-// <workspace>/.dohc/trash in any file manager and moving the entry back.
+// <workspace>/.dohc/local/trash in any file manager and moving the entry back.
 export async function moveIntoWorkspaceTrash(
-  rootPath: string,
+  workspace: LocalStateWorkspace,
   target: string,
 ): Promise<string> {
-  const realRoot = await realpath(rootPath);
-  const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
-  // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when a
-  // non-directory squats.dohc/trash. When something is at the path, fall
-  // through: the check below names the squatter and the way out, which the
-  // errno does not. When nothing is there, the mkdir itself failed
-  // (permissions, I/O) — rethrow that.
-  try {
-    await mkdir(trashDir, { recursive: true });
-  } catch (error) {
-    if (!(await lstat(trashDir).catch(() => null))) throw error;
-  }
-  // Validate after mkdir, lstat-first (a pre-check is insufficient: mkdir
-  // {recursive} silently no-ops on an existing symlink-to-dir, so only the
-  // post-mkdir state proves where the rename would land). The check sits
-  // immediately before the rename to keep the swap window minimal; a
-  // colluding local process racing a symlink into .dohc between this check
-  // and the rename is the accepted residual (Node has no renameat dirfd).
-  const trashStat = await lstat(trashDir);
-  if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
-    throw new Error(notARealFolderRefusal(DOHC_TRASH_GUARD, trashStat));
-  }
-  if (!isInside(realRoot, await realpath(trashDir))) {
-    throw new Error(outsideWorkspaceRefusal(DOHC_TRASH_GUARD));
-  }
+  // The trash is checked after it is made and immediately before the rename,
+  // to keep the swap window minimal; a colluding local process racing a
+  // symlink into .dohc between the check and the rename is the accepted
+  // residual (Node has no renameat dirfd).
+  const trashDir = await workspaceTrashForWrite(workspace, `move ${basename(target)} to the workspace trash`);
+  // Checked here, with the workspace held and right before the rename, so a
+  // file has the least time to leave the disk after it was seen there. The
+  // check's bounds limit how long it holds the workspace.
+  await refuseOnlyInICloud(target);
   // Collision-resistant name: back-to-back deletes (multi-select) share a
   // Date.now() tick, and POSIX rename silently clobbers an existing
   // destination — two same-basename deletes would destroy the first file's

@@ -20,7 +20,7 @@ import {
   type CollectionAutomationRunOutcome,
   type CollectionRecordWrites,
 } from "./collectionAutomationRun";
-import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createTestScratch, testStoreFolder } from "./testScratch";
 import { createAutomationTargets } from "./automationTargets";
 import { MAX_FOUND_RECORDS } from "./automationPlan";
 import { chatDirectoryOf } from "./automationChat";
@@ -436,7 +436,7 @@ const task = (id: string, values: Record<string, JsonValue>): Doc => ({ id, path
  * Runs the claim to its end, starting it again after each crash, as the
  * engine hands a crashed claim out again under the same run.
  */
-const scratchStore = async () => createAutomationRunStore(await createTestScratch("dohc-stepwise-"), testMetadataDir);
+const scratchStore = async () => createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-stepwise-")));
 
 it("Undo reverses confirmed fields and finds an unconfirmed creation only if it exists", async () => {
   const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {A: 1}}]");
@@ -797,7 +797,7 @@ describe("a stepwise run", () => {
 
   it("rechecks a destination at effect time after caching its planning resolution", async () => {
     const space = workspace([task("rec_t", { Count: 1 })]);
-    const store = createAutomationRunStore(await createTestScratch("dohc-target-recheck-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-target-recheck-")));
     const dependencies = space.dependencies(store);
     let resolutions = 0;
     const signal = new AbortController().signal;
@@ -816,7 +816,7 @@ describe("a stepwise run", () => {
 
   it("refuses a dataset destination with no approved operation before reading records", async () => {
     const space = workspace([task("rec_t", {})]);
-    const store = createAutomationRunStore(await createTestScratch("dohc-document-target-"), testMetadataDir);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-document-target-")));
     const dependencies = space.dependencies(store);
     const definition = automation("id: donate\nname: Donate\nwhen: record-added\ndo:\n  - add-record: {Amount: 5}\n    collection: Log");
     const signal = new AbortController().signal;

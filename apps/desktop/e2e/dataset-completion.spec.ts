@@ -123,7 +123,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(approval).toContainText("Owner actions: None");
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
-    await expect(publication.getByRole("status")).toHaveText("App published on the selected link.");
+    // The publication list reloads behind the notice, so its loading status can show beside it.
+    await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
     await publication.getByRole("button", { name: "Close publication", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);

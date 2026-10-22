@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewFiles,
@@ -41,6 +41,7 @@ import {
 } from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import { deferred } from "../testing/deferred";
 
 let materializationWriteSchedule: {
@@ -106,24 +107,42 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
+// Writers of `.dohc/local` ask the engine's open. Here every view counts as
+// opened once its `.dohc/local` exists.
+const OPENED = { localStateReady: true };
+beforeEach(() => {
+  readLocalStateFrom({ currentBinding: () => OPENED });
+});
+
+/** A view the engine has opened: its `.dohc/local` is made. */
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");
-  await mkdir(root, { recursive: true });
+  await mkdir(join(root, ".dohc", "local"), { recursive: true, mode: 0o700 });
   return root;
+}
+
+/** Where a view's refresh records live. */
+function recordsDir(rootPath: string): string {
+  return join(rootPath, ".dohc", "local", "share-refresh");
+}
+
+async function writeRecord(rootPath: string, name: string, content: string): Promise<string> {
+  await mkdir(recordsDir(rootPath), { recursive: true, mode: 0o700 });
+  const path = join(recordsDir(rootPath), name);
+  await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+  return path;
 }
 
 async function seedPendingMaterializationPaths(
   rootPath: string,
   paths: readonly string[],
 ): Promise<void> {
-  const metadataPath = join(rootPath, ".dohc");
-  await mkdir(metadataPath, { recursive: true });
-  await writeFile(
-    join(metadataPath, "pending-materialization.json"),
+  await writeRecord(
+    rootPath,
+    "pending-materialization.json",
     JSON.stringify({
       counts: Object.fromEntries([...new Set(paths)].map((path) => [path, 1])),
     }),
-    "utf8",
   );
 }
 
@@ -784,8 +803,7 @@ describe("ShareViewFiles", () => {
           if (failedRecord === "pending") {
             sidecarRenameFailure = {
               path: join(
-                rootPath,
-                ".dohc",
+                recordsDir(rootPath),
                 "pending-materialization.json",
               ),
               error: new Error("pending marker persistence failed"),
@@ -795,8 +813,7 @@ describe("ShareViewFiles", () => {
           if (failedRecord === "collision") {
             sidecarRenameFailure = {
               path: join(
-                rootPath,
-                ".dohc",
+                recordsDir(rootPath),
                 "share-collision-record.json",
               ),
               error: new Error("collision persistence failed"),
@@ -893,6 +910,8 @@ describe("ShareViewFiles", () => {
       createMount: async (owner) => {
         leakedOwner = owner;
         await shareViewFilesMountProjection(owner).create();
+        // The engine's open of the mount's store makes its `.dohc/local`.
+        await mkdir(join(prepared.rootPath, ".dohc", "local"), { recursive: true });
         registered = true;
       },
       removeMount: async (owner) => {
@@ -1019,7 +1038,7 @@ describe("ShareViewFiles", () => {
         files.mount(lease, prepared),
       ),
     ).rejects.toThrow("belongs to another target");
-    await expect(lstat(join(otherRoot, ".dohc"))).rejects.toMatchObject({
+    await expect(lstat(recordsDir(otherRoot))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -1147,7 +1166,7 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
     sidecarRenameFailure = {
-      path: join(rootPath, ".dohc", "pending-materialization.json"),
+      path: join(recordsDir(rootPath), "pending-materialization.json"),
       error: new Error("real pending mark failed"),
     };
 
@@ -1181,8 +1200,7 @@ describe("ShareViewFiles", () => {
     const before = "before\n";
     const after = "after\n";
     const pendingPath = join(
-      rootPath,
-      ".dohc",
+      recordsDir(rootPath),
       "pending-materialization.json",
     );
     await mkdir(join(rootPath, "notes"), { recursive: true });
@@ -1254,17 +1272,15 @@ describe("ShareViewFiles", () => {
     const before = "before\n";
     const after = "agent edit\n";
     const pendingPath = join(
-      rootPath,
-      ".dohc",
+      recordsDir(rootPath),
       "pending-materialization.json",
     );
     await mkdir(join(rootPath, "notes"), { recursive: true });
-    await mkdir(join(rootPath, ".dohc"), { recursive: true });
     await writeFile(join(rootPath, path), after, "utf8");
-    await writeFile(
-      pendingPath,
+    await writeRecord(
+      rootPath,
+      "pending-materialization.json",
       JSON.stringify({ counts: { [path]: 2 } }),
-      "utf8",
     );
     const store = mutableTextStore({ initial: [{ path, text: before }] });
     const pull = vi.fn(async () => {
@@ -1928,12 +1944,7 @@ describe("ShareViewFiles", () => {
     const path = "docs/collision.md";
     await mkdir(join(rootPath, "docs"), { recursive: true });
     await writeFile(join(rootPath, path), "recipient data\n", "utf8");
-    await mkdir(join(rootPath, ".dohc"), { recursive: true });
-    await writeFile(
-      join(rootPath, ".dohc", "share-collision-record.json"),
-      "not json",
-      "utf8",
-    );
+    await writeRecord(rootPath, "share-collision-record.json", "not json");
     const store = mutableTextStore({
       initial: [{ path, text: "granter old\n" }],
     });
@@ -2028,6 +2039,104 @@ describe("ShareViewFiles", () => {
     } finally {
       errorLog.mockRestore();
     }
+  });
+
+  // A view's records wait for the engine's open of that view's own store: a
+  // standalone view's attachment, or a mount's store in its own folder.
+  it("saves in a standalone view only once its attachment's open is ready, and changes nothing before", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/attached.md";
+    const before = "before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), before, "utf8");
+    const attachmentId = Symbol("attached view");
+    const asked: unknown[] = [];
+    let opened = false;
+    readLocalStateFrom({
+      currentBinding: (view) => {
+        asked.push(view);
+        return opened && view.attachmentId === attachmentId ? OPENED : null;
+      },
+    });
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => ({ ...target(rootPath), attachmentId }),
+      openStore: () => store,
+    });
+    const save = () =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: "after\n",
+            expectedContentHash: createHash("sha256").update(before).digest("hex"),
+          },
+        ),
+      );
+
+    await expect(save()).rejects.toThrow(
+      "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.",
+    );
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(before);
+    await expect(lstat(recordsDir(rootPath))).rejects.toMatchObject({ code: "ENOENT" });
+
+    opened = true;
+    await expect(save()).resolves.toMatchObject({ status: "committed", projection: "current" });
+    await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("after\n");
+    expect(asked).not.toEqual([]);
+    for (const view of asked) {
+      expect(view).toMatchObject({ workspaceId: "workspace-a", rootPath, attachmentId });
+    }
+  });
+
+  it("names a mount's own .dohc/local when its open can't keep it out of iCloud Drive", async () => {
+    const hostRoot = await workspaceRoot();
+    const mounted = {
+      ...mountTarget(mountRootFor(hostRoot, "granter")),
+      schedulingRootPath: hostRoot,
+    };
+    await mkdir(join(mounted.rootPath, ".dohc", "local"), { recursive: true });
+    const notExcluded = { localStateReady: false };
+    readLocalStateFrom({
+      currentBinding: (view) =>
+        view.workspaceId === "host-a:share-a" &&
+        view.rootPath === mounted.rootPath &&
+        view.attachmentId === undefined
+          ? notExcluded
+          : null,
+    });
+    const pull = vi.fn(async (): Promise<never> => {
+      throw new Error("Unexpected pull");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => mounted,
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(hostRoot, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+      ),
+    ).rejects.toThrow(
+      "dohc did not update these shared files because it can't keep shared-with-me/granter/.dohc/local out of iCloud Drive. Restart dohc to try again.",
+    );
+    expect(pull).not.toHaveBeenCalled();
+    expect(await readdir(join(mounted.rootPath, ".dohc", "local"))).toEqual([]);
   });
 
   it("propagates a mounted refresh failure", async () => {
@@ -2454,10 +2563,12 @@ describe("ShareViewFiles", () => {
     "leaves %s collision record untouched for capture to quarantine",
     async (_recordKind, serialized) => {
       const rootPath = await workspaceRoot();
-      const metadataPath = join(rootPath, ".dohc");
-      const collisionPath = join(metadataPath, "share-collision-record.json");
-      await mkdir(metadataPath, { recursive: true });
-      await writeFile(collisionPath, serialized, "utf8");
+      const metadataPath = recordsDir(rootPath);
+      const collisionPath = await writeRecord(
+        rootPath,
+        "share-collision-record.json",
+        serialized,
+      );
       const store = readStore({ text: "canonical\n" });
       const files = createShareViewFiles({
         ...unusedReconcilePorts,

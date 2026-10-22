@@ -20,6 +20,8 @@ export interface ShareViewFilesOwnerResource {
   rootPath: string;
   shareId: string;
   mountLabel?: string;
+  /** A standalone view's attachment, whose engine open prepares its `.dohc/local`. */
+  attachmentId?: symbol;
 }
 
 export type ShareViewFilesOwnerResourceExpectation = Partial<

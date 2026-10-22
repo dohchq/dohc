@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { privateFolder } from "./private-folder.test-helper";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,7 +33,7 @@ async function fixture(){
  const host=createDatasetReplicaHost({journal,owner(context:string){if(!allowed||context!=="owner")throw Error("revoked");return {principal:"owner"};}});
  const remote:DatasetReplicaSource={async capture(){return host.replicaCapture("owner",scope);},async page(input){return host.replicaPage("owner",{...scope,...input});},async blob(input){return host.replicaBlob("owner",{...scope,...input});}};
  const copies:DatasetReplica[]=[];
- async function open(runtime?: PersistentRuntimeOptions){const replica=await createDatasetReplica({directory:join(directory,"copy"),scope,ownerKey:"owner",origin:"https://relay",runtime,assertOwner(){if(!owner)throw Error("owner changed");}});copies.push(replica);return replica;}
+ async function open(runtime?: PersistentRuntimeOptions){const replica=await createDatasetReplica({directory:await privateFolder(join(directory,"copy"))(),scope,ownerKey:"owner",origin:"https://relay",runtime,assertOwner(){if(!owner)throw Error("owner changed");}});copies.push(replica);return replica;}
  cleanups.push(async()=>{for(const copy of copies)await copy.close();seed.close();db.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
  function add(value:string){const session=seed.createSession({table:"items"});seed.prepare("INSERT INTO items(value,secret) VALUES(?,'private')").run(value);const changeset=session.changeset();session.close();const result=journal.commitOperation({expected:head,proposalId:value,operation:"add",callerKey:"owner",idempotencyKey:value,payloadSha256:hash(value),resultJson:"null",changeset,changesetSha256:hash(changeset),attachedFileIds:[],authorize(){},accountAndAttach(){}});if(result.kind!=="committed")throw Error("replay");head=result.event.cursor;}
  const read={operationId:id(5),revision:1,revisionSha256:approved.revisionSha256,input:{}};

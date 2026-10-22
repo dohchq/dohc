@@ -71,6 +71,7 @@ if (config) {
   check(config.productName === "dohc", "productName is dohc");
   check(typeof config.appId === "string" && config.appId.includes("dohc"), `appId carries dohc (${config.appId})`);
   check(config.executableName === "dohc", "executableName is filesystem-safe");
+  check(config.linux?.executableName === "dohc-desktop", "the Linux app's command leaves dohc to the chat CLI");
   check(
     config.linux?.syncDesktopName === true,
     "Linux launcher filename and StartupWMClass sync to desktopName",
@@ -169,6 +170,10 @@ if (config) {
     check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
     const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
     check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
+  }
+  // A Linux desktop entry names types, not extensions.
+  for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
+    check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
   }
   check(
     Array.isArray(config.protocols) &&

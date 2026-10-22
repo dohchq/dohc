@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,10 @@ import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import type { Request, Response } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
+import { deferred } from "../testing/deferred";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -30,6 +35,8 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-migration-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra });
   hosts.push(host); return { host, workspaceRoot };
 }
@@ -187,5 +194,64 @@ describe("owner Collection migration", () => {
     if (prepared.kind !== "migration-prepared") throw new Error("Missing migration review");
     const migrated = await handler("owner", { workspaceId: "w", action: "approveMigration", ...approval(prepared) });
     expect(DatasetResult.parse(migrated).kind).toBe("migrated");
+  });
+});
+
+// A daemon whose opens prepare `.dohc/local` as the engine's do.
+class Daemon implements EngineDaemonClient {
+  async sendRequest(request: Request): Promise<Response> {
+    if (request.method === "workspace.open") {
+      const { rootDir } = request.params as { rootDir: string };
+      await mkdir(join(rootDir, ".dohc", "local"), { recursive: true });
+      return { id: request.id, result: { workspace: "handle", localStateReady: true } };
+    }
+    if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+    throw new Error(`Unexpected method: ${request.method}`);
+  }
+  close(): void {}
+}
+
+describe("a Collection change during an engine run", () => {
+  it("refuses at once when a rebind closes the open before the change takes its worker folder", async () => {
+    const first = await open(), f = fixture();
+    await activate(first.host, f); f.next();
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
+    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
+    try {
+      readLocalStateFrom(sessions);
+      // Windows can't remove the first host's worker lock while that host is open.
+      await first.host.close();
+      // Opened before the engine, so the host takes its worker folder at the first worker.
+      await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+      const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
+        attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
+      hosts.push(host);
+      // The dataset IPC prepares a change inside an engine run. A rebind's close waits for that run.
+      const inRun = deferred<void>(), proceed = deferred<void>();
+      const preview = sessions.run(workspace, async () => { inRun.resolve(); await proceed.promise; return prepare(host, f); });
+      await inRun.promise;
+      const closing = sessions.closeWorkspaceBinding(workspace);
+      proceed.resolve();
+      await expect(preview).rejects.toThrow("dohc did not open this Collection's records because the workspace has not finished opening.");
+      await closing;
+    } finally { await sessions.closeAll(); }
+  });
+
+  it("refuses once the open deadline passes when the open's preparation never settles", async () => {
+    const first = await open(), f = fixture(), revision = await activate(first.host, f);
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
+    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+    // The open's own preparation stalls, before the daemon deadline starts. Nothing closes these sessions: a close would wait for that open.
+    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockReturnValue(new Promise<void>(() => {}));
+    readLocalStateFrom(sessions);
+    // Windows can't remove the first host's worker lock while that host is open.
+    await first.host.close();
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
+      attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
+    hosts.push(host);
+    void sessions.run(workspace, async () => undefined).catch(() => undefined);
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    await expect(host.query(call(revision, id(5)))).rejects.toThrow("dohc did not open this Collection's records because the workspace has not finished opening.");
   });
 });

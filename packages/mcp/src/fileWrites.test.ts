@@ -86,7 +86,7 @@ describe("MCP authored moves and deletes", () => {
   it("preserves the replaced destination's trash and History report", async () => {
     const ctx = await context();
     const result = { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: "source.csv", toPath: "dest.csv", withoutHistory: ["dest.csv"],
-      replaced: { path: "dest.csv", trashed: false, trashPath: ".dohc/trash/old-dest.csv", withoutHistory: ["dest.csv"] } };
+      replaced: { path: "dest.csv", trashed: false, trashPath: ".dohc/local/trash/old-dest.csv", withoutHistory: ["dest.csv"] } };
     ctx.request = vi.fn<NonNullable<ToolContext["request"]>>(async () => result);
     expect(await moveWorkspacePath(ctx, { fromPath: "source.csv", toPath: "dest.csv", overwrite: true }, "Client")).toEqual(result);
   });

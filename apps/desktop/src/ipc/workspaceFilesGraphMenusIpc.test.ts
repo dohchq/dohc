@@ -27,6 +27,7 @@ import { deferred } from "../testing/deferred";
 import type { OperationHistory } from "../workspaces/workspaceHistoryOperations";
 import { saveRecoveryRecord } from "../workspaces/workspaceDeleteRecovery";
 import type { FileMoveRecoveryRecord } from "../workspaces/workspaceMoveRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 type Sender = { id: number };
 type Event = { sender: Sender; trusted: boolean };
@@ -167,7 +168,8 @@ describe("registered workspace file handlers", () => {
     const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     const record: FileMoveRecoveryRecord = {operationId, from, to, entries: [from], tracked: true};
-    await saveRecoveryRecord(h.workspace.rootPath, record, "move");
+    await openedLocalState(h.workspace);
+    await saveRecoveryRecord(h.workspace, record, "move");
     await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, {workspaceId: "workspace", operationId}))
       .resolves.toEqual({ok: false, reason: `Cannot read the ${word} operation. Its recovery paths are invalid.`});
     expect(readHistoryPage).not.toHaveBeenCalled();
@@ -190,11 +192,12 @@ describe("registered workspace file handlers", () => {
     const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
     const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    await mkdir(join(h.workspace.rootPath, ".dohc"));
+    await mkdir(join(h.workspace.rootPath, ".dohc"), {recursive: true});
     await writeFile(join(h.workspace.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "excluded/**"\ntracked = false\n');
     const record: FileMoveRecoveryRecord = {operationId, from: "old.md", to: "new.md", entries: ["old.md"], tracked: true,
       links: state === "updating" ? {state} : {state, documents: 2, unchecked: ["visible.md", "excluded/source.md", "../outside.md"], uncheckedCount: 3}};
-    await saveRecoveryRecord(h.workspace.rootPath, record, "move");
+    await openedLocalState(h.workspace);
+    await saveRecoveryRecord(h.workspace, record, "move");
     const payload = {workspaceId: "workspace", operationId};
     await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, payload)).resolves.toMatchObject({ok: true,
       links: state === "updating" ? {state} : {state, documents: 2, unchecked: ["visible.md", "excluded/source.md"], uncheckedCount: 3}});
@@ -239,6 +242,8 @@ describe("registered workspace file handlers", () => {
 
   it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     const root = h.workspace.rootPath;
     const foreignPath = collision === "root" ? "app/notes.txt"
       : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
@@ -280,6 +285,8 @@ describe("registered workspace file handlers", () => {
 
   it("keeps foreign descendants added to a created folder before rollback", async () => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     await expect(createFirstAppFiles({
       workspaceId: "workspace", files: [], folders: [],
       mutations: {
@@ -416,7 +423,7 @@ describe("registered workspace file handlers", () => {
 
   it("screens dragged metadata and imports native picks", async () => {
     const h = await harness();
-    await mkdir(join(h.workspace.rootPath, ".dohc"));
+    await mkdir(join(h.workspace.rootPath, ".dohc"), {recursive: true});
     const metadata = join(h.workspace.rootPath, ".dohc", "private.json");
     await writeFile(metadata, "secret metadata");
     await expect(h.invoke(workspaceFileOperations.importWorkspaceFiles.channel, {

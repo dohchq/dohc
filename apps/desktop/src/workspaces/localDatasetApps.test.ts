@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,6 +39,8 @@ afterEach(async () => {
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
 async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));

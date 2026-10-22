@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   adoptLoginShellPath,
   loginShellEnvironment,
+  hasControllingTerminal,
   mergeShellPath,
+  needsLoginShellPath,
   parseShellPath,
   readLoginShellPath,
   registeredLoginShell,
@@ -36,6 +38,27 @@ describe("mergeShellPath", () => {
       .toBe("/opt/homebrew/bin:/usr/bin:/Users/sam/.local/bin:/bin:/usr/sbin:/sbin");
     expect(mergeShellPath(undefined, ["/opt/homebrew/bin"])).toBe("/opt/homebrew/bin");
     expect(mergeShellPath("::relative:/bin", ["/usr/bin"])).toBe("/usr/bin:/bin");
+  });
+});
+
+describe("needsLoginShellPath", () => {
+  it("reads it for Finder and a Linux launcher, and keeps a Linux terminal's PATH", () => {
+    expect(needsLoginShellPath("darwin", false)).toBe(true);
+    expect(needsLoginShellPath("darwin", true)).toBe(true);
+    expect(needsLoginShellPath("linux", false)).toBe(true);
+    expect(needsLoginShellPath("linux", true)).toBe(false);
+    expect(needsLoginShellPath("win32", false)).toBe(false);
+  });
+});
+
+describe("hasControllingTerminal", () => {
+  it("is true only when /dev/tty opens", () => {
+    const opened: string[] = [];
+    expect(hasControllingTerminal((path) => { opened.push(path); })).toBe(true);
+    expect(opened).toEqual(["/dev/tty"]);
+    expect(hasControllingTerminal(() => {
+      throw Object.assign(new Error("No such device or address"), { code: "ENXIO" });
+    })).toBe(false);
   });
 });
 

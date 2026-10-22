@@ -1,6 +1,7 @@
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { canRewriteMoveLinks, listMoveRecoveries, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
+import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
 
 export type LinkRewriteContext = {
@@ -25,7 +26,8 @@ const stateFor = (root: string, id: string) => {
 const eligible = (record: FileMoveRecoveryRecord) => canRewriteMoveLinks(record) && record.links?.state === "updating";
 
 // Register inside the move lock. The next event-loop turn is after the visible result.
-export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord, context: LinkRewriteContext): void {
+export function scheduleLinkRewrite(workspace: LocalStateWorkspace, record: FileMoveRecoveryRecord, context: LinkRewriteContext): void {
+  const root = workspace.rootPath;
   if (!eligible(record) || context.signal?.aborted) return;
   const state = stateFor(root, record.operationId);
   if (state.undo || state.pass || state.scheduled) return;
@@ -50,7 +52,7 @@ export function scheduleLinkRewrite(root: string, record: FileMoveRecoveryRecord
         const current = await readMoveRecovery(root, record.operationId);
         if (!current || "noUndo" in current || !eligible(current) || context.signal?.aborted) return;
         current.links = { state: "done", documents: receipt.documents, unchecked: receipt.unchecked, uncheckedCount: receipt.uncheckedCount };
-        await saveRecoveryRecord(root, current, "move");
+        await saveRecoveryRecord(workspace, current, "move");
       }, {markOnSuccess: false});
     }).catch(() => {
       // A cancelled or interrupted pass stays updating for refusal/open recovery.
@@ -84,12 +86,13 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
   };
 }
 
-export async function resumeWorkspaceLinkRewrites(root: string, context: LinkRewriteContext): Promise<void> {
+export async function resumeWorkspaceLinkRewrites(workspace: LocalStateWorkspace, context: LinkRewriteContext): Promise<void> {
+  const root = workspace.rootPath;
   for (const id of await listMoveRecoveries(root)) {
     if (context.signal?.aborted) return;
     await withExclusiveWorkspaceOperation(root, async () => {
       const record = await readMoveRecovery(root, id);
-      if (record && !("noUndo" in record)) scheduleLinkRewrite(root, record, context);
+      if (record && !("noUndo" in record)) scheduleLinkRewrite(workspace, record, context);
     }, {markOnSuccess: false});
   }
 }

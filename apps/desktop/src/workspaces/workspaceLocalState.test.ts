@@ -1,12 +1,17 @@
-import { lstat, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
+  existingLocalStateFolder,
   localStateDir,
+  localStateFolder,
+  LocalStateFolderError,
   LocalStateUnavailableError,
+  ownedLocalStateDir,
+  ownedSqliteFiles,
   readLocalStateFrom,
 } from "./workspaceLocalState";
 import { createTestScratch } from "./testTemp";
@@ -144,6 +149,75 @@ describe("this computer's .dohc/local", () => {
     expect(await refusal(localStateDir(workspace))).toBe("not-opened");
     expect(await existingLocalStateDir(workspace.rootPath)).toBeNull();
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  // What dohc can't look at may hold what protects a person's work, so only a
+  // folder that is not there reads as missing. chmod can't hide a folder from
+  // root, and Windows has no such mode.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "refuses a reader whose .dohc dohc can't look into, rather than read it as missing",
+    async () => {
+      const { workspace, open } = await engine();
+      await open();
+      await mkdir(join(workspace.rootPath, ".dohc", "local", "trash"));
+      const dohc = join(workspace.rootPath, ".dohc");
+      await chmod(dohc, 0o600);
+      try {
+        const refused = await ownedLocalStateDir(workspace.rootPath).then(() => null, (error: unknown) => error);
+        expect(refused).toBeInstanceOf(LocalStateFolderError);
+        expect((refused as Error).message).toBe(
+          "This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+        );
+        await expect(existingLocalStateFolder(workspace.rootPath, "trash")).rejects.toBeInstanceOf(LocalStateFolderError);
+      } finally {
+        await chmod(dohc, 0o700);
+      }
+      expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
+    },
+  );
+
+  it("makes each folder on the way to a nested one private, and refuses a link on the way to writers and readers", async () => {
+    const { workspace, open } = await engine();
+    await open();
+    const guard = { path: ".dohc/local/datasets/workers", lead: "dohc could not open this Collection's records." };
+    const made = await localStateFolder(workspace, "datasets/workers", guard);
+    expect(made).toBe(join(workspace.rootPath, ".dohc", "local", "datasets", "workers"));
+    if (process.platform !== "win32") for (const folder of [join(made, ".."), made]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe(made);
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/exports")).toBeNull();
+    const outside = await createTestScratch("dohc-local-state-outside-");
+    await rm(join(workspace.rootPath, ".dohc", "local", "datasets"), { recursive: true });
+    await symlink(outside, join(workspace.rootPath, ".dohc", "local", "datasets"), "dir");
+    await expect(localStateFolder(workspace, "datasets/workers", guard)).rejects.toThrow(
+      "dohc could not open this Collection's records. A link is at .dohc/local/datasets, which must be a real folder.");
+    expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe("unusable");
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  // A SQLite database in `.dohc/local` can decide what dohc does, such as the
+  // next operation number, so each of its files must be one only this user can change.
+  it.skipIf(process.platform === "win32")("trusts a SQLite database only when it and each of its files is this user's alone", async () => {
+    const folder = await createTestScratch("dohc-local-sqlite-");
+    const elsewhere = await createTestScratch("dohc-local-sqlite-elsewhere-");
+    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+    for (const name of ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm", "state.sqlite-journal"]) await writeFile(join(folder, name), "", { mode: 0o644 });
+    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+    const someoneElse = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+    try {
+      expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(false);
+    } finally { someoneElse.mockRestore(); }
+    for (const [name, untrust, restore] of [
+      ["state.sqlite", () => chmod(join(folder, "state.sqlite"), 0o664), () => chmod(join(folder, "state.sqlite"), 0o644)],
+      ["state.sqlite-wal", () => link(join(folder, "state.sqlite-wal"), join(elsewhere, "wal")), () => rm(join(elsewhere, "wal"))],
+      ["state.sqlite-shm", async () => { await rm(join(folder, "state.sqlite-shm")); await symlink(join(elsewhere, "shm"), join(folder, "state.sqlite-shm")); },
+        async () => { await rm(join(folder, "state.sqlite-shm")); await writeFile(join(folder, "state.sqlite-shm"), ""); }],
+      ["state.sqlite-journal", () => chmod(join(folder, "state.sqlite-journal"), 0o646), () => chmod(join(folder, "state.sqlite-journal"), 0o644)],
+    ] as const) {
+      await untrust();
+      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(false);
+      await restore();
+      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(true);
+    }
   });
 
   it("gives a reader the folder whatever the engine said, and null when it is missing", async () => {

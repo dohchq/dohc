@@ -12,18 +12,19 @@ import { createRegistryStore, type RegistryEntry } from "../workspaces/registryS
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import {
-  applyDatabaseEdit, createWorkspaceDatabaseWorkerOwner,
+  createWorkspaceDatabaseAccess, createWorkspaceDatabaseWorkerOwner,
   readPreparedDatabaseSnapshot, readDatabaseSnapshotFromBytes,
   readPreparedDatabasePage, readDatabasePageFromBytes,
 } from "../workspaces/workspaceDatabase";
 import type { OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { createTestScratch } from "../workspaces/testTemp";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { databaseImportOperations, ImportToDatabaseResult } from "./bridgeContract";
 import { deferred } from "../testing/deferred";
-import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
+import { withExclusiveWorkspaceOperation, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 
 class Sender {
   constructor(readonly id: number) {}
@@ -52,6 +53,7 @@ const sharedView = { shareId: "share-db", granterEmail: null, genericChatWritabl
 async function harness() {
   const rootPath = realpathSync(await createTestScratch("desktop-database-ipc-"));
   const workspace: RegistryEntry = { workspaceId: "workspace-a", rootPath, kind: "personal", mode: "local-first" };
+  await openedLocalState(workspace);
   const registry = createRegistryStore(join(rootPath, "registry.json"));
   registry.register(workspace);
   const authority = createWorkspaceAuthorityOwner({ findWorkspace: registry.find, canonicalizeRoot: (path) => realpathSync(path), createState: () => ({}) });
@@ -87,10 +89,7 @@ async function harness() {
     readPageBytes: (path, bytes, table, offset) => readDatabasePageFromBytes(path, bytes, table, offset, { worker, signal }),
   }));
   type Dependencies = Parameters<typeof registerDesktopDatabaseIpcHandlers<Sender, { sender: Sender }, RegistryEntry>>[0];
-  const edit = vi.fn<Dependencies["editWorkspaceDatabaseInWorker"]>((input) => applyDatabaseEdit(
-    input.rootPath, input.relativePath, input.edit, input.author, input.nowMs,
-    { worker, signal: input.signal, createId: () => input.operationId! },
-  ));
+  const edit = vi.fn<Dependencies["editWorkspaceDatabaseInWorker"]>(createWorkspaceDatabaseAccess(worker).editWorkspaceDatabaseInWorker);
   const readOwner = vi.fn<ShareViewFiles["read"]>(async () => ({ kind: "asset", bytes: Buffer.from("id,value\n1,owner value\n"), mediaType: "text/csv" }));
   const writable = vi.fn((candidate: RegistryEntry) => {
     const refusal = workspaceWriteRefusal(registry.find(candidate.workspaceId)?.shareView);
@@ -170,7 +169,7 @@ describe("desktop database IPC composition", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
     await expect(h.invoke(CHANNELS.applyDatabaseEdit, { ...editPayload, rootPath: "C:/untrusted", author: { kind: "agent" } })).resolves.toMatchObject({ path: "data.sqlite", table: "items", version: 1, page: { rows: [expect.objectContaining({ value: "changed" }), expect.objectContaining({ value: "next value" })] } });
     expect(h.edit).toHaveBeenCalledTimes(1);
-    expect(h.edit.mock.calls[0]?.[0]).toEqual({ rootPath: h.workspace.rootPath, relativePath: "data.sqlite", edit: editPayload.edit, author: { kind: "user", userId: "local" }, nowMs: 1_700_000_000_000, operationId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), signal: h.signals[1] });
+    expect(h.edit.mock.calls[0]?.[0]).toEqual({ workspace: expect.objectContaining({ workspaceId: h.workspace.workspaceId, rootPath: h.workspace.rootPath }), relativePath: "data.sqlite", edit: editPayload.edit, author: { kind: "user", userId: "local" }, nowMs: 1_700_000_000_000, operationId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), signal: h.signals[1] });
     const log = (await readFile(join(h.workspace.rootPath, databaseOpLogPath("data.sqlite")), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(log).toEqual([expect.objectContaining({ operationId: h.edit.mock.calls[0]![0].operationId, appliedAt: 1_700_000_000_000, author: { kind: "user", userId: "local" }, payload: { value: "changed" } })]);
   });
@@ -312,6 +311,43 @@ describe("desktop database IPC composition", () => {
   });
 });
 
+// Right after launch the engine may still be preparing `.dohc/local`, which
+// holds an edit's operation counter.
+describe("a database edit during the engine's open", () => {
+  it("waits for the open outside the workspace lease, so other workspace operations go on", async () => {
+    const h = await harness();
+    await h.seed();
+    const opens = fakeLocalStateOpens();
+    const opening = opens.start(h.workspace);
+    const pending = h.invoke(CHANNELS.applyDatabaseEdit);
+    try {
+      await vi.waitFor(() => expect(opens.waits()).toBe(1));
+      let other = false;
+      void withExclusiveWorkspaceOperation(h.workspace.rootPath, async () => { other = true; });
+      await vi.waitFor(() => expect(other).toBe(true));
+      expect(h.edit).not.toHaveBeenCalled();
+    } finally { await opening.finish(); }
+    await expect(pending).resolves.toMatchObject({ version: 1 });
+  });
+
+  it("stops waiting when its operation is cancelled, before it takes the lease", async () => {
+    const h = await harness();
+    await h.seed();
+    const opens = fakeLocalStateOpens();
+    const opening = opens.start(h.workspace);
+    let settled = false;
+    const pending = h.invoke(CHANNELS.applyDatabaseEdit).finally(() => { settled = true; });
+    const rejected = expect(pending).rejects.toThrow();
+    try {
+      await vi.waitFor(() => expect(opens.waits()).toBe(1));
+      const drained = h.authority.invalidate("workspace-a");
+      await vi.waitFor(() => expect(settled).toBe(true));
+      await Promise.all([rejected, drained]);
+    } finally { await opening.finish(); }
+    expect(h.edit).not.toHaveBeenCalled();
+  });
+});
+
 describe("database import Undo", () => {
   const seed = async (h: Awaited<ReturnType<typeof harness>>) => ImportToDatabaseResult.parse(await h.seed());
   const undo = (h: Awaited<ReturnType<typeof harness>>, operationId: string) =>
@@ -338,7 +374,7 @@ describe("database import Undo", () => {
     expect(deletion.trashed).toBe(false);
     const recovery = await readDeleteRecovery(h.workspace.rootPath, deletion.operationId);
     expect(recovery).toMatchObject({ base: result.path, tracked: true });
-    expect(await readFile(join(h.workspace.rootPath, ".dohc", "trash", recovery!.staged!))).toEqual(bytes);
+    expect(await readFile(join(h.workspace.rootPath, ".dohc", "local", "trash", recovery!.staged!))).toEqual(bytes);
     await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
   });
 
@@ -402,7 +438,7 @@ describe("database import Undo", () => {
 
   it("keeps Undo available when both trash routes fail", async () => {
     const h = await harness(), result = await seed(h);
-    const trash = join(h.workspace.rootPath, ".dohc", "trash");
+    const trash = join(h.workspace.rootPath, ".dohc", "local", "trash");
     await mkdir(join(h.workspace.rootPath, ".dohc"), { recursive: true });
     await writeFile(trash, "blocks fallback trash");
     await expect(undo(h, result.operationId)).rejects.toThrow();

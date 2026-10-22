@@ -17,6 +17,7 @@ import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { undoOperation as mcpUndoOperation } from "@dohc/mcp/tools";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: string) => Promise<void>) }));
 vi.mock("node:fs/promises", async original => {
@@ -43,6 +44,8 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites three linking docum
   const workspace = {workspaceId: "link-rewrites-engine", rootPath, attachmentId: Symbol("link-rewrites")};
   const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0});
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
   const operation = {workspace: {...workspace, readOnly: false, shareView: undefined}, state: {}, signal: new AbortController().signal, assertCurrent: vi.fn()};
   let editor: YdocLiveAdapter | undefined;
@@ -106,6 +109,8 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
   const workspace = { workspaceId: "delete-recovery-engine", rootPath, attachmentId: Symbol("delete-recovery") };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
   const operation = { workspace: { ...workspace, readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
@@ -175,6 +180,8 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
   const workspace = { workspaceId: "move-recovery-engine", rootPath, attachmentId: Symbol("move-recovery") };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
   const operation = { workspace: { ...workspace, readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
@@ -220,7 +227,8 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
         { capture, requestId, linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal, history},
           trashItem: async () => { throw new Error("No trash expected"); }, markDeleted: () => undefined }))(),
     };
-    server = await startCliServer({ stateDir: join(rootPath, ".dohc/socket-test"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
+    // A Unix socket path must stay short (107 bytes on Linux, 103 on macOS), so the socket gets its own folder.
+    server = await startCliServer({ stateDir: await createTestScratch("cli-"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
       agentRunDepth: () => 0, dispatchedAgentRun: () => false });
     const token = (await readFile(server.tokenPath, "utf8")).trim();

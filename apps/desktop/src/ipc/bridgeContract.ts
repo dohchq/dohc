@@ -826,7 +826,7 @@ export type DeleteWorkspacePathPayload = z.infer<
 
 // With emptyFolderOnly, false also means an empty folder was removed or a
 // nonempty folder was preserved. This mode never trashes descendants.
-// trashed: true = OS trash; false = the .dohc/trash fallback (cross-
+// trashed: true = OS trash; false = the .dohc/local/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a
 // file the workspace owns. There the change is what can be taken back: the
@@ -5761,6 +5761,9 @@ export const UpdateStateEvent = z.object({
   canInstall: z.boolean().optional(),
   version: z.string().min(1).max(200).optional(),
   percent: z.number().finite().min(0).max(100).optional(),
+  // A Linux .deb that did not install: the terminal command that installs it. Its
+  // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
+  installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -5769,6 +5772,8 @@ export const UpdateActionResult = z.object({
   // True when the exit round was cancelled: a window's recovery dialog
   // went back. A decision, not an install failure.
   cancelled: z.boolean().optional(),
+  // Why an install did not go ahead, when the updater said.
+  reason: z.string().min(1).max(500).optional(),
   state: UpdateStateEvent,
 });
 export type UpdateActionResult = z.infer<typeof UpdateActionResult>;

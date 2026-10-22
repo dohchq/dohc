@@ -15,7 +15,9 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
 import { resumeWorkspaceLinkRewrites } from "./workspaceLinkRewrites";
-import { readMoveRecovery } from "./workspaceMoveRecovery";
+import { listMoveRecoveries, readMoveRecovery } from "./workspaceMoveRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -34,6 +36,7 @@ async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewri
   const retirement = new AbortController();
   const operation = { workspace: { rootPath, workspaceId: "move-test", attachmentId: Symbol("move-test"), readOnly: false, shareView: undefined as unknown },
     signal: retirement.signal, state: {}, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const members: { path: string; beforePath: string; operation: "rename" | "write"; momentId: string; objectId?: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
@@ -80,7 +83,7 @@ async function fixture(rewriteHistoryLinks?: NonNullable<OperationHistory["rewri
   });
   const move = (fromPath: string, toPath: string) => owner.movePath({}, { workspaceId: "move-test", fromPath, toPath });
   const undo = (operationId = activeOperationId, byAgent = false) => undoWorkspaceHistoryOperation(operation, { operationId }, byAgent ? agent : person, { history, agent: byAgent });
-  const recordPath = () => join(rootPath, ".dohc/trash", `move-${createHash("sha256").update(activeOperationId).digest("hex")}.json`);
+  const recordPath = () => join(rootPath, ".dohc/local/trash", `move-${createHash("sha256").update(activeOperationId).digest("hex")}.json`);
   const moveAsAgent = async (fromPath: string, toPath: string) => {
     const result = await (await prepareMoveWorkspacePathAs(operation, { fromPath, toPath }, agent, options))();
     if (!result.ok) throw new Error(result.reason);
@@ -150,7 +153,7 @@ it.each([false, true])("cancels the in-flight pass and waits for its last commit
   expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: true})).not.toHaveProperty("links");
   expect(f.history.readHistoryPage).toHaveBeenCalled();
   expect(rewrite).toHaveBeenCalledTimes(1);
-  await resumeWorkspaceLinkRewrites(f.rootPath, f.options.linkRewrites!);
+  await resumeWorkspaceLinkRewrites(f.operation.workspace, f.options.linkRewrites!);
   await nextTurn(); expect(rewrite).toHaveBeenCalledTimes(1);
   expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toHaveProperty("engine");
   f.retirement.abort();
@@ -215,6 +218,25 @@ it("does not floor or Undo when cancellation has no engine acknowledgement", asy
   f.retirement.abort();
 });
 
+it.each(["local", "old", "expired", "hardlink"])("resumes only owned, current local move records: %s", async location => {
+  const f = await fixture(); await f.write("old.md");
+  const moved = await f.move("old.md", "new.md");
+  await recovery.waitForRecovery(moved.operationId!);
+  const path = f.recordPath();
+  if (location === "old") {
+    const old = join(f.rootPath, ".dohc", "trash");
+    await filesystem.mkdir(old);
+    await filesystem.rename(path, join(old, `move-${createHash("sha256").update(moved.operationId!).digest("hex")}.json`));
+  }
+  if (location === "expired") {
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    await filesystem.utimes(path, old, old);
+  }
+  if (location === "hardlink") await filesystem.link(path, join(f.rootPath, "another-record.json"));
+  expect(await listMoveRecoveries(f.rootPath)).toEqual(location === "local" ? [moved.operationId] : []);
+  f.retirement.abort();
+});
+
 it.each(["updating", "begun", "finished"])("resumes an open record only before Undo has begun: %s", async phase => {
   const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
   const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");
@@ -223,8 +245,8 @@ it.each(["updating", "begun", "finished"])("resumes an open record only before U
   record.links = {state: "updating"}; record.linkRewrite = {requestId: "original-key", author: agent};
   if (phase === "begun") record.engine = {requested: true};
   if (phase === "finished") record.result = {ok: true, tracked: {state: "restored", momentCount: 1}, restored: [], remaining: []};
-  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
-  await resumeWorkspaceLinkRewrites(f.rootPath, {workspaceId: "move-test", signal: f.retirement.signal, history: {rewriteHistoryLinks: rewrite}});
+  await recovery.saveRecoveryRecord(f.operation.workspace, record, "move");
+  await resumeWorkspaceLinkRewrites(f.operation.workspace, {workspaceId: "move-test", signal: f.retirement.signal, history: {rewriteHistoryLinks: rewrite}});
   await nextTurn();
   expect(rewrite).toHaveBeenCalledTimes(phase === "updating" ? 1 : 0);
   if (phase !== "updating") expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent: true})).not.toHaveProperty("links");
@@ -264,7 +286,7 @@ it.each(["link changed after rename", "linking document removed", "capture hold"
   const record = await readMoveRecovery(f.rootPath, moved.operationId!);
   if (!record || "noUndo" in record) throw new Error("missing record");
   record.links = {state: "updating"}; record.linkRewrite = {requestId: "same-key", author: agent};
-  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
+  await recovery.saveRecoveryRecord(f.operation.workspace, record, "move");
   f.history.undoHistoryOperation.mockRejectedValue(new Error(`domain error: Undo refused: ${reason}: private/.env`));
   const result = await f.undo(undefined, true);
   expect(result).toMatchObject({ok: false, reason: expect.stringContaining("private contains a link or a reserved, secret, or excluded path")});
@@ -296,7 +318,7 @@ it.each([false, true])("filters unchecked paths using the reader's floor, agent=
   const record = await readMoveRecovery(f.rootPath, moved.operationId!);
   if (!record || "noUndo" in record) throw new Error("missing record");
   record.links = {state: "done", documents: 2, unchecked: ["visible.md", "excluded/source.md"], uncheckedCount: 2};
-  await recovery.saveRecoveryRecord(f.rootPath, record, "move");
+  await recovery.saveRecoveryRecord(f.operation.workspace, record, "move");
   expect(await readWorkspaceHistoryOperation(f.operation, {operationId: moved.operationId!}, f.history, {agent})).toMatchObject({ok: true,
     links: {state: "done", unchecked: agent ? ["visible.md"] : ["visible.md", "excluded/source.md"], uncheckedCount: 2}});
 });
@@ -359,7 +381,7 @@ it.each([false, true])("keeps a person's folder on the base capture path with un
     reason: `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.` } });
   expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder");
   expect(finished).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
-  await expect(readdir(join(f.rootPath, ".dohc/trash"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readdir(join(f.rootPath, ".dohc/local/trash"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 it.each([false, true])("records only an agent folder kind and refuses both authors without engine work, rename=%s", async renameOnly => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin");
@@ -455,6 +477,22 @@ it("replays one compensation across person and agent doors, and refreshes restor
   expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } }); expect(f.compensationCount()).toBe(1);
   expect(f.history.undoHistoryOperation.mock.calls.every(([input]) => input.requestId.startsWith("move-undo:dohc-operation:"))).toBe(true);
 });
+// A retry of a saved Undo still restoring saves what History says, so it
+// waits for the open as a first Undo does.
+it("checks readiness before a retried move Undo asks History to finish restoring", async () => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.restoring(true); expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restoring" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  f.restoring(false);
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  expect(await f.undo()).toEqual({ ok: false,
+    reason: "dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toMatchObject({ result: { tracked: { state: "restored" } } });
+});
 it("resumes a rowless file after the engine receipt was saved before a crash", async () => {
   const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
   const actual = recovery.saveRecoveryRecord;
@@ -467,7 +505,7 @@ it("resumes a rowless file after the engine receipt was saved before a crash", a
 it("returns no Undo for an overwrite and refuses it with the replaced words", async () => {
   const f = await fixture(); await f.write("a.txt"); await f.write("b.txt");
   const result = await (await prepareMoveWorkspacePathAs(f.operation, { fromPath: "a.txt", toPath: "b.txt", overwrite: true }, agent, f.options))();
-  expect(result).toMatchObject({ ok: true, undo: { available: false, reason: "Cannot undo the rename. It replaced the old b.txt. Rename it back yourself. Restore the old b.txt from History or the trash." } });
+  expect(result).toMatchObject({ ok: true, undo: { available: false, reason: "Cannot undo the rename. It replaced the old b.txt. Rename it back yourself. Restore the old b.txt from History, the system trash, or .dohc/local/trash." } });
   expect(await f.undo()).toMatchObject({ ok: false, reason: expect.stringContaining("It replaced the old b.txt") });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
@@ -693,16 +731,16 @@ it("logs a recording failure after the committed move result was published", asy
 });
 
 it("keeps a private source if flushing its fallback copy fails", async () => {
-  const f = await fixture(); await f.write(".dohc/trash/staged.txt", "kept");
+  const f = await fixture(); await f.write(".dohc/local/trash/staged.txt", "kept");
   vi.spyOn(filesystem, "link").mockRejectedValueOnce(Object.assign(new Error("unsupported"), { code: "ENOTSUP", syscall: "link" }));
   const open = filesystem.open;
   const sync = vi.fn(async () => { throw new Error("flush failed"); });
   vi.spyOn(filesystem, "open").mockImplementationOnce(async (...args: Parameters<typeof filesystem.open>) => {
     const handle = await open(...args); vi.spyOn(handle, "sync").mockImplementation(sync); return handle;
   });
-  expect(await placeBack(f.rootPath, join(f.rootPath, ".dohc/trash/staged.txt"), join(f.rootPath, "placed.txt"))).toEqual([""]);
+  expect(await placeBack(f.rootPath, join(f.rootPath, ".dohc/local/trash/staged.txt"), join(f.rootPath, "placed.txt"))).toEqual([""]);
   expect(sync).toHaveBeenCalledOnce();
-  expect(await readFile(join(f.rootPath, ".dohc/trash/staged.txt"), "utf8")).toBe("kept");
+  expect(await readFile(join(f.rootPath, ".dohc/local/trash/staged.txt"), "utf8")).toBe("kept");
 });
 
 it("refuses a rowless person's Undo through a replaced parent link", async () => {

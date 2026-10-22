@@ -37,6 +37,7 @@ import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { readMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import * as workspaceFileMoves from "../workspaces/workspaceFileMoves";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 function deferred() {
   let release!: () => void;
@@ -863,7 +864,7 @@ describe("completed CLI writes during workspace close", () => {
 describe("raw fileMove and fileDelete socket requests", () => {
   async function setup(configure?: (f: ReturnType<typeof fixture>) => void) {
     const root = await createTestScratch("dohc-cli-file-move-");
-    await mkdir(join(root, ".dohc"));
+    await openedLocalState({ workspaceId: "workspace", rootPath: root });
     const f = fixture(root);
     configure?.(f);
     await f.create().startDesktopCliServer();
@@ -899,7 +900,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
         expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
         const record = await readDeleteRecovery(f.root, operationId);
         expect(record).toMatchObject({ operationId, tracked: true, staged: expect.any(String) });
-        expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
+        expect(await readFile(join(f.root, ".dohc/local/trash", record!.staged!), "utf8")).toBe("original");
       } else {
         expect(await readMoveRecovery(f.root, operationId)).toMatchObject({ operationId, tracked: true, from: "plain.txt", to: "moved.txt" });
         expect(await readFile(join(f.root, "moved.txt"), "utf8")).toBe("original");
@@ -1035,7 +1036,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       await waitForRecovery(operationId);
       const record = await readDeleteRecovery(f.root, operationId);
       expect(record).toMatchObject({ tracked: true, paths: ["folder/rowless.bin"], staged: expect.any(String) });
-      expect(await readFile(join(f.root, ".dohc/trash", record!.staged!, "rowless.bin"))).toEqual(rowless);
+      expect(await readFile(join(f.root, ".dohc/local/trash", record!.staged!, "rowless.bin"))).toEqual(rowless);
       expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(attachmentId, "folder");
       expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
       const reopened = await f.create().openCliWorkspace(f.workspace);
@@ -1117,7 +1118,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
       .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt", undo: { available: true } });
-    expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
+    expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/local\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
       { operation: "move", author, operationId: expect.stringMatching(/^dohc-operation:/) }, { operation: "delete", author, operationId: expect.stringMatching(/^dohc-operation:/) },
