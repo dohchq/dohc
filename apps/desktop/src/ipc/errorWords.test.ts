@@ -1,3 +1,5 @@
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
+import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
 import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
@@ -20,6 +22,8 @@ import {
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
+  readCollectionsRefusal,
+  readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
   VOLUME_SHARES_NEW_FILES_WORDS,
@@ -382,6 +386,35 @@ describe("error words", () => {
       new Error("The Collection changed after this preview. Preview the change again."),
       "desktop:dataset",
     ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
+  });
+
+  it("carries a refusal to use the Collections here across IPC, with its kind and its words", () => {
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    expect(String(ipcWireError(elsewhere))).toBe(`CollectionsRefusalError [collections-elsewhere]: ${elsewhere.message}`);
+    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: elsewhere.message });
+    expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
+    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))?.kind).toBe("unclaimed");
+    // Another error with the same words is not a refusal.
+    expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
+    expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
+  });
+
+  it("carries where the Collections are with a server list that failed, across IPC, apart from why", () => {
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
+    const read = readServerCollectionsUnavailable(acrossIpc(failed, "desktop:dataset"));
+    expect(read).toEqual({ elsewhere: elsewhere.message, failure: "TypeError: fetch failed" });
+    // The server's error reads as it would have alone.
+    for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
+      const failure = readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, cause), "desktop:dataset"))!.failure;
+      expect(readError(new Error(failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
+    }
+    expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
+      .toEqual({ elsewhere: elsewhere.message, failure: "" });
+    expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
+    // The same words from another error are not that list.
+    expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();
+    expect(readServerCollectionsUnavailable(acrossIpc(elsewhere, "desktop:dataset"))).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {

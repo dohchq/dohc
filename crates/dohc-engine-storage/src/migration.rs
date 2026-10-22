@@ -3349,6 +3349,16 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("conversation_file_links.sql"),
         sets_user_version: None,
     },
+    // A merge write that finds its target occupied looks up the pending
+    // delete that expects those bytes.
+    Migration {
+        ordinal: 66,
+        id: "v2-pending-delete-preimage-index",
+        sql: "CREATE INDEX idx_materialization_jobs_pending_delete_preimage \
+              ON materialization_jobs(workspace_id, preimage_sha256) \
+              WHERE status = 'pending' AND operation = 'delete';",
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4414,6 +4424,10 @@ mod tests {
                 "v2-chat-conversation-file-links",
                 "a976e7546ecf2efacaa0e885b966bfaac96f4c2b1c3ca24f417fbf3b645bdd22",
             ),
+            (
+                "v2-pending-delete-preimage-index",
+                "a6ead02cfa43cab0395717b10b07be6e314baa0b453c09ebb63c56df2267d08b",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4533,7 +4547,7 @@ mod tests {
             };
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
             let rows: Vec<(i64, String, String)> = conn.prepare(
-                "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal>=64 AND completed_at IS NOT NULL ORDER BY ordinal"
+                "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal BETWEEN 64 AND 65 AND completed_at IS NOT NULL ORDER BY ordinal"
             ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
                 .collect::<Result<_,_>>().unwrap();
             assert_eq!(
@@ -4570,6 +4584,45 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn pending_delete_preimage_index_covers_jobs_from_main_65() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-pending-delete-preimage-index");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 65);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 66);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let sha = crate::blob::hex_sha256(b"old");
+        conn.execute(
+            "INSERT INTO blobs(sha256,byte_length,text) VALUES(?1,3,'old')",
+            [&sha],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation,status,created_at_ms,operation,workspace_id) \
+             VALUES('merge-mat_old','notes.md',?1,1,?1,1,'pending',1,'delete','ws')",
+            [&sha],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let jobs = crate::materialize::pending_merge_deletes_expecting(&conn, "ws", &sha).unwrap();
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["merge-mat_old"]
+        );
+        assert!(
+            conn.query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type='index' AND name='idx_materialization_jobs_pending_delete_preimage'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

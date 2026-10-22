@@ -432,7 +432,7 @@ pub fn apply_moment_envelope_detailed(
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
         if payload.operation != "delete" {
-            crate::hosted::wait_for_departed_occupant_in_tx(
+            crate::hosted::wait_for_occupant_in_tx(
                 tx,
                 &envelope.workspace_id,
                 &payload.version_id,
