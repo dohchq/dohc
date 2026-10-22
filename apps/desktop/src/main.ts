@@ -4638,7 +4638,11 @@ function createCollectionAutomationsFor(
     serverDataset: (datasetId) => withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
       const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
-      return server && await readServerDataset(workspaceId, datasetId, server.data, server.automationHost);
+      return server && await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
+        // The server doesn't have it: the computer that keeps the workspace's other Collections does.
+        if (error instanceof CollectionsRefusalError) return null;
+        throw error;
+      });
     }),
     withDatasetHost: async (work, open) => {
       // An open host serves the executor until disposal closes it, so a

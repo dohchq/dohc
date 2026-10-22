@@ -2007,7 +2007,8 @@ export class CollectionAutomations {
     // A Collection on the server pins against the server's rules.
     const server = await this.onServer({ folder: collectionPath });
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    return automations.map((automation) => this.pinned(collectionPath, automation, held, server === null ? undefined : this.serverDatasetAt(server)));
+    const datasetAt = server === null ? undefined : await this.serverDatasetsFor(server, automations);
+    return automations.map((automation) => this.pinned(collectionPath, automation, held, datasetAt));
   }
 
   /**
@@ -3101,15 +3102,26 @@ export class CollectionAutomations {
     return { collectionPath: folder, dataset: { approved: server.approved, definition, generated: server.generated, grants: server.grants }, runs: server.runs };
   }
 
-  /** Datasets by folder as a Collection on the server sees them: itself as the server has it, and the index's. */
-  private serverDatasetAt(server: OnServer): DatasetAt {
-    return (path) => (path === server.collectionPath ? server.dataset : this.datasets.get(path));
+  /**
+   * Datasets by folder as automations in a Collection on the server see
+   * them: that Collection, each other Collection on the server their steps
+   * reach, read from the server now, then the index's. Only the panel and
+   * button checks read it; no run does.
+   */
+  private async serverDatasetsFor(server: OnServer, automations: readonly Automation[]): Promise<DatasetAt> {
+    const found = new Map<string, IndexedDataset>([[server.collectionPath, server.dataset]]);
+    const reached = new Set(automations.flatMap((automation) => [...recordStepDestinations(automation, server.collectionPath).values()]));
+    const others = [...reached].filter((folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder));
+    for (const other of await Promise.all(others.map((folder) => this.onServer({ folder })))) {
+      if (other !== null) found.set(other.collectionPath, other.dataset);
+    }
+    return (path) => found.get(path) ?? this.datasets.get(path);
   }
 
   /** Why the server does not run `automation` in its Collection, as far as this computer can tell, or null. */
-  private serverCannotRun(server: OnServer, automation: Automation): string | null {
+  private serverCannotRun(server: OnServer, automation: Automation, datasetAt: DatasetAt): string | null {
     if (server.runs === "off") return AUTOMATION_SERVER_OFF;
-    const cannot = this.cannotRun(server.collectionPath, automation, this.serverDatasetAt(server));
+    const cannot = this.cannotRun(server.collectionPath, automation, datasetAt);
     if (cannot !== null) return cannot;
     const hostTrigger = automation.when.kind === "schedule" || automation.when.kind === "group-message";
     return server.runs === "no-schedules" && hostTrigger ? SERVER_TRIGGERS_ELSEWHERE : null;
@@ -3127,7 +3139,8 @@ export class CollectionAutomations {
     const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
     if (!indexed) return { status: "missing", ...you };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const collection = collectionNamed(collectionPath), datasetAt = this.serverDatasetAt(server);
+    const collection = collectionNamed(collectionPath);
+    const datasetAt = await this.serverDatasetsFor(server, indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : [])));
     const [waiting] = roster.kind === "unknown"
       ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
       : [];
@@ -3136,7 +3149,7 @@ export class CollectionAutomations {
       const { automation } = entry;
       const summary = {
         valid: true as const, automationId: collectionAutomationId(dataset.definition.datasetId, automation.id), automation,
-        definitionHash: definitionHash(automation), cannotRun: this.serverCannotRun(server, automation), lastRun: null,
+        definitionHash: definitionHash(automation), cannotRun: this.serverCannotRun(server, automation, datasetAt), lastRun: null,
       };
       if (roster.kind === "unknown") return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
       let steps: ReachStep[];
@@ -3180,7 +3193,7 @@ export class CollectionAutomations {
     if (resolved.kind === "state") return resolved.state;
     const { automation } = resolved;
     let inventory: AutomationInventory;
-    try { inventory = this.buildInventory(collectionPath, automation, this.serverDatasetAt(server)); }
+    try { inventory = this.buildInventory(collectionPath, automation, await this.serverDatasetsFor(server, [automation])); }
     catch (error) { return disabled(errorText(error)); }
     if (!await canPressInventory(inventory, describe)) return disabled(noAccessReason(table.name));
     if (roster.kind !== "unknown") {

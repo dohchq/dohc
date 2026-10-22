@@ -638,9 +638,9 @@ describe("pressing a button", () => {
       { table: "Invoices", field: "Mark paid", recordId: "12", pressId: expect.stringMatching(/^[0-9a-f-]{36}$/u), confirmed: [],
         agent: { originId: "agent-run-7", depth: 2 } },
     ]);
-    // The server remembers its presses, so the CLI's checks the button as a new press.
+    // The server checks a new press itself; this computer's ledger and checks are not asked.
     expect(f.executor.datasetPressed).not.toHaveBeenCalled();
-    expect(f.executor.datasetButtons).toHaveBeenCalledOnce();
+    expect(f.executor.datasetButtons).not.toHaveBeenCalled();
     expect(f.executor.pressDataset).not.toHaveBeenCalled();
     expect(f.window.sent).toEqual([]);
     // A run the server already ended says how; one busy for someone else says so.
@@ -651,6 +651,31 @@ describe("pressing a button", () => {
     // An answer that is not a press is refused.
     const odd = fixture({ server: () => ({ busy: false, claimId, settled: null, pressedBy: "someone" }) });
     await expect(odd.pressDataset()).rejects.toThrow();
+  });
+
+  it("lets the server answer a CLI press it remembers, and checks the button here only to say why the server refused one", async () => {
+    const claimId = "c".repeat(64);
+    // Sent again after a lost answer: the automation is off now, but the server remembers the press.
+    const remembered = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] },
+      datasetState: { kind: "disabled", reason: "Mark paid is off. Turn it on in Automations." },
+      server: () => ({ busy: false, claimId, settled: { outcome: "done", error: null } }) });
+    await expect(remembered.named({}, { kind: "agent", originId: "agent-run-7", depth: 1 })).resolves.toEqual({ busy: false, claimId, settled: { outcome: "done", error: null } });
+    expect(remembered.executor.datasetButtons).not.toHaveBeenCalled();
+    // A new press the server refuses says why as this computer reads the button.
+    const off = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] },
+      datasetState: { kind: "disabled", reason: "Mark paid is off. Turn it on in Automations." },
+      server: () => { throw new Error("Mark paid is off. Turn it on in Automations."); } });
+    await expect(off.named()).rejects.toThrow("Mark paid is off. Turn it on in Automations.");
+    // One that runs an action dohc cannot undo asks for it by name, as a press kept here does.
+    const irreversible = [{ name: "sendInvoice", label: "Send invoice" }];
+    const unconfirmed = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] }, irreversible,
+      server: () => { throw new Error("Mark paid changed after it was pressed. Press it again."); } });
+    await expect(unconfirmed.named()).resolves.toEqual({ confirm: irreversible });
+    // The server's own refusal stands when this computer sees nothing wrong.
+    const refused = fixture({ datasetIn: id(1), described: ["list"], buttons: { Invoices: ["Mark paid"] },
+      server: () => { throw new Error("This record is no longer in Invoices."); } });
+    await expect(refused.named()).rejects.toThrow("This record is no longer in Invoices.");
+    for (const f of [remembered, off, unconfirmed, refused]) expect(f.executor.pressDataset).not.toHaveBeenCalled();
   });
 
   it("refuses a press that names both a folder and a dataset, a dataset press with no table, and one that names a person", async () => {

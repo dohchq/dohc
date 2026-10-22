@@ -447,20 +447,34 @@ export function registerAutomationButtonsIpc<
     // A press sent again may name a button renamed since; its table is the one it named.
     const table = named[0]?.table ?? input.table;
     if (table === undefined) throw new Error(`${field} is not a button in ${nameOf(collectionPath)}.`);
-    // The server remembers its own presses, so a press there is checked as a new one.
-    const pressedHere = await caller.withOperation(async (operation) =>
-      (await dependencies.serverCollection(operation, datasetId)) === null && await operation.state.collectionAutomations.datasetPressed(pressId));
-    if (!pressedHere) {
+    // What a new press needs first: a ready button, and every action dohc cannot undo confirmed by name.
+    const asks = async (): Promise<{ confirm: IrreversibleAction[] } | null> => {
       const [state] = await caller.withOperation((operation) =>
         operation.state.collectionAutomations.datasetButtons(datasetId, [{ field, table }], (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id)));
       if (state === undefined || state.kind !== "ready") throw new Error(state?.reason ?? `${field} did not start.`);
       const unconfirmed = (state.irreversible ?? []).filter((action) => !input.confirm.includes(action.name));
-      if (unconfirmed.length > 0) return { confirm: unconfirmed };
-    }
-    return (await press(
+      return unconfirmed.length > 0 ? { confirm: unconfirmed } : null;
+    };
+    const send = async () => (await press(
       { workspaceId, datasetId, table, field, recordId, pressId, confirmed: [...input.confirm] },
       { ...caller, describeDataset: (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id) },
     )).result;
+    if (await caller.withOperation(async (operation) => (await dependencies.serverCollection(operation, datasetId)) !== null)) {
+      // The server answers a press it remembers, however the button changed
+      // since, and checks a new one itself, confirmations included. Only a
+      // press it refuses is checked here, to say why.
+      try { return await send(); }
+      catch (error) {
+        const asked = await asks();
+        if (asked !== null) return asked;
+        throw error;
+      }
+    }
+    if (!(await caller.withOperation((operation) => operation.state.collectionAutomations.datasetPressed(pressId)))) {
+      const asked = await asks();
+      if (asked !== null) return asked;
+    }
+    return await send();
   }
 
   async function inspectNamed(input: Pick<NamedPress, "collectionPath" | "table">, caller: PressCaller<Operation>): Promise<CollectionAutomationButton[]> {

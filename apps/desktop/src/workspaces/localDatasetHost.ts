@@ -398,7 +398,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       approveMigrationCandidate: input => host.approveMigration(owner, input),
       discardMigrationCandidate: input => host.discardMigration(owner, input) });
     const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory: () => existingLocalDatasetExports(options.workspaceRoot), limits: { maxTotalBytes: maxStoredBytes },
-      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }) });
+      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }),
+      fenced: () => changed(undefined) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
       return tracked(async () => {
         const abort = signal(input.signal);
@@ -518,8 +519,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
+      // Each end, failed or not, tells the automation runner, which reads the transfer record again.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
+          .then(changed, (error: unknown) => { changed(undefined); throw error; });
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
