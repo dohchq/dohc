@@ -1239,7 +1239,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     // deliberately differs from what will be on disk — capture must neither
     // overwrite nor retire it.
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    let key = create_key_file(scratch.path()).expect("mint key");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("mint key");
     {
         let mut store = EngineStore::open(&db_path, 1).expect("open store");
         VersionedTextStore::new(&mut store)

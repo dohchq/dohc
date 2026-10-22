@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DOHC_COLLECTIONS_GUARD,
   DOHC_ENGINE_GUARD,
   DOHC_METADATA_GUARD,
   DOHC_SYNC_HISTORY_GUARD,
@@ -38,6 +39,9 @@ describe("dohc guard refusals", () => {
     expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
     );
+    expect(notAFileRefusal(DOHC_COLLECTIONS_GUARD, asLink)).toBe(
+      "dohc could not read which computer keeps this workspace's Collections. A link is at .dohc/collections.json, which must be a file. Remove or rename that link. Then retry.",
+    );
     expect(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.",
     );
@@ -53,7 +57,7 @@ describe("dohc guard refusals", () => {
 
   it("names a folder another user can change, and the way out", () => {
     expect(notOnlyYoursRefusal(DOHC_TRASH_GUARD)).toBe(
-      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash, which must be a folder only you can change. Remove or rename it. Then retry.",
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash. Make it a folder only you can change. Then retry.",
     );
   });
 
