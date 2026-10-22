@@ -458,6 +458,51 @@ fn each_succession_requirement_refuses_without_writes() {
     }
 }
 
+/// Sol's any-namespace ruling, through adoption: once a lineage adopted in
+/// one namespace, a capture in another neither adopts it first nor succeeds
+/// the released tail; each refuses with no writes.
+#[test]
+fn another_namespace_never_adopts_or_succeeds_an_adopted_lineage() {
+    for (case, succeeds) in [("a first adoption", false), ("a succession", true)] {
+        let mut f = imported_fixture();
+        adopt_root(&mut f);
+        release_parked(&mut f);
+        returned(&mut f);
+        offline_edit(&mut f, "Edited while stopped", "offline");
+        let tail = chain_tail(&f, "namespace").unwrap().expect("a released tail");
+        let boundary = f
+            .store
+            .read_with(|conn| retirement::released_tail(conn, "namespace", &tail))
+            .unwrap()
+            .0
+            .expect("an adopted chain keeps its boundary");
+        let path = f.binding.current_path.clone();
+        let captured =
+            capture_imported_owner_activation(&mut f.store, "other", &f.key, &path, 1_000_000, &NoFaults).unwrap();
+        f.handle = f
+            ._owner
+            .register_activation(&mut f.store, "other".into(), retirement_host(), f.binding.clone(), captured.activation_id.clone())
+            .unwrap();
+        f.cut.adoption_id = captured.activation_id.clone();
+        f.cut.source_moment_id = captured.source.source_moment_id.clone();
+        f.cut.source_digest = captured.source.source_digest.clone();
+        f.cut.source_byte_length = captured.source.source_byte_length;
+        f.cut.expected_local_sequence = captured.source.native_head_sequence;
+        f.cut.events.clear();
+        f.cut.terminal_receipt = boundary.terminal_receipt.clone();
+        f.cut.retained_prefix = succeeds.then_some(RetainedPrefix {
+            terminal_receipt: boundary.terminal_receipt,
+            event_count: boundary.event_count,
+            history_evidence_digest: boundary.history_evidence_digest,
+            predecessor_activation_id: tail,
+        });
+        let before = rows(&f, &SUCCESSION_WRITES);
+        let refused = f.adopt();
+        assert!(matches!(refused, Err(ApplicationError::Conflict)), "{case}: {refused:?}");
+        assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
+    }
+}
+
 /// A successor of a chain whose tail carried deliveries: its coverage holds
 /// the Covered entry and the Carried one, each with its receipt, and its seed
 /// follows them. A covered receipt that differs from accepted history, a

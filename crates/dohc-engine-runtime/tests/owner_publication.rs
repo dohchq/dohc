@@ -5512,7 +5512,18 @@ struct HostWindow {
     root: ScratchDir,
 }
 
-async fn adopted_window(carried: bool) -> HostWindow {
+/// The host before any activation: the document's base as ordinary sync
+/// brought it, materialized. Fields drop in order.
+struct WindowHost {
+    actor: ActorHandle,
+    supervisor: WorkspaceSupervisor,
+    store: EngineStore,
+    lineage: String,
+    base: Vec<u8>,
+    root: ScratchDir,
+}
+
+async fn window_host() -> WindowHost {
     let root = ScratchDir::new().unwrap();
     let db = engine_db_path(&root).unwrap();
     let mut store = EngineStore::open(&db, 0).unwrap();
@@ -5536,6 +5547,31 @@ async fn adopted_window(carried: bool) -> HostWindow {
         .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
         .await
         .unwrap();
+    WindowHost {
+        actor,
+        supervisor,
+        store,
+        lineage,
+        base,
+        root,
+    }
+}
+
+async fn adopted_window(carried: bool) -> HostWindow {
+    adopt_window(window_host().await, carried).await
+}
+
+/// `host`'s root activation in "relay", adopted through the host, as
+/// [`HostWindow`] describes it.
+async fn adopt_window(host: WindowHost, carried: bool) -> HostWindow {
+    let WindowHost {
+        actor,
+        supervisor,
+        store,
+        lineage,
+        base,
+        root,
+    } = host;
     let first = actor
         .capture_imported_owner_activation(
             "relay".into(),
@@ -5548,12 +5584,7 @@ async fn adopted_window(carried: bool) -> HostWindow {
         )
         .await
         .unwrap();
-    let coordinate = ApplicationHostCoordinate {
-        host_id: "host".into(),
-        host_epoch: 1,
-        instance_id: "instance".into(),
-        connection_id: "connection".into(),
-    };
+    let coordinate = window_host_coordinate();
     let binding = window_binding(&lineage);
     let owner = actor
         .live_application_owner("workspace".into())
@@ -5614,6 +5645,15 @@ async fn adopted_window(carried: bool) -> HostWindow {
 
 fn window_key() -> DocKey {
     DocKey::new("workspace", "main", "object").unwrap()
+}
+
+fn window_host_coordinate() -> ApplicationHostCoordinate {
+    ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    }
 }
 
 fn window_binding(lineage: &str) -> dohc_engine_collab::LiveObjectBinding {
@@ -5705,9 +5745,9 @@ impl HostWindow {
             )
             .await
             .unwrap();
-        execute(&mut self.store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+        execute(&mut self.store, "INSERT OR IGNORE INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
               VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
-            INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+            INSERT OR REPLACE INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
         assert!(matches!(
             self.owner
                 .release_activation(scope, self.coordinate.clone(), retirement, 40)
@@ -7773,6 +7813,12 @@ const APPLIED_EXACTLY: &str = "INSERT INTO live_device_update_applications (rela
 #[path = "owner_publication/released_window_measure.rs"]
 mod released_window_measure;
 
+#[path = "owner_publication/settlement_drain.rs"]
+mod settlement_drain;
+
+#[path = "owner_publication/released_namespaces.rs"]
+mod released_namespaces;
+
 /// A decision of [`released_window_measure`] on `tails`, kept for one open
 /// store as the actor keeps them, run to its end as the actor's relay
 /// coordinator runs it: each attempt, with the request for the validation it
@@ -8320,61 +8366,6 @@ async fn an_actor_pull_waiting_for_validation_goes_on_from_the_row_that_waited()
     w.close().await;
 }
 
-/// Queue three ready owner settlements of the window document for the
-/// drain, as an observed owner's store keeps them once its feed accepted
-/// them, with the owner's binding still present though the activation was
-/// released. In drain order: "a-moved", queued under a binding the owner has
-/// since left; "settled", under the binding it holds; "z-moved", as a-moved.
-fn queue_owner_settlements(w: &mut RetainedWindow) {
-    let binding = serde_json::to_string(&window_binding(&w.lineage)).unwrap();
-    let text = "A settlement the host never applied.\n";
-    let (before, latest, updated): (String, String, i64) = w
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT blob_sha256,latest_moment_id,updated_at_ms FROM snapshots WHERE object_id='object'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-        })
-        .unwrap();
-    let mut sql = format!(
-        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES ('{}',{},'{text}');
-         INSERT INTO ydoc_owner_bindings VALUES ('workspace','main','object','{lineage}','{binding}',
-           'relay',1,1,0,'{lineage}',1000000,60000);",
-        hex_sha256(text.as_bytes()),
-        text.len(),
-        lineage = w.lineage,
-    );
-    for (seq, origin) in ["a-moved", "settled", "z-moved"].into_iter().enumerate() {
-        let payload = serde_json::json!({
-            "momentId": format!("settlement-{origin}"), "versionId": "main", "objectId": "object",
-            "path": WINDOW_PATH, "recordedAtMs": 2_000, "operation": "write",
-            "payloadBeforeBlobSha256": before, "payloadBeforePath": WINDOW_PATH,
-            "payloadAfterBlobSha256": hex_sha256(text.as_bytes()), "payloadAfterPath": WINDOW_PATH,
-            "metadata": {"origin": "sync"}, "beforePresent": "present", "beforeObjectId": "object",
-            "beforeVersionId": "main", "beforePath": WINDOW_PATH, "beforeBlobSha256": before,
-            "beforeContentKind": "text", "beforeUpdatedAtMs": updated, "beforeLatestMomentId": latest
-        });
-        let queued = if origin == "settled" {
-            format!("'{binding}'")
-        } else {
-            format!(
-                "json_set('{binding}','$.selectorPaths',json_array('{WINDOW_PATH}','notes/moved.md'))"
-            )
-        };
-        sql.push_str(&format!(
-            "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
-               VALUES ('workspace','{origin}',{seq},'moment.append','{payload}',2000,1);
-             INSERT INTO owner_pending_settlements (workspace_id,origin_id,origin_seq,main_version_id,object_id,
-               lineage_claim_id,relay_namespace,binding_json,terminal_cursor)
-               VALUES ('workspace','{origin}',{seq},'main','object','{lineage}','relay',{queued},1);",
-            lineage = w.lineage,
-        ));
-    }
-    execute(&mut w.store, &sql);
-}
-
 /// Each queued owner settlement in drain order: its origin, whether it was
 /// scheduled, whether it applied, and the report that owns it.
 fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
@@ -8390,79 +8381,6 @@ fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<Stri
             .collect()
         })
         .unwrap()
-}
-
-/// Sol's ruling 1 through the actor: the drain of a pull reaches the owner
-/// settlement of a lineage whose activation was released with work retained.
-/// The settlement before it commits with the pass's report and the one that
-/// waits rolls back, while the request stays outstanding and the actor
-/// serves other work. Once validation completes the request goes on from
-/// that settlement, fetched once: the lineage holds it, the settlement after
-/// it is refused, and the cursor names the report the committed one carries.
-#[tokio::test]
-async fn an_actor_pull_whose_drain_waits_commits_its_prefix_and_goes_on() {
-    let mut w = retained_window(Retained::Carried).await;
-    queue_owner_settlements(&mut w);
-    let feed = std::sync::Arc::new(HostedFeed::new(&[("object", WINDOW_PATH)]));
-    let tails = w.actor.released_tails();
-    tails.pause_validation();
-    let mut pull = tokio::spawn({
-        let (actor, feed) = (w.actor.clone(), std::sync::Arc::clone(&feed));
-        let operation = dohc_engine_runtime::RelayOperation::PullHosted {
-            workspace_id: "workspace".into(),
-            root: w.root.path().to_owned(),
-            relay_namespace: Some("relay".into()),
-            now_ms: 1_000_000,
-        };
-        async move {
-            actor
-                .relay_through(feed, operation, CancellationToken::new())
-                .await
-        }
-    });
-    held_validation(&tails, &mut pull).await;
-    let queue = settlement_queue(&w.store);
-    let report = queue[2].3.clone();
-    assert!(report.is_some(), "{queue:?}");
-    assert_eq!(
-        queue,
-        [
-            ("settled".into(), false, false, None),
-            ("z-moved".into(), false, false, None),
-            ("a-moved".into(), true, true, report.clone()),
-        ]
-    );
-    w.actor
-        .remote_changes_applied("workspace".into())
-        .await
-        .expect("the actor serves other work");
-    assert!(!pull.is_finished(), "the pull is outstanding");
-    tails.resume_validation();
-    let dohc_engine_runtime::RelayOperationOutcome::HostedPass { pass, .. } =
-        pull.await.unwrap().unwrap()
-    else {
-        panic!("a hosted pass");
-    };
-    assert_eq!(pass.pending_cursor.unwrap().settlement_report_id, report);
-    assert_eq!(
-        settlement_queue(&w.store),
-        [
-            ("a-moved".into(), true, true, report.clone()),
-            ("settled".into(), true, false, None),
-            ("z-moved".into(), true, true, report),
-        ],
-        "the lineage holds the settlement that waited"
-    );
-    let mut refused: Vec<_> = pass
-        .refusals
-        .iter()
-        .map(|refusal| refusal.origin_id.as_str())
-        .collect();
-    refused.sort_unstable();
-    assert_eq!(refused, ["a-moved", "z-moved"]);
-    assert_eq!(feed.pulls(), 1, "fetched once");
-    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
-    w.close().await;
 }
 
 /// The released-lineage binding `pass` holds the window document with.
@@ -9224,6 +9142,58 @@ async fn a_bare_text_moment_in_the_released_window_holds_only_its_document() {
     assert_eq!(main_cursor(&w.store), edited.relay_seq.unwrap());
     assert_eq!(w.native(), native);
     assert!(w.text().contains(RETAINED));
+    w.close().await;
+}
+
+/// Opus's review of round 4b2i-1a-2i, finding 1: a moment decides
+/// released-window protection once, before it writes. A protected text write
+/// that leaves the document at its path, whose resulting head the lineage
+/// does not project, holds with the binding that decision named: the head
+/// before the moment, after one validation. On tails that keep nothing, the
+/// moment reads the window once.
+#[tokio::test]
+async fn a_moment_decides_released_window_protection_once() {
+    let mut w = retained_window(Retained::Carried).await;
+    let file = std::fs::read_to_string(w.root.path().join(WINDOW_PATH)).unwrap();
+    let text = format!("---\ntitle: Plan\n---\n{file}");
+    let (mut moment, _) = host_write(&w.store, WINDOW_PATH, &text);
+    moment.relay_seq = Some(10);
+    w.store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                rusqlite::params![hex_sha256(text.as_bytes()), text.len() as i64, text],
+            )
+        })
+        .unwrap();
+    let head = hex_sha256(&w.native());
+    let held = |store: &mut EngineStore, tails: &ReleasedTails| {
+        let held = settled_apply(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::with_released_tails(tails.clone()),
+            &moment,
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::SyncError::ReleasedLineageUnsettled(binding)) = held else {
+            panic!("{held:?}");
+        };
+        binding
+    };
+    let tails = ReleasedTails::default();
+    let binding = held(&mut w.store, &tails);
+    assert_eq!(binding.head_digest, head, "the head before the moment");
+    assert_eq!(binding.current_path.as_deref(), Some(WINDOW_PATH));
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    let scans = released_tail_scans_on_this_thread();
+    let binding = held(&mut w.store, &ReleasedTails::uncached());
+    assert_eq!(binding.head_digest, head);
+    assert_eq!(
+        released_tail_scans_on_this_thread(),
+        scans + 1,
+        "one decision"
+    );
+    assert_eq!(hex_sha256(&w.native()), head);
     w.close().await;
 }
 

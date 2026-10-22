@@ -5153,6 +5153,59 @@ mod tests {
             .is_err(),
             "an activation that never adopted names no origin"
         );
+        // Sol's any-namespace ruling: a document lineage has one adopted
+        // origin in any namespace, and succession stays in its own.
+        let copied = |table: &str, id_column: &str, id: &str, changes: &str| {
+            conn.execute_batch(&format!(
+                "CREATE TEMP TABLE copied AS SELECT * FROM {table} WHERE {id_column}='{id}';
+                 UPDATE copied SET relay_database_namespace='other',{changes};"
+            ))
+            .unwrap();
+            let inserted = conn
+                .execute(&format!("INSERT INTO {table} SELECT * FROM copied"), [])
+                .map_err(|error| error.to_string());
+            conn.execute_batch("DROP TABLE copied").unwrap();
+            inserted
+        };
+        let refused = |inserted: Result<usize, String>, constraint: &str, case: &str| {
+            assert!(
+                inserted
+                    .as_ref()
+                    .is_err_and(|error| error.contains(constraint)),
+                "{case}: {inserted:?}"
+            );
+        };
+        refused(
+            copied(
+                "live_owner_adoptions",
+                "adoption_id",
+                "adoption-a",
+                "adoption_id='adoption-other'",
+            ),
+            "UNIQUE",
+            "a second adopted origin in another namespace",
+        );
+        refused(
+            copied(
+                "live_owner_activations",
+                "activation_id",
+                "released",
+                "activation_id='across'",
+            ),
+            "FOREIGN KEY",
+            "a successor of an activation in another namespace",
+        );
+        refused(
+            copied(
+                "live_owner_activations",
+                "activation_id",
+                "adoption-a",
+                "activation_id='adopted-across',released_at_ms=9,released_restore_generation=1,
+                 released_accepted_cursor=0,released_boundary_json='[]',carried_manifest_json='[]'",
+            ),
+            "FOREIGN KEY",
+            "an adoption naming the origin of another namespace",
+        );
         let unregistered: (Option<i64>, Option<i64>) = conn
             .query_row(
                 "SELECT baseline_moment_relay_sequence,baseline_registered_at_ms

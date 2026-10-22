@@ -318,6 +318,37 @@ struct DeferredRelayState {
     share_log_pushed: usize,
 }
 
+/// One pull request at a time on a store, held from its fetch through every
+/// wait for released-tail validation to its outcome: another pull's drain
+/// would reclaim the owner settlements this one's report already owns.
+#[derive(Clone, Default)]
+pub(super) struct PullPermit {
+    held: Arc<tokio::sync::Mutex<()>>,
+    /// Woken each time a pull finds the permit held.
+    #[cfg(feature = "test-support")]
+    pub(super) waited: Arc<tokio::sync::Notify>,
+}
+
+impl PullPermit {
+    /// The permit once no other pull holds it, or none if `token` is
+    /// cancelled first. Dropping it releases it.
+    async fn acquire(
+        &self,
+        token: &CancellationToken,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, RuntimeError> {
+        if let Ok(held) = Arc::clone(&self.held).try_lock_owned() {
+            return Ok(held);
+        }
+        #[cfg(feature = "test-support")]
+        self.waited.notify_one();
+        tokio::select! {
+            biased;
+            () = token.cancelled() => Err(RuntimeError::Cancelled),
+            held = Arc::clone(&self.held).lock_owned() => Ok(held),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct DeferredRelayTransport {
     native_settlements: bool,
@@ -2002,6 +2033,12 @@ impl ActorHandle {
         let transport = DeferredRelayTransport {
             native_settlements,
             ..DeferredRelayTransport::default()
+        };
+        let _pull = match &operation {
+            RelayOperation::Pull { .. } | RelayOperation::PullHosted { .. } => {
+                Some(self.pulls.acquire(&token).await?)
+            }
+            _ => None,
         };
         // Once the relay may have stored something, the operation runs to its
         // end so the request answers with what landed. Until then each step

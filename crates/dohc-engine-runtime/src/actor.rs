@@ -211,6 +211,7 @@ pub struct WorkspaceActor {
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     /// The store's released tails, whose worker validates off the actor.
     released_tails: ReleasedTails,
+    pulls: relay::PullPermit,
 }
 
 impl WorkspaceActor {
@@ -377,6 +378,7 @@ impl WorkspaceActor {
                     link_drain_holds,
                     current_views: Arc::default(),
                     released_tails,
+                    pulls: relay::PullPermit::default(),
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -411,6 +413,7 @@ impl WorkspaceActor {
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             current_views: Arc::clone(&self.current_views),
             released_tails: self.released_tails.clone(),
+            pulls: self.pulls.clone(),
         }
     }
 
@@ -508,6 +511,7 @@ pub struct ActorHandle {
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     released_tails: ReleasedTails,
+    pulls: relay::PullPermit,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -560,6 +564,14 @@ impl ActorHandle {
     #[doc(hidden)]
     pub fn released_tails(&self) -> ReleasedTails {
         self.released_tails.clone()
+    }
+
+    /// Completes once a pull has found another holding the store's pull
+    /// permit and waits for it.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn pull_waiting(&self) {
+        self.pulls.waited.notified().await;
     }
 
     /// Engine diagnostics for the derived index; no store read or drain.
@@ -1106,6 +1118,7 @@ mod saturation_tests {
             link_drain_holds: holds,
             current_views: Arc::default(),
             released_tails: ReleasedTails::default(),
+            pulls: relay::PullPermit::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
