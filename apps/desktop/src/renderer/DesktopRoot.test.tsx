@@ -1030,7 +1030,8 @@ describe("the window's title and menu commands", () => {
     const root = stub({ windowRole: "workspace", platform: "darwin", workspaces: [workspace("trip")] });
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
-    expect(document.title).toBe("trip");
+    // The title follows the workspace in an effect after the shell paints.
+    await waitFor(() => expect(document.title).toBe("trip"));
     expect(root.listening()).toBe(false);
   });
 
