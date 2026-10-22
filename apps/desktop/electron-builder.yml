@@ -161,9 +161,11 @@ appImage:
 deb:
   # A package names who answers for it. The homepage is package.json's.
   maintainer: dohc <sup@dohc.computer>
-  # electron-builder's default list, plus ALSA. Electron links libasound.so.2,
-  # which a minimal or server Ubuntu lacks, and setting depends replaces the
-  # default list. Ubuntu 24.04 renamed the package libasound2t64.
+  # Setting depends replaces electron-builder's default list, so this repeats
+  # it and adds two libraries Electron links that the list does not bring:
+  # libasound.so.2, which a minimal or server Ubuntu lacks, and libgbm.so.1,
+  # which otherwise arrives only with Mesa's EGL packages. Ubuntu 24.04
+  # renamed ALSA's package libasound2t64.
   depends:
     - libgtk-3-0
     - libnotify4
@@ -175,6 +177,7 @@ deb:
     - libuuid1
     - libsecret-1-0
     - libasound2t64 | libasound2
+    - libgbm1
 
 # macOS ranks: dohc edits Markdown as its own documents, so it may be their
 # default app, but it never claims to own the type. For text, CSV and JSON it
