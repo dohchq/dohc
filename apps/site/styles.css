@@ -110,7 +110,8 @@ body {
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 32px;
+  /* Narrower windows tighten the gaps, so the alpha tag still fits. */
+  gap: clamp(16px, 3vw, 32px);
   min-height: 60px;
   padding: 8px clamp(20px, 5vw, 56px);
   border-bottom: 1px solid var(--line);
@@ -138,7 +139,7 @@ body {
 
 .nav-links {
   display: flex;
-  gap: 32px;
+  gap: clamp(16px, 3vw, 32px);
   margin-left: auto;
 }
 
@@ -238,7 +239,8 @@ body {
   .nav-github { font-size: 11px; }
 }
 
-@media (max-width: 360px) {
+/* Below 380px the logo and the alpha tag leave no room for the wordmark. */
+@media (max-width: 380px) {
   .nav-brand .wordmark { display: none; }
 }
 
