@@ -1235,7 +1235,7 @@ fn below_threshold(pending: i64, threshold: u32) -> bool {
 /// the same converged content as the un-compacted log. Below threshold this is
 /// a no-op.
 ///
-/// `threshold` of 0 forces a compaction (used by replicated close).
+/// `threshold` of 0 forces a compaction, except for a pristine replicated seed.
 pub fn maybe_compact(
     store: &mut EngineStore,
     key: &DocKey,
@@ -1266,6 +1266,13 @@ pub fn maybe_compact(
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
     if persisted.doc.has_missing_updates() {
+        return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
+    }
+    // Keep the seed witness across closes so an unedited reopen can prove
+    // the file already holds its content, even when projection normalizes it.
+    if persisted.marker.regime == Regime::Replicated
+        && read_pristine_seed_lineage_source(store, key)?.is_some()
+    {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
 

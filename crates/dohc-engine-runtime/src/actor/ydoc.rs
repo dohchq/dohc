@@ -2954,19 +2954,13 @@ pub(super) fn ydoc_settle_on_store(
             projection,
         })));
     }
-    // A session with no edits settles without writing. The lineage's
-    // durable history is exactly one client-declared seed importing the
-    // captured head — and the head guard above proved the store still holds
-    // that head, while the disk probe proved the file still holds its bytes.
-    // The live Y.Doc is canonical, and an unedited doc's canonical content IS
-    // the imported file's content, so the file already holds this settlement;
-    // writing would only re-encode it through the projection's normalization
-    // (mint a moment, churn the mtime, trip every watcher). Answer with the
-    // current head, like the idempotent no-op above. Any doubt — a second
-    // update, a snapshot, a prior settle, no recorded seed source, a moved
-    // head or disk — falls through to the write below.
+    // An unedited seed, including its exact sync-promoted base, already holds
+    // the imported file's content. Head and disk must still match its source.
+    // Keep last_settled_sha unset: it describes a projection, and recording
+    // the source there would destroy the pristine witness on the next settle.
     if live_audit.is_none()
-        && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+        && let Some(seed_source) =
+            dohc_engine_collab::read_pristine_seed_lineage_source(store, key)?
         && Some(&seed_source) == probe_sha.as_ref()
         && matches!(
             &disk_preimage,
