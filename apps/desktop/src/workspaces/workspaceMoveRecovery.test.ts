@@ -237,6 +237,39 @@ it.each(["local", "old", "expired", "hardlink"])("resumes only owned, current lo
   f.retirement.abort();
 });
 
+it("does not enumerate a record linked to a valid record outside the trash", async context => {
+  const f = await fixture(); await f.write("old.md");
+  const moved = await f.move("old.md", "new.md");
+  await recovery.waitForRecovery(moved.operationId!);
+  const outside = join(f.rootPath, "outside-record.json");
+  await rename(f.recordPath(), outside);
+  try {
+    await filesystem.symlink(outside, f.recordPath(), "file");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      context.skip(); return;
+    }
+    throw error;
+  }
+  expect(await listMoveRecoveries(f.rootPath)).toEqual([]);
+  expect(JSON.parse(await readFile(outside, "utf8"))).toHaveProperty("operationId", moved.operationId);
+  f.retirement.abort();
+});
+
+it("reports skipped links when a person's move cannot save its record before local state is ready", async () => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(rewrite); await f.write("folder/old.md");
+  readLocalStateFrom({currentBinding: () => ({localStateReady: false})});
+  const moved = await moveWorkspacePathByHand(f.operation, {fromPath: "folder/old.md", toPath: "archive/new.md"}, person, f.options);
+  expect(moved).toMatchObject({path: "archive/new.md", undo: {available: false, paths: [],
+    reason: "Move finished. dohc could not save Undo information or update links to this file. Move it back yourself."}});
+  await nextTurn();
+  expect(rewrite).not.toHaveBeenCalled();
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toBeUndefined();
+  expect(await readFile(join(f.rootPath, "archive/new.md"), "utf8")).toBe("folder/old.md");
+  f.retirement.abort();
+});
+
 it.each(["updating", "begun", "finished"])("resumes an open record only before Undo has begun: %s", async phase => {
   const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
   const f = await fixture(); await f.write("old.md"); const moved = await f.moveAsAgent("old.md", "new.md");

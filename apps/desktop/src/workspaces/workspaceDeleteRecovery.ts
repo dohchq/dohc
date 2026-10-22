@@ -130,8 +130,9 @@ export async function listRecoveryRecordTexts(root: string, kind: "delete" | "mo
   const dir = await existingLocalStateFolder(root, "trash");
   if (dir === null || dir === "unusable") return [];
   const records: { name: string; text: string }[] = [];
+  const recordPattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`, "u");
   for (const name of await readdir(dir)) {
-    if (!new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`, "u").test(name)) continue;
+    if (!recordPattern.test(name)) continue;
     try {
       const read = await readRecoveryFileText(join(dir, name));
       if (read.status === "read") records.push({name, text: read.text});

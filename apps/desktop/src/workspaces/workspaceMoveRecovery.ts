@@ -76,12 +76,16 @@ export async function finishFolderMoveRecovery(workspace: LocalStateWorkspace, o
 export async function finishMoveRecovery(workspace: LocalStateWorkspace, plan: DeleteRecoveryPlan, from: string, to: string, replaced: boolean,
   linkRewrite?: FileMoveRecoveryRecord["linkRewrite"]): Promise<{ recovery: OperationRecovery; record?: FileMoveRecoveryRecord }> {
   const word = moveWord(from, to);
+  let linksNotUpdated = false;
   try {
     if (!plan.record || plan.noUndo) throw new Error("Recovery collection failed");
     const record: FileMoveRecoveryRecord = { operationId: plan.operationId, from, to,
       entries: [...plan.record.paths, ...plan.record.emptyFolders], tracked: plan.record.tracked, ...(replaced ? { replaced } : {}),
       ...(linkRewrite ? { linkRewrite } : {}) };
-    if (canRewriteMoveLinks(record)) record.links = {state: "updating"};
+    if (canRewriteMoveLinks(record)) {
+      linksNotUpdated = true;
+      record.links = {state: "updating"};
+    }
     await saveRecoveryRecord(workspace, record, "move");
     scheduleRecoveryPrune(workspace);
     return { record, recovery: { operationId: plan.operationId, undo: replaced
@@ -89,7 +93,7 @@ export async function finishMoveRecovery(workspace: LocalStateWorkspace, plan: D
       : { available: true } } };
   } catch {
     return { recovery: { operationId: plan.operationId, undo: { available: false, paths: [],
-      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information. ${moveBack(word)}` } } };
+      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information${linksNotUpdated ? " or update links to this file" : ""}. ${moveBack(word)}` } } };
   }
 }
 export function replacedMoveReason(record: FileMoveRecoveryRecord): string {
