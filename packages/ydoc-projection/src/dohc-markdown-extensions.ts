@@ -3,7 +3,7 @@
 // so a fix to a tokenizer reaches the editor and the projection together.
 import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
-import { getDefaults, Lexer, Tokenizer, type Tokens } from 'marked'
+import { getDefaults, Lexer, Tokenizer, type Token, type Tokens } from 'marked'
 import { preprocessTablePipes, Table } from '@tiptap/extension-table'
 import { ListItem, OrderedList, TaskItem, TaskList } from '@tiptap/extension-list'
 import { Paragraph } from '@tiptap/extension-paragraph'
@@ -33,6 +33,9 @@ export type InlineText = {
   // importer's url rule last measured, ends, and whether an address's
   // domain follows.
   localPart?: { from: number; at: number; address: boolean }
+  // The text marked masks for its emphasis rules, and the importer's
+  // searches in it.
+  masked?: { text: string; searched: Map<RestSearch, { from: number; at: number }> }
 }
 const inlineTexts = new WeakMap<object, InlineText[]>()
 // marked hands an extension's tokenizer the tokens of the text it reads.
@@ -108,72 +111,159 @@ export function findInlineStart(lexer: object | undefined, src: string, start: I
   return found.match < 0 ? -1 : found.at - from + 1
 }
 
-// marked asks where a block may start only to cut the paragraph it is about
-// to read, and that paragraph ends at the first line holding only spaces. A
-// search past that line would read the rest of the document per paragraph.
-function paragraphRegion(src: string): string {
-  let lineEnd = src.indexOf('\n')
-  while (lineEnd >= 0) {
-    let next = lineEnd + 1
-    while (src[next] === ' ') next += 1
-    if (next === src.length || src[next] === '\n') return src.slice(0, lineEnd)
-    lineEnd = src.indexOf('\n', next)
-  }
-  return src
-}
-
-function lineMarkerStart(source: string, marker: string): number {
-  const src = paragraphRegion(source)
-  let markerIndex = src.indexOf(marker)
-  while (markerIndex >= 0) {
-    if (markerIndex === 0 || src[markerIndex - 1] === '\n') {
-      return markerIndex <= 1 ? 0 : markerIndex
-    }
-    markerIndex = src.indexOf(marker, markerIndex + marker.length)
-  }
-  return -1
-}
-
-function calloutStart(source: string): number {
-  const src = paragraphRegion(source)
-  let markerIndex = src.indexOf('[!')
-  while (markerIndex >= 0) {
-    let quoteIndex = markerIndex - 1
-    if (quoteIndex >= 0 && /\s/u.test(src[quoteIndex]!)) quoteIndex -= 1
-    if (quoteIndex >= 0 && src[quoteIndex] === '>') {
-      let lineStart = quoteIndex
-      while (lineStart > 0 && quoteIndex - lineStart < 3 && src[lineStart - 1] === ' ') {
-        lineStart -= 1
-      }
-      if (lineStart === 0 || src[lineStart - 1] === '\n') {
-        return lineStart <= 1 ? 0 : lineStart
-      }
-    }
-    markerIndex = src.indexOf('[!', markerIndex + 2)
-  }
-  return -1
-}
-
 // A tokenizer's search for where its token ends, which finds the same place
 // from any start before it. marked tries a tokenizer at each place in a
 // text, so a search to the end each time would read it quadratically. While
 // the importer reads a text, each search answers from its last answer until
 // the rest passes it.
-type RestSearch = (text: string, from: number) => number
+export type RestSearch = (text: string, from: number) => number
+type Searched = Map<RestSearch, { from: number; at: number }>
+
+export function searchFrom(text: string, searched: Searched, from: number, search: RestSearch): number {
+  let found = searched.get(search)
+  if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
+    found = { from, at: search(text, from) }
+    searched.set(search, found)
+  }
+  return found.at
+}
+
+/** `search` from `from` in `src`, the rest of the text `read` holds. */
+export function searchInlineText(read: InlineText, src: string, from: number, search: RestSearch): number {
+  const offset = read.text.length - src.length
+  const at = searchFrom(read.text, read.searched, offset + from, search)
+  return at < 0 ? -1 : at - offset
+}
 
 function searchRest(src: string, tokens: object, from: number, search: RestSearch): number {
   const read = tokenTexts.get(tokens)
-  if (!read || read.text.length < src.length) return search(src, from)
-  const offset = read.text.length - src.length
-  let found = read.searched.get(search)
-  if (!found || found.from > offset + from || (found.at >= 0 && found.at < offset + from)) {
-    found = { from: offset + from, at: search(read.text, offset + from) }
-    read.searched.set(search, found)
-  }
-  return found.at < 0 ? -1 : found.at - offset
+  return !read || read.text.length < src.length ? search(src, from) : searchInlineText(read, src, from, search)
 }
 
-const nextBrace: RestSearch = (text, from) => text.indexOf('}', from)
+export const nextCharacter = (character: string): RestSearch => (text, from) => text.indexOf(character, from)
+const nextBrace = nextCharacter('}')
+
+// marked cuts a paragraph wherever a block may start, and lexes each cut's
+// rest anew, so the `$` of `$$$…` or each `$$` line of a paragraph is a step.
+// A search to the end of the line or paragraph at each step would read it
+// quadratically. While the importer lexes blocks between `enterBlockText` and
+// `leaveBlockText`, each search answers from its last answer in that text
+// until the rest passes it.
+export type BlockText = {
+  text: string
+  tokens: Token[]
+  searched: Searched
+  rest?: string
+  heads: Map<Token, string[]>
+}
+const blockTexts = new WeakMap<object, BlockText[]>()
+const tokenBlockTexts = new WeakMap<object, BlockText>()
+
+export function enterBlockText(lexer: object, text: string, tokens: Token[]): void {
+  const read = { text, tokens, searched: new Map(), heads: new Map() }
+  const texts = blockTexts.get(lexer)
+  if (texts) texts.push(read)
+  else blockTexts.set(lexer, [read])
+  tokenBlockTexts.set(tokens, read)
+}
+
+export function leaveBlockText(lexer: object, tokens: Token[]): void {
+  const read = blockTexts.get(lexer)?.pop()
+  for (const [token, head] of read?.heads ?? []) token.raw = head.join('') + token.raw
+  if (tokenBlockTexts.get(tokens) === read) tokenBlockTexts.delete(tokens)
+}
+
+// marked joins each piece of a cut paragraph onto the last with `raw +=`,
+// after checking whether that raw ends in a newline, which copies the whole
+// joined raw each time. Before each paragraph, the last one keeps only its
+// last character, and its block text holds the rest until it ends.
+export function shortenLastParagraph(lexer: object | undefined): void {
+  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+  const last = read?.tokens.at(-1)
+  if (!read || last?.type !== 'paragraph' || last.raw.length < 2) return
+  const head = read.heads.get(last)
+  if (head) head.push(last.raw.slice(0, -1))
+  else read.heads.set(last, [last.raw.slice(0, -1)])
+  last.raw = last.raw.slice(-1)
+}
+
+/** Records `rest`, the rest of the text whose `tokens` a block tokenizer is given, as the lexer's current step. */
+export function stepBlockText(tokens: object, rest: string): void {
+  const read = tokenBlockTexts.get(tokens)
+  if (read) read.rest = rest
+}
+
+/** The block text `lexer` reads, when `src` is the rest at its current step. */
+export function steppedBlockText(lexer: object | undefined, src: string): BlockText | undefined {
+  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+  return read?.rest === src ? read : undefined
+}
+
+/** `search` from `from` in `src`, the rest of the text `read` holds. */
+export function searchBlockText(read: BlockText, src: string, from: number, search: RestSearch): number {
+  const offset = read.text.length - src.length
+  const at = searchFrom(read.text, read.searched, offset + from, search)
+  return at < 0 ? -1 : at - offset
+}
+
+// marked asks where a block may start with the rest after the first
+// character of its step.
+function blockStartSearch(lexer: object | undefined, src: string): (from: number, search: RestSearch) => number {
+  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+  return read?.rest?.length === src.length + 1
+    ? (from, search) => searchBlockText(read, src, from, search)
+    : (from, search) => search(src, from)
+}
+
+// marked asks where a block may start only to cut the paragraph it is about
+// to read, and that paragraph ends at the first line holding only spaces. A
+// search past that line would read the rest of the document per paragraph.
+const paragraphEnd: RestSearch = (text, from) => {
+  let lineEnd = text.indexOf('\n', from)
+  while (lineEnd >= 0) {
+    let next = lineEnd + 1
+    while (text[next] === ' ') next += 1
+    if (next === text.length || text[next] === '\n') return lineEnd
+    lineEnd = text.indexOf('\n', next)
+  }
+  return -1
+}
+
+// A marker at a line start after the first. Its line's newline is in the
+// paragraph exactly when the whole marker is.
+const mathBlockLine: RestSearch = (text, from) => text.indexOf('\n$$', from)
+
+function mathBlockStart(this: { lexer?: object }, src: string): number {
+  const search = blockStartSearch(this?.lexer, src)
+  if (src.startsWith('$$')) return 0
+  const line = search(0, mathBlockLine)
+  const end = search(0, paragraphEnd)
+  return line < 0 || (end >= 0 && end < line) ? -1 : line === 0 ? 0 : line + 1
+}
+
+// The newline before a line that starts a callout: up to three spaces, `>`,
+// at most one white-space character and `[!`.
+const calloutLine: RestSearch = (text, from) => {
+  for (let marker = text.indexOf('[!', from); marker >= 0; marker = text.indexOf('[!', marker + 2)) {
+    let quote = marker - 1
+    if (/\s/u.test(text[quote] ?? '')) quote -= 1
+    if (text[quote] !== '>') continue
+    let lineStart = quote
+    while (quote - lineStart < 3 && text[lineStart - 1] === ' ') lineStart -= 1
+    if (lineStart - 1 >= from && text[lineStart - 1] === '\n') return lineStart - 1
+  }
+  return -1
+}
+
+function calloutStart(this: { lexer?: object }, src: string): number {
+  const search = blockStartSearch(this?.lexer, src)
+  let quote = 0
+  while (quote < 3 && src[quote] === ' ') quote += 1
+  if (src[quote] === '>' && (src.startsWith('[!', quote + 1) || (src.startsWith('[!', quote + 2) && /\s/u.test(src[quote + 1]!)))) return 0
+  const line = search(0, calloutLine)
+  const end = search(0, paragraphEnd)
+  return line < 0 || (end >= 0 && end < line) ? -1 : line === 0 ? 0 : line + 1
+}
 
 // The first `]]` after a wikilink's `[[` that no backslash escapes. A run of
 // backslashes cannot reach back past the `[[`, so whether one escapes a `]`
@@ -726,9 +816,10 @@ const DohcCallout = Node.create({
     level: 'block',
     start: calloutStart,
     tokenize(src, _tokens, helpers) {
+      // The quote marker cannot reach past the first line.
+      if (!CALLOUT_LINE_RE.test(src)) return undefined
       const newline = src.indexOf('\n')
       const first = newline < 0 ? src : src.slice(0, newline)
-      if (!CALLOUT_LINE_RE.test(first)) return undefined
       const header = CALLOUT_HEADER_RE.exec(stripBlockquotePrefix(first))
       if (!header) return undefined
       const lines = src.split('\n')
@@ -1015,7 +1106,7 @@ export const DohcMathBlock = Node.create({
   markdownTokenizer: {
     name: 'mathBlock',
     level: 'block',
-    start: src => lineMarkerStart(src, '$$'),
+    start: mathBlockStart,
     tokenize(src) {
       if (!src.startsWith('$$')) return undefined
       const closing = src.indexOf('$$', 2)
@@ -1355,12 +1446,22 @@ function tableRowHeightsAnnotation(rows: JSONContent[]): string {
   return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
 }
 
-// Table.start only inspects the first two lines. Avoid splitting the full
-// remaining document while probing ordinary blocks.
-function tableStart(src: string): number {
-  const newline = src.indexOf('\n')
-  if (newline < 0) return -1
-  const second = src.indexOf('\n', newline + 1)
+export const nextLine = nextCharacter('\n')
+// The same search from the second line on, so its answer stays apart from
+// the first line's.
+const nextLineAfter: RestSearch = (text, from) => text.indexOf('\n', from)
+const nextPipe = nextCharacter('|')
+
+// Table.start only inspects the first two lines, and finds a table only when
+// the first holds a pipe. Avoid splitting the full remaining document while
+// probing ordinary blocks.
+function tableStart(this: { lexer?: object }, src: string): number {
+  if (TABLE_ROW_HEIGHTS_RE.test(src)) return 0
+  const search = blockStartSearch(this?.lexer, src)
+  const newline = search(0, nextLine)
+  const pipe = search(0, nextPipe)
+  if (newline < 0 || pipe < 0 || pipe > newline) return -1
+  const second = search(newline + 1, nextLineAfter)
   const prefix = second < 0 ? src : src.slice(0, second)
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
@@ -1435,22 +1536,25 @@ function leadingTableText(rest: string): { text: string; cut: boolean } | undefi
 // Only a line after the first that could be a delimiter row can start a
 // table, so ordinary blocks skip the table probe.
 const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
-function secondLine(src: string): string {
-  const first = src.indexOf('\n')
+function secondLine(src: string, read: BlockText | undefined): string {
+  const search = (from: number, rest: RestSearch) => (
+    read && read.text.length >= src.length ? searchBlockText(read, src, from, rest) : rest(src, from)
+  )
+  const first = search(0, nextLine)
   if (first < 0) return ''
-  const second = src.indexOf('\n', first + 1)
+  const second = search(first + 1, nextLineAfter)
   return src.slice(first + 1, second < 0 ? undefined : second)
 }
 
 export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
-    start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
+    start: tableStart,
     tokenize: (src, tokens, helpers) => {
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
       const prefix = annotation?.[0] ?? ''
       const rest = src.slice(prefix.length)
-      const second = secondLine(rest)
+      const second = secondLine(rest, annotation ? undefined : tokenBlockTexts.get(tokens))
       const delimiter = TABLE_DELIMITER_RE.test(second)
       const extent = annotation || delimiter ? leadingTableText(rest) : undefined
       if (!annotation && !extent?.cut) {

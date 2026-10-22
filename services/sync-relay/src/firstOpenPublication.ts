@@ -20,6 +20,17 @@ import {enforceWorkspaceIdentity, parseOptionalWorkspaceIdentity} from "./worksp
 
 /** Writer attempts per request: the first, then at most two after catching up. */
 export const FIRST_OPEN_WRITER_ATTEMPTS = 3;
+/** The wait before the relay builds a source again after its build passed the deadline. Each repeat doubles it, up to the cap. */
+export const FIRST_OPEN_DEADLINE_WAIT_MS = 60_000;
+const FIRST_OPEN_DEADLINE_WAIT_CAP_MS = 60 * 60_000;
+/**
+ * How many sources' waits the relay keeps. Full, it forgets the wait it set
+ * longest ago, and that source builds at once when asked again. Each wait
+ * costs a build that held the one first-open slot to its deadline, so at the
+ * default deadline the oldest of these was set at least 17 hours before, and
+ * its wait has passed.
+ */
+const FIRST_OPEN_DEADLINE_WAITS = 1_024;
 
 /** What a service host may name. The relay derives everything else. */
 export interface FirstOpenRequest {
@@ -121,9 +132,16 @@ export function createFirstOpenPublisher(options: {
   host(): FirstOpenCheckHost | undefined;
   /** The first-open worker, unless a test injects another. */
   build?: FirstOpenBuild;
+  /** The relay's clock, unless a test injects another. */
+  nowMs?: () => number;
+  /** How many sources' waits the relay keeps, unless a test keeps fewer. */
+  maxDeadlineWaits?: number;
 }) {
-  const {storage, namespace} = options;
+  const {storage, namespace, nowMs = Date.now, maxDeadlineWaits = FIRST_OPEN_DEADLINE_WAITS} = options;
   const build: FirstOpenBuild = options.build ?? ((policy, input, signal) => liveValidation.buildFirstOpenBase(policy, input, signal));
+  // A build that passes its deadline would pass it again on the same bytes, holding the one first-open slot every time,
+  // so the relay itself makes the same source wait, whatever its clients do. A restart forgets every wait.
+  const deadlineWaits = new Map<string, {waitMs: number; untilMs: number}>();
   // Every bound native capture and the relay's verifier apply to a base-only history.
   const bounds = (config: ServiceActivationConfig, source: FirstOpenSource, identity: {replicationEpoch: string; streamIdentity: string}, originId: string): FirstOpenBaseBounds => ({
     maxCaptureBytes: config.maxCaptureBytes, maxBytesPerDrain: config.maxBytesPerDrain,
@@ -209,6 +227,9 @@ export function createFirstOpenPublisher(options: {
 
     const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
     if (preparation.kind !== "prepared") return refusal(preparation);
+    // A source whose build passed its deadline waits before it builds again; an edit is a new source.
+    const waitKey = JSON.stringify([workspaceId, objectId, source.sourceDigest]), waiting = deadlineWaits.get(waitKey), at = nowMs();
+    if (waiting && at < waiting.untilMs) return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waiting.untilMs - at});
     let proof = preparation.proof;
     const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
       currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,
@@ -216,9 +237,15 @@ export function createFirstOpenPublisher(options: {
     signal.throwIfAborted();
     if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
     if (built.kind === "deadline") {
-      console.error("[sync-relay] first-open build passed its deadline", source.sourceDigest);
-      return answer({kind: "unavailable", reason: "build-deadline"});
+      const previous = deadlineWaits.get(waitKey);
+      const waitMs = previous ? Math.min(2 * previous.waitMs, FIRST_OPEN_DEADLINE_WAIT_CAP_MS) : FIRST_OPEN_DEADLINE_WAIT_MS;
+      deadlineWaits.delete(waitKey);
+      deadlineWaits.set(waitKey, {waitMs, untilMs: nowMs() + waitMs});
+      if (deadlineWaits.size > maxDeadlineWaits) deadlineWaits.delete(deadlineWaits.keys().next().value!);
+      console.error("[sync-relay] first-open build passed its deadline", workspaceId, objectId, source.sourceDigest);
+      return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waitMs});
     }
+    deadlineWaits.delete(waitKey);
     if (built.kind === "refused") {
       switch (built.reason) {
         case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});

@@ -62,8 +62,10 @@ export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" |
  *   read. `worker-failed`: the worker building the base failed, other than by
  *   running out of memory. `build-deadline`: building the base took longer
  *   than the relay allows, so it ended the worker; a slow host proves nothing
- *   about the note. The host failures say why the engine gave no
- *   verdict. Nothing was appended or retained for any of these.
+ *   about the note. The relay builds the same source again only after
+ *   `retryAfterMs`, which doubles each time the build repeats this, up to an
+ *   hour; an edit is a new source. The host failures say why the engine gave
+ *   no verdict. Nothing was appended for any of these.
  *   `storage-failed`: the relay database failed in
  *   a way that can pass, possibly while committing the base; asking again
  *   replays any base that was appended. The relay logs the failures.
@@ -77,7 +79,8 @@ export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readon
   | {readonly kind: "refused"; readonly reason: "unsupported-source"; readonly cause: FirstOpenUnsupportedCause}
   | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound | "source-limit" | "host-capacity" | "seed-worker-capacity"}
   | {readonly kind: "refused"; readonly reason: "ordinary-activation-refused"; readonly code?: string}
-  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "reconfigured" | "build-deadline" | FirstOpenFailure | FirstOpenHostFailure}
+  | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "reconfigured" | FirstOpenFailure | FirstOpenHostFailure}
+  | {readonly kind: "unavailable"; readonly reason: "build-deadline"; readonly retryAfterMs: number}
   | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate" | "check-evidence"}
 );
 

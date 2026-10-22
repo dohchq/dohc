@@ -1,7 +1,7 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { Extension, flattenExtensions, getSchema, type Mark } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
-import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Token, type Tokens } from 'marked'
+import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Token, type Tokens, type TokensList } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableCell, TableHeader, TableRow } from '@tiptap/extension-table'
 import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -15,11 +15,13 @@ import {
   DohcMarkdownTable,
   DohcTaskItem,
   dohcMarkdownExtensions,
+  enterBlockText,
   enterInlineText,
   escapeHighlightMarkdown,
   findInlineStart,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
   inlineStart,
+  leaveBlockText,
   leaveInlineText,
   MarkdownListItem,
   MarkdownOrderedList,
@@ -28,9 +30,18 @@ import {
   MarkdownTaskList,
   markdownListParseState,
   measureTableCellsAs,
+  nextCharacter,
+  nextLine,
   readingInlineText,
+  searchBlockText,
+  searchFrom,
+  searchInlineText,
+  shortenLastParagraph,
+  stepBlockText,
+  steppedBlockText,
   stepInlineText,
   type InlineText,
+  type RestSearch,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -482,6 +493,80 @@ function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
   return found.at > from && found.address
 }
 
+// marked's emphasis and strikethrough rules search the rest of the text for a
+// closing run each time a run of `*`, `_` or `~` opens, so a paragraph of
+// openers with no closer, such as `*a *a …`, cost quadratic time. Every run
+// the rules may close with follows a character that is neither white space
+// nor their delimiter, so with no such run after the opener they find none.
+const closingRun = (delimiter: string): RestSearch => (text, from) => {
+  for (let at = text.indexOf(delimiter, from); at >= 0; at = text.indexOf(delimiter, at + 1)) {
+    const before = text[at - 1]
+    if (before !== undefined && before !== delimiter && !/\s/u.test(before)) return at
+  }
+  return -1
+}
+const CLOSING_RUNS = new Map(['*', '_', '~'].map(delimiter => [delimiter, closingRun(delimiter)]))
+
+function mayClose(tokenizer: Tokenizer, src: string, masked: string): boolean {
+  const search = CLOSING_RUNS.get(src[0] ?? '')
+  const read = readingInlineText(tokenizer.lexer)
+  if (!search || !read) return true
+  if (read.masked?.text !== masked) read.masked = { text: masked, searched: new Map() }
+  // The rules search the end of the masked text as long as the rest, past
+  // the opener.
+  return searchFrom(masked, read.masked.searched, Math.max(0, masked.length - src.length) + 1, search) >= 0
+}
+
+// marked's link rule reads a destination to the `)` that ends the link, and
+// its tag rule a comment to its `-->`. With none in the rest of the text,
+// each `[` or `<!--` read the rest for nothing.
+const nextParenthesis = nextCharacter(')')
+const nextCommentEnd: RestSearch = (text, from) => text.indexOf('-->', from)
+
+function linkMayClose(read: InlineText | undefined, src: string): boolean {
+  return !read || read.step !== src.length || !(src.startsWith('[') || src.startsWith('!['))
+    || searchInlineText(read, src, 0, nextParenthesis) >= 0
+}
+
+function commentMayClose(read: InlineText | undefined, src: string): boolean {
+  // `<!-->` and `<!--->` are whole comments.
+  return !read || read.step !== src.length || !src.startsWith('<!--') || src[4] === '>' || src.startsWith('->', 4)
+    || searchInlineText(read, src, 4, nextCommentEnd) >= 0
+}
+
+// marked's setext rule reads a paragraph's lines up to an underline, and
+// stops before a line that could interrupt the paragraph. Where the rest of
+// a block text holds no underline before such a line, it reads them at each
+// step for nothing. The importer finds both once per block text, with the
+// interrupting lines taken from marked's own rule.
+type SetextRule = { underline: RestSearch; interrupt: RestSearch }
+const SETEXT_RULE = /^\^\(\?!(.+)\)\(\(\?:\.\|\\n\(\?!\\s\*\?\\n\|\1\)\)\+\?\)\\n \{0,3\}\(=\+\|-\+\) \*\(\?:\\n\+\|\$\)$/
+const setextRules = new WeakMap<RegExp, SetextRule | null>()
+const firstMatch = (pattern: RegExp): RestSearch => (text, from) => {
+  pattern.lastIndex = from
+  return pattern.exec(text)?.index ?? -1
+}
+
+function setextRule(rule: RegExp): SetextRule | null {
+  let setext = setextRules.get(rule)
+  if (setext === undefined) {
+    const interrupts = SETEXT_RULE.exec(rule.source)?.[1]
+    setext = interrupts && !rule.flags
+      ? {
+          underline: firstMatch(/\n {0,3}(?:=+|-+) *(?:\n|$)/g),
+          interrupt: firstMatch(new RegExp(`\\n(?=\\s*?\\n|${interrupts})`, 'g')),
+        }
+      : null
+    setextRules.set(rule, setext)
+  }
+  return setext
+}
+
+// marked's table rule reads its header line to the newline before trying
+// the delimiter row, so a long line cut at each `$` read it at each cut.
+const TABLE_RULE_START = String.raw`^ *([^\n ].*)\n {0,3}((?:\| *)?:?-+`
+const TABLE_DELIMITER_START = / {0,3}(?:\| *)?:?-/y
+
 const extensions: AnyExtension[] = [
   MarkdownHtml,
   MarkdownDefinition,
@@ -519,10 +604,12 @@ const markdownParser = new Marked({
     start(src) {
       return findInlineStart(this.lexer, src, EMPTY_LINK_START)
     },
-    tokenizer: (src, tokens) => {
-      // marked tries this tokenizer first at every step.
+    tokenizer(src, tokens) {
+      // marked tries every inline extension before its own rules, so this
+      // runs at each step that reaches marked's rules, such as its text and
+      // url rules.
       stepInlineText(tokens, src)
-      if (!src.startsWith('[](')) return undefined
+      if (!src.startsWith('[](') || !linkMayClose(readingInlineText(this.lexer), src)) return undefined
       const link = literalProbe.link(src)
       return link?.type === 'link'
         ? { type: 'escape', raw: link.raw, text: sourceText(link.raw) }
@@ -553,6 +640,8 @@ const markdownParser = new Marked({
     level: 'inline',
     tokenizer(src, tokens) {
       if (!src.startsWith('<')) return undefined
+      // marked tries this before the extension that records each step.
+      stepInlineText(tokens, src)
       const tag = this.lexer.options.tokenizer?.tag(src)
       if (!tag) return undefined
       const { raw } = tag
@@ -568,8 +657,55 @@ const markdownParser = new Marked({
       if (open && !raw.endsWith('/>')) recordOpenTag(tokens, open[1]!)
       return { type: 'escape', raw, text }
     },
+  }, {
+    // marked tries every block extension before its own rules, so this runs
+    // at each step that reaches them.
+    name: 'dohcBlockStep',
+    level: 'block',
+    tokenizer(src, tokens) {
+      stepBlockText(tokens, src)
+      return undefined
+    },
   }],
+  hooks: {
+    emStrongMask: maskedText,
+  },
   tokenizer: {
+    table(src) {
+      const read = steppedBlockText(this.lexer, src)
+      if (read && this.rules.block.table.source.startsWith(TABLE_RULE_START)) {
+        const line = searchBlockText(read, src, 0, nextLine)
+        TABLE_DELIMITER_START.lastIndex = line + 1
+        if (line < 0 || !TABLE_DELIMITER_START.test(src)) return undefined
+      }
+      return Tokenizer.prototype.table.call(this, src)
+    },
+    lheading(src) {
+      const read = steppedBlockText(this.lexer, src)
+      const rule = read && setextRule(this.rules.block.lheading)
+      if (read && rule) {
+        const underline = searchBlockText(read, src, 1, rule.underline)
+        const interrupt = searchBlockText(read, src, 0, rule.interrupt)
+        if (underline < 0 || (interrupt >= 0 && interrupt < underline)) return undefined
+      }
+      return Tokenizer.prototype.lheading.call(this, src)
+    },
+    paragraph(src) {
+      shortenLastParagraph(this.lexer)
+      return Tokenizer.prototype.paragraph.call(this, src)
+    },
+    emStrong(src, masked, prevChar) {
+      return mayClose(this, src, masked) ? Tokenizer.prototype.emStrong.call(this, src, masked, prevChar) : undefined
+    },
+    del(src, masked, prevChar) {
+      return mayClose(this, src, masked) ? Tokenizer.prototype.del.call(this, src, masked, prevChar) : undefined
+    },
+    link(src) {
+      return linkMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.link.call(this, src) : undefined
+    },
+    tag(src) {
+      return commentMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.tag.call(this, src) : undefined
+    },
     def(src) {
       const escaped = escapedDefinition(src)
       const token = escaped ?? Tokenizer.prototype.def.call(this, src)
@@ -593,15 +729,77 @@ const markdownParser = new Marked({
   },
 })
 
+// Before the emphasis rules read a text, marked masks each escape, then each
+// link, code span and tag, by copying the whole text around each one, so a
+// paragraph of `\[` cost quadratic time. The importer gives marked's masking
+// loops rules that find nothing, and masks the text once in the emphasis
+// hook marked calls right after them, with marked's own rules and
+// replacements.
+const NO_MASK = { exec: () => null } as unknown as RegExp
+let masking: { tokenizer: Tokenizer; rules: Tokenizer['rules'] } | undefined
+
+function maskedText(text: string): string {
+  if (!masking) return text
+  const { tokenizer, rules } = masking
+  const { anyPunctuation, blockSkip } = rules.inline
+  tokenizer.rules = rules
+  masking = undefined
+  const escaped: string[] = []
+  let kept = 0
+  anyPunctuation.lastIndex = 0
+  for (let match = anyPunctuation.exec(text); match; match = anyPunctuation.exec(text)) {
+    escaped.push(text.slice(kept, match.index), '++')
+    kept = match.index + match[0].length
+    // marked searches on from where the escape ended in the text before it
+    // shortened it, so past an escaped astral character it skips one more.
+    anyPunctuation.lastIndex = kept + match[0].length - 2
+  }
+  escaped.push(text.slice(kept))
+  // Each of these masks keeps the text's length, and none could start right
+  // after a code span, so later matches read the same characters.
+  const source = escaped.join('')
+  const masked: string[] = []
+  kept = 0
+  blockSkip.lastIndex = 0
+  for (let match = blockSkip.exec(source); match; match = blockSkip.exec(source)) {
+    const offset = match[2] ? match[2].length : 0
+    masked.push(source.slice(kept, match.index + offset), `[${'a'.repeat(match[0].length - offset - 2)}]`)
+    kept = blockSkip.lastIndex
+  }
+  masked.push(source.slice(kept))
+  return masked.join('')
+}
+
 // Block lexing must protect content tabs from list indentation expansion, but
 // inline lexing must see whitespace when it decides emphasis boundaries.
 class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Lexer<ParserOutput, RendererOutput> {
+  blockTokens(src: string, tokens?: Token[], lastParagraphClipped?: boolean): Token[]
+  blockTokens(src: string, tokens?: TokensList, lastParagraphClipped?: boolean): TokensList
+  blockTokens(src: string, tokens: Token[] = [], lastParagraphClipped = false): Token[] {
+    enterBlockText(this, src, tokens)
+    try {
+      return super.blockTokens(src, tokens, lastParagraphClipped)
+    } finally {
+      leaveBlockText(this, tokens)
+    }
+  }
+
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
     const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
     enterInlineText(this, text, tokens)
+    const tokenizer = this.options.tokenizer
+    const rules = this.options.hooks === markdownParser.defaults.hooks ? tokenizer?.rules : undefined
+    if (tokenizer && rules) {
+      tokenizer.rules = { ...rules, inline: { ...rules.inline, anyPunctuation: NO_MASK, blockSkip: NO_MASK } }
+      masking = { tokenizer, rules }
+    }
     try {
       return super.inlineTokens(text, tokens)
     } finally {
+      if (tokenizer && rules) {
+        tokenizer.rules = rules
+        masking = undefined
+      }
       leaveInlineText(this, tokens)
     }
   }

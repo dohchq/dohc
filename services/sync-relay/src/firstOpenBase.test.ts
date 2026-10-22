@@ -458,18 +458,19 @@ describe("first-open worker", () => {
 
   // Each of these once held the worker for minutes to hours at this size. On
   // a loaded host the slowest now takes about 25 s.
+  const slowShapes = ["a*", "a@", "[", "[[", "a[[", "{{atom:", "$", "$$a\n", "*a ", "_a ", "~a ", "*.txt ", "[](", "[a](", "\\[", "a<!--"];
   it("builds a note of each shape that once parsed slowly at the source limit, or refuses it by size, inside the deadline", async () => {
     const { pool } = fixture();
     const bySize = ["update-limit", "capture-budget", "read-budget", "validation-budget", "seed-worker-capacity"];
     const outcomes = [];
-    for (const unit of ["a*", "a@", "[", "[[", "a[[", "{{atom:"]) {
+    for (const unit of slowShapes) {
       // A started worker, so the deadline bounds only the build.
       expect((await pool.buildFirstOpenBase(policy, input("Body"))).kind).toBe("built");
       const built = await pool.buildFirstOpenBase(policy, input(unit.repeat(Math.floor(LIVE_MARKDOWN_MAX_BYTES / unit.length))));
       outcomes.push({ unit, built: built.kind === "refused" ? built.reason : built.kind });
     }
     expect(outcomes.filter(({ built }) => built !== "built" && !bySize.includes(built))).toEqual([]);
-  }, 8 * FIRST_OPEN_BUILD_MS);
+  }, (slowShapes.length + 2) * FIRST_OPEN_BUILD_MS);
 
   it("ends a build that passes its deadline and answers once its slot is free, while a caller's cancellation still rejects", async () => {
     // A deadline of 0 passes long before a new worker can start and answer.

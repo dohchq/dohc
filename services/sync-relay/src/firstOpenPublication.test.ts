@@ -16,7 +16,7 @@ import {parseServiceActivationConfig, type ServiceActivationConfig} from "./serv
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {firstOpenCandidateBinding, type FirstOpenCandidateInput, type FirstOpenCandidateRefusal} from "@dohc/workspace-engine-client/daemon";
 import {buildFirstOpenBase, MAX_YDOC_UPDATE_BYTES} from "./firstOpenBase";
-import {createFirstOpenPublisher, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication";
+import {createFirstOpenPublisher, FIRST_OPEN_DEADLINE_WAIT_MS, FIRST_OPEN_WRITER_ATTEMPTS, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication";
 import {firstOpenRecovery, type FirstOpenOutcome} from "./firstOpenOutcome";
 import {createLiveValidationExecutor} from "./liveValidation";
 import {FIRST_OPEN_ORIGIN_PREFIX} from "./relayLogInputs";
@@ -66,8 +66,8 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
  * checks, so what it commits lands between those checks and the writer. `afterRead`
  * runs once a read has its snapshot, so what it commits moves the log past the cutoff.
  */
-async function fixture(options: {markdown?: string | Uint8Array} = {}) {
-  let reads = 0, onRead: ((read: number) => void) | undefined, afterRead: ((read: number) => void) | undefined;
+async function fixture(options: {markdown?: string | Uint8Array; maxDeadlineWaits?: number} = {}) {
+  let reads = 0, onRead: ((read: number) => void) | undefined, afterRead: ((read: number) => void) | undefined, clock = 0;
   let reader: FirstOpenHistoryReader = async read => readFirstOpenHistoryFile(read);
   const storage = await testStorage({firstOpenHistory: async (read, signal) => {
     reads++;
@@ -120,7 +120,8 @@ async function fixture(options: {markdown?: string | Uint8Array} = {}) {
     expect(workspaceId).toBe(WS);
     return checks(input, signal);
   }};
-  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host, build: builds});
+  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host, build: builds,
+    nowMs: () => clock, maxDeadlineWaits: options.maxDeadlineWaits});
   const writes = vi.spyOn(storage, "writeFirstOpen");
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
@@ -142,7 +143,7 @@ async function fixture(options: {markdown?: string | Uint8Array} = {}) {
     afterRead(next?: (read: number) => void) { afterRead = next; },
     setActivation(next: ServiceActivationConfig | undefined) { activation = next; }, buildWith(next: FirstOpenBuild) { build = next; },
     checkWith(next: Native) { native = next; }, setHost(next: FirstOpenCheckHost | undefined) { host = next; },
-    get reads() { return reads; }};
+    advance(ms: number) { clock += ms; }, get reads() { return reads; }};
 }
 
 const published = (outcome: FirstOpenOutcome) => {
@@ -693,14 +694,78 @@ it("answers a build that passes its deadline as transient, and frees its slot fi
     following = Promise.all([validate(live), validate(live)]).then(results => results.map(result => result.kind));
     return built;
   });
-  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", recovery: "retry-later"});
-  expect(logged).toHaveBeenCalledWith("[sync-relay] first-open build passed its deadline", f.source.sourceDigest);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS, recovery: "retry-later"});
+  expect(logged).toHaveBeenCalledWith("[sync-relay] first-open build passed its deadline", WS, OBJECT, f.source.sourceDigest);
   expect(await following).toEqual(["accepted", "accepted"]);
   expect(f.checks).not.toHaveBeenCalled();
   nothingAppended(f);
-  // The same source publishes once a build finishes in time.
+  // The same source publishes once its wait has passed and a build finishes in time.
   f.buildWith(inThread);
+  f.advance(FIRST_OPEN_DEADLINE_WAIT_MS);
   expect((await f.open()).kind).toBe("published");
+});
+
+// Each build that passes its deadline holds the one first-open slot that
+// long, so the relay, not its clients, decides when the same source builds
+// again.
+it("answers a source whose build passed its deadline at once until its wait passes, doubling the wait up to an hour", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(), deadline = async () => ({kind: "deadline"}) as const;
+  f.buildWith(deadline);
+  const waits = [];
+  for (let repeat = 0; repeat < 9; repeat++) {
+    const outcome = await f.open();
+    expect(outcome).toMatchObject({kind: "unavailable", reason: "build-deadline", recovery: "retry-later"});
+    const waitMs = outcome.kind === "unavailable" && outcome.reason === "build-deadline" ? outcome.retryAfterMs : 0;
+    waits.push(waitMs / 60_000);
+    // Inside the wait, the relay answers with what is left of it, and builds nothing.
+    const builds = f.builds.mock.calls.length;
+    f.advance(waitMs - 1);
+    const inside = await f.open();
+    expect(f.builds).toHaveBeenCalledTimes(builds);
+    expect(inside).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: 1});
+    f.advance(1);
+  }
+  expect(waits).toEqual([1, 2, 4, 8, 16, 32, 60, 60, 60]);
+  expect(f.builds).toHaveBeenCalledTimes(9);
+  // An edit is a new source, which builds at once.
+  f.source = f.writeText(`${MARKDOWN}\nEdited.`);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  expect(f.builds).toHaveBeenCalledTimes(10);
+  // A build that finishes forgets the wait, so a later deadline waits a minute again.
+  f.advance(FIRST_OPEN_DEADLINE_WAIT_MS);
+  f.buildWith(async () => ({kind: "refused", reason: "update-limit"}));
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "update-limit"});
+  f.buildWith(deadline);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  nothingAppended(f);
+});
+
+// The wait stands in only for the build, so every answer that comes before it still holds.
+it("answers a waiting source with the history it gained since, without building", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture();
+  f.buildWith(async () => ({kind: "deadline"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline"});
+  priorAuthority[0]![1](f);
+  expect(await f.open()).toMatchObject({kind: "existing-history", reason: "prior-authority", recovery: "pull"});
+  expect(f.builds).toHaveBeenCalledTimes(1);
+});
+
+it("keeps at most its limit of waits, forgetting the one set longest ago", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture({maxDeadlineWaits: 2});
+  // Writing a text again makes it the current source, with the same digest.
+  const open = (text: string) => { f.source = f.writeText(text); return f.open(); };
+  f.buildWith(async () => ({kind: "deadline"}));
+  for (const text of ["One", "Two", "Three"]) await open(text);
+  expect(f.builds).toHaveBeenCalledTimes(3);
+  // The third wait pushed out the first: that source builds again at once, while the newest still waits.
+  await open("One");
+  expect(f.builds).toHaveBeenCalledTimes(4);
+  const newest = await open("Three");
+  expect(f.builds).toHaveBeenCalledTimes(4);
+  expect(newest).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
 });
 
 it("publishes nothing when the validation policy changes while the engine checks, and builds under the new policy next time", async () => {

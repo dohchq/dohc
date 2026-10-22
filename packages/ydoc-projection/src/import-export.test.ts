@@ -100,20 +100,34 @@ it.each([
 // The characters `run` reads in searches: from where each starts to the end
 // of its match, or to the end of the text when it finds none, and the items
 // each `findIndex` reads. An anchored pattern reads only its match. One `exec`
-// hides what its pattern reads past where it stops, so three patterns count
+// hides what its pattern reads past where it stops, so these patterns count
 // that too: marked's text rule looks ahead through the email characters after
 // its match, its url rule reads the characters an address's local part may
-// hold, and a wikilink start that repeats its label reads to the end of the
-// line from each `[[` it tries.
+// hold, a wikilink start that repeats its label reads to the end of the line
+// from each `[[` it tries, marked's link rule reads a destination with no `)`
+// to the next white space, its tag rule reads the rest for a comment's end,
+// its setext rule the rest of the block text, and its table rule the first
+// line. Each other text marked's masks search is a copy of the text it
+// masked, and checking the end of a raw marked joined copies it.
 const MARKED_TEXT_RULE = Lexer.rules.inline.gfm.text
 const EMAIL_CHARACTERS = /[a-zA-Z0-9.!#$%&'*+/=?_`{|}~-]*/y
 const MARKED_URL_RULE = Lexer.rules.inline.gfm.url
 const LOCAL_PART = /[A-Za-z0-9._+-]*/y
+const MARKED_LINK_RULE = Lexer.rules.inline.gfm.link
+const LINK_DESTINATION = /!?\[[^\]]*\]\([^ \t\n\x00-\x1f]*/y
+const MARKED_TAG_RULE = Lexer.rules.inline.gfm.tag
+const MARKED_SETEXT_RULE = Lexer.rules.block.gfm.lheading
+const MARKED_TABLE_RULE = Lexer.rules.block.gfm.table
+const MARKED_MASKS = new Set([Lexer.rules.inline.gfm.anyPunctuation, Lexer.rules.inline.gfm.blockSkip])
 function searchWork(run: () => void, searched = new Set<string>()): number {
-  const { indexOf } = String.prototype
+  const { endsWith, indexOf } = String.prototype
   const { exec } = RegExp.prototype
   const { findIndex } = Array.prototype
-  let work = 0
+  let work = 0, masked: string | undefined
+  const endsWithSpy = vi.spyOn(String.prototype, 'endsWith').mockImplementation(function (this: string, ...args) {
+    work += this.length
+    return Reflect.apply(endsWith, this, args) as boolean
+  })
   const findIndexSpy = vi.spyOn(Array.prototype, 'findIndex').mockImplementation(function (this: unknown[], ...args) {
     const at = Reflect.apply(findIndex, this, args) as number
     work += at < 0 ? this.length : at + 1
@@ -138,6 +152,20 @@ function searchWork(run: () => void, searched = new Set<string>()): number {
       LOCAL_PART.lastIndex = 0
       work += (Reflect.apply(exec, LOCAL_PART, [input]) as RegExpExecArray)[0].length
     }
+    if (this === MARKED_LINK_RULE && !match) {
+      LINK_DESTINATION.lastIndex = 0
+      work += (Reflect.apply(exec, LINK_DESTINATION, [input]) as RegExpExecArray | null)?.[0].length ?? 0
+    }
+    if (this === MARKED_TAG_RULE && !match && input.startsWith('<!--')) work += input.length
+    if (this === MARKED_SETEXT_RULE && !match) work += input.length
+    if (this === MARKED_TABLE_RULE && !match) {
+      const line = Reflect.apply(indexOf, input, ['\n']) as number
+      work += line < 0 ? input.length : line
+    }
+    if (MARKED_MASKS.has(this) && input !== masked) {
+      work += input.length
+      masked = input
+    }
     if (this.source.includes('\\[\\[') && /[+*]/.test(this.source.replace(/\\./g, ''))) {
       const end = this.sticky ? from + 1 : match ? match.index + 1 : input.length
       for (let at = Reflect.apply(indexOf, input, ['[[', from]) as number; at >= 0 && at <= end; at = Reflect.apply(indexOf, input, ['[[', at + 1]) as number) {
@@ -151,6 +179,7 @@ function searchWork(run: () => void, searched = new Set<string>()): number {
     run()
     return work
   } finally {
+    endsWithSpy.mockRestore()
     findIndexSpy.mockRestore()
     indexOfSpy.mockRestore()
     execSpy.mockRestore()
@@ -236,6 +265,46 @@ it.each([
   expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
   // The count sees the search for an atom's `}` only through `indexOf`.
   if (search) expect(searched).toContain(search)
+})
+
+// marked's emphasis and strikethrough rules searched the rest of the text for
+// a closer at each opener, its link rule read a destination at each `[`, its
+// tag rule the rest at each comment, and it copied the text for each escape
+// it masked.
+it.each([
+  ['unclosed emphasis', '*a '],
+  ['unclosed underscores', '_a '],
+  ['unclosed strikethrough', '~a '],
+  ['globs', '*.txt '],
+  ['links with no text and no end', '[]('],
+  ['links with no end', '[a]('],
+  ['escaped brackets', '\\['],
+  ['comment openers after letters', 'a<!--'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked cuts a paragraph at each `$` of `$$$…` and at each `$$` line, then
+// tries every block rule on the rest after each cut and joins the cut onto
+// the paragraph before it.
+it.each([
+  ['dollar signs', '$', '', ['paragraph', 'mathBlock']],
+  ['dollar signs before more lines', '$', '\nb\nc\n', ['paragraph', 'mathBlock', 'paragraph']],
+  ['math block openers', '$$a\n', '', ['paragraph']],
+  ['math block openers before a heading and an underline', '$$a\n', '# h\n---\n', ['paragraph', 'heading', 'horizontalRule']],
+  ['math block openers before a callout', '$$a\n', '> [!note] Title\n> body\n', ['paragraph', 'callout']],
+])('cuts a paragraph of %s in a linear amount of work', (_name, unit, end, kinds) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}`).content?.map(block => block.type)).toEqual(kinds)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
 })
 
 it.each([

@@ -30,6 +30,15 @@ const FRAGMENTS = [
   'a*'.repeat(9), '['.repeat(9), '[['.repeat(5), 'a[['.repeat(5), 'a@'.repeat(4), '*a '.repeat(4), 'a_'.repeat(6),
   '!'.repeat(5), '<'.repeat(4), '~'.repeat(5), '`a'.repeat(4), '=='.repeat(4), '$a'.repeat(4), '++a'.repeat(3),
   '{{atom:'.repeat(3), '</b>'.repeat(3), '<b><i>'.repeat(2), '[[a\n'.repeat(3), '[[a\\]'.repeat(3), '$'.repeat(5),
+  '$$$', '$$$$', '$'.repeat(7), '$$a\n$$b', '$$\n', '$$ x', '\n$$a', '$$a$$', '$$$x', '$$a\n'.repeat(3),
+  '*a ', '_a ', '~a ', '~~a ', '**a ', ' *', '* a', 'a *b', '_a_b', 'a_ ', ' _a', '~a~~', '~~a~', '*a**', '***a',
+  '*.txt ', '*.txt '.repeat(3), '_a '.repeat(3), '~a '.repeat(3), '*a b*', '_a b_', '~a b~', '*(a)*', '_.a_',
+  '[](', '[a](', '[a](b', '[a](<b', '[a](b "t', ')', '(', '![a](', '[a]( b )', '[a](b)c)', '[](()', '[a]((b))',
+  '[a](b\\)', '[]('.repeat(3), '[a]('.repeat(3), '[a](\nb)', '[a]\n(b)',
+  '\\[', '\\*a\\*', '\\😀', '\\€', '\\🎉\\*', '\\\\[', '`\\[`', '\\[a](b)', '\\['.repeat(3), '\\😀\\*', '\\😀*a*',
+  'a<!--', '<!--', '-->', '<!-->', '<!--->', '<!-- x -->', '<!--a-->', 'a<!--'.repeat(3), '<!---->', '<!--\n-->',
+  '| $ |', '|-|', '===', '# h', '> [!a', 'a\n===', 'a\n---', '    x',
+  '`a`*b*', '*a`*`b*', '[*a*](b)*c*', '<i>*</i>*', '\\**a*', '~~a~~b~~', '**a*', 'a\u2028b',
 ]
 const LINE_STARTS = [
   '# ', '## ', '> ', '> [!note] ', '- ', '* ', '1. ', '2) ', '- [ ] ', '- [x] ', '    ', '   ', '',
@@ -37,6 +46,9 @@ const LINE_STARTS = [
 const BLOCKS = [
   '| a | b |\n| - | - |\n| c | d |', '```js\nconst a = 1\n```', '~~~\nfence\n~~~', '---', '***',
   'Setext\n===', '$$\nE = mc^2\n$$', '<div>\nhtml block\n</div>', '<!-- dohc:table row-heights=1:84 -->\n| a |\n| - |\n| b |',
+  '$$a\n$$b\n$$c', `${'$'.repeat(9)}\nx`, '$$x\n---', '$$a\n> [!note] t', '$$a\n# h\n---', 'a\n$$\nb', '$$$$$\n===',
+  '*a *b *c\nd', '| a | b |\n|-|\n| $ |', '$$a\n| b | c |\n| - | - |', '$$a\n```\nb\n```', '$$a\n- b', '$$a\n  \n$$b',
+  'a\n- b\n---', 'a\n> b\n===', 'a\n    b\n---', 'a\u2028b\n---', 'a\u2028| b |\n| - |', '> a\n$$b\n$$c', '- [ ] $$$\n$$a',
 ]
 const SEPARATORS = ['', '', ' ', ' ', '\n', '\n\n']
 
@@ -77,6 +89,11 @@ function countNodes(node: JSONContent, counts: Map<string, number>): void {
 // a cache that answers from the wrong text, or an upgrade of marked or Tiptap.
 // When a change is meant to read some text differently, show that change in a
 // focused test first, then record the new hash here.
+//
+// The hash only notices a change; it cannot say whose it is. The importer's
+// fast paths assume marked 17.0.6's own rules, so at the first upgrade of
+// marked or Tiptap, before recording a new hash, read this corpus with the
+// fast paths and with marked's own rules alone, and require the same result.
 it('reads 6,000 generated Markdown inputs exactly as before', () => {
   const hash = createHash('sha256')
   const counts = new Map<string, number>()
@@ -99,5 +116,5 @@ it('reads 6,000 generated Markdown inputs exactly as before', () => {
   ]) {
     expect(counts.get(kind) ?? 0, kind).toBeGreaterThan(20)
   }
-  expect(hash.digest('hex')).toBe('dd23e48e535f6bb53f58a53c8fb7402982aba08383b1fd91ffd9cdea65ff97d9')
+  expect(hash.digest('hex')).toBe('d731b842fd8a56847363ee4a0cd40a957b5f8af25123dab68de290f7f1367ddb')
 })
