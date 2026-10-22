@@ -800,9 +800,10 @@ async function flush(path: string, folder = false): Promise<void> {
  * moving such a file out of the synced folder can lose them. So SQLite
  * reads the old store read-only, which downloads it, and its backup API
  * copies it page by page, -wal included, off the main thread. The copy is
- * reopened to check its id and flushed under another name. Just before it
- * is renamed to `path`, `held` checks that the record still names this
- * installation and store, so `path` is either missing or this store whole.
+ * reopened to check its id and flushed under another name. Before the
+ * rename to `path`, and before each retry of it, `held` checks that the
+ * record still names this installation and store, so `path` is either
+ * missing or this store whole.
  * A crash before the rename leaves the old store, which the next open
  * copies again.
  */
@@ -821,7 +822,7 @@ async function copyOldStore(root: string, path: string, storeId: string, held: (
     try { if (storeIdOf(db) !== storeId) throw new Error("The copy is not the store."); } finally { db.close(); }
     await flush(copy);
     held();
-    await renameWithRetry(copy, path);
+    await renameWithRetry(copy, path, {}, async () => held());
   } catch (error) {
     await Promise.all(sqliteFiles(copy).map(file => rm(file, { force: true }))).catch(() => undefined);
     if (error instanceof CollectionsRefusalError) throw error;
