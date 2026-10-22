@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -92,7 +92,30 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
       body: JSON.stringify({ revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { limit: 50 }, idempotencyKey: "read-from-test" }) });
     expect(JSON.stringify(await read.json())).toContain("From the other computer");
 
-    // Approving a Collection stays with the computer that keeps them, and nothing opened a store here.
+    // Export, Access and the workspace's History reach the server Collection, as they do on the computer that keeps the Collections.
+    const archivePath = join(workspace.baseDir, "registrations.dohc-recovery");
+    await desktop.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, archivePath);
+    await collection.getByLabel("Manage Collection", { exact: true }).click();
+    await collection.getByRole("button", { name: "Export recovery", exact: true }).click();
+    const exportDialog = page.getByRole("dialog", { name: "Export Registrations?", exact: true });
+    await exportDialog.getByRole("button", { name: "Save recovery file", exact: true }).click();
+    await expect(exportDialog).toBeHidden();
+    expect((await readFile(archivePath)).byteLength).toBeGreaterThan(4096);
+    const access = await page.evaluate(({ workspaceId, datasetId }) =>
+      window.dohcDesktop!.getObjectAccess({ workspaceId, ref: { kind: "collection", datasetId } }), { workspaceId, datasetId: definition.datasetId });
+    expect(access).toMatchObject({ visibility: "visible", unknownReason: null, freshness: "fresh", coverage: { kind: "collection", complete: true } });
+    const history = await page.evaluate(workspaceId => window.dohcDesktop!.listHistory({ workspaceId }), workspaceId);
+    expect(history).toMatchObject({ status: "ready", completeness: "complete", unavailableSources: [] });
+    expect("entries" in history && history.entries.some(entry => entry.kind === "collection" && entry.datasetId === definition.datasetId)).toBe(true);
+    const rail = page.getByRole("navigation", { name: "Activity bar", exact: true });
+    await rail.getByRole("button", { name: "History", exact: true }).click();
+    // The panel reads History again with the workspace's next change, as it does for any Collection on a server.
+    await writeFile(join(workspace.rootPath, "notes.md"), "After the record\n");
+    await expect(page.getByTestId("history-collection-change").filter({ hasText: "Registrations" })).toContainText("Create");
+    await page.screenshot({ path: test.info().outputPath("collections-server-history.png") });
+    await rail.getByRole("button", { name: "Explorer", exact: true }).click();
+
+    // Approving a Collection stays with the computer that keeps them, and nothing above opened a store here.
     const refused = await page.evaluate(async workspaceId => {
       try { await window.dohcDesktop!.dataset({ action: "prepare", workspaceId, descriptorPath: "registrations/dataset.json" }); return null; }
       catch (error) { return String(error); }
