@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, open, rename, rm } from "node:fs/promises";
 import { z } from "zod";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
-import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { join, posix } from "node:path";
+import type { DohcPathGuard } from "@dohc/workspace-core";
+import { readOwnedFile } from "@dohc/workspace-core/owned-file";
+import { localStateFolder, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
+import { basename, join, posix } from "node:path";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -12,31 +14,46 @@ import { admitPath } from "./workspaceFileMoves";
 import { refuseMoveAcrossShareMount } from "./shareMounts";
 import { storedShareMounts, shareMountRegistryIsPresent } from "./shareViewFilesTarget";
 
+// A receipt in `.dohc/local/duplicate-pending` lets a retry find the copy an
+// earlier Duplicate of the same file made before its reply was lost. It
+// describes what this computer did, so it stays out of iCloud Drive.
 const PendingDuplicate = z.object({workspaceId: z.string(), source: z.string(), path: z.string(), operationId: HistoryOperationId}).strict();
-async function pendingLocation(root: string, source: string) {
-  const directory = join(await resolveWorkspaceMetadataDir(root), "duplicate-pending");
-  await mkdir(directory, {recursive: true});
-  const entry = await lstat(directory);
-  if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("dohc could not save Duplicate recovery. The recovery folder must be a real folder in this workspace.");
+const PENDING_GUARD: DohcPathGuard = {path: ".dohc/local/duplicate-pending", lead: "dohc could not save Duplicate recovery."};
+async function pendingLocation(workspace: LocalStateWorkspace, source: string) {
+  let directory: string;
+  try {
+    directory = await localStateFolder(workspace, "duplicate-pending", PENDING_GUARD);
+  } catch (error) {
+    if (!(error instanceof LocalStateUnavailableError)) throw error;
+    throw new LocalStateUnavailableError(error.refusal, error.refusal === "not-opened"
+      ? "dohc did not duplicate this file because the workspace has not finished opening. Try again when it opens."
+      : "dohc did not duplicate this file because it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again.");
+  }
   return join(directory, createHash("sha256").update(source).digest("hex") + ".json");
 }
-async function readPending(path: string) {
-  const entry = await lstat(path).catch(error => {if (error.code === "ENOENT") return null; throw error;});
-  if (!entry) return null;
-  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("dohc could not read the pending Duplicate. Check the workspace recovery files.");
-  return PendingDuplicate.parse(JSON.parse(await readFile(path, "utf8")));
+// Only a missing receipt means no earlier Duplicate is pending. One dohc
+// can't read, parse or trust may stand for a copy already made, so
+// Duplicate refuses rather than make another and replace the receipt.
+async function readPending(path: string, source: string) {
+  const read = await readOwnedFile(path, 64 * 1024).catch(() => null);
+  if (read?.status === "missing") return null;
+  try {
+    if (read?.status === "read") return PendingDuplicate.parse(JSON.parse(read.content));
+  } catch { /* Refused below. */ }
+  throw new Error(`dohc did not duplicate ${source} because it can't use the pending Duplicate at ${PENDING_GUARD.path}/${basename(path)}. Check History for an earlier copy. Then remove that file and try again.`);
 }
 async function savePending(path: string, record: z.infer<typeof PendingDuplicate>) {
   const temp = path + "." + randomUUID() + ".tmp";
   try {
-    const file = await open(temp, "wx");
+    // 0600 whatever the umask: the reader ignores a receipt others can write.
+    const file = await open(temp, "wx", 0o600);
     try {await file.writeFile(JSON.stringify(record)); await file.sync();} finally {await file.close();}
     await rename(temp, path);
   } finally {await rm(temp, {force: true});}
 }
 
 export async function duplicateWorkspaceFile(
-  operation: { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown; shareMounts?: unknown }; assertCurrent(): void },
+  operation: { workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol; readOnly?: boolean; shareView?: unknown; shareMounts?: unknown }; assertCurrent(): void },
   path: string, author: MomentWriteAuthor, capture: Pick<WorkspaceEngineCapture, "changePathsAs">,
 ) {
   const { workspace } = operation;
@@ -49,14 +66,14 @@ export async function duplicateWorkspaceFile(
   return withExclusiveWorkspaceOperation(workspace.rootPath, async markChanged => {
     const endpoint = await admitPath(workspace.rootPath, path);
     if (!(await lstat(join(workspace.rootPath, endpoint.physical))).isFile()) throw new Error("Duplicate supports one regular file. Choose a file instead of a folder or link.");
-    const pendingPath = await pendingLocation(workspace.rootPath, endpoint.physical);
+    const pendingPath = await pendingLocation(workspace, endpoint.physical);
     const result = await capture.changePathsAs([endpoint.physical], {operation: "duplicate", author, operationId}, async engine => {
       assertWritable();
       const source = await admitPath(workspace.rootPath, path);
       if (source.physical !== endpoint.physical || !(await lstat(join(workspace.rootPath, source.physical))).isFile()) throw new Error("The source changed. Check the file, then try again.");
       const allowed = historyPathAdmission(engine.policy);
       if (engine.policy.errors.length || !allowed(source.path) || !allowed(source.physical)) throw new Error("History cannot record this file. Choose a path with no reserved, secret, or excluded files.");
-      const pending = await readPending(pendingPath);
+      const pending = await readPending(pendingPath, source.path);
       if (pending) {
         if (pending.workspaceId !== workspace.workspaceId || pending.source !== source.physical) throw new Error("This pending Duplicate belongs to another file or workspace.");
         const previous = await engine.readDuplicate(pending.operationId, pending.path);

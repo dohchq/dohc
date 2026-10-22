@@ -1101,7 +1101,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/trash if that fails, and you can
+            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
             restore them.
           </p>
         </ConfirmDialogCard>

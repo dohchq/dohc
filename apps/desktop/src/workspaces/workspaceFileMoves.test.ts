@@ -1,7 +1,7 @@
 import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles";
 import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -20,6 +20,9 @@ import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 // Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(() => ({} as {
@@ -91,9 +94,10 @@ async function fixture(options: {
   const rootPath = await createTestScratch("dohc-file-moves-");
   const systemTrash = await createTestScratch("dohc-system-trash-");
   await mkdir(join(rootPath, ".dohc"));
-  const operation = { workspace: { rootPath, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown },
-    state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const workspaceId = "file-moves-test";
+  const operation = { workspace: { workspaceId, rootPath, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown },
+    state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   let capture: WorkspaceEngineCapture | undefined;
   const attachmentId = Symbol("attachment");
   const sessions = mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
@@ -117,7 +121,7 @@ async function fixture(options: {
   const added = async (seen: ReadonlySet<string>) => (await rows()).filter(row => !seen.has(row.id))
     .map(row => ({ operation: row.operation, path: row.path, agentId: row.authors?.find(author => author.kind === "agent")?.agentId }))
     .sort((a, b) => a.path.localeCompare(b.path) || a.operation.localeCompare(b.operation));
-  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? (await readdir(join(rootPath, ".dohc/trash"))).filter(name => !/^(?:delete|move)-[a-f0-9]{64}\.json$/.test(name)) : [];
+  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/local/trash")) ? (await readdir(join(rootPath, ".dohc/local/trash"))).filter(name => !/^(?:delete|move)-[a-f0-9]{64}\.json$/.test(name)) : [];
   // The system trash keeps the workspace trash's entry name, which ends with the file's own name.
   const systemTrashed = async (name: string) => {
     const entry = (await readdir(systemTrash)).find(entry => entry.endsWith(`-${name}`));
@@ -149,7 +153,7 @@ describe("agent moves and deletes", () => {
     faults.link = async (from, to) => {
       if (to !== join(f.rootPath, "target.txt")) return;
       links.push(from);
-      expect(dirname(from)).toBe(join(f.rootPath, ".dohc/trash"));
+      expect(dirname(from)).toBe(join(f.rootPath, ".dohc/local/trash"));
       expect(existsSync(join(f.rootPath, "source.txt"))).toBe(false);
       // A save at the vacated source name must survive placement.
       await write(f.rootPath, "source.txt", "new save");
@@ -314,7 +318,7 @@ describe("agent moves and deletes", () => {
     const seen = await f.start();
     const result = await f.remove("dir");
     expect(result).toEqual({ ok: false, deleted: ["dir/1.txt"], path: "dir/2.txt", reason: expect.stringContaining("dir/2.txt") });
-    expect(result.ok ? "" : result.reason).toContain("dir/1.txt left dir for the workspace trash as .dohc/trash/");
+    expect(result.ok ? "" : result.reason).toContain("dir/1.txt left dir for the workspace trash as .dohc/local/trash/");
     await f.settle();
     expect((await readdir(join(f.rootPath, "dir"))).sort()).toEqual(["2.txt", "3.txt"]);
     expect(f.trashItem).not.toHaveBeenCalled();
@@ -337,7 +341,7 @@ describe("agent moves and deletes", () => {
     expect(await readFile(join(f.rootPath, "dir/2.txt"), "utf8")).toBe("theirs");
     expect(await readFile(join(f.rootPath, "dir/3.txt"), "utf8")).toBe("3");
     const [staged] = await f.workspaceTrash();
-    expect(await readFile(join(f.rootPath, ".dohc/trash", staged!, "2.txt"), "utf8")).toBe("2");
+    expect(await readFile(join(f.rootPath, ".dohc/local/trash", staged!, "2.txt"), "utf8")).toBe("2");
     await f.engine().stop();
   });
 
@@ -375,7 +379,7 @@ describe("agent moves and deletes", () => {
 
   it("keeps a staged folder whole in the trash when it cannot be read back, and makes nothing at its place", async () => {
     const f = await fixture({ beforeRequest: request => {
-      if (request.method === VERSIONED_METHOD.textDelete) faults.readdir = path => path.includes(join(".dohc", "trash"));
+      if (request.method === VERSIONED_METHOD.textDelete) faults.readdir = path => path.includes(join(".dohc", "local", "trash"));
       refusedFor(VERSIONED_METHOD.textDelete, "dir/1.txt")(request);
     } });
     for (const n of [1, 2]) await write(f.rootPath, `dir/${n}.txt`, String(n));
@@ -387,13 +391,13 @@ describe("agent moves and deletes", () => {
     expect(result).toMatchObject({ ok: false, deleted: [], reason: expect.stringContaining("dir/1.txt, dir/2.txt stay in the workspace trash") });
     expect(existsSync(join(f.rootPath, "dir"))).toBe(false);
     const [staged] = await f.workspaceTrash();
-    expect((await readdir(join(f.rootPath, ".dohc/trash", staged!))).sort()).toEqual(["1.txt", "2.txt"]);
+    expect((await readdir(join(f.rootPath, ".dohc/local/trash", staged!))).sort()).toEqual(["1.txt", "2.txt"]);
     await f.engine().stop();
   });
 
   it("puts a file back even when its staged name cannot be removed, leaving a spare copy in the trash", async () => {
     const f = await fixture({ beforeRequest: request => {
-      if (request.method === VERSIONED_METHOD.textDelete) faults.unlink = path => path.includes(join(".dohc", "trash")) && path.endsWith("2.txt");
+      if (request.method === VERSIONED_METHOD.textDelete) faults.unlink = path => path.includes(join(".dohc", "local", "trash")) && path.endsWith("2.txt");
       refusedFor(VERSIONED_METHOD.textDelete, "dir/1.txt")(request);
     } });
     for (const n of [1, 2]) await write(f.rootPath, `dir/${n}.txt`, String(n));
@@ -407,7 +411,7 @@ describe("agent moves and deletes", () => {
     expect(await readFile(join(f.rootPath, "dir/1.txt"), "utf8")).toBe("1");
     expect(await readFile(join(f.rootPath, "dir/2.txt"), "utf8")).toBe("2");
     const [staged] = await f.workspaceTrash();
-    expect(await readdir(join(f.rootPath, ".dohc/trash", staged!))).toEqual(["2.txt"]);
+    expect(await readdir(join(f.rootPath, ".dohc/local/trash", staged!))).toEqual(["2.txt"]);
     await f.engine().stop();
   });
 
@@ -422,7 +426,7 @@ describe("agent moves and deletes", () => {
       reason: expect.stringContaining("stay in the workspace trash") });
     expect(await readdir(join(f.rootPath, "dir"))).toEqual([]);
     const [staged] = await f.workspaceTrash();
-    expect((await readdir(join(f.rootPath, ".dohc/trash", staged!))).sort()).toEqual(["1.txt", "2.txt"]);
+    expect((await readdir(join(f.rootPath, ".dohc/local/trash", staged!))).sort()).toEqual(["1.txt", "2.txt"]);
     await f.engine().stop();
   });
 
@@ -435,7 +439,7 @@ describe("agent moves and deletes", () => {
     await f.start();
     expect(await f.remove("note.txt")).toMatchObject({ ok: true, path: "note.txt", trashed: true });
     expect(f.trashItem).toHaveBeenCalledOnce();
-    expect(f.trashItem.mock.calls[0]?.[0]).toContain(join(".dohc", "trash"));
+    expect(f.trashItem.mock.calls[0]?.[0]).toContain(join(".dohc", "local", "trash"));
     expect(await readFile(join(f.rootPath, "note.txt"), "utf8")).toBe("theirs");
     expect(await readFile(await f.systemTrashed("note.txt"), "utf8")).toBe("mine");
     await f.engine().stop();
@@ -447,10 +451,10 @@ describe("agent moves and deletes", () => {
     await f.start();
     f.trashItem.mockRejectedValueOnce(new Error("no system trash on this volume"));
     const result = await f.remove("note.txt");
-    expect(result).toMatchObject({ ok: true, path: "note.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
+    expect(result).toMatchObject({ ok: true, path: "note.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/local\/trash\//) });
     const kept = await f.workspaceTrash();
     expect(kept).toHaveLength(1);
-    expect(await readFile(join(f.rootPath, ".dohc/trash", kept[0]!), "utf8")).toBe("keep me");
+    expect(await readFile(join(f.rootPath, ".dohc/local/trash", kept[0]!), "utf8")).toBe("keep me");
     await f.engine().stop();
   });
 
@@ -461,6 +465,49 @@ describe("agent moves and deletes", () => {
     expect(await f.move("dir", "moved")).toEqual({ ok: false, path: "dir", reason: expect.stringContaining("put everything back") });
     expect((await readdir(join(f.rootPath, "dir"))).sort()).toEqual(["1.txt", "2.txt"]);
     expect(existsSync(join(f.rootPath, "moved"))).toBe(false);
+    await f.engine().stop();
+  });
+
+  // iCloud Drive can leave a file's bytes only in iCloud. An agent's delete
+  // stages in .dohc/local/trash, which iCloud Drive skips, so it moves
+  // nothing whose dataless flag is set. A sparse file is the candidate.
+  it.skipIf(process.platform === "win32")("refuses an agent's delete of a file or folder only in iCloud Drive, and moves nothing", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "notes/kept.md", "here");
+    for (const path of ["evicted.bin", "notes/evicted.bin"]) { await write(f.rootPath, path, ""); await truncate(join(f.rootPath, path), 4096); }
+    await f.start();
+    await withICloudCheck(datalessCandidates, async () => {
+      expect(await f.remove("evicted.bin")).toEqual({ ok: false, deleted: [], path: "evicted.bin",
+        reason: "dohc did not move evicted.bin to the workspace trash because it is only in iCloud Drive. Download it, then try again." });
+      expect(await f.remove("notes")).toEqual({ ok: false, deleted: [], path: "notes",
+        reason: "dohc did not move notes to the workspace trash because some of it is only in iCloud Drive. Download it, then try again." });
+    });
+    expect((await lstat(join(f.rootPath, "evicted.bin"))).size).toBe(4096);
+    expect((await lstat(join(f.rootPath, "notes/evicted.bin"))).size).toBe(4096);
+    expect(await readFile(join(f.rootPath, "notes/kept.md"), "utf8")).toBe("here");
+    expect(await f.workspaceTrash()).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    await f.engine().stop();
+  });
+
+  // A failed move goes back through the workspace trash. When it can't go
+  // there, it stays where it was moved, and the note says why.
+  it.skipIf(process.platform === "win32").each([
+    ["part of it is only in iCloud Drive", "because some of it is only in iCloud Drive"],
+    ["the workspace trash is not ready", "because dohc could not move it to the workspace trash to put it back"],
+  ] as const)("says why a failed move stays at its target when %s", async (cause, because) => {
+    const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textRename, "dir/2.txt") });
+    for (const n of [1, 2]) await write(f.rootPath, `dir/${n}.txt`, String(n));
+    await write(f.rootPath, "dir/evicted.bin", "");
+    await truncate(join(f.rootPath, "dir/evicted.bin"), 4096);
+    await f.start();
+    if (cause === "the workspace trash is not ready") readLocalStateFrom(null);
+    const result = await withICloudCheck(datalessCandidates, () => f.move("dir", "moved"));
+    expect(result).toMatchObject({ ok: false, path: "dir",
+      reason: `History refused dir/2.txt. History still shows moved/2.txt at dir/2.txt. It stays at moved, ${because}. Rename it back yourself.` });
+    expect((await readdir(join(f.rootPath, "moved"))).sort()).toEqual(["1.txt", "2.txt", "evicted.bin"]);
+    expect(existsSync(join(f.rootPath, "dir"))).toBe(false);
+    expect(await f.workspaceTrash()).toEqual([]);
     await f.engine().stop();
   });
 
@@ -625,7 +672,7 @@ describe("agent moves and deletes", () => {
     const retained = await readFile(kept);
     expect(retained.byteLength).toBe(oversized.byteLength);
     expect(retained.equals(oversized)).toBe(true);
-    expect(result.replaced.trashPath).toEqual(accepts ? undefined : expect.stringMatching(/^\.dohc\/trash\//));
+    expect(result.replaced.trashPath).toEqual(accepts ? undefined : expect.stringMatching(/^\.dohc\/local\/trash\//));
     await f.engine().stop();
   });
 
@@ -640,7 +687,7 @@ describe("agent moves and deletes", () => {
     await f.start();
     const result = await f.move("source.png", "dest.png", named, true);
     expect(result).toMatchObject({ ok: false, withoutHistory: ["dest.png"],
-      replaced: { path: "dest.png", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//), withoutHistory: ["dest.png"] } });
+      replaced: { path: "dest.png", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/local\/trash\//), withoutHistory: ["dest.png"] } });
     if (result.ok || !result.replaced?.trashPath) throw new Error("Expected retained replacement");
     expect((await readFile(join(f.rootPath, result.replaced.trashPath))).byteLength).toBe(7 * 1024 * 1024);
     expect((await readFile(join(f.rootPath, "dest.png"))).byteLength).toBe(6 * 1024 * 1024);
@@ -1014,7 +1061,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      await expect(f.removeByHand("tasks/hand.md")).rejects.toThrow("tasks/hand.md is in the trash.");
+      await expect(f.removeByHand("tasks/hand.md")).rejects.toThrow("tasks/hand.md is in the system trash.");
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
@@ -1031,7 +1078,7 @@ describe("a person's delete", () => {
       expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: false });
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       const [staged] = await f.workspaceTrash();
-      expect(await readFile(join(f.rootPath, ".dohc/trash", staged!), "utf8")).toBe("# Hand made\n");
+      expect(await readFile(join(f.rootPath, ".dohc/local/trash", staged!), "utf8")).toBe("# Hand made\n");
       expect((await f.rows()).filter(row => !seen.has(row.id))).toMatchObject([
         { operation: "delete", path: "tasks/hand.md", authors: [person] },
       ]);
@@ -1157,13 +1204,67 @@ it("records a hand-made record as a local file edit under the person main read, 
 });
 
 
+// The workspace trash is in `.dohc/local`, which only the engine's open
+// prepares. A change that would put something there before then moves nothing.
+describe("before the workspace's open prepares .dohc/local", () => {
+  const notReady = {
+    "not-opened": () => readLocalStateFrom(null),
+    "not-excluded": () => readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) }),
+  };
+  const because = {
+    "not-opened": "because the workspace has not finished opening. Try again when it opens.",
+    "not-excluded": "because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again.",
+  };
+
+  it.each(["not-opened", "not-excluded"] as const)("refuses an agent's delete and replacing move, and moves nothing (%s)", async refusal => {
+    const f = await fixture();
+    await write(f.rootPath, "note.txt", "keep me");
+    await write(f.rootPath, "source.txt", "source");
+    await write(f.rootPath, "dest.txt", "dest");
+    await f.start();
+    notReady[refusal]();
+    expect(await f.remove("note.txt")).toEqual({ ok: false, deleted: [], path: "note.txt",
+      reason: `dohc did not move note.txt to the workspace trash ${because[refusal]}` });
+    expect(await f.move("source.txt", "dest.txt", named, true)).toMatchObject({ ok: false,
+      reason: `dohc did not move dest.txt to the workspace trash ${because[refusal]} dohc put everything back.` });
+    expect(await readFile(join(f.rootPath, "note.txt"), "utf8")).toBe("keep me");
+    expect(await readFile(join(f.rootPath, "source.txt"), "utf8")).toBe("source");
+    expect(await readFile(join(f.rootPath, "dest.txt"), "utf8")).toBe("dest");
+    expect(f.trashItem).not.toHaveBeenCalled();
+    expect(existsSync(join(f.rootPath, ".dohc/local/trash"))).toBe(false);
+    await f.engine().stop();
+  });
+
+  it("lets a person's delete and a plain move finish without Undo, and say so", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "a");
+    await write(f.rootPath, "b.txt", "b");
+    await write(f.rootPath, "c.txt", "c");
+    await f.start();
+    readLocalStateFrom(null);
+    // The system trash is the reverse path.
+    expect(await f.removeByHand("a.txt")).toMatchObject({ trashed: true, undo: { available: false,
+      reason: "Delete finished. dohc could not save Undo information. Restore files from History or the system trash." } });
+    expect(await readFile(join(f.systemTrash, "a.txt"), "utf8")).toBe("a");
+    // Without the system trash there is none, so nothing moves.
+    f.trashItem.mockRejectedValueOnce(new Error("no system trash on this volume"));
+    await expect(f.removeByHand("b.txt")).rejects.toThrow(`dohc did not move b.txt to the workspace trash ${because["not-opened"]}`);
+    expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("b");
+    expect(await f.move("c.txt", "d.txt")).toMatchObject({ ok: true, undo: { available: false,
+      reason: "Rename finished. dohc could not save Undo information. Rename it back yourself." } });
+    expect(await readFile(join(f.rootPath, "d.txt"), "utf8")).toBe("c");
+    expect(existsSync(join(f.rootPath, ".dohc/local/trash"))).toBe(false);
+    await f.engine().stop();
+  });
+});
+
 describe("empty-folder rollback admission", () => {
   it.each(["read-only", "share", "stale"] as const)("preserves folders when the workspace is %s", async (refusal) => {
     const rootPath = await createTestScratch("empty-rollback-admission-");
     await mkdir(join(rootPath, "app"));
     const trashItem = vi.fn(async () => undefined);
     await expect(deleteWorkspacePathByHand({
-      workspace: { rootPath, readOnly: refusal === "read-only",
+      workspace: { workspaceId: "empty-rollback", rootPath, readOnly: refusal === "read-only",
         ...(refusal === "share" ? { shareView: {} } : {}) },
       assertCurrent: () => { if (refusal === "stale") throw new Error("stale workspace"); },
     }, "app", person, {

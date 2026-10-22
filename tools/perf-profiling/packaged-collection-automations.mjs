@@ -341,7 +341,7 @@ async function readRunFile(path) {
  * Collection's path and the automation's name.
  */
 async function runFolder(workspaceRoot, automation) {
-  const root = join(workspaceRoot, '.dohc', 'automations', 'runs');
+  const root = join(workspaceRoot, '.dohc', 'local', 'automations', 'runs');
   let folders;
   try { folders = await readdir(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   for (const folder of folders) {
@@ -374,7 +374,7 @@ export async function journalBytes(workspaceRoot, automation) {
 }
 
 /**
- * A case's saved runs, as the executor left them in <workspace>/.dohc/automations. The header's
+ * A case's saved runs, as the executor left them in <workspace>/.dohc/local/automations. The header's
  * startedAtMs is when the executor created the run, before any Find; finishedAtMs is when it settled.
  * A run refused before it saves a header leaves nothing.
  */

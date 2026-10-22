@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { posix } from "node:path";
 import type { Readable } from "node:stream";
@@ -9,8 +9,8 @@ import type { Readable } from "node:stream";
 // hangs costs agent runs this much once, then they use the PATH dohc has.
 export const LOGIN_SHELL_PATH_TIMEOUT_MS = 3_000;
 const OUTPUT_LIMIT = 256 * 1024;
-// The login shell sees only these, so variables launchd or a parent process
-// set, such as BASH_ENV, ZDOTDIR, ENV or NODE_OPTIONS, cannot steer it.
+// The login shell sees only these, so variables launchd, a desktop session or
+// a parent process set, such as BASH_ENV, ZDOTDIR, ENV or NODE_OPTIONS, cannot steer it.
 const SHELL_ENVIRONMENT = ["USER", "LOGNAME", "TMPDIR", "LANG"] as const;
 
 /** The absolute PATH entries a shell printed between two markers, or null. */
@@ -98,6 +98,32 @@ export function readLoginShellPath(options: {
   });
 }
 
+/**
+ * Whether startup reads the login shell's PATH. Finder, the Dock and a Linux
+ * desktop's launcher start dohc without what the shell adds. A Linux terminal
+ * launch already has the shell's PATH, with whatever the person chose there,
+ * such as `nvm use`, so it keeps that PATH as it is.
+ */
+export function needsLoginShellPath(platform: NodeJS.Platform, fromTerminal: boolean): boolean {
+  return platform === "darwin" || (platform === "linux" && !fromTerminal);
+}
+
+/**
+ * Whether this process has a controlling terminal, as one a terminal started
+ * has even with its streams redirected and in the background. A desktop's
+ * launcher starts apps without one.
+ */
+export function hasControllingTerminal(
+  open: (path: string) => void = (path) => closeSync(openSync(path, "r")),
+): boolean {
+  try {
+    open("/dev/tty");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The account's registered shell, when /etc/shells lists it, or null. */
 export function registeredLoginShell(
   shell: string | null | undefined,
@@ -122,7 +148,8 @@ export function loginShellEnvironment(
 
 /**
  * Finder and the Dock start dohc with launchd's PATH, which has no Homebrew,
- * Node or user installs. Merges the PATH the account's login shell sets into
+ * Node or user installs, and a Linux launcher starts it without what only the
+ * shell adds, such as nvm. Merges the PATH the account's login shell sets into
  * `env`, so agents and the tools they call find what they find in Terminal.
  * Never rejects.
  */

@@ -70,6 +70,7 @@ import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
+import { localStateOpened, LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
@@ -327,7 +328,7 @@ import {
 import { automationFailedNoticeId } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
-import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
+import { localAutomationStoreFolder } from "./automations/localAutomationStore";
 import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
@@ -542,7 +543,7 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
-import { adoptLoginShellPath } from "./process/loginShellPath";
+import { adoptLoginShellPath, hasControllingTerminal, needsLoginShellPath } from "./process/loginShellPath";
 import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
@@ -568,10 +569,13 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 makeProcessDiagnosticsNonFatal();
 
 // Finder and the Dock start a packaged dohc with launchd's PATH, where the
-// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. The
+// dohc CLI's node, npm-installed agents, and Homebrew tools are missing. A
+// Linux desktop's launcher starts it with the session's PATH, which misses
+// what only the shell adds, such as nvm and its npm-installed agents. The
 // login shell's PATH is read once, in parallel with startup, once this
-// instance holds the single-instance lock. Agent runs and agent detection
-// wait for it, at most for its timeout.
+// instance holds the single-instance lock, unless a Linux terminal started
+// dohc (needsLoginShellPath). Agent runs and agent detection wait for it, at
+// most for its timeout.
 let loginShellPathRead: Promise<void> = Promise.resolve();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
@@ -4511,7 +4515,7 @@ function createCollectionAutomationsFor(
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
+    store: createAutomationRunStore(localAutomationStoreFolder(workspace), () => {
       if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed. Open it again.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
@@ -4669,7 +4673,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, localPersonId: localUserId,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -5203,9 +5207,7 @@ function createShareViewFilesForOperation(
       receivedShareEngine.storeFor({
         engineWorkspaceId: target.storeWorkspaceId,
         rootPath: target.rootPath,
-        ...(target.storeWorkspaceId === operation.workspace.workspaceId
-          ? { attachmentId: operation.workspace.attachmentId }
-          : {}),
+        ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
       }),
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
@@ -5237,9 +5239,7 @@ function createShareViewFilesForOperation(
         .relayFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
-          ...(target.storeWorkspaceId === operation.workspace.workspaceId
-            ? { attachmentId: operation.workspace.attachmentId }
-            : {}),
+          ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
           relay,
         })
         .pullShareView({
@@ -6483,10 +6483,11 @@ function registerIpcHandlers(): void {
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-            signal.throwIfAborted(); operation.assertCurrent();
+          let attachmentId: symbol | undefined;
+          const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+            signal.throwIfAborted(); operation.assertCurrent(); attachmentId = operation.workspace.attachmentId;
             if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
-            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
+            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
@@ -6494,6 +6495,16 @@ function registerIpcHandlers(): void {
               runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath(), "persistent-child.mjs") },
             });
           });
+          // Right after launch the engine's open may still be preparing
+          // `.dohc/local`, so a copy waits once for an open already under
+          // way. If the folder still isn't ready, the server holds the
+          // Collection, so it works online without an offline copy.
+          const copy = await openCopy().catch(async (error: unknown) => {
+            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+            await localStateOpened({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId });
+            return openCopy();
+          }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
+          if (copy === null) return data;
           const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
             ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayResponse: relayShareResponseWithCredentials,
@@ -7254,6 +7265,7 @@ if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
 // start() takes the lock first. A second instance quits without running the profile.
-if (process.platform === "darwin" && app.isPackaged && app.hasSingleInstanceLock()) {
+const fromTerminal = process.platform === "linux" && hasControllingTerminal();
+if (app.isPackaged && needsLoginShellPath(process.platform, fromTerminal) && app.hasSingleInstanceLock()) {
   loginShellPathRead = adoptLoginShellPath(process.env);
 }

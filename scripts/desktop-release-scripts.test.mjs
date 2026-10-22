@@ -485,6 +485,11 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
     assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
     assert.equal(job.steps[toolchain].if, "inputs.runners == 'github'");
     assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
+    // GitHub's Windows TEMP is a short 8.3 path; every later step uses the runner's own temp folder.
+    const temp = job.steps.findIndex(step => step.name === "Use the runner's temp folder");
+    assert.ok(temp >= 0 && temp < job.steps.findIndex(step => step.name === "Install"), "TEMP is set before anything runs");
+    assert.equal(job.steps[temp].if, "inputs.runners == 'github' && runner.os == 'Windows'");
+    assert.match(job.steps[temp].run, /TEMP=\$RUNNER_TEMP[\s\S]*TMP=\$RUNNER_TEMP/);
   }
   const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
   const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
@@ -867,6 +872,32 @@ test("the source map upload leaves a PostHog host the release did not set unset,
   );
 });
 
+test("the source map upload leaves PowerShell 7's module path out of the CLI's environment on Windows", () => {
+  for (const name of ["PSModulePath", "PSMODULEPATH"]) {
+    const env = { ...SOURCE_MAP_ENV, [name]: "C:\\Program Files\\PowerShell\\7\\Modules", PATH: "/bin" };
+    const windows = sourceMapUpload(env, "win32").env;
+    assert.equal(Object.keys(windows).some((key) => key.toUpperCase() === "PSMODULEPATH"), false);
+    assert.equal(windows.PATH, "/bin");
+    for (const platform of ["darwin", "linux"]) assert.equal(sourceMapUpload(env, platform).env[name], env[name]);
+  }
+});
+
+test("a dry run installs and runs the CLI with the release's environment, and uploads nothing", async () => {
+  const dryRun = { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", POSTHOG_CLI_HOST: "", PSModulePath: "C:\\Modules", PATH: "/bin" };
+  const upload = sourceMapUpload(dryRun, "win32");
+  assert.deepEqual(upload.args, ["dlx", "--allow-build=@posthog/cli", "@posthog/cli@0.18.10", "--version"]);
+  assert.deepEqual(upload.env, { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", PATH: "/bin" });
+  // The Mac's release passes its shell's environment on, so a DRY_RUN left there must not skip a real upload.
+  assert.equal(sourceMapUpload({ ...SOURCE_MAP_ENV, DRY_RUN: "true" }).dryRun, undefined);
+
+  // A dry run's build has no PostHog key, so its files carry no chunk ID.
+  const directories = await builtDist({ injected: false });
+  const calls = [];
+  uploadSourceMaps(dryRun, (command, args) => { calls.push(args); return { status: 0 }; }, directories);
+  assert.deepEqual(calls, [upload.args]);
+  assert.throws(() => uploadSourceMaps(dryRun, () => ({ status: 1 }), directories), /failed with exit code 1/);
+});
+
 test("the source map upload fails when a script the reports name ships without its chunk ID", async () => {
   const directories = await builtDist({ injected: false });
   assert.deepEqual(scriptsWithoutChunkIds(directories).map((path) => path.replaceAll("\\", "/").split("/").at(-1)).sort(), [
@@ -893,12 +924,13 @@ test("upload-desktop-source-maps skips without a PostHog key and fails without u
   );
 });
 
-test("the release injects source maps for every build that names PostHog before packaging, and never in a dry run", () => {
+test("the release injects source maps for every build that names PostHog before packaging, and a dry run only runs the CLI", () => {
   const job = releaseWorkflow.jobs.build;
   const build = releaseStep(job, "pnpm build:desktop");
   const upload = releaseStep(job, "upload-desktop-source-maps.mjs");
   const packaging = releaseStep(job, "electron-builder");
-  assert.equal(upload.if, "needs.preflight.outputs.dry_run != 'true'");
+  assert.equal(upload.if, undefined);
+  assert.equal(upload.env.DOHC_SOURCE_MAPS_DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
   // The upload sees the key and dist the build compiled in.
   for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {

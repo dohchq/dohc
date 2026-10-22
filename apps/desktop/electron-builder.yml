@@ -137,6 +137,10 @@ win:
   signExts: ["!node.exe"]
   target: [nsis]
 linux:
+  # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
+  # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
+  # signal-desktop and github-desktop do.
+  executableName: dohc-desktop
   # Without its own icon, the Linux target falls back to mac.icon.
   icon: build/icon.png
   # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
@@ -144,6 +148,9 @@ linux:
   # .deb installs an AppArmor profile that allows them.
   target: [AppImage, deb]
   category: Office
+  # A Linux desktop offers dohc under Open With only for the types its desktop
+  # entry names. These are the existing types of the associations below.
+  mimeTypes: [text/markdown, text/plain, text/csv, application/json]
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true

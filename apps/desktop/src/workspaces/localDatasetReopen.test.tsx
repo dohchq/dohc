@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { spawn } from "node:child_process";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -77,6 +78,8 @@ async function fixture() {
   });
   cleanups.push(async () => { expect([...closedPids].sort()).toEqual([...pids].sort()); });
   async function openHost() {
+    // Workers and exports live in .dohc/local, which an engine open prepares.
+    await openedLocalState({ workspaceId: "w", rootPath: root });
     const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
       localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch },
       resources: () => ({ accountCheckpointStage: cacheAccounting }) });

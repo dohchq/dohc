@@ -54,6 +54,7 @@ import { setCollectionRecordFields } from "@dohc/automation-executor/collection-
 import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 import { bindEngineYDoc, EngineYDocDeliveryRefusedError, type EngineYDocTransport } from "../renderer/collab/engineYDocProvider";
 import { flushTypingCheckpoints } from "./outageTypingRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -752,12 +753,13 @@ it("keeps the closed-record open, journal, settle and close path", async () => {
 
 it("settles an open record before a person's delete and credits the person in History", async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
+  await openedLocalState({ workspaceId: "record-delete", rootPath: root });
   const { editor } = await openRecordEditor();
   typeIntoBody(editor, "Typed before the delete.");
   let trashedText = "";
   const trashed: Array<{ target: string; requestsBefore: number }> = [];
   await expect(deleteWorkspacePathByHand(
-    { workspace: { rootPath: root }, assertCurrent: () => undefined }, PATH,
+    { workspace: { workspaceId: "record-delete", rootPath: root }, assertCurrent: () => undefined }, PATH,
     { kind: "human", humanId: "person" },
     { capture, requestId: "hand-delete", markDeleted: () => undefined,
       trashItem: async target => {

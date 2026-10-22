@@ -594,7 +594,7 @@ describe("engine markdown source view", () => {
     expect(
       (await screen.findByTestId("deleted-while-editing-notice")).textContent,
     ).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(screen.queryByTestId("orphaned-draft-copy")).toBeNull();
@@ -605,7 +605,7 @@ describe("engine markdown source view", () => {
       ).toBe("false"),
     );
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
   });
 
@@ -783,7 +783,7 @@ describe("engine markdown source view", () => {
     expect(
       (await screen.findByTestId("deleted-while-editing-notice")).textContent,
     ).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
       "This document reopened before your last edit saved. Copy your text to keep it.",

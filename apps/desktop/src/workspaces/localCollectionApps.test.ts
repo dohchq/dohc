@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -85,6 +86,8 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
   if (!options.workspaceRoot) roots.push(workspaceRoot);
   const engine = options.engine ?? fakeEngine();
   const open = async () => {
+    // Workers and exports live in .dohc/local, which an engine open prepares.
+    await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
     const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture,
       collectionEngine: () => { if (engine.state.down) throw new Error("The engine is not running."); return engine.api; },
       collectionAuthor: options.author ?? (async () => person) });

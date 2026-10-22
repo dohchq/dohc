@@ -4,16 +4,23 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { prepareWorkspaceFileRead } from "./workspaceAssets";
 import {
-  applyDatabaseEdit,
+  createWorkspaceDatabaseAccess,
   importToDatabase,
   readDatabaseSnapshot,
   readPreparedDatabaseSnapshot,
   createWorkspaceDatabaseWorkerOwner,
+  workspaceDatabaseWorker,
+  type DatabaseEdit,
 } from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 let root: string;
 const AUTHOR = { kind: "user", userId: "local" } as const;
+const { editWorkspaceDatabaseInWorker } = createWorkspaceDatabaseAccess(workspaceDatabaseWorker);
+function editDatabase(relativePath: string, edit: DatabaseEdit, nowMs: number, operationId?: string) {
+  return editWorkspaceDatabaseInWorker({ workspace: { workspaceId: "workspace-db", rootPath: root }, relativePath, edit, author: AUTHOR, nowMs, operationId });
+}
 const WALLET_SOURCE = {
   path: "imports/wallet.csv",
   body: "id,amount,category\ntxn_001,42,Food\ntxn_002,10,Transport\n",
@@ -21,7 +28,7 @@ const WALLET_SOURCE = {
 
 beforeEach(async () => {
   root = await createTestScratch("dohc-db-");
-  await mkdir(join(root, ".dohc"), { recursive: true });
+  await openedLocalState({ workspaceId: "workspace-db", rootPath: root });
   await mkdir(join(root, "imports"), { recursive: true });
   await writeFile(
     join(root, "imports", "wallet.csv"),
@@ -46,11 +53,9 @@ describe("importToDatabase", () => {
   });
   it("refuses to replace an existing database (edits are never silently dropped)", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
-    await applyDatabaseEdit(
-      root,
+    await editDatabase(
       "finance/wallet.sqlite",
       { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Edited" } },
-      AUTHOR,
       1_700_000_000_000,
     );
     // Re-importing the same CSV over the canonical, user-edited file must fail…
@@ -84,15 +89,13 @@ describe("importToDatabase", () => {
   });
 });
 
-describe("applyDatabaseEdit", () => {
+describe("editing a database", () => {
   it("edits a row in place and records the edit in an inspectable op log", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
 
-    const after = await applyDatabaseEdit(
-      root,
+    const after = await editDatabase(
       "finance/wallet.sqlite",
       { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Groceries" } },
-      AUTHOR,
       1_700_000_000_000,
     );
     expect(
@@ -123,15 +126,13 @@ describe("applyDatabaseEdit", () => {
     });
   });
 
-  it("stamps the persisted operationId from an injected createId seam", async () => {
+  it("stamps the persisted operationId from the supplied id", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
-    await applyDatabaseEdit(
-      root,
+    await editDatabase(
       "finance/wallet.sqlite",
       { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Groceries" } },
-      AUTHOR,
       1_700_000_000_000,
-      { createId: () => "op_fixed_0001" },
+      "op_fixed_0001",
     );
     const log = await readFile(join(root, databaseOpLogPath("finance/wallet.sqlite")), "utf8");
     const ops = log.trim().split("\n").map((l) => JSON.parse(l));
@@ -166,11 +167,9 @@ describe("applyDatabaseEdit", () => {
     expect(new Set(rowids).size).toBe(2);
 
     const second = rows.find((r) => String(r.amount) === "2");
-    await applyDatabaseEdit(
-      root,
+    await editDatabase(
       "finance/dups.sqlite",
       { table: "rows", op: "update", pkColumn: "rowid", rowId: Number(second?.__dohc_rowid), payload: { amount: 99 } },
-      AUTHOR,
       1_700_000_000_002,
     );
 
@@ -183,11 +182,9 @@ describe("applyDatabaseEdit", () => {
 
   it("persists edits across reopen (the on-disk file is canonical)", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
-    await applyDatabaseEdit(
-      root,
+    await editDatabase(
       "finance/wallet.sqlite",
       { table: "transactions", op: "delete", pkColumn: "id", rowId: "txn_002" },
-      AUTHOR,
       1_700_000_000_001,
     );
     // Fresh read = fresh open of the file.

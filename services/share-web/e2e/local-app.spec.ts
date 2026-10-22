@@ -8,6 +8,7 @@ import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCa
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
+import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -58,6 +59,7 @@ test("local app works without an account, survives restart, and stops at shared 
   const root = await mkdtemp(join(tmpdir(), "dohc-local-app-e2e-")), lifetime = new AbortController();
   const backends: LocalDatasetHost[] = [], launchers: LocalAppLaunchHost[] = [];
   try {
+    await openedLocalState({ workspaceId: "w", rootPath: root });
     let backend = await createLocalDatasetHost({ localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
     const publication = await backend.apps.activate(await prepare(backend), lifetime.signal);
     let launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);

@@ -30,7 +30,7 @@ async function fixture() {
   let transactions = 0;
   const transaction = <T,>(work: () => T): T => { transactions++; db.exec("BEGIN"); try { const result = work(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
   const journal = createDatasetJournal({ db, transaction });
-  const supervisor = await createDatasetSupervisor({ journal, directory: root });
+  const supervisor = await createDatasetSupervisor({ journal, directory: async () => root });
   cleanups.push(async () => { await supervisor.close(); db.close(); });
   const host = createDatasetHost({ db, transaction, journal, supervisor,
     resolveAuthority(_caller: string, request) { if (request.workspaceId !== "workspace") throw Error("wrong workspace"); return { principalKey: "owner", caller: { kind: "owner" as const, userId: "owner" } }; } });

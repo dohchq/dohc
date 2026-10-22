@@ -15,6 +15,7 @@ import { shareViewIsPresent } from "./shareViewMarker";
 export interface ShareViewFilesWorkspaceRecord {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
   shareView?: unknown;
   shareMounts?: unknown;
 }
@@ -89,6 +90,9 @@ export function resolveRegisteredShareViewFilesTarget(
           : null,
       relayUrl:
         typeof shareView.relayUrl === "string" ? shareView.relayUrl : null,
+      ...(workspace.attachmentId === undefined
+        ? {}
+        : { attachmentId: workspace.attachmentId }),
     };
   }
 

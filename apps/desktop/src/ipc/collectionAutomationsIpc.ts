@@ -86,7 +86,7 @@ export function registerCollectionAutomationsIpc<
   writeText(event: Event, payload: WriteWorkspaceTextPayload): Promise<{ status: "written"; contentHash: string } | { status: "conflict" }>;
   /** Shows a file in the system's file manager. */
   showItemInFolder(path: string): void;
-  /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
+  /** A person's delete: the OS trash, or the workspace's .dohc/local/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
   /** The window that runs a failed press again hears how the run settles. */
   watchPress(workspaceId: string, claimId: string, sender: Sender): void;

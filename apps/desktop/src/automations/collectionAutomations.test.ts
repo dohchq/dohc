@@ -1,6 +1,6 @@
 import { historyPageFields, neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import * as Y from "yjs";
@@ -18,7 +18,6 @@ import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspaces/desktopRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost } from "../workspaces/localDatasetHost";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
@@ -29,6 +28,8 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
+import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { localAutomationStoreFolder } from "./localAutomationStore";
 import { automationHostGeneration, createAutomationHosts, createWorkspaceHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { collectionAutomationAuthor, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "../ipc/engineHistoryIpc";
@@ -67,6 +68,8 @@ type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 // documents with the engine's idempotency rule, and files adopted as records.
 // Formulas run in the real evaluator.
 
+// Each world's engine open, which prepares its .dohc/local.
+const localState = fakeLocalStateOpens();
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
 const evaluator = sharedEvaluator.forWorkspace("workspace");
@@ -499,7 +502,10 @@ async function world(options: {
   // The claims each run history prune kept.
   const historyPrunes: string[][] = [];
   let updates = 0;
-  const baseStore = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
+  // The store main makes, which writes only while the engine's open stands.
+  const opened = { workspaceId: "workspace", rootPath: root };
+  await localState.open(opened);
+  const baseStore = createAutomationRunStore(localAutomationStoreFolder(opened));
   let failRecordAt: number | null = null;
   let beforeRecord: (() => void) | null = null;
   // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
@@ -736,6 +742,8 @@ async function world(options: {
       })));
     },
     addRecord, claim, settledClaim, until, writeAutomations, baseStore,
+    /** Ends the engine's open of the workspace, or opens it again. */
+    localState: { close: () => localState.close(opened), open: () => localState.open(opened) },
     requeue: (claim: AutomationClaim) => { pending.push(claim); },
     fieldsOf,
     idleDrains: () => idleDrains,
@@ -2031,6 +2039,58 @@ describe("Collection automations", () => {
     expect(run!.writes).toContainEqual({ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 2, after: 3 });
   });
 
+  it("writes nothing and makes no .dohc/local before the engine's open prepares it, and runs once it has", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    w.localState.close();
+    await rm(join(w.root, ".dohc"), { recursive: true, force: true });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    const claim = w.claim(TASKS, task);
+    // An open, a claim's wake and a Group message before the engine's open.
+    await w.executor.open();
+    w.executor.notifyClaimed();
+    await w.executor.groupMessagesArrived();
+    await w.executor.idle();
+    expect(claim.state).toBe("pending");
+    expect(w.fieldsOf(task).Count).toBe(2);
+    await expect(readdir(join(w.root, ".dohc"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(w.errors.map(({ error }) => (error as Error).message)).toContain(
+      "dohc did not save automation progress because the workspace has not finished opening. Try again when it opens.",
+    );
+
+    // The next open, once the engine's has prepared the folder, runs it.
+    await w.localState.open();
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+  it("fails a run whose progress dohc may not save, keeps what it saved, and tries it again without repeating what landed", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    const claim = w.claim(TASKS, task);
+    // The engine's open ends after step 1's write landed, before it is recorded.
+    w.beforeNextRecord(() => w.localState.close());
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const refused = "dohc did not save automation progress because the workspace has not finished opening. Try again when it opens.";
+    expect(claim).toMatchObject({ state: "failed", error: refused });
+    expect(w.fieldsOf(task).Count).toBe(3);
+    // The person hears why, with Try again.
+    await w.until(() => w.failureReports.length === 1);
+    expect(w.failureReports[0]!.failure).toMatchObject({ claimId: claim.claimId, error: refused });
+    // The step saved before the refusal is still there.
+    const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
+    expect(saved!.steps).toHaveLength(1);
+    expect(saved!.applied).toEqual([]);
+
+    await w.localState.open();
+    await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Count).toBe(3);
+    expect([...w.records.values()].filter((record) => record.collection === "Log")).toHaveLength(1);
+  });
+
   it("asks before running a changed automation from the start, and repeats its steps only when confirmed", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
@@ -2696,7 +2756,7 @@ describe("Collection automations", () => {
     const claim = w.claim(TASKS, task);
     await w.executor.open();
     await w.settledClaim(claim);
-    const folder = join(w.root, ".dohc", "automations", "runs");
+    const folder = join(w.root, ".dohc", "local", "automations", "runs");
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) await writeFile(join(folder, automation, file), "{ torn");
     }
@@ -3550,7 +3610,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: source },
       evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace") });
     await w.executor.dispose();
-    const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(w.root));
     let failedSave = false;
     const executor = w.makeExecutor({ store: { ...store,
       recordCircuitBreaker: async (breaker) => {
@@ -3908,7 +3968,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#log", claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "failed" && claim.run === 2);
     // Pruning drops A's superseded run while B's failure stays.
-    const folder = join(w.root, ".dohc", "automations", "runs");
+    const folder = join(w.root, ".dohc", "local", "automations", "runs");
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) {
         if (!file.endsWith(".json")) continue;
@@ -3958,10 +4018,29 @@ describe("Collection automations", () => {
     expect(run!.outcome).toEqual({ state: "done" });
   });
 
+  // Node reports no mode on Windows.
+  it.skipIf(process.platform === "win32")("keeps every automation waiting when other users could have changed which steps were allowed", async () => {
+    const seen = "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n";
+    const w = await world({ automations: { Tasks: seen } });
+    const parsed = parseAutomationsFile(`version: 1\nautomations:\n${seen}`);
+    const automation = parsed.status === "read" && parsed.entries[0]!.status === "valid" ? parsed.entries[0]!.automation : null;
+    await w.baseStore.saveReachVerdicts({
+      verdicts: [{ automationId: "collection:Tasks#seen", definitionHash: definitionHash(automation!), step: "0", verdict: "allowed", stoppedFor: null, seq: 1 }],
+      hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null,
+    });
+    await chmod(join(w.root, ".dohc", "local", "automations", "reach.json"), 0o666);
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`) || claim.state !== "running" && claim.state !== "pending");
+    expect(w.executor.holdState()).toMatchObject({ unreadable: true });
+    expect(w.fieldsOf(task).Seen).toBeUndefined();
+  });
+
   it("keeps every automation waiting when the saved verdicts cannot be read, until the holds are reset and allowed", async () => {
     const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
-    await mkdir(join(w.root, ".dohc", "automations"), { recursive: true });
-    await writeFile(join(w.root, ".dohc", "automations", "reach.json"), "{ torn");
+    await mkdir(join(w.root, ".dohc", "local", "automations"), { recursive: true });
+    await writeFile(join(w.root, ".dohc", "local", "automations", "reach.json"), "{ torn");
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const claim = w.claim("collection:Tasks#seen", task);
     await w.executor.open();
@@ -3969,7 +4048,7 @@ describe("Collection automations", () => {
     expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true, unprovenPaths: [] });
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
     // Nothing overwrote the file dohc could not read.
-    expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
+    expect(await readFile(join(w.root, ".dohc", "local", "automations", "reach.json"), "utf8")).toBe("{ torn");
 
     // Every run waits, so no field is marked.
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
@@ -7128,7 +7207,7 @@ it.skipIf(!process.env.DOHC_UNDO_BENCHMARK)("measures production Undo of 2000 re
     path: record.path, collectionPath: "Tasks"}, fields: [{field: "Count", before: 1, after: 2}]}))}];
   run.applied = [{ordinal: 0, writes: records.map(record => ({kind: "field", recordId: record.id,
     path: record.path, field: "Count", before: 1, after: 2}))}];
-  const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+  const store = createAutomationRunStore(preparedAutomationStoreFolder(w.root));
   await store.save(run);
   const start = performance.now();
   const result = await w.executor.undo({automationId: TASKS, claimId: claim.claimId, deletes: null}, async () => {});

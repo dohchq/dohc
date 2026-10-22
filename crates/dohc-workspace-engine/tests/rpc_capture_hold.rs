@@ -68,8 +68,8 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
     let hold = call(&transport, &handle, 12, "capture.hold", json!({})).await["holdId"].clone();
     std::fs::rename(root.join("notes.txt"), root.join("moved.txt")).expect("move text");
     std::fs::rename(root.join("photo.bin"), root.join("photo-moved.bin")).expect("move binary");
-    std::fs::create_dir_all(root.join(".dohc/trash")).expect("trash");
-    std::fs::rename(root.join("docs"), root.join(".dohc/trash/docs")).expect("trash folder");
+    std::fs::create_dir_all(root.join(".dohc/local/trash")).expect("trash");
+    std::fs::rename(root.join("docs"), root.join(".dohc/local/trash/docs")).expect("trash folder");
     let moves = [("notes.txt", "moved.txt"), ("photo.bin", "photo-moved.bin")];
     for (id, (from, to)) in (13_u64..).zip(moves) {
         let params = json!({
@@ -116,7 +116,7 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
     let moved = std::fs::read(root.join("photo-moved.bin")).expect("binary");
     assert_eq!(moved, [0, 1, 2, 3, 255]);
     assert!(!root.join("photo.bin").exists());
-    let trashed = std::fs::read(root.join(".dohc/trash/docs/a.txt")).expect("trashed");
+    let trashed = std::fs::read(root.join(".dohc/local/trash/docs/a.txt")).expect("trashed");
     assert_eq!(trashed, b"a");
 
     let params = json!({ "holdId": hold });
@@ -209,14 +209,22 @@ async fn a_binary_delete_rolled_back_after_its_file_returns_keeps_its_bytes_with
     let author = json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person-1" });
 
     let hold = call(&transport, &handle, 12, "capture.hold", json!({})).await["holdId"].clone();
-    std::fs::create_dir_all(root.join(".dohc/trash")).expect("trash");
-    std::fs::rename(root.join("photo.bin"), root.join(".dohc/trash/photo.bin")).expect("stage");
+    std::fs::create_dir_all(root.join(".dohc/local/trash")).expect("trash");
+    std::fs::rename(
+        root.join("photo.bin"),
+        root.join(".dohc/local/trash/photo.bin"),
+    )
+    .expect("stage");
     let params = json!({
         "versionId": "main", "path": "photo.bin", "onlyIfAbsentOnDisk": true,
         "origin": "api", "author": author, "captureHoldId": hold,
     });
     let deleted = call(&transport, &handle, 13, "versionedText.delete", params).await;
-    std::fs::rename(root.join(".dohc/trash/photo.bin"), root.join("photo.bin")).expect("put back");
+    std::fs::rename(
+        root.join(".dohc/local/trash/photo.bin"),
+        root.join("photo.bin"),
+    )
+    .expect("put back");
     let params = json!({
         "versionId": "main", "path": "photo.bin", "mutationMomentId": deleted["moment"]["momentId"],
         "origin": "api", "author": author,
