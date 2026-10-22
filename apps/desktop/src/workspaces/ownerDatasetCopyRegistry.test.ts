@@ -211,7 +211,7 @@ async function failedSignOut() {
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("EBUSY");
   return {...f,directory,root:await realpath(f.input.rootPath)};
 }
-const nothing={workspaces:[],recordUnreadable:false,sweepPending:false};
+const nothing={workspaces:[],recordUnreadable:false,sweepPending:false},tag=expect.stringMatching(/^[0-9a-f]{16}$/);
 it("names the workspace that still holds a copy it could not remove, and removes it on Try again",async()=>{
   const f=await failedSignOut();
   expect(f.registry.leftover()).toEqual({...nothing,workspaces:[f.root]});expect(f.onLeftover).toHaveBeenCalledOnce();
@@ -223,7 +223,7 @@ it("names the workspace that still holds a copy it could not remove, and removes
 });
 it("records a folder it could not remove, and the next start removes it before another account's copy opens",async()=>{
   const f=await failedSignOut();
-  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory],departed:[tag]});
   files.busy.clear();
   const next=restart(f.record),other={...f.input,lifetime:new AbortController().signal,ownerKey:datasetCopyOwnerKey({serverUrl:"https://account",userId:"other"})};
   let leftAtOpen:boolean|undefined;
@@ -273,17 +273,17 @@ it("records what a sign-out will remove before any copy closes, so a stop part w
   } finally { closing.resolve(); }
   await removal;
 });
-it("never removes the folder of a copy the signed-in account opens while Try again waits",async()=>{
-  const f=await failedSignOut(),gate=deferred<void>();files.gates.set(f.directory,gate.promise);files.blocked.length=0;
-  // The same account signs in again while the folder it left is still busy.
-  const back=f.registry.credentialsChanged(f.input.ownerKey);
-  await vi.waitFor(()=>expect(files.blocked).toEqual([f.directory]));
-  const reopened=f.registry.get({...f.input,lifetime:new AbortController().signal}),retried=f.registry.removeLeftover();
-  files.busy.clear();gate.resolve();
-  await expect(back).rejects.toThrow("EBUSY");await reopened;await retried;
+it("keeps a folder an account left once it signs in again, and opens its copy there",async()=>{
+  const f=await failedSignOut();
+  // The same account signs in again while its folder is still busy: the folder is its own again.
+  await f.registry.credentialsChanged(f.input.ownerKey);
+  await f.registry.get({...f.input,lifetime:new AbortController().signal});
   expect(mocks.open.mock.calls[1]![0].directory).toBe(f.directory);
+  files.busy.clear();await f.registry.removeLeftover();
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
-  expect(f.registry.leftover()).toEqual(nothing);
+  expect(f.registry.leftover()).toEqual(nothing);await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  await restart(f.record,[f.input.rootPath]).credentialsChanged(null);
+  expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
 });
 it.skipIf(process.platform==="win32")("removes copies an earlier run left in every registered workspace when the account changes, and keeps them across a restart",async()=>{
   const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
@@ -339,7 +339,7 @@ it.each(["Try again","the next start"])("keeps the look in every workspace owed 
   const f=await fixture({workspaces:rootPath=>{if(!listing)throw new Error("dohc could not read its workspace list.");return [rootPath,earlier];}});
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("dohc could not read its workspace list.");
   expect(f.registry.leftover()).toEqual({...nothing,sweepPending:true});expect(f.onLeftover).toHaveBeenCalledOnce();
-  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],sweepPending:true});
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],sweepPending:true,departed:[tag]});
   expect(await readdir(copy)).toEqual(["replica.sqlite"]);
   listing=true;
   const registry=when==="Try again"?f.registry:restart(f.record,[f.input.rootPath,earlier]);
@@ -347,4 +347,26 @@ it.each(["Try again","the next start"])("keeps the look in every workspace owed 
   await (when==="Try again"?registry.removeLeftover():registry.credentialsChanged(null));
   await expect(lstat(copy)).rejects.toThrow("ENOENT");
   expect(registry.leftover()).toEqual(nothing);await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+});
+it("removes only the copies of accounts that left in a look still owed, never the signed-in account's, after a restart",async()=>{
+  const earlier=await mkdtemp(join(tmpdir(),"dohc-copy-registry-earlier-"));cleanups.push(()=>rm(earlier,{recursive:true,force:true}));
+  let listing=false;
+  const f=await fixture({workspaces:rootPath=>{if(!listing)throw new Error("dohc could not read its workspace list.");return [rootPath,earlier];}});
+  await f.registry.get(f.input);const {directory:first}=mocks.open.mock.calls[0]![0] as {directory:string};
+  // Account A's copies from an earlier run in another workspace: one with its tag, and one from before tags.
+  const copies=join(earlier,".dohc","local","dataset-copies"),tagged=join(copies,`${basename(first).slice(0,16)}-${"1".repeat(64)}`),untagged=join(copies,"2".repeat(64));
+  for(const copy of [tagged,untagged]){await mkdir(copy,{recursive:true});await writeFile(join(copy,"replica.sqlite"),"A's data");}
+  // A signs out while dohc can't list the workspaces, and B signs in while it still can't, then opens a copy in each.
+  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("workspace list");
+  const b=datasetCopyOwnerKey({serverUrl:"https://account",userId:"b"});
+  await expect(f.registry.credentialsChanged(b)).rejects.toThrow("workspace list");
+  await openedLocalState({workspaceId:"e",rootPath:earlier});
+  for(const input of [{...f.input,ownerKey:b,lifetime:new AbortController().signal},{...f.input,workspaceId:"e",rootPath:earlier,ownerKey:b,lifetime:new AbortController().signal}])await f.registry.get(input);
+  const mine=mocks.open.mock.calls.slice(1).map(([options])=>(options as {directory:string}).directory);
+  // dohc starts again, able to list them, with B still signed in.
+  listing=true;
+  await restart(f.record,[f.input.rootPath,earlier]).credentialsChanged(null);
+  for(const copy of mine)expect(await readdir(copy)).toEqual(["owned.sqlite"]);
+  for(const copy of [first,tagged,untagged])await expect(lstat(copy)).rejects.toThrow("ENOENT");
+  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
 });
