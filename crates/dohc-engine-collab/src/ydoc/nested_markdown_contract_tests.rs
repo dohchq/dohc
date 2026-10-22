@@ -1044,3 +1044,42 @@ fn nested_contract_item_setext_text_trims_like_marked() {
         );
     }
 }
+
+#[test]
+fn nested_contract_item_setext_bang_and_pipe_lines_follow_marked() {
+    // marked starts `<!` block HTML only before a letter, a comment or CDATA,
+    // and a table divider holds no tab, so the first lines are heading text.
+    for (source, heading) in [
+        ("- <!-x\n  =", Some("<!-x")),
+        ("- <!\n  =", Some("<!")),
+        ("- <!1\n  =", Some("<!1")),
+        ("- <! x\n  =", Some("<! x")),
+        ("- |\t|\n  =", Some("|\t|")),
+        ("- <!a\n  =", None),
+        ("- <!--x\n  =", None),
+        ("- <![CDATA[x\n  =", None),
+    ] {
+        let blocks = parse_markdown_blocks(source, MarkdownReading::Source);
+        let [MdBlock::BulletList(items)] = blocks.as_slice() else {
+            panic!("{source:?}: {blocks:?}");
+        };
+        let (paragraph, item_blocks) = items.iter().next().unwrap();
+        match heading {
+            Some(text) => {
+                assert_eq!(paragraph, "", "{source:?}");
+                assert_eq!(
+                    item_blocks,
+                    [MdBlock::Heading {
+                        level: 1,
+                        text: text.to_owned()
+                    }],
+                    "{source:?}"
+                );
+            }
+            None => assert!(
+                item_blocks.is_empty() && paragraph.ends_with("\n="),
+                "{source:?}"
+            ),
+        }
+    }
+}

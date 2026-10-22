@@ -316,8 +316,8 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
     // writes the vector's Markdown. Main settled `lexical-16` as fenced code,
     // which its next settle turns back into the source. The file reading
     // refuses a `--` heading over two lines, so both settles write its
-    // projection, as main did. A bare `-` heading over two lines keeps its
-    // file, as on main.
+    // projection, as main did. A bare `-` heading over two lines, and an `=`
+    // heading that marked and main both read, keep their file, as on main.
     for (name, file, with_file) in [
         (
             "lexical-16",
@@ -338,6 +338,12 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
             "list-heading-bare-dash-two-lines",
             "- a\n  b\n  -\n",
             "- a\n  b\n  -\n",
+        ),
+        ("list-heading-equals-bang", "- <!-x\n  =\n", "- <!-x\n  =\n"),
+        (
+            "list-heading-equals-pipe-tab",
+            "- |\t|\n  =\n",
+            "- |\t|\n  =\n",
         ),
     ] {
         let vector = vectors

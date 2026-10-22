@@ -2630,9 +2630,18 @@ fn setext_text(line: &str) -> Option<bool> {
     }
     let rest = line.trim_start_matches(' ');
     // marked keeps block HTML, and a `<...>` that ends the line, out of a
-    // heading. Any other tag stays in its text.
+    // heading. Any other tag stays in its text. Its `<!` block needs a
+    // letter, a comment or CDATA after it.
     let html = rest.strip_prefix('<').is_some_and(|tag| {
-        html_block(rest)
+        let block = match tag.strip_prefix('!') {
+            Some(bang) => {
+                bang.starts_with(|c: char| c.is_ascii_alphabetic())
+                    || bang.starts_with("--")
+                    || bang.starts_with("[CDATA[")
+            }
+            None => html_block(rest),
+        };
+        block
             || tag
                 .find('>')
                 .is_some_and(|end| end > 0 && end + 1 == tag.len())
@@ -2640,7 +2649,7 @@ fn setext_text(line: &str) -> Option<bool> {
     let divider = rest.contains('|')
         && rest
             .bytes()
-            .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'));
+            .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' '));
     Some(
         !(html
             || divider
