@@ -16,6 +16,8 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
+import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
 import type {StorageContext} from '../../../services/sync-relay/src/storage/context.js'
 
@@ -273,6 +275,107 @@ it('checks configured history entry and byte budgets before loading relay blobs'
     expect(read).not.toHaveBeenCalled()
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
+})
+const ydocUpdate=(payload:Record<string,unknown>)=>({versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',...payload})
+// Appends one relay row, with its bytes when given, and moves the native cut to it.
+function append(f:ReturnType<typeof fixture>,origin:string,originSeq:number,opKind:string,payload:Record<string,unknown>,bytes?:Uint8Array){
+  const row=f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace',?,?,?,?,3)")
+    .run(origin,originSeq,opKind,JSON.stringify(payload))
+  if(bytes)f.raw.prepare("INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(bytes),bytes.length,bytes)
+  f.capture.source.committedCursor=Number(row.lastInsertRowid)
+}
+// A second device set up the same text before the two synced. Its own Y.Doc
+// encodes it in different bytes, so its base names another lineage. The relay
+// ordered it after the winner, so native acknowledges it without applying it.
+function losingDevice(f:ReturnType<typeof fixture>){
+  const doc=markdownToYDoc('Original'),base=Buffer.from(Y.encodeStateAsUpdate(doc)),lineageClaimId=hash(base)
+  expect(lineageClaimId).not.toBe(f.document.lineageClaimId)
+  append(f,'losing-device',1,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId,updateBlobSha256:lineageClaimId}),base)
+  return {doc,lineageClaimId}
+}
+// The ordinary-cut check a fresh capture runs, without retaining an activation.
+function verify(f:ReturnType<typeof fixture>,readBounds=bounds){
+  const base=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes})
+  if(base.kind!=='accepted')throw new Error('Invalid base fixture')
+  return verifyOrdinaryActivationCut(f.storage as StorageContext,{source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,
+    fullState:f.capture.fullState,baseline:base.evidence,validateJournal,validateRegistration:validateBaseline,bounds:readBounds})
+}
+it('activates past a losing base from a second device and keeps one lineage through Resume and a fresh capture',()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    completeActivation(f)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    expect(f.store.resume({document:f.document,activationId:f.capture.activationId,host:{...host,connectionId:'resumed'},registeredAtMs:6,guard(){}}))
+      .toMatchObject({completed:true})
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    expect(verify(f)).toEqual({verified:true})
+    expect(f.raw.prepare('SELECT lineage_claim_id FROM sync_relay_live_documents').all()).toEqual([{lineage_claim_id:f.document.lineageClaimId}])
+  }finally{loser.doc.destroy();f.close()}
+})
+it('verifies a fresh capture after a losing base arrives behind the adopted one',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    losingDevice(f).doc.destroy()
+    expect(verify(f)).toEqual({verified:true})
+  }finally{f.close()}
+})
+it('neither applies nor charges a losing device\'s offline edit',()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    const before=Y.encodeStateVector(loser.doc)
+    loser.doc.getMap('frontmatter').set('offline','x'.repeat(bounds.maxBytesPerDrain))
+    const delta=Y.encodeStateAsUpdate(loser.doc,before)
+    append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(delta)}),delta)
+    const read=vi.spyOn(f.storage,'getBlob')
+    expect(f.prepare({...bounds,maxEntriesPerDrain:2})).toEqual({document:f.document,replayed:false,completed:false})
+    const digests=read.mock.calls.map(call=>call[1])
+    expect(digests).not.toContain(loser.lineageClaimId)
+    expect(digests).not.toContain(hash(delta))
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.fullState).toEqual(new Uint8Array(f.capture.fullState))
+  }finally{loser.doc.destroy();f.close()}
+})
+it('keeps losing rows out of the self-host entry budget and still charges the winner\'s own',()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation,readBounds={maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}
+    for(let seq=2;seq<=maxEntriesPerDrain;seq++){
+      append(f,'losing-device',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(Buffer.from(`losing-${seq}`))}))
+    }
+    expect(f.capture.source.committedCursor-f.capture.source.baseRelaySeq+1).toBeGreaterThan(maxEntriesPerDrain)
+    expect(verify(f,readBounds)).toEqual({verified:true})
+    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++){
+      append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`winning-${seq}`))}))
+    }
+    expect(()=>verify(f,readBounds)).toThrow('Ordinary activation history exceeds its configured entry budget.')
+  }finally{loser.doc.destroy();f.close()}
+})
+// Native ignores another lineage's rows, so a captured state that includes one is damaged evidence.
+it('refuses a captured state that includes a row naming another lineage',()=>{
+  const f=fixture(),loser=losingDevice(f),doc=new Y.Doc();try{
+    Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc)
+    doc.getMap('frontmatter').set('foreign','applied')
+    const delta=Y.encodeStateAsUpdate(doc,before),fullState=Buffer.from(Y.encodeStateAsUpdate(doc))
+    append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(delta)}),delta)
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(f.prepare).toThrow('Native activation differs from the complete ordinary CRDT history.')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{doc.destroy();loser.doc.destroy();f.close()}
+})
+type LosingDevice=ReturnType<typeof losingDevice>
+it.each([
+  ['an unknown lineage claim',(f,_loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,updateBlobSha256:hash(Buffer.from('unknown'))})),
+    'Ordinary activation history differs from the captured lineage.'],
+  ['a malformed lineage claim',(f,_loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'unknown',updateBlobSha256:hash(Buffer.from('unknown'))})),
+    'Ordinary activation history differs from the captured lineage.'],
+  ['a lineage claim with an embedded NUL',(f,_loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'b'.repeat(64)+'\u0000damaged',updateBlobSha256:hash(Buffer.from('unknown'))})),
+    'Ordinary activation history differs from the captured lineage.'],
+  ['a second base naming the captured lineage',(f,loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:loser.lineageClaimId})),
+    'Ordinary activation has a different baseline.'],
+  ['a replaced file',(f,_loser)=>append(f,'losing-device',2,'moment.append',{versionId:'main',objectId:'object',momentId:'losing-delete',path:'docs/a.md',operation:'delete'}),
+    'Ordinary activation history replaced the live document.'],
+] as [string,(f:ReturnType<typeof fixture>,loser:LosingDevice)=>void,string][])('refuses %s beside a losing base',(_evidence,add,message)=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    add(f,loser)
+    expect(f.prepare).toThrow(message)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{loser.doc.destroy();f.close()}
 })
 it('rejects a different replication epoch even at the same relay cursor',()=>{
   const f=fixture();try{

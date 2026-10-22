@@ -32,11 +32,16 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
+  // Native acknowledges another lineage's base and deltas without applying them, so they are neither read nor charged.
+  // The captured full state must still equal the rebuilt history.
+  const claim="json_extract(payload_json,'$.lineageClaimId')";
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
       AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
+      AND NOT (op_kind='ydoc.update' AND json_type(payload_json,'$.lineageClaimId') IS 'text' AND ${claim}<>?
+        AND length(${claim})=64 AND length(CAST(${claim} AS BLOB))=64 AND ${claim} NOT GLOB '*[^0-9a-f]*')
     ORDER BY relay_seq LIMIT ?`;
-  const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,entryLimit+1];
+  const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
     (SELECT length(CAST(payload_json AS BLOB))+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
   requireValue(size&&integer(size.entries)&&size.entries>0&&size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
