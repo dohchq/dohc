@@ -377,6 +377,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await capture?.stop().catch(() => undefined);
   await sessions?.closeAll().catch(() => undefined);
   if (root) await rm(root, { recursive: true, force: true });
@@ -1396,21 +1397,13 @@ it.each([
   await session.close({settle: false});
 });
 
-// A close reads the disk before its first retry. Keep the clock still until
-// a retry timeout exists, however many real I/O turns the read needs.
-const realSetImmediate = setImmediate;
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.setTimerTickMode("nextTimerAsync");
   try {
-    let settled = false;
-    const result = operation();
-    const completion = result.catch(() => undefined).finally(() => { settled = true; });
-    while (!settled) {
-      if (vi.getTimerCount() > 0) await vi.advanceTimersToNextTimerAsync();
-      else await new Promise((resolve) => realSetImmediate(resolve));
-    }
-    await completion;
-    await expect(result).rejects.toThrow(message);
+    const startedAt = Date.now();
+    await expect(operation()).rejects.toThrow(message);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(10_000);
   } finally { vi.useRealTimers(); }
 }
 
