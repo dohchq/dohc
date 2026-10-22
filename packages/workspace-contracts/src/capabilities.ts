@@ -129,6 +129,8 @@ export const CAPABILITIES = {
   "version.conflict.resolve": capability("Resolve a version conflict.", {ipc: ["resolveWorkspaceVersionConflict"]}),
   "file.kept.list": capability("List kept file copies.", {ipc: ["listKeptCopies"], mcp: {owner: ["dohc_list_kept_copies"], view: ["dohc_list_kept_copies"], comment: ["dohc_list_kept_copies"], edit: ["dohc_list_kept_copies"]}}),
   "file.kept.save": capability("Save a kept copy beside its file.", {ipc: ["saveKeptCopy"], mcp: {owner: ["dohc_save_kept_copy"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
+  "file.retained.list": capability("List old file copies kept on a drive that cannot tell whether a program uses them.", {ipc: ["listRetainedCopies"]}),
+  "file.retained.delete": capability("Delete listed old file copies after accepting that a program still using one may lose its next write.", {ipc: ["deleteRetainedCopies"]}),
   "version.try": capability("Try changes in a workspace version.", {ipc: ["tryInWorkspaceVersion"]}),
   "version.try.read": capability("Read the current version trial.", {ipc: ["getTryInVersionState"]}),
   "version.try.dismiss": capability("Dismiss a version trial review.", {ipc: ["dismissTryInVersionReview"]}),

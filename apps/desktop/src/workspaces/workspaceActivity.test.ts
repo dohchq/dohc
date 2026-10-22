@@ -86,6 +86,27 @@ describe("workspaceActivity capture hooks", () => {
     hooks.onHeldFiles([held]);
     expect(onHeldFiles).toHaveBeenCalledTimes(2);
   });
+  it("carries the old file copies the engine reports, pushing only a change, until the capture retires", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").retainedCopies).toBeUndefined();
+    notify.mockClear();
+    hooks.onRetainedCopies({ count: 3, bytes: 300 });
+    expect(activity.getStatus("activity-test").retainedCopies).toEqual({ count: 3, bytes: 300 });
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "activity-test" });
+    hooks.onRetainedCopies({ count: 3, bytes: 300 });
+    expect(notify).toHaveBeenCalledOnce();
+    await activity.stopAll();
+    hooks.onRetainedCopies({ count: 4, bytes: 400 });
+    expect(notify).toHaveBeenCalledOnce();
+  });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();

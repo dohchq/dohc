@@ -59,6 +59,7 @@ export type ShellErrorKind =
   | "network-share"
   | "file-recovery-unavailable"
   | "kept-files"
+  | "retained-copies"
   | "record-history"
   | "record-history-run"
   | "reports"
@@ -512,6 +513,33 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // Old file copies on a drive that cannot tell dohc whether a program
+  // still uses them: one warning per workspace, updated where it stands.
+  // `toast` files it with a toast, once each time the copies pass the size;
+  // otherwise it updates the row, or files it quietly. Null clears it.
+  const showRetainedCopies = useCallback(
+    (notice: {
+      title: string;
+      message: string;
+      action: { label: string; run: () => void };
+      onDismiss: () => void;
+    } | null, toast: boolean) => {
+      if (notice === null) {
+        clearKind("retained-copies");
+        return;
+      }
+      push({
+        tone: "warning",
+        title: notice.title,
+        message: notice.message,
+        retry: null,
+        action: notice.action,
+        onDismiss: notice.onDismiss,
+        kind: "retained-copies",
+      }, toast ? false : "quiet");
+    },
+    [clearKind, push],
+  );
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -791,6 +819,7 @@ export function useShellError(workspaceId: string) {
     reportDriveLimit,
     reportNetworkShare,
     reportKeptFiles,
+    showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,

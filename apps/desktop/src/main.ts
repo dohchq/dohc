@@ -3229,7 +3229,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onHeldFiles: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onRetainedCopies: () => undefined, onHeldFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;

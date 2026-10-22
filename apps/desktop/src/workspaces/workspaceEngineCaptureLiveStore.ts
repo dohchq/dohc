@@ -37,6 +37,9 @@ import {
   type KeptCopy,
   type CaptureMoveFileResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopy,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
@@ -178,6 +181,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   // them meanwhile, and the step that moves one to a visible copy.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Old versions of files kept on a drive that cannot tell dohc whether a
+  // program still has one open, and the step that deletes listed ones.
+  listRetainedCopies(): Promise<RetainedCopiesListResult>;
+  deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
   // Capture records nothing from hold to release, or until the hold's lease
   // runs out unrenewed or the workspace closes.
@@ -1526,6 +1533,14 @@ export function createCaptureLiveStores(
 
     async saveKeptCopy(id: number) {
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
+    },
+
+    async listRetainedCopies() {
+      return await runRead(async (adapter) => await adapter.listRetainedCopies());
+    },
+
+    async deleteRetainedCopies(copies: readonly RetainedCopy[]) {
+      return await runMutation(async (adapter) => await adapter.deleteRetainedCopies(copies));
     },
 
     readHistoryOperation: input => runRead(adapter => adapter.readHistoryOperation(input)),
