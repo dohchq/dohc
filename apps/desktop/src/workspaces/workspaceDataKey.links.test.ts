@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath, readFile, readlink, readdir, symlink, writeFile } from "node:fs/promises";
+import { link, open, lstat, mkdir, realpath, readFile, readlink, readdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SECRET_KEY_RELATIVE_PATH, installWorkspaceDataKey, loadSecretDataKey } from "./workspaceDataKey";
@@ -6,12 +6,13 @@ import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, realpath: vi.fn(actual.realpath), writeFile: vi.fn(actual.writeFile) };
+  return { ...actual, realpath: vi.fn(actual.realpath), link: vi.fn(actual.link), open: vi.fn(actual.open) };
 });
 const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
 afterEach(() => {
   vi.mocked(realpath).mockReset();
-  vi.mocked(writeFile).mockReset();
+  vi.mocked(link).mockReset();
+  vi.mocked(open).mockReset();
 });
 const key = Buffer.alloc(32, 7);
 const payload = `dohc-secret-key-v1:${key.toString("base64")}\n`;
@@ -91,7 +92,8 @@ describe.each(operations)("$name key custody", ({ run }) => {
       code: "key-corrupt",
       message: "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again.",
     });
-    expect(writeFile).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(link).not.toHaveBeenCalled();
     await expect(lstat(join(root, ".dohc", "engine"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -104,7 +106,8 @@ describe.each(operations)("$name key custody", ({ run }) => {
       code: "key-corrupt",
       message: "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
     });
-    expect(writeFile).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(link).not.toHaveBeenCalled();
   });
 
   it("accepts a workspace reached through an alias above its own key folder", async () => {
@@ -134,9 +137,9 @@ describe.each(["load", "install"])("%s key creation race", (operation) => {
     const root = await createTestScratch("dohc-data-key-race-");
     const path = join(root, SECRET_KEY_RELATIVE_PATH);
     await mkdir(dirname(path), { recursive: true });
-    vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
+    vi.mocked(link).mockImplementationOnce(async (...args) => {
       await actualFs.writeFile(path, payload);
-      return actualFs.writeFile(...args);
+      return actualFs.link(...args);
     });
     if (operation === "load") {
       expect(await loadSecretDataKey(root, { createIfMissing: true })).toEqual(key);
@@ -152,9 +155,9 @@ describe.each(["load", "install"])("%s key creation race", (operation) => {
     const path = join(root, SECRET_KEY_RELATIVE_PATH), target = join(base, "outside.key");
     await mkdir(dirname(path), { recursive: true });
     await writeFile(target, payload);
-    vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
+    vi.mocked(link).mockImplementationOnce(async (...args) => {
       await symlink(target, path, "file");
-      return actualFs.writeFile(...args);
+      return actualFs.link(...args);
     });
     const result = operation === "load"
       ? loadSecretDataKey(root, { createIfMissing: true })

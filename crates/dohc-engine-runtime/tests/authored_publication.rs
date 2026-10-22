@@ -1491,7 +1491,7 @@ async fn secret_capture_never_takes_a_binary_publication_job() {
         let db = engine_db_path(&scratch).unwrap();
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).unwrap().actor;
-        let key = dohc_engine_crypto::create_key_file(root).unwrap();
+        let key = dohc_engine_crypto::create_key_file(&root.join(".dohc/engine")).unwrap();
         assert_eq!(capture_env(&actor, root, &key, "MODE=first", 20).await, 0);
         let moment = format!(
             "secret-mat_{}",
