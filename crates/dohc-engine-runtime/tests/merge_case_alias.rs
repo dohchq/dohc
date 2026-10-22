@@ -328,27 +328,27 @@ fn disk_names(root: &Path) -> Vec<String> {
     names
 }
 
-/// Main has `notes.md`; the draft edits it to `text` and renames it to
-/// `Notes.md`. The folder holds Main's `notes.md`.
-fn seed_case_only_rename(root: &Path, db: &Path, text: &str) {
+/// Main has `from`; the draft edits it to `text` and renames it to `to`.
+/// The folder holds Main's `from`.
+fn seed_case_only_rename(root: &Path, db: &Path, from: &str, to: &str, text: &str) {
     let mut store = EngineStore::open(db, 1).unwrap();
     let mut texts = VersionedTextStore::new(&mut store);
     texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
     texts
-        .write_text(&text_write("main", "notes.md", "old", "base"), &NoFaults)
+        .write_text(&text_write("main", from, "old", "base"), &NoFaults)
         .unwrap();
     fork(&mut store);
     let mut texts = VersionedTextStore::new(&mut store);
     texts
-        .write_text(&text_write("draft", "notes.md", text, "edit"), &NoFaults)
+        .write_text(&text_write("draft", from, text, "edit"), &NoFaults)
         .unwrap();
     texts
         .rename_text_file(
             &RenameTextFile {
                 workspace_id: WS.into(),
                 version_id: "draft".into(),
-                from_path: "notes.md".into(),
-                to_path: "Notes.md".into(),
+                from_path: from.into(),
+                to_path: to.into(),
                 moment_id: "rename".into(),
                 request_id: None,
                 metadata_origin: "api".into(),
@@ -361,7 +361,10 @@ fn seed_case_only_rename(root: &Path, db: &Path, text: &str) {
         )
         .unwrap();
     complete_pending_jobs(&mut store);
-    std::fs::write(root.join("notes.md"), "old").unwrap();
+    if let Some((folder, _)) = from.rsplit_once('/') {
+        std::fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    std::fs::write(root.join(from), "old").unwrap();
 }
 
 fn merge(path: &str, now_ms: i64) -> MergeTextFileFromVersion {
@@ -390,7 +393,7 @@ async fn text_case_only_merge(replay: bool, text: &str) {
         return;
     }
     let db = engine_db_path(&root).unwrap();
-    seed_case_only_rename(&root, &db, text);
+    seed_case_only_rename(&root, &db, "notes.md", "Notes.md", text);
     let supervisor = WorkspaceSupervisor::new();
     if replay {
         let mut store = EngineStore::open(&db, 4).unwrap();
@@ -448,22 +451,29 @@ async fn text_case_only_merge_survives_reopen_replay() {
     text_case_only_merge(true, "new").await;
 }
 
-/// The merge's delete of `notes.md` fails for a moment, as a busy file makes
-/// it, and stays pending. With `edit`, the person changes `notes.md` before
-/// the merge writes `Notes.md` (#2369).
-async fn text_case_only_merge_after_failed_delete(text: &str, edit: Option<&str>) {
+/// The merge's delete of `from` fails for a moment, as a busy file makes it,
+/// and stays pending. The merge then writes `to`, which the folder should hold
+/// at `stored`. With `edit`, the person changes `from` before that write
+/// (#2369).
+async fn text_case_only_merge_after_failed_delete(
+    from: &str,
+    to: &str,
+    stored: &str,
+    text: &str,
+    edit: Option<&str>,
+) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
     }
     let db = engine_db_path(&root).unwrap();
-    seed_case_only_rename(&root, &db, text);
+    seed_case_only_rename(&root, &db, from, to, text);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
     let busy = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
     let deleted = actor
         .versioned_text_merge(
-            merge("notes.md", 4),
+            merge(from, 4),
             root.path().into(),
             Arc::new(()),
             busy.clone(),
@@ -473,11 +483,11 @@ async fn text_case_only_merge_after_failed_delete(text: &str, edit: Option<&str>
         .unwrap();
     assert!(busy.fired() && !deleted.materialized);
     if let Some(edit) = edit {
-        std::fs::write(root.join("notes.md"), edit).unwrap();
+        std::fs::write(root.join(from), edit).unwrap();
     }
     let written = actor
         .versioned_text_merge(
-            merge("Notes.md", 5),
+            merge(to, 5),
             root.path().into(),
             Arc::new(()),
             Arc::new(NoFaults),
@@ -499,23 +509,24 @@ async fn text_case_only_merge_after_failed_delete(text: &str, edit: Option<&str>
             .is_empty()
     );
     let write_status = store
-        .load_materialization_job("merge-mat_merge-Notes.md")
+        .load_materialization_job(&format!("merge-mat_merge-{to}"))
         .unwrap()
         .unwrap()
         .status;
     let Some(edit) = edit else {
-        assert_eq!(disk_names(&root), ["Notes.md"]);
-        assert_eq!(
-            std::fs::read(root.join("Notes.md")).unwrap(),
-            text.as_bytes()
-        );
+        let mut folder = root.path().to_path_buf();
+        for segment in stored.split('/') {
+            assert_eq!(disk_names(&folder), [segment]);
+            folder.push(segment);
+        }
+        assert_eq!(std::fs::read(folder).unwrap(), text.as_bytes());
         assert!(written.materialized);
         assert_eq!(write_status, JobStatus::Complete);
         return;
     };
     let [copy, kept]: [String; 2] = disk_names(&root).try_into().unwrap();
-    assert!(copy.starts_with("Notes.md.") && copy.ends_with(".conflict"));
-    assert_eq!(kept, "notes.md");
+    assert!(copy.starts_with(&format!("{to}.")) && copy.ends_with(".conflict"));
+    assert_eq!(kept, stored);
     assert_eq!(std::fs::read(root.join(kept)).unwrap(), edit.as_bytes());
     assert_eq!(std::fs::read(root.join(copy)).unwrap(), text.as_bytes());
     assert_eq!(
@@ -527,17 +538,32 @@ async fn text_case_only_merge_after_failed_delete(text: &str, edit: Option<&str>
 
 #[tokio::test]
 async fn text_case_only_merge_after_a_failed_delete_keeps_the_new_spelling() {
-    text_case_only_merge_after_failed_delete("new", None).await;
+    text_case_only_merge_after_failed_delete("notes.md", "Notes.md", "Notes.md", "new", None).await;
 }
 
 #[tokio::test]
 async fn text_case_only_merge_after_a_failed_delete_with_equal_bytes_keeps_the_new_spelling() {
-    text_case_only_merge_after_failed_delete("old", None).await;
+    text_case_only_merge_after_failed_delete("notes.md", "Notes.md", "Notes.md", "old", None).await;
 }
 
 #[tokio::test]
 async fn text_case_only_merge_after_a_failed_delete_keeps_an_edit_to_the_old_spelling() {
-    text_case_only_merge_after_failed_delete("new", Some("edited")).await;
+    let edit = Some("edited");
+    text_case_only_merge_after_failed_delete("notes.md", "Notes.md", "notes.md", "new", edit).await;
+}
+
+/// Only the folder's capitals change. A write places only the file, so the
+/// folder keeps its stored spelling.
+#[tokio::test]
+async fn text_case_only_merge_after_a_failed_delete_writes_into_a_folder_renamed_by_case() {
+    text_case_only_merge_after_failed_delete(
+        "drafts/notes.md",
+        "Drafts/notes.md",
+        "drafts/notes.md",
+        "new",
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]

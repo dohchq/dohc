@@ -1637,7 +1637,7 @@ fn materialize_ordinary_write(
         && let TargetHash::Sha(sha) = reads.read(target)?
     {
         if matches!(job.preimage, Preimage::Absent) {
-            respelled = pending_respelled_delete(store, target, job, &sha)?;
+            respelled = pending_respelled_delete(store, root, target, job, &sha)?;
         }
         if sha == job.content_sha256
             && respelled.is_none()
@@ -2570,19 +2570,23 @@ fn create_from_temp(
 /// spelling before it creates the new one. On a disk that ignores the
 /// difference, a create that finds its name held by the old spelling, while
 /// that delete is still pending, runs the delete first. This finds that
-/// delete when the target is stored under another spelling and holds the
-/// bytes the delete expects.
+/// delete when the file at the target is stored on disk under the delete's
+/// path and holds the bytes the delete expects. The two spellings can differ
+/// in a folder name, the file name, or both.
 fn pending_respelled_delete(
     store: &EngineStore,
+    root: &Path,
     target: &Path,
     job: &MaterializationJob,
     current_sha256: &str,
 ) -> Result<Option<MaterializationJob>, MaterializeError> {
-    match std::fs::canonicalize(target) {
-        Ok(stored) if stored != target => {}
-        _ => return Ok(None),
-    }
-    let key = path_collision_key(&job.target_path);
+    let stored = std::fs::canonicalize(target).ok().and_then(|stored| {
+        let relative = stored.strip_prefix(root).ok()?.to_str()?;
+        Some(relative.replace('\\', "/"))
+    });
+    let Some(stored) = stored.filter(|stored| *stored != job.target_path) else {
+        return Ok(None);
+    };
     let expected = Preimage::Present(current_sha256.to_owned());
     Ok(store
         .list_pending_materialization_jobs()?
@@ -2591,9 +2595,8 @@ fn pending_respelled_delete(
             delete.operation == MaterializationOperation::Delete
                 && delete.job_id.starts_with("merge-mat_")
                 && (delete.workspace_id == job.workspace_id || delete.workspace_id.is_empty())
-                && delete.target_path != job.target_path
+                && delete.target_path == stored
                 && delete.preimage == expected
-                && path_collision_key(&delete.target_path) == key
         }))
 }
 
