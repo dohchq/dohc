@@ -30,6 +30,7 @@
   "cloudSessionChanged",
   "cloudStatus",
   "collectionAutomationsChanged",
+  "collectionCopiesLeftChanged",
   "confirmCollectionAutomationStep",
   "crashReportChanged",
   "workspaceTrustChanged",

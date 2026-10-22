@@ -249,5 +249,7 @@
   "workspace.trust.read",
   "workspace.trust.request",
   "workspace.trust.restrict",
-  "file.duplicate"
+  "file.duplicate",
+  "collection.copies.left.read",
+  "collection.copies.left.remove"
 ]
