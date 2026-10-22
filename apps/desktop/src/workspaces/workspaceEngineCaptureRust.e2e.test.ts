@@ -1354,7 +1354,8 @@ it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
       expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
       expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["note.md"] });
       expect(await opened.withEngine((engine) => engine.flushCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
-      expect(await opened.withEngine((engine) => engine.reconcileCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.reconcileCapture())).toMatchObject({ degraded: false, deferredWrites: ["note.md"] });
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
       await writeFile(join(opened.root, "other.md"), "other file\n");
       await waitForPathMoments(opened.capture, "other.md", 1);
       await opened.withEngine(async (engine) => {
