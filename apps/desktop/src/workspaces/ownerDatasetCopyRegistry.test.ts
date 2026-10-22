@@ -98,10 +98,15 @@ it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old 
   // Windows keeps no POSIX mode bits, so Node reports 0o666 there.
   if(process.platform!=="win32")for(const folder of [dirname(directory),directory])expect((await lstat(folder)).mode&0o777).toBe(0o700);
   expect(await readdir(old)).toEqual(["replica.sqlite"]);expect(await readFile(join(old,"replica.sqlite"),"utf8")).toBe("old");
+  // The Collections this computer keeps sit beside the copies, and stay.
+  const store=join(f.input.rootPath,".dohc","local","datasets");await mkdir(store);await writeFile(join(store,"state.sqlite"),"the Collections");
+  const removedBefore=files.removed.length;
   // Signing out removes the copy at its new path, and the old folder with the account's data.
   await f.registry.credentialsChanged(null);
   expect(await readdir(dirname(directory))).toEqual([]);
   expect(await readdir(join(f.input.rootPath,".dohc"))).toEqual(["local"]);
+  expect(await readFile(join(store,"state.sqlite"),"utf8")).toBe("the Collections");
+  expect(files.removed.slice(removedBefore).filter(path=>!path.startsWith(dirname(directory))&&!path.startsWith(old))).toEqual([]);
 });
 it("removes old offline copies in .dohc/dataset-copies when the account changes",async()=>{
   const f=await fixture(),old=join(f.input.rootPath,".dohc","dataset-copies","0".repeat(64));

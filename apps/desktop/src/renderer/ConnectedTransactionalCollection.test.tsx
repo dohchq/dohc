@@ -539,7 +539,7 @@ describe("a Collection this computer cannot use", () => {
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
     render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} />);
     await screen.findByLabelText("Collection view state");
-    backend.dataset.mockRejectedValueOnce(refused("collections-replaced", "This computer keeps this workspace's Collections, but another copy replaced .dohc/datasets/state.sqlite."));
+    backend.dataset.mockRejectedValueOnce(refused("collections-replaced", "This computer keeps this workspace's Collections, but another copy replaced .dohc/local/datasets/state.sqlite."));
     fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
     expect((await screen.findByTestId("collection-refusal")).textContent).toContain("another copy replaced");
     expect(screen.queryByLabelText("Collection view state")).toBeNull();
