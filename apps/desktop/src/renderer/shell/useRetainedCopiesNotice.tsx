@@ -27,8 +27,8 @@ export function oldFileCopies(count: number): string {
 
 export function retainedCopiesNotice(summary: RetainedCopiesSummary): { title: string; message: string } {
   return {
-    title: `${oldFileCopies(summary.count)} · ${retainedCopiesSize(summary.bytes)}`,
-    message: "dohc can't check whether another program still uses these copies on this drive.",
+    title: oldFileCopies(summary.count),
+    message: `They take up ${retainedCopiesSize(summary.bytes)}. dohc can't check whether another program still uses these copies on this drive.`,
   };
 }
 

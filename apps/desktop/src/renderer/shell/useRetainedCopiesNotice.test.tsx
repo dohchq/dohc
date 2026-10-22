@@ -80,15 +80,15 @@ describe("useRetainedCopiesNotice", () => {
     const row = h.row()!;
     expect(row).toMatchObject({
       tone: "warning",
-      title: "1,200 old file copies · 300 MB",
-      message: "dohc can't check whether another program still uses these copies on this drive.",
+      title: "1,200 old file copies",
+      message: "They take up 300 MB. dohc can't check whether another program still uses these copies on this drive.",
       action: { label: RETAINED_COPIES_ACTION },
       retry: null,
       seen: false,
     });
     h.rerender({ workspaceId: "ws-a", summary: { count: 2400, bytes: 2.5 * 1024 * MB } });
     expect(h.errors().filter((error) => error.kind === "retained-copies")).toHaveLength(1);
-    expect(h.row()).toMatchObject({ id: row.id, title: "2,400 old file copies · 2.5 GB" });
+    expect(h.row()).toMatchObject({ id: row.id, title: "2,400 old file copies", message: expect.stringContaining("They take up 2.5 GB.") });
     h.rerender({ workspaceId: "ws-a", summary: { count: 0, bytes: 0 } });
     expect(h.row()).toBeUndefined();
   });
@@ -148,7 +148,7 @@ describe("useRetainedCopiesNotice", () => {
     expect(h.bridge.deleteRetainedCopies.mock.calls.map(([input]) => input.copies.length)).toEqual([100, 50]);
     expect(h.errors().find((error) => error.tone === "success")?.message)
       .toBe("Deleted 148 old file copies. 2 stay because they changed or dohc still needs them.");
-    expect(h.row()?.title).toBe("1,002 old file copies · 300 MB");
+    expect(h.row()?.title).toBe("1,002 old file copies");
   });
 
   it("reports a failed delete with Try again, which asks again", async () => {
