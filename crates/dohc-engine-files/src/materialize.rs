@@ -1632,13 +1632,20 @@ fn materialize_ordinary_write(
     // The staging recheck reuses this read while the target's size and time
     // stay the same.
     let mut reads = TargetReads::default();
+    let mut respelled = None;
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
-        && sha == job.content_sha256
-        && !target_has_other_leaf_spelling(target)
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+        if matches!(job.preimage, Preimage::Absent) {
+            respelled = pending_respelled_delete(store, target, job, &sha)?;
+        }
+        if sha == job.content_sha256
+            && respelled.is_none()
+            && !target_has_other_leaf_spelling(target)
+        {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
     }
 
     // Step 2: sibling temp file, bounded, with the target's permissions. A
@@ -1673,9 +1680,16 @@ fn materialize_ordinary_write(
         ));
     }
     let outcome = match placement {
-        OrdinaryWritePlacement::Target(staging) => {
-            swap_in_temp(store, staging, target, &tmp, job, &mut reads, options)
-        }
+        OrdinaryWritePlacement::Target(staging) => swap_in_temp(
+            store,
+            staging,
+            target,
+            &tmp,
+            job,
+            respelled.as_ref(),
+            &mut reads,
+            options,
+        ),
         OrdinaryWritePlacement::ConflictSibling => {
             record_write_conflict(store, target, &tmp, job, now_ms)
         }
@@ -1686,12 +1700,17 @@ fn materialize_ordinary_write(
     outcome
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the respelled delete is found with the first read of the target"
+)]
 fn swap_in_temp(
     store: &EngineStore,
     staging: &Staging,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
+    respelled: Option<&MaterializationJob>,
     reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -1705,7 +1724,22 @@ fn swap_in_temp(
     let expected = match &job.preimage {
         Preimage::Absent => {
             if !create_from_temp(target, tmp, options)? {
-                return record_write_conflict(store, target, tmp, job, now_ms);
+                // The old spelling's delete keeps its own preimage check, so
+                // a file changed since the merge stays and this write conflicts.
+                let Some(delete) = respelled else {
+                    return record_write_conflict(store, target, tmp, job, now_ms);
+                };
+                match materialize_one(store, root, delete, options)? {
+                    JobOutcome::Completed | JobOutcome::AlreadyMaterialized
+                        if create_from_temp(target, tmp, options)? => {}
+                    outcome @ (JobOutcome::Parked | JobOutcome::Blocked) => {
+                        // Both jobs stay pending, and replay runs the delete first.
+                        let _ = std::fs::remove_file(tmp);
+                        return Ok(outcome);
+                    }
+                    outcome @ JobOutcome::Crashed(_) => return Ok(outcome),
+                    _ => return record_write_conflict(store, target, tmp, job, now_ms),
+                }
             }
             sync_parent_dir(store, target.parent(), policy)?;
             if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -2530,6 +2564,37 @@ fn create_from_temp(
         }
         place_attempt(options.replacer, tmp, target)
     })
+}
+
+/// A merge that renames a file only by case or normalization deletes the old
+/// spelling before it creates the new one. On a disk that ignores the
+/// difference, a create that finds its name held by the old spelling, while
+/// that delete is still pending, runs the delete first. This finds that
+/// delete when the target is stored under another spelling and holds the
+/// bytes the delete expects.
+fn pending_respelled_delete(
+    store: &EngineStore,
+    target: &Path,
+    job: &MaterializationJob,
+    current_sha256: &str,
+) -> Result<Option<MaterializationJob>, MaterializeError> {
+    match std::fs::canonicalize(target) {
+        Ok(stored) if stored != target => {}
+        _ => return Ok(None),
+    }
+    let key = path_collision_key(&job.target_path);
+    let expected = Preimage::Present(current_sha256.to_owned());
+    Ok(store
+        .list_pending_materialization_jobs()?
+        .into_iter()
+        .find(|delete| {
+            delete.operation == MaterializationOperation::Delete
+                && delete.job_id.starts_with("merge-mat_")
+                && (delete.workspace_id == job.workspace_id || delete.workspace_id.is_empty())
+                && delete.target_path != job.target_path
+                && delete.preimage == expected
+                && path_collision_key(&delete.target_path) == key
+        }))
 }
 
 /// Rename the temp to the name staging emptied. `false` when a program

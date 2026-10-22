@@ -3,7 +3,10 @@ use dohc_engine_domain::{
     CreateNamedVersion, MergeTextFileFromVersion, RenameTextFile, SecretDelete, SecretDiskIntent,
     SecretFileStore, SecretWrite, VersionedTextStore, WriteText,
 };
-use dohc_engine_runtime::{ActiveVersionSwitch, CancellationToken, NoFaults, WorkspaceSupervisor};
+use dohc_engine_runtime::{
+    ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
+    WorkspaceSupervisor,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
@@ -325,49 +328,44 @@ fn disk_names(root: &Path) -> Vec<String> {
     names
 }
 
-/// Main has `notes.md`; the draft edits it and renames it to `Notes.md`.
-/// The desktop merges the path Main loses first. With `replay`, both merge
-/// jobs are left pending, as after a crash, and run on reopen.
-async fn text_case_only_merge(replay: bool, text: &str) {
-    let root = ScratchDir::new().unwrap();
-    if !ignores_case(&root) {
-        return;
-    }
-    let db = engine_db_path(&root).unwrap();
-    {
-        let mut store = EngineStore::open(&db, 1).unwrap();
-        let mut texts = VersionedTextStore::new(&mut store);
-        texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
-        texts
-            .write_text(&text_write("main", "notes.md", "old", "base"), &NoFaults)
-            .unwrap();
-        fork(&mut store);
-        let mut texts = VersionedTextStore::new(&mut store);
-        texts
-            .write_text(&text_write("draft", "notes.md", text, "edit"), &NoFaults)
-            .unwrap();
-        texts
-            .rename_text_file(
-                &RenameTextFile {
-                    workspace_id: WS.into(),
-                    version_id: "draft".into(),
-                    from_path: "notes.md".into(),
-                    to_path: "Notes.md".into(),
-                    moment_id: "rename".into(),
-                    request_id: None,
-                    metadata_origin: "api".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 3,
-                },
-                &NoFaults,
-            )
-            .unwrap();
-        complete_pending_jobs(&mut store);
-    }
+/// Main has `notes.md`; the draft edits it to `text` and renames it to
+/// `Notes.md`. The folder holds Main's `notes.md`.
+fn seed_case_only_rename(root: &Path, db: &Path, text: &str) {
+    let mut store = EngineStore::open(db, 1).unwrap();
+    let mut texts = VersionedTextStore::new(&mut store);
+    texts.ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
+    texts
+        .write_text(&text_write("main", "notes.md", "old", "base"), &NoFaults)
+        .unwrap();
+    fork(&mut store);
+    let mut texts = VersionedTextStore::new(&mut store);
+    texts
+        .write_text(&text_write("draft", "notes.md", text, "edit"), &NoFaults)
+        .unwrap();
+    texts
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WS.into(),
+                version_id: "draft".into(),
+                from_path: "notes.md".into(),
+                to_path: "Notes.md".into(),
+                moment_id: "rename".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    complete_pending_jobs(&mut store);
     std::fs::write(root.join("notes.md"), "old").unwrap();
-    let merge = |path: &str, now_ms| MergeTextFileFromVersion {
+}
+
+fn merge(path: &str, now_ms: i64) -> MergeTextFileFromVersion {
+    MergeTextFileFromVersion {
         workspace_id: WS.into(),
         target_version_id: "main".into(),
         source_version_id: "draft".into(),
@@ -381,7 +379,18 @@ async fn text_case_only_merge(replay: bool, text: &str) {
         metadata_correlation_id: None,
         author_json: None,
         now_ms,
-    };
+    }
+}
+
+/// The desktop merges the path Main loses first. With `replay`, both merge
+/// jobs are left pending, as after a crash, and run on reopen.
+async fn text_case_only_merge(replay: bool, text: &str) {
+    let root = ScratchDir::new().unwrap();
+    if !ignores_case(&root) {
+        return;
+    }
+    let db = engine_db_path(&root).unwrap();
+    seed_case_only_rename(&root, &db, text);
     let supervisor = WorkspaceSupervisor::new();
     if replay {
         let mut store = EngineStore::open(&db, 4).unwrap();
@@ -437,6 +446,98 @@ async fn text_case_only_merge_keeps_the_new_spelling() {
 #[tokio::test]
 async fn text_case_only_merge_survives_reopen_replay() {
     text_case_only_merge(true, "new").await;
+}
+
+/// The merge's delete of `notes.md` fails for a moment, as a busy file makes
+/// it, and stays pending. With `edit`, the person changes `notes.md` before
+/// the merge writes `Notes.md` (#2369).
+async fn text_case_only_merge_after_failed_delete(text: &str, edit: Option<&str>) {
+    let root = ScratchDir::new().unwrap();
+    if !ignores_case(&root) {
+        return;
+    }
+    let db = engine_db_path(&root).unwrap();
+    seed_case_only_rename(&root, &db, text);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 4).unwrap().actor;
+    let busy = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    let deleted = actor
+        .versioned_text_merge(
+            merge("notes.md", 4),
+            root.path().into(),
+            Arc::new(()),
+            busy.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(busy.fired() && !deleted.materialized);
+    if let Some(edit) = edit {
+        std::fs::write(root.join("notes.md"), edit).unwrap();
+    }
+    let written = actor
+        .versioned_text_merge(
+            merge("Notes.md", 5),
+            root.path().into(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    // A later replay must keep what the merge left.
+    actor
+        .materialize_replay_pending(root.path().into(), WS.into(), 6)
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 7).unwrap();
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .is_empty()
+    );
+    let write_status = store
+        .load_materialization_job("merge-mat_merge-Notes.md")
+        .unwrap()
+        .unwrap()
+        .status;
+    let Some(edit) = edit else {
+        assert_eq!(disk_names(&root), ["Notes.md"]);
+        assert_eq!(
+            std::fs::read(root.join("Notes.md")).unwrap(),
+            text.as_bytes()
+        );
+        assert!(written.materialized);
+        assert_eq!(write_status, JobStatus::Complete);
+        return;
+    };
+    let [copy, kept]: [String; 2] = disk_names(&root).try_into().unwrap();
+    assert!(copy.starts_with("Notes.md.") && copy.ends_with(".conflict"));
+    assert_eq!(kept, "notes.md");
+    assert_eq!(std::fs::read(root.join(kept)).unwrap(), edit.as_bytes());
+    assert_eq!(std::fs::read(root.join(copy)).unwrap(), text.as_bytes());
+    assert_eq!(
+        written.materialize_outcome,
+        PostCommitMaterializeOutcome::Conflict
+    );
+    assert_eq!(write_status, JobStatus::Conflict);
+}
+
+#[tokio::test]
+async fn text_case_only_merge_after_a_failed_delete_keeps_the_new_spelling() {
+    text_case_only_merge_after_failed_delete("new", None).await;
+}
+
+#[tokio::test]
+async fn text_case_only_merge_after_a_failed_delete_with_equal_bytes_keeps_the_new_spelling() {
+    text_case_only_merge_after_failed_delete("old", None).await;
+}
+
+#[tokio::test]
+async fn text_case_only_merge_after_a_failed_delete_keeps_an_edit_to_the_old_spelling() {
+    text_case_only_merge_after_failed_delete("new", Some("edited")).await;
 }
 
 #[tokio::test]
