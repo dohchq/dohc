@@ -723,14 +723,20 @@ export function MarkdownView(props: {
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The file changed outside dohc. Reopening closes this session first, and
-  // main lets the disk version stand, keeping any unsaved text in a copy
-  // beside the file. A document with nothing unsaved reopens by itself.
-  // It reloads by itself at most once per open note, and never over edits
-  // main has not confirmed; otherwise the notice asks the person.
+  // main lets the disk version stand, keeping any unsaved text in History.
+  // A document with nothing unsaved reopens by itself, never over edits main
+  // has not confirmed; otherwise the notice asks the person.
   const { onRetryEngineOpen, onButtonError } = props;
   const [reloading, setReloading] = useState(false);
   const [reloadedItself, setReloadedItself] = useState(false);
+  // The text a reload replaced. A reopened note with other text took in the
+  // change, so it may reload by itself again. One with the same text did
+  // not, and reloading it again would only repeat that.
+  const engineDocRef = useRef(engine.doc);
+  engineDocRef.current = engine.doc;
+  const replacedText = useRef<string | null>(null);
   const reloadChangedOutside = useCallback(() => {
+    replacedText.current = engineDocRef.current?.getXmlFragment("body").toString() ?? null;
     setReloading(true);
     onRetryEngineOpen();
   }, [onRetryEngineOpen]);
@@ -745,12 +751,13 @@ export function MarkdownView(props: {
     (engine.changedOutside === "saved" && reloadedItself && !reloading);
   // The Reloaded sign starts when the reopened document binds.
   const [reloadedSign, setReloadedSign] = useState(0);
-  const reloadedBound = reloading && engine.available && engine.changedOutside === null;
+  const reloadedBound = reloading && engine.available;
   useEffect(() => {
-    if (reloadedBound) {
-      setReloading(false);
-      setReloadedSign((count) => count + 1);
-    }
+    if (!reloadedBound) return;
+    setReloading(false);
+    setReloadedSign((count) => count + 1);
+    if (engine.doc?.getXmlFragment("body").toString() !== replacedText.current) setReloadedItself(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
   useEffect(() => {

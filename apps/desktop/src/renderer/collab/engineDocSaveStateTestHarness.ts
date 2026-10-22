@@ -170,12 +170,13 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   // remote update still applies to a deleted-while-editing doc (only LOCAL
   // writes are refused), so a deletion's captured text must be frozen
   // against exactly this.
-  function emitRemoteEdit(suffix: string): void {
+  function emitRemoteEdit(suffix: string, lineageGeneration?: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const before = Y.encodeStateVector(doc);
     doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
     const update = Y.encodeStateAsUpdate(doc, before);
-    const event = { sessionId: openedSessionId, update };
+    // Main stamps a remote update with its lineage; without one the editor drops it.
+    const event = { sessionId: openedSessionId, update, ...(lineageGeneration === undefined ? {} : { lineageGeneration }) };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });

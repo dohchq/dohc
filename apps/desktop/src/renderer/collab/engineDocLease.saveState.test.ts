@@ -261,6 +261,16 @@ it("makes a change outside dohc unsaved when typing lands after it", async () =>
   expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
 });
 
+// An agent's edit through dohc reaches this editor from main, so it is not a
+// local edit. Landing after main said nothing was unsaved, it still is one.
+it("makes a change outside dohc unsaved when an agent's edit lands after it", async () => {
+  await retainBound();
+  harness.emitChangedOutside(false, 0);
+  harness.emitRemoteEdit(" agent", 1);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+  expect(retained.lease.localEditsPending()).toBe(true);
+});
+
 it("keeps a change outside dohc reported while a history replacement installs", async () => {
   await retainBound();
   harness.emitLineageReplacement("winner");

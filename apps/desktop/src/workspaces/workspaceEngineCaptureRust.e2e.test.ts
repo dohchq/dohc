@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import { foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import type {
@@ -1515,8 +1516,9 @@ it.skipIf(engine.missing)("does not open a note again until capture records its 
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   // Capture that does not record the outside version: its status keeps the
-  // path waiting.
+  // path waiting. Its flush can also fail.
   let captureRecords = false;
+  let flushFails = false;
   const live = createCaptureLiveStores(workspace, sessions).store;
   const store = new Proxy(live, {
     get(target, property) {
@@ -1524,6 +1526,12 @@ it.skipIf(engine.missing)("does not open a note again until capture records its 
         return async () => {
           const status = await target.watcherStatus!();
           return captureRecords ? status : { ...status, deferredWrites: [...new Set([...status.deferredWrites, "note.md"])] };
+        };
+      }
+      if (property === "flushCapture") {
+        return async () => {
+          if (flushFails) throw new Error("capture did not settle");
+          await target.flushCapture!();
         };
       }
       const value = Reflect.get(target, property, target);
@@ -1549,6 +1557,13 @@ it.skipIf(engine.missing)("does not open a note again until capture records its 
     // Opening again would take the file back and show the old version.
     const refusal = await openNote(capture).then(() => null, (error: unknown) => error);
     expect(isYDocOutsideWriteWaitingError(refusal)).toBe(true);
+    // A check that fails proves nothing either: the open still waits, and
+    // says why.
+    flushFails = true;
+    const failedCheck = await openNote(capture).then(() => null, (error: unknown) => error);
+    expect(isYDocOutsideWriteWaitingError(failedCheck)).toBe(true);
+    expect(String((failedCheck as Error).cause)).toContain("capture did not settle");
+    flushFails = false;
     // Once capture records it, the note opens on the disk version.
     captureRecords = true;
     const reopened = await openNote(capture);
@@ -1558,6 +1573,48 @@ it.skipIf(engine.missing)("does not open a note again until capture records its 
     await capture.stop().catch(() => undefined);
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
+  }
+}, 60_000);
+
+// Capture keeps a note's unsaved text in History when it records an outside
+// version, but has nothing that keeps a drawing's strokes. A drawing keeps its
+// guarded close: the close refuses, and the strokes stay in the open drawing.
+it.skipIf(engine.missing)("keeps a drawing's unsaved strokes when its file changed outside dohc (#2463)", async () => {
+  const opened = await openRealCapture("drawing-outside-write", { settleDebounceMs: 60_000 });
+  const scene = (elements: unknown[]) => JSON.stringify({ type: "excalidraw", version: 2, source: "test", elements, appState: {}, files: {} });
+  const stroke = { id: "stroke", x: 42, y: 17, type: "rectangle", version: 1, versionNonce: 1, isDeleted: false };
+  try {
+    const absolute = join(opened.root, "drawing.excalidraw");
+    await writeFile(absolute, scene([]), "utf8");
+    await waitForPathMoments(opened.capture, "drawing.excalidraw", 1);
+    const editor = new Y.Doc();
+    const states: string[] = [];
+    const changedOutside: boolean[] = [];
+    const session = await opened.capture.openYDocSession({
+      path: "drawing.excalidraw", contentKind: "scene",
+      onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+      onSaveState: (state) => states.push(state),
+      onChangedOutside: (unsaved) => changedOutside.push(unsaved),
+    });
+    Y.applyUpdate(editor, session.initialUpdate);
+    await new Promise<void>((armed) => {
+      const vector = Y.encodeStateVector(editor);
+      insertElementRevision(editor, stroke);
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector), armed);
+    });
+    await writeOutside(absolute, scene([{ ...stroke, id: "outside" }]), "rename");
+    opened.capture.start();
+    await vi.waitFor(async () => expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["drawing.excalidraw"] }), { timeout: REAL_DAEMON_DEADLINE_MS });
+    const closed = await session.close().then(() => null, (error: unknown) => error);
+    // The close stays refused, and the lease stays held with the strokes.
+    expect(closed).not.toBeNull();
+    expect(foldScene(session.doc).elements.map((element) => element.id)).toEqual(["stroke"]);
+    expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["drawing.excalidraw"] });
+    // The drawing has no notice, and its chip promises nothing about History.
+    expect(changedOutside).toEqual([]);
+    expect(states).not.toContain("changed-on-disk");
+  } finally {
+    await opened.stop();
   }
 }, 60_000);
 

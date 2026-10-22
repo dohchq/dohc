@@ -8,17 +8,20 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { EngineDocInput } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { FileInspector } from "./FileInspector";
 import { CHANGED_OUTSIDE_NOTICE } from "./MarkdownView";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 
 // The engine session as the test sets it, and every retry key the inspector
-// asked for. A new retry key closes the session and opens it again. Setting
-// the session re-renders its subscribers, as a real session update does.
+// asked for. A new retry key closes the session and opens it again: until the
+// test sets the reopened session, the note is opening, as with the real hook.
+// Setting the session re-renders its subscribers, as a real update does.
 const engine = vi.hoisted(() => ({
   state: undefined as unknown as UseEngineDoc,
   listeners: new Set<() => void>(),
   retryKeys: [] as number[],
+  boundRetryKey: 0,
 }));
 const retryKeys = engine.retryKeys;
 vi.mock("./collab/useEngineDoc", async () => {
@@ -30,13 +33,17 @@ vi.mock("./collab/useEngineDoc", async () => {
   return {
     useEngineDoc: (input: EngineDocInput) => {
       if (engine.retryKeys.at(-1) !== input.retryKey) engine.retryKeys.push(input.retryKey ?? 0);
-      return useSyncExternalStore(subscribe, () => engine.state);
+      const state = useSyncExternalStore(subscribe, () => engine.state);
+      return (input.retryKey ?? 0) === engine.boundRetryKey
+        ? state
+        : { ...state, available: false, opening: true, doc: null, changedOutside: null };
     },
   };
 });
 function setEngine(state: UseEngineDoc): void {
   act(() => {
     engine.state = state;
+    engine.boundRetryKey = engine.retryKeys.at(-1) ?? 0;
     for (const listener of [...engine.listeners]) listener();
   });
 }
@@ -93,6 +100,7 @@ function makeBridge(): DohcDesktopBridge {
 describe("FileInspector when an open note changed outside dohc", () => {
   beforeEach(() => {
     retryKeys.length = 0;
+    engine.boundRetryKey = 0;
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
     vi.stubGlobal("dohcDesktop", makeBridge());
   });
@@ -104,10 +112,20 @@ describe("FileInspector when an open note changed outside dohc", () => {
     vi.unstubAllGlobals();
   });
 
+  // The note as the person has it: its file read, and its session bound.
+  async function openNote(props: { onButtonError?: ReportButtonError } = {}): Promise<void> {
+    engine.state = engineState(markdownToYDoc("# Plan\n"), null);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onButtonError={props.onButtonError} />);
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
   it("reopens a note with nothing unsaved and says Reloaded for a moment", async () => {
+    await openNote();
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    engine.state = engineState(markdownToYDoc("# Plan\n"), "saved");
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
     expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
     // The reopened session shows the disk version.
@@ -120,28 +138,42 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(retryKeys).toEqual([0, 1]);
   });
 
-  it("reloads by itself once per open note, then asks", async () => {
-    engine.state = engineState(markdownToYDoc("# Plan\n"), "saved");
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+  it("reloads by itself again for a later change that shows new text", async () => {
+    await openNote();
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
     setEngine(engineState(markdownToYDoc("# First outside change\n"), null));
-    // A second change outside dohc waits for the person.
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+    // A second outside write a few seconds later reloads too, with no notice.
     setEngine(engineState(markdownToYDoc("# First outside change\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1, 2]));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    setEngine(engineState(markdownToYDoc("# Second outside change\n"), null));
+    expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("reloaded");
+  });
+
+  it("asks instead of reloading again when the reopened note shows the same text", async () => {
+    await openNote();
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    // The reopen came back on the old text, so the change was not taken in.
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
     expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
     expect(retryKeys).toEqual([0, 1]);
   });
 
   it("does not reload by itself over an edit main has not confirmed", async () => {
-    engine.state = { ...engineState(markdownToYDoc("# Plan typed\n"), "saved"), localEditsPending: () => true };
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await openNote();
+    setEngine({ ...engineState(markdownToYDoc("# Plan typed\n"), "saved"), localEditsPending: () => true });
     expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
     expect(retryKeys).toEqual([0]);
   });
 
   it("stays on the notice and reports Try again when capture has not recorded the new version", async () => {
     const onButtonError = vi.fn();
-    engine.state = engineState(markdownToYDoc("# Plan\n"), "saved");
-    render(<FileInspector workspaceId="ws-1" path="a.md" onButtonError={onButtonError} />);
+    await openNote({ onButtonError });
+    setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
     // The reopen was refused: capture still holds the change.
     setEngine({ ...engineState(markdownToYDoc("# Plan\n"), null), available: false, doc: null, outsideWriteWaiting: true });
@@ -157,8 +189,8 @@ describe("FileInspector when an open note changed outside dohc", () => {
   });
 
   it("keeps unsaved text until the person chooses Reload", async () => {
-    engine.state = engineState(markdownToYDoc("# Plan typed\n"), "unsaved");
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await openNote();
+    setEngine(engineState(markdownToYDoc("# Plan typed\n"), "unsaved"));
     const notice = await screen.findByTestId("changed-outside-notice");
     expect(notice.textContent).toContain(CHANGED_OUTSIDE_NOTICE);
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CHANGED_OUTSIDE_NOTICE);

@@ -552,7 +552,11 @@ function createEngineDocSession(
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
-  const localEditsPending = (): boolean => deliveryPending || localSeq.current > confirmedLocalSeq;
+  // A change to the document from any origin, an agent's edit through main
+  // included, after main said nothing was unsaved.
+  let changedSinceCleanSignal = false;
+  const localEditsPending = (): boolean =>
+    deliveryPending || localSeq.current > confirmedLocalSeq || changedSinceCleanSignal;
   // The file changed outside dohc. Edits main has not confirmed are unsaved
   // whatever main counted, so the document must not reload over them.
   const noteChangedOutside = (unsaved: boolean): void => {
@@ -1115,6 +1119,10 @@ function createEngineDocSession(
     detachSaveObserver?.();
     const onUpdate = () => {
       if (disposed) return;
+      if (snapshot.changedOutside?.token === token && !snapshot.changedOutside.unsaved) {
+        changedSinceCleanSignal = true;
+        noteChangedOutside(true);
+      }
       if (writesRefused.current) {
         if (recovery.snapshotBytes === null && deletionPending) {
           // A replacement installed a fresh recovery slot while the path
