@@ -5114,6 +5114,79 @@ fn an_untouched_seed_losing_to_other_source_bytes_keeps_its_file_in_a_conflict()
     );
 }
 
+/// The seed's source is the winner's, but the file now holds the seed's own
+/// projection, as the table-fix parent's construction writes it. The file was
+/// never preserved, so it stays the current side of a conflict.
+///
+/// Mutation check: drop the head comparison from the quiet adoption in
+/// `preserve_base_sides_in_tx` and the winner's source overwrites the file.
+#[test]
+fn an_untouched_seed_of_the_winners_source_keeps_a_file_holding_its_projection() {
+    let (file, parent) = table_note("table-fix-parent.json");
+    let (_, current) = table_note("candidates.json");
+    let projection = {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&parent).unwrap();
+        doc.project(dohc_engine_collab::ContentKind::Richdoc)
+            .unwrap()
+            .content
+    };
+    assert_ne!(projection, file, "the parent's seed settles to other bytes");
+    assert_eq!(
+        untouched_seed_lost(
+            dohc_engine_collab::ContentKind::Richdoc,
+            &file,
+            &parent,
+            Some(&projection),
+            &current,
+        ),
+        (projection.clone(), file, projection)
+    );
+}
+
+/// The seed and the winner are the same text, but the file changed after
+/// seeding. The head check keeps the changed file as the current side.
+#[test]
+fn an_untouched_seed_of_the_winners_bytes_keeps_a_file_changed_after_seeding() {
+    let (seeded, changed) = ("Seeded.\n", "Changed after seeding.\n");
+    let kind = dohc_engine_collab::ContentKind::Plaintext;
+    assert_eq!(
+        untouched_seed_lost(
+            kind,
+            seeded,
+            &build_base(kind, seeded),
+            Some(changed),
+            &build_base(kind, seeded),
+        ),
+        (changed.to_owned(), seeded.to_owned(), changed.to_owned())
+    );
+}
+
+/// One row of the first-open fixtures: the table note and its first base.
+fn table_note(fixture: &str) -> (String, Vec<u8>) {
+    use base64::Engine as _;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dohc-engine-collab/tests/first-open-base")
+        .join(fixture);
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let row = rows
+        .into_iter()
+        .find(|row| row["name"] == "table-inline-code")
+        .expect("the table note");
+    let base = base64::engine::general_purpose::STANDARD
+        .decode(row["candidate"].as_str().unwrap())
+        .unwrap();
+    (row["markdown"].as_str().unwrap().to_owned(), base)
+}
+
+fn build_base(kind: dohc_engine_collab::ContentKind, source: &str) -> Vec<u8> {
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(kind, source)
+        .unwrap();
+    doc.encode_full_state()
+}
+
 /// Seed `file` as an untouched lineage, lose it to a base whose source is
 /// `winner`, and read the open conflict's current, incoming and head text.
 fn untouched_seed_loses_to(
@@ -5121,14 +5194,27 @@ fn untouched_seed_loses_to(
     file: &str,
     winner: &str,
 ) -> (String, String, String) {
+    untouched_seed_lost(
+        kind,
+        file,
+        &build_base(kind, file),
+        None,
+        &build_base(kind, winner),
+    )
+}
+
+/// Seed `file` as the untouched lineage `seed`, replace the file with
+/// `captured`, lose the seed to the base `winner`, and read the open
+/// conflict's current, incoming and head text.
+fn untouched_seed_lost(
+    kind: dohc_engine_collab::ContentKind,
+    file: &str,
+    seed: &[u8],
+    captured: Option<&str>,
+    winner: &[u8],
+) -> (String, String, String) {
     use dohc_engine_collab::{
-        DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc, record_local_update,
-    };
-    let build = |source: &str| {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(kind, source)
-            .unwrap();
-        doc.encode_full_state()
+        DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, record_local_update,
     };
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
@@ -5141,7 +5227,7 @@ fn untouched_seed_loses_to(
         &mut engine,
         &mut WriterDocCache::new(),
         &key,
-        &build(file),
+        seed,
         LocalAppend {
             marker: Some(MarkerCreation {
                 path: Some(path),
@@ -5157,7 +5243,25 @@ fn untouched_seed_loses_to(
         |_tx, _outcome, _sha| Ok(()),
     )
     .unwrap();
-    let claim = engine.put_binary_blob(&build(winner)).unwrap();
+    if let Some(text) = captured {
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE snapshots SET blob_sha256=?1 WHERE object_id=?2",
+                    params![sha, key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    }
+    let claim = engine.put_binary_blob(winner).unwrap();
     let mut base_op = envelope(
         "remote",
         0,

@@ -4629,3 +4629,28 @@ it.each(['Total\n1.\n\n  x', 'Total\n*\n\tfoo'])('keeps a bare marker in root pa
     expect(parseRichdocMarkdown(source, reading).content?.every(node => node.type === 'paragraph')).toBe(true)
   }
 })
+
+// Yjs spreads a detached element's children as call arguments, which overflows
+// a main thread's stack past about 124,000 children. A wide element goes in
+// empty and is filled in place.
+describe('an element with more children than Yjs can spread', () => {
+  it.each([
+    ['a paragraph of hard breaks', `${'a  \n'.repeat(6_000)}a\n`],
+    ['a list before a paragraph', `${'- a\n'.repeat(10_001)}\nafter\n`],
+    ['a quoted list', '> - a\n'.repeat(10_001)],
+    ['a list in a list item', `${'- a\n'.repeat(10_000)}- b\n${'  - c\n'.repeat(10_001)}`],
+  ])('builds the same tree as one conversion: %s', (_shape, markdown) => {
+    const staged = markdownToYDoc(markdown)
+    const direct = yDocFromBody(parseRichdocMarkdown(markdown).content ?? [])
+    expect(getDohcYDocBodyFragment(staged).toJSON()).toBe(getDohcYDocBodyFragment(direct).toJSON())
+    expect(yDocToMarkdown(staged)).toBe(yDocToMarkdown(direct))
+  })
+
+  it('seeds a paragraph of 200,000 hard breaks', () => {
+    const markdown = `a${'\\\n'.repeat(200_000)}a\n`
+    expect(() => yDocFromBody(parseRichdocMarkdown(markdown).content ?? [])).toThrow(RangeError)
+    const paragraph = getDohcYDocBodyFragment(markdownToYDoc(markdown)).get(0) as Y.XmlElement
+    expect(paragraph.nodeName).toBe('paragraph')
+    expect(paragraph.length).toBe(200_002)
+  })
+})

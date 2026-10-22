@@ -388,8 +388,7 @@ describe("first-open candidates", () => {
   // measurement. `over` is the same note with one more line. Run with
   // `vitest run src/firstOpenBase.test.ts --mode first-open-dense`.
   it.runIf(process.env.MODE === "first-open-dense")("writes the dense seeds the memory measurement checks", () => {
-    // Yjs spreads a new element's children as call arguments, so a single
-    // paragraph holding every hard break overflows the stack.
+    // Paragraphs of 1,387 hard breaks, the shape the measurement recorded.
     const breaks = (count: number) => Array.from({ length: Math.ceil(count / 1_387) },
       (_, index) => `${"a  \n".repeat(Math.min(1_387, count - index * 1_387) - 1)}a`).join("\n\n") + "\n";
     const shapes: [string, (count: number) => string, number][] = [

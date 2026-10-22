@@ -3254,15 +3254,18 @@ fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {
 }
 
 /// The fewest projection nodes `blocks` build: an element for each block,
-/// list item, table row and cell, and a text with its run for each non-empty
-/// paragraph.
+/// list item, table row and cell, each attribute the staged document writes,
+/// a heading's text, and a text with its run for each non-empty paragraph or
+/// code block. Wire-default cell spans are not counted.
 fn md_block_nodes(blocks: &[MdBlock<'_>]) -> usize {
-    let paragraph = |text: &str| if text.is_empty() { 1 } else { 3 };
-    let item = |text: &str, blocks: &[MdBlock<'_>]| 1 + paragraph(text) + md_block_nodes(blocks);
+    let text_run = |body: &str| 2 * usize::from(!body.is_empty());
+    let paragraph = |body: &str| 1 + text_run(body);
+    let item = |body: &str, blocks: &[MdBlock<'_>]| 1 + paragraph(body) + md_block_nodes(blocks);
     blocks
         .iter()
         .map(|block| match block {
-            MdBlock::Paragraph(text) => paragraph(text),
+            MdBlock::Paragraph(body) => paragraph(body),
+            MdBlock::Heading { text, .. } => 3 + usize::from(!text.is_empty()),
             MdBlock::Quote(inner) => 1 + md_block_nodes(inner),
             MdBlock::BulletList(items) => {
                 1 + items
@@ -3271,7 +3274,7 @@ fn md_block_nodes(blocks: &[MdBlock<'_>]) -> usize {
                     .sum::<usize>()
             }
             MdBlock::OrderedList { items, .. } => {
-                1 + items
+                2 + items
                     .iter()
                     .map(|entry| item(&entry.paragraph, entry.blocks()))
                     .sum::<usize>()
@@ -3279,13 +3282,32 @@ fn md_block_nodes(blocks: &[MdBlock<'_>]) -> usize {
             MdBlock::TaskList(items) => {
                 1 + items
                     .iter()
-                    .map(|(_, entry)| item(&entry.paragraph, entry.blocks()))
+                    .map(|(_, entry)| 1 + item(&entry.paragraph, entry.blocks()))
                     .sum::<usize>()
             }
-            MdBlock::Table { rows, .. } => {
-                1 + rows.iter().map(|cells| 1 + 2 * cells.len()).sum::<usize>()
+            MdBlock::CodeBlock { language, content } => {
+                1 + usize::from(!language.is_empty()) + text_run(content)
             }
-            _ => 1,
+            MdBlock::Rule => 1,
+            MdBlock::Table {
+                rows,
+                alignments,
+                row_heights,
+            } => {
+                // Escaped pipes and entities decode to text, never to none.
+                let cell = |(index, body): (usize, &String)| {
+                    1 + usize::from(matches!(alignments.get(index), Some(Some(_))))
+                        + paragraph(body)
+                };
+                1 + rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, cells)| {
+                        1 + usize::from(row_heights.contains_key(&row))
+                            + cells.iter().enumerate().map(cell).sum::<usize>()
+                    })
+                    .sum::<usize>()
+            }
         })
         .sum()
 }
@@ -9569,6 +9591,38 @@ mod projection_tests {
                     "{markdown:?} {reading:?}: {nodes}"
                 );
             }
+        }
+    }
+
+    /// Without inline code the count is exact: every heading text, attribute,
+    /// cell and code text the staged document writes is charged.
+    #[test]
+    fn staged_block_nodes_count_plain_blocks_exactly() {
+        for markdown in [
+            "# Title\n\n## \n",
+            "3. a\n4. \n",
+            "- [ ] a\n- [x] b\n",
+            "| a | |\n| :-- | --: |\n| b | c |\n",
+            "```rs\nx\n```\n\n```\n```\n\n---\n",
+        ] {
+            let (blocks, refused) =
+                parse_markdown_blocks_checked(markdown, MarkdownReading::Source);
+            assert!(!refused, "{markdown:?}");
+            let nodes = md_block_nodes(&blocks);
+            let staged = Ydoc::wire();
+            staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    markdown,
+                    MarkdownReading::Source,
+                    FileFold::No,
+                )
+                .unwrap();
+            assert!(
+                staged.project_richdoc_with_node_budget(nodes).is_ok()
+                    && staged.project_richdoc_with_node_budget(nodes - 1).is_err(),
+                "{markdown:?}: {nodes}"
+            );
         }
     }
 

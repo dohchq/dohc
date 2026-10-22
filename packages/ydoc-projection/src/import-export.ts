@@ -4,8 +4,10 @@ import { MarkdownManager } from '@tiptap/markdown'
 import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Token, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableCell, TableHeader, TableRow } from '@tiptap/extension-table'
+import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model'
 import {
-  prosemirrorJSONToYXmlFragment,
+  prosemirrorToYXmlFragment,
+  updateYFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
@@ -482,9 +484,61 @@ export function markdownToYDoc(
   const tiptapJson = parseRichdocMarkdown(
     usesCrlf ? body.replaceAll('\r\n', '\n') : body, options.reading,
   )
-  prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
+  writeBodyFragment(tiptapJson, bodyFragment)
 
   return doc
+}
+
+// Yjs fills an element outside a document with one argument spread, which
+// overflows the stack past about 124,000 children on a main thread and 498,000
+// in a worker.
+const MAX_DETACHED_CHILDREN = 10_000
+
+/**
+ * `prosemirrorJSONToYXmlFragment`, except that an element with more children
+ * than Yjs can spread goes in empty and is filled once it is in the document.
+ * The tree is the same; only the order Yjs numbers its items in differs.
+ */
+export function writeBodyFragment(json: JSONContent, fragment: Y.XmlFragment): void {
+  const source = schema.nodeFromJSON(json)
+  const fills: { path: number[]; node?: ProseMirrorNode }[] = []
+  const path: number[] = []
+  const detach = (node: ProseMirrorNode): ProseMirrorNode => {
+    const wide = path.length > 0 && node.childCount > MAX_DETACHED_CHILDREN
+      && yChildIndex(node, node.childCount) > MAX_DETACHED_CHILDREN
+    const fill: (typeof fills)[number] | undefined = wide ? { path: [...path] } : undefined
+    if (fill) fills.push(fill)
+    let children: ProseMirrorNode[] | undefined
+    node.forEach((child, _offset, index) => {
+      path.push(index)
+      const next = detach(child)
+      path.pop()
+      if (next !== child) (children ??= node.children.slice())[index] = next
+    })
+    const filled = children ? node.copy(Fragment.from(children)) : node
+    if (!fill) return filled
+    fill.node = filled
+    return node.copy()
+  }
+  prosemirrorToYXmlFragment(detach(source), fragment)
+  for (const { path, node } of fills) {
+    let parent = source
+    let target = fragment
+    for (const index of path) {
+      target = target.get(yChildIndex(parent, index)) as Y.XmlElement
+      parent = parent.child(index)
+    }
+    updateYFragment(fragment.doc!, target, node, { mapping: new Map(), isOMark: new Map() })
+  }
+}
+
+/** y-prosemirror keeps a run of text nodes as one child. */
+function yChildIndex(parent: ProseMirrorNode, index: number): number {
+  let children = 0
+  for (let at = 0; at < index; at += 1) {
+    if (!parent.child(at).isText || at === 0 || !parent.child(at - 1).isText) children += 1
+  }
+  return children
 }
 
 // Admission is independent of canonical serialization. Code bodies are opaque;

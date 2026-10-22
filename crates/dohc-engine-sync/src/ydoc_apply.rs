@@ -2953,9 +2953,14 @@ fn preserve_base_sides_in_tx(
     let mut recovered_paths = Vec::new();
     let incoming_sha = hex_sha256(incoming_content.as_bytes());
     // Equal projections need neither a choice nor a second copy, and neither
-    // does an untouched seed whose file already holds the winner's bytes.
+    // does an untouched seed of the winner's bytes whose file still holds them.
+    let quiet_adoption = losing_seed_untouched
+        && last_settled_sha == Some(incoming_sha.as_str())
+        && validate_retryable_ydoc_identity(tx, key, path)?
+            .snapshot
+            .is_some_and(|snapshot| snapshot.blob_sha256 == incoming_sha);
     if let (Some(claim), Some(local)) = (losing_claim_id, losing_projection)
-        && !(losing_seed_untouched && last_settled_sha == Some(incoming_sha.as_str()))
+        && !quiet_adoption
         && hex_sha256(local.as_bytes()) != incoming_sha
     {
         if let Some(opened) = conflict_replaced_lineage_in_tx(

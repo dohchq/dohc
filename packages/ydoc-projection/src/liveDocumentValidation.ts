@@ -7,16 +7,14 @@ import {
 import { liveDocumentKindForPath } from '@dohc/workspace-contracts/live-documents'
 import { validateUserWritePath } from '@dohc/workspace-core/paths'
 import { digest as sha256 } from 'lib0/hash/sha256'
-import {
-  prosemirrorJSONToYXmlFragment,
-  yXmlFragmentToProseMirrorRootNode,
-} from 'y-prosemirror'
+import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
 import * as Y from 'yjs'
 import {SOURCE_META_KEYS, readMarkdownSourceWitness, resolveMarkdownSource} from './artifact-markdown.js'
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
+  writeBodyFragment,
   yDocToMarkdown,
 } from './import-export.js'
 import {
@@ -764,7 +762,7 @@ function validatePublicState(
     const rebuilt = new Y.Doc({ gc: false })
     try {
       const rebuiltBody = rebuilt.getXmlFragment('body')
-      prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
+      writeBodyFragment(rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
       if (engineReader && !isProseMirrorSchemaError(error)) throw error
