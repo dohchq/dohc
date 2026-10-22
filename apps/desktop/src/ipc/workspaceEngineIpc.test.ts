@@ -1,3 +1,4 @@
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createTestScratch } from "../workspaces/testTemp";
 import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
@@ -1537,6 +1538,16 @@ describe("merged History IPC", () => {
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
     expect(h.historyCollections).not.toHaveBeenCalled();
   });
+});
+
+it("shows file History without Collections when another computer keeps them, and still fails on any other Collection error", async () => {
+  const h = await harness();
+  h.capture.listMoments.mockResolvedValue({ ...historyPage(), nextCursor: null });
+  h.historyCollections.mockRejectedValue(new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false }));
+  await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+  expect(h.historyCollections).toHaveBeenCalledOnce();
+  h.historyCollections.mockRejectedValue(new Error("Collection storage is full."));
+  await expect(h.invoke(historyOperations.listHistory.channel)).rejects.toThrow("Collection storage is full.");
 });
 
 it("does not start the Collection host for main per-file History", async () => {

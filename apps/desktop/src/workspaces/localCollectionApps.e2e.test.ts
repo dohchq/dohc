@@ -17,6 +17,7 @@ import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const engine = requireEngineBinaryOrSkip();
 const compile = createDatasetFixtureCompiler();
@@ -59,7 +60,7 @@ async function tripWorkspace(name: string) {
   // `down`: the engine is unavailable to the app, as when the daemon is gone.
   const control = { wrap: (real: LocalCollectionEngine): LocalCollectionEngine => real, down: false };
   async function open() {
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId, workspaceRoot: root, attachmentId: attached.attachmentId, capacityBytes: 1024 * 1024, compile,
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId, workspaceRoot: root, attachmentId: attached.attachmentId, capacityBytes: 1024 * 1024, compile,
       collectionEngine: () => { if (control.down) throw new Error("The workspace engine is unavailable."); return control.wrap(running.binding); },
       collectionAuthor: async () => person });
     hosts.push(host);

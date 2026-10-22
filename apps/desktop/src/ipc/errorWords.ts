@@ -41,8 +41,9 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
- * kind of item, or another user's. The message names the reason, then the
- * path from the workspace's root: one of the paths below, and nothing else.
+ * kind of item, another user's, or on a disk dohc can't check. The message
+ * names the reason, then the path from the workspace's root: one of the
+ * paths below, and nothing else.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
   /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
@@ -53,6 +54,7 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
+  ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
@@ -338,6 +340,28 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
   const { name, code, retryAfterMs, message } = parse(error);
   return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
     ? { words: message, waitMs: retryAfterMs } : null;
+}
+
+/**
+ * Why this computer cannot use a workspace's Collections: no computer keeps
+ * them yet, another one keeps them, dohc cannot read which one, the store
+ * this computer keeps is not there or was replaced, or the record changed
+ * while dohc wrote it.
+ */
+export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced", "changed"] as const;
+/** Refusals that keeping the Collections here can answer, after the person confirms where needed. */
+export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
+export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
+export const COLLECTIONS_REFUSAL_CODE = "collections-";
+/** The control that keeps Collections no computer keeps yet on this one. */
+export const KEEP_COLLECTIONS_HERE = "Keep the Collections on this computer";
+
+/** main's refusal to use a workspace's Collections here, with its words. */
+export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
+  const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
+  return kind === undefined ? null : { kind, words: message };
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */

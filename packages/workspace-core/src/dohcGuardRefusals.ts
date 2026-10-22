@@ -51,6 +51,11 @@ export const DOHC_SYNC_HISTORY_GUARD: DohcPathGuard = {
   lead: "dohc could not record this workspace's sync history.",
 };
 
+export const DOHC_COLLECTIONS_GUARD: DohcPathGuard = {
+  path: ".dohc/collections.json",
+  lead: "dohc could not read which computer keeps this workspace's Collections.",
+};
+
 export const DOHC_DATABASES_GUARD: DohcPathGuard = {
   path: ".dohc/databases",
   lead: "dohc could not save this database edit.",

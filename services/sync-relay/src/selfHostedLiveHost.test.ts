@@ -13,7 +13,7 @@ import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helpe
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
-import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
+import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -944,9 +944,11 @@ it("drains the workspace of a renamed last document and keeps its store and its 
 
 // Proves: a page of stopped documents that stay gives way to the next, so
 // every one of them reaches its replica and is released. Every store stays,
-// and no update asks for more workspaces than the engine opens.
+// and an update names one page of departing workspaces at most, beside the
+// hosted one. One page and one more workspace prove it; each workspace costs
+// durable writes, and the storage tests cover many pages.
 it("reaches stopped documents past a page of ones that stay and keeps every store", async () => {
-  const workspaces = Array.from({length: 130}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
+  const workspaces = Array.from({length: SERVICE_HOST_MAX_WORKSPACES + 1}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
   const last = storeName(workspaces.at(-1)!), stale = "e".repeat(64);
   const f = await fixture({pending: ["object-stopped"], seed: async (data, relay) => {
     const stopped = relay.raw.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
@@ -966,11 +968,11 @@ it("reaches stopped documents past a page of ones that stay and keeps every stor
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(await readFile(join(f.data, stale, "marker"), "utf8")).toBe(stale);
   await vi.waitFor(() => expect(f.updates.some(update => update.departing.some(row => row.workspaceId === workspaces.at(-1)))).toBe(true), {timeout: 10_000});
-  expect(undrained()).toHaveLength(131);
+  expect(undrained()).toHaveLength(workspaces.length + 1);
   f.pending.delete("object-stopped");
   await vi.waitFor(() => expect(undrained()).toEqual([scope.workspaceId]), {timeout: 20_000});
   expect(f.onError).not.toHaveBeenCalled();
-  expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(64);
+  expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(SERVICE_HOST_MAX_WORKSPACES + 1);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(existsSync(join(f.data, storeName(workspaces[0]!)))).toBe(true);
 });

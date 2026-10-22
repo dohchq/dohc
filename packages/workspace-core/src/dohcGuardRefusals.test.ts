@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DOHC_COLLECTIONS_GUARD,
   DOHC_ENGINE_GUARD,
   DOHC_DATABASES_GUARD,
   DOHC_METADATA_GUARD,
@@ -53,6 +54,9 @@ describe("dohc guard refusals", () => {
     );
     expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
+    );
+    expect(notAFileRefusal(DOHC_COLLECTIONS_GUARD, asLink)).toBe(
+      "dohc could not read which computer keeps this workspace's Collections. A link is at .dohc/collections.json, which must be a file. Remove or rename that link. Then retry.",
     );
     expect(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.",
