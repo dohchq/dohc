@@ -228,7 +228,8 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
           trashItem: async () => { throw new Error("No trash expected"); }, markDeleted: () => undefined }))(),
     };
     // A Unix socket path must stay short (107 bytes on Linux, 103 on macOS), so the socket gets its own folder.
-    server = await startCliServer({ stateDir: await createTestScratch("cli-"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
+    const socketHome = await createTestScratch("cli-");
+    server = await startCliServer({ stateDir: socketHome, listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
       agentRunDepth: () => 0, dispatchedAgentRun: () => false });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
@@ -266,7 +267,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const operationId = (renamed as { operationId: string }).operationId;
     await expect.poll(() => context.historyOperation!({operationId}), {timeout: REAL_DAEMON_DEADLINE_MS})
       .toMatchObject({ok: true, links: {state: "done", documents: 3, unchecked: [], uncheckedCount: 0}});
-    const agentUndo = () => mcpUndoOperation({root: rootPath, home: join(rootPath, ".dohc/socket-test")}, {operationId}, "dohc-mcp");
+    const agentUndo = () => mcpUndoOperation({root: rootPath, home: socketHome}, {operationId}, "dohc-mcp");
     await expect.poll(agentUndo, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 4 } });
     for (const name of ["one.md", "two.md", "open.md"]) {
       await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[folder/tracked.txt#part|label]]" + (name === "open.md" ? "" : "\n"));
