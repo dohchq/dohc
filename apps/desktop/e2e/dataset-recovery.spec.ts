@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
@@ -92,7 +92,9 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     const collections = restored.getByRole("region", { name: "Collections", exact: true });
     await expect(collections.getByTestId("collections-refusal")).toContainText("dohc doesn't know which computer keeps this workspace's Collections.");
     await expect(restored.getByRole("button", { name: "Restore from recovery file", exact: true })).toBeHidden();
-    expect(await readdir(join(target.rootPath, ".dohc"))).not.toContain("datasets");
+    const missing = (...path: string[]) => lstat(join(target.rootPath, ...path)).then(() => false, () => true);
+    expect(await missing(".dohc", "local", "datasets", "state.sqlite")).toBe(true);
+    expect(await missing(".dohc", "datasets")).toBe(true);
     await collections.getByRole("button", { name: "Keep the Collections on this computer", exact: true }).click();
     await expect(collections.getByTestId("collections-refusal")).toBeHidden();
     expect(await dataset(restored, { action: "list", workspaceId, includeArchived: true })).toMatchObject({ kind: "list", datasets: [] });
