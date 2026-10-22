@@ -1165,6 +1165,35 @@ describe("notice center", () => {
     );
   });
 
+  it("shows why a Linux .deb did not install, with the command that installs it and its copy, in the toast and the notice", async () => {
+    const ready = {
+      status: "ready" as const,
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest" as const,
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    };
+    const reason = "The update did not install. Run this command in a terminal to install it.";
+    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
+    installUpdate.mockResolvedValueOnce({ accepted: false, reason, state: { ...ready, message: reason, installCommand } });
+    renderNotices();
+    pushUpdate?.(ready);
+    expect(screen.queryByTestId("update-toast-install-command")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Restart" }));
+
+    expect((await screen.findByTestId("update-toast-install-command")).textContent).toBe(installCommand);
+    expect(screen.getByTestId("update-toast").textContent).toContain(reason);
+    expect(screen.getByTestId("update-toast-install-command-copy").getAttribute("aria-label")).toBe("Copy command");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(reason);
+    expect(screen.getByTestId("notice-update-ready-command").textContent).toBe(installCommand);
+    expect(screen.getByTestId("notice-update-ready-command-copy").getAttribute("aria-label")).toBe("Copy command");
+  });
+
   it("shows restart failures in the update notice and toast", async () => {
     installUpdate.mockResolvedValueOnce({
       accepted: false,

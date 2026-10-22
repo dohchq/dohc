@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { lstat, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
-import { ownedFileRefusal } from "@dohc/workspace-core/owned-file";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { localDatasetFolder } from "./localDatasetFolders";
+import { ownedSqliteFiles } from "./workspaceLocalState";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export const datasetCopyOwnerKey = (credentials: Pick<CloudCredentials, "serverUrl" | "userId">) =>
@@ -13,18 +13,11 @@ export const datasetCopyOwnerKey = (credentials: Pick<CloudCredentials, "serverU
 type Copy = Awaited<ReturnType<typeof createOwnerDatasetCopy>>;
 type Entry = { lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
 
-// A copy's database decides what the copy holds, so dohc opens only one that
-// is a file this user owns, that no other user can write, with one name. The
-// copy's folder is one only this user can change, so a check by name holds.
+// A copy's database decides what the copy holds, so dohc opens only one it
+// can trust, in the copy's folder, which only this user can change.
 async function assertOwnCopyFiles(directory: string, key: string): Promise<void> {
-  for (const name of ["replica.sqlite", "replica.sqlite-wal", "replica.sqlite-shm", "replica.sqlite-journal"]) {
-    const stats = await lstat(join(directory, name)).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (stats && ownedFileRefusal(stats) !== null) {
-      throw new Error(`dohc did not open this Collection's offline copy because it can't trust a file in .dohc/local/dataset-copies/${key}. Remove that folder, then try again.`);
-    }
+  if (!(await ownedSqliteFiles(directory, "replica.sqlite"))) {
+    throw new Error(`dohc did not open this Collection's offline copy because it can't trust a file in .dohc/local/dataset-copies/${key}. Remove that folder, then try again.`);
   }
 }
 
