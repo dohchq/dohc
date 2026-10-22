@@ -1817,6 +1817,180 @@ describe("shared view refresh", () => {
     expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("body\n");
   });
 
+  // A sharer on Linux holds `notes.md` and `Notes.md` as two files. Here the
+  // second arrives in its own refresh and takes the one file a disk that
+  // ignores case has for both, and a later refresh deletes `notes.md`. That
+  // delete would remove the file `Notes.md` still owns (#2294).
+  it("keeps the file another spelling still owns when a later refresh deletes one spelling", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("docs/notes.md", "old\n");
+    await refresh();
+    relay.addWrite("Docs/Notes.md", "live\n");
+    await refresh();
+    relay.addDelete("docs/notes.md");
+    await refresh();
+
+    expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+  });
+
+  // The same sequence the way dohc refreshes a view, capturing first: the
+  // second spelling arrives while the first's file is there, so it is held back
+  // as a collision and never written. Deleting the first then writes the live
+  // spelling's head into the file, which settles the collision.
+  it("writes the live spelling's head when a later refresh deletes the spelling the disk holds", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("docs/notes.md", "old\n");
+      await reconcile();
+      relay.addWrite("Docs/Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "docs", "notes.md"), "utf8")).toBe("old\n");
+      relay.addDelete("docs/notes.md");
+      await reconcile();
+
+      expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+      expect((await reconcile()).unjournalablePaths).toEqual([]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+    } finally {
+      await store.close();
+    }
+  });
+
+  // Both spellings arrive in one refresh, so the disk's one file holds the
+  // later one's bytes. Deleting that one writes the other's head there.
+  it("writes the other spelling's head when a refresh deletes the spelling whose bytes the disk holds", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("notes.md", "old\n");
+      relay.addWrite("Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("live\n");
+      relay.addDelete("Notes.md");
+      await reconcile();
+
+      expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("old\n");
+    } finally {
+      await store.close();
+    }
+  });
+
+  // A spelling the refresh protects, here a preserved path holding local
+  // edits, keeps its file: deleting another spelling neither removes the file
+  // nor writes the protected spelling's head over those edits.
+  it("leaves a protected spelling's file alone when a refresh deletes another spelling of it", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("Notes.md", "N\n");
+    relay.addWrite("notes.md", "n\n");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    await writeFile(join(rootDir, "notes.md"), "local bytes\n");
+    relay.addDelete("Notes.md");
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    try {
+      const notes = new Set(["notes.md"]);
+      await refreshSharedViewOnceWithPull({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, store,
+        excludeFromMaterialization: notes, protectedPaths: notes, trackPendingMaterialization: true,
+      });
+
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("local bytes\n");
+      // The delete left undone keeps its debt, so a capture after the owner is free settles the file.
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await store.close();
+    }
+  });
+
+  // A rename only by capitals in one refresh leaves the old spelling to the
+  // new one's write, which recreates the file under the new spelling.
+  it("ends a rename only by capitals with the new spelling on a disk that ignores case", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "body\n");
+    await refresh();
+    relay.addRename("notes.md", "Notes.md", "body\n");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("body\n");
+  });
+
+  // On a disk that keeps case apart the two spellings are two files, so the
+  // delete removes only its own.
+  it("deletes only its own spelling where the disk keeps case apart", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (ignoresCase) context.skip("this disk ignores case");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "old\n");
+    relay.addWrite("Notes.md", "live\n");
+    await refresh();
+    relay.addDelete("notes.md");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+  });
+
   it("leaves a directory that replaced a tracked file untouched during refresh", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();

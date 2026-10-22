@@ -7,18 +7,38 @@ import { ownedLocalStateDir, readLocalStateFrom, type LocalStateWorkspace } from
 // root, with what it said about `.dohc/local`.
 export function fakeLocalStateOpens() {
   const opens = new Map<string, { localStateReady: boolean }>();
+  const underWay = new Map<string, Promise<void>>();
   const key = (workspace: LocalStateWorkspace) => `${workspace.workspaceId}\0${workspace.rootPath}`;
-  readLocalStateFrom({ currentBinding: (workspace) => opens.get(key(workspace)) ?? null });
-  return {
+  let waits = 0;
+  readLocalStateFrom({
+    currentBinding: (workspace) => opens.get(key(workspace)) ?? null,
+    openInProgress: (workspace) => {
+      const opening = underWay.get(key(workspace)) ?? null;
+      if (opening) waits++;
+      return opening;
+    },
+  });
+  const fake = {
     /** What an engine open that writes does: make the folder, then answer. */
     async open(workspace: LocalStateWorkspace, localStateReady = true) {
       await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
       opens.set(key(workspace), { localStateReady });
     },
+    /** An open that is under way until `finish` answers it. */
+    start(workspace: LocalStateWorkspace) {
+      let finish!: () => void;
+      const answered = new Promise<void>((resolve) => { finish = resolve; });
+      const opening = answered.then(() => fake.open(workspace)).finally(() => underWay.delete(key(workspace)));
+      underWay.set(key(workspace), opening);
+      return { finish: async () => { finish(); await opening; } };
+    },
+    /** How many times a writer waited for an open under way. */
+    waits: () => waits,
     close(workspace: LocalStateWorkspace) {
       opens.delete(key(workspace));
     },
   };
+  return fake;
 }
 
 // One map for every workspace a file opens with openedLocalState, installed

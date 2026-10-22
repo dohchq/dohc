@@ -8,6 +8,13 @@ import type {
 import type { ImportDataInput } from "@dohc/sqlite-worker";
 import type { FsEntryIdentity } from "@dohc/workspace-core/fs-entry-identity";
 
+/**
+ * The code of an edit the worker refused because a line in the operations
+ * log has a numeric version that is not a safe integer, so no next number
+ * can come after it.
+ */
+export const UNCOUNTABLE_LOG_VERSION = "uncountable-log-version";
+
 export interface DatabaseImportResult {
   bytes: Uint8Array;
   rowCount: number;

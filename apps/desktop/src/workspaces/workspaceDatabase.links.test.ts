@@ -1,13 +1,14 @@
-import { databaseOpLogPath } from "@dohc/workspace-core";
+import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
 import * as fs from "node:fs/promises";
 import { link, lstat, mkdir, readFile, readdir, readlink, rename, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyDatabaseEdit, createWorkspaceDatabaseAccess } from "./workspaceDatabase";
+import { createWorkspaceDatabaseAccess } from "./workspaceDatabase";
 import { readDatabaseSnapshotAtPath } from "./workspaceDatabaseCore";
 import { createWorkspaceDatabaseWorkerOwner, type WorkspaceDatabaseWorkerOwner } from "./workspaceDatabaseWorker";
 import { createTestScratch } from "./testTemp";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -25,6 +26,7 @@ beforeEach(async () => {
   base = await createTestScratch("dohc-database-links-");
   root = join(base, "workspace");
   await mkdir(root);
+  await openedLocalState({ workspaceId: "links", rootPath: root });
   const db = new DatabaseSync(join(root, "data.sqlite"));
   try {
     db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')");
@@ -34,9 +36,8 @@ beforeEach(async () => {
 afterEach(async () => { vi.restoreAllMocks(); vi.mocked(fs.lstat).mockReset(); await worker.dispose(); });
 
 const entryPoints = [
-  { name: "direct edit", run: (rootPath: string) => applyDatabaseEdit(rootPath, "data.sqlite", EDIT, AUTHOR, 1, { worker }) },
   { name: "workspace access", run: (rootPath: string) => createWorkspaceDatabaseAccess(worker).editWorkspaceDatabaseInWorker({
-    rootPath, relativePath: "data.sqlite", edit: EDIT, author: AUTHOR, nowMs: 1,
+    workspace: { workspaceId: "links", rootPath }, relativePath: "data.sqlite", edit: EDIT, author: AUTHOR, nowMs: 1,
   }) },
 ];
 
@@ -48,6 +49,14 @@ async function tree(path: string): Promise<Record<string, string>> {
     else result[name] = "directory";
   }
   return result;
+}
+
+function counterPath(rootPath = root): string {
+  return join(rootPath, ".dohc", "local", "databases", databaseFolderName("data.sqlite"), "state.sqlite");
+}
+
+function storageFile(file: string): string {
+  return file === "operations.jsonl" ? join(root, databaseOpLogPath("data.sqlite")) : `${counterPath()}${file.slice("state.sqlite".length)}`;
 }
 
 function rowValue(): unknown {
@@ -88,7 +97,7 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
   describe.each(["operations.jsonl", "state.sqlite", "state.sqlite-journal"])("%s", (file) => {
     it.each([false, true])("refuses a file link without touching its target (exists: %s)", async (exists) => {
       const logPath = join(root, databaseOpLogPath("data.sqlite"));
-      const path = join(dirname(logPath), file);
+      const path = storageFile(file);
       const outside = join(base, "outside");
       const target = join(outside, file);
       await mkdir(dirname(path), { recursive: true });
@@ -106,19 +115,22 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
       expect((await lstat(path)).isSymbolicLink()).toBe(true);
       expect(await readlink(path)).toBe(link);
       expect(outcome).toBeInstanceOf(Error);
-      expect((outcome as Error).message).toContain(file);
-      expect((outcome as Error).message).toMatch(/A link is at .*must be a file\. Remove or rename that link\. Then retry\./);
+      expect((outcome as Error).message).toMatch(file === "operations.jsonl"
+        ? /A link is at .*must be a file\. Remove or rename that link\. Then retry\./
+        : /dohc can't trust a file in .dohc\/local\/databases\/.*Remove that folder, then try again\./);
       if (file === "operations.jsonl") {
-        await expect(lstat(join(dirname(path), "state.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lstat(counterPath())).rejects.toMatchObject({ code: "ENOENT" });
       } else {
         await expect(lstat(logPath)).rejects.toMatchObject({ code: "ENOENT" });
       }
     });
   });
 
-  it.each([".dohc", ".dohc/databases", "slug"])("refuses a junction at %s before creating any target folders", async (ancestor) => {
+  it.each([".dohc", ".dohc/databases", "slug", ".dohc/local", ".dohc/local/databases", "local slug"])("refuses a junction at %s before creating any target folders", async (ancestor) => {
     const logPath = join(root, databaseOpLogPath("data.sqlite"));
-    const path = ancestor === "slug" ? dirname(logPath) : join(root, ancestor);
+    const path = ancestor === "slug" ? dirname(logPath) : ancestor === "local slug" ? dirname(counterPath()) : join(root, ancestor);
+    const existing = await lstat(path).catch(() => null);
+    if (existing) await rename(path, `${path}-parked`);
     const outside = join(base, "outside");
     await mkdir(dirname(path), { recursive: true });
     await mkdir(outside);
@@ -129,7 +141,9 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
     expect((await lstat(path)).isSymbolicLink()).toBe(true);
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toContain(relative(root, path).replaceAll("\\", "/"));
-    expect((outcome as Error).message).toMatch(/A link is at .*must be a real folder\. Remove or rename that link\. Then retry\./);
+    expect((outcome as Error).message).toMatch(ancestor === ".dohc" || ancestor === ".dohc/local"
+      ? /is a link\. Put what it links to in its place, then try again\./
+      : /A link is at .*must be a real folder\. Remove or rename that link\. Then retry\./);
   });
 
   it("refuses a slug redirected to another directory inside the workspace", async () => {
@@ -144,14 +158,15 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
   });
 
   it.each(["operations.jsonl", "state.sqlite"])("names the refusal for a directory at %s", async (file) => {
-    const logPath = join(root, databaseOpLogPath("data.sqlite"));
-    await mkdir(join(dirname(logPath), file), { recursive: true });
-    await expect(run(root)).rejects.toThrow(/An item is at .*must be a file\. Remove or rename that item\. Then retry\./);
+    await mkdir(storageFile(file), { recursive: true });
+    await expect(run(root)).rejects.toThrow(file === "operations.jsonl"
+      ? /An item is at .*must be a file\. Remove or rename that item\. Then retry\./
+      : /dohc can't trust a file in .*Remove that folder, then try again\./);
     expect(rowValue()).toBe("before");
   });
 
   it.each(["operations.jsonl", "state.sqlite"])("refuses a hard-linked %s without changing either name", async (file) => {
-    const path = join(dirname(join(root, databaseOpLogPath("data.sqlite"))), file);
+    const path = storageFile(file);
     const target = join(base, `outside-${file}`);
     await mkdir(dirname(path), { recursive: true });
     if (file === "state.sqlite") new DatabaseSync(target).close();
@@ -159,7 +174,9 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
     await link(target, path);
     const before = await readFile(target);
     const dispatch = vi.spyOn(worker, "editPath");
-    await expect(run(root)).rejects.toThrow(/has another link.*Remove or rename this file\. Then retry\./);
+    await expect(run(root)).rejects.toThrow(file === "operations.jsonl"
+      ? /has another link.*Remove or rename this file\. Then retry\./
+      : /dohc can't trust a file in .*Remove that folder, then try again\./);
     expect(dispatch).not.toHaveBeenCalled();
     expect(await readFile(target)).toEqual(before);
     expect(await readFile(path)).toEqual(before);
@@ -170,6 +187,7 @@ describe.each(entryPoints)("$name metadata custody", ({ run }) => {
   it("edits and reopens through a workspace alias with increasing log versions", async () => {
     const alias = join(base, "alias");
     await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+    await openedLocalState({ workspaceId: "links", rootPath: alias });
     expect((await run(alias)).version).toBe(1);
     await worker.dispose();
     worker = createWorkspaceDatabaseWorkerOwner();

@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { renameSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -101,6 +102,34 @@ it("refuses a hard-linked log in the worker without relying on the main-process 
   await expect(editDatabaseAtPath(input)).rejects.toThrow(/has another link/);
   expect(await fs.readFile(target, "utf8")).toBe("");
   await expect(fs.lstat(input.statePath)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+});
+
+it("counts through the checked log handle when its name becomes a link before reading", async () => {
+  const { root, input } = await editFixture();
+  const target = join(root, "outside.jsonl");
+  const parked = join(root, "parked.jsonl");
+  await fs.writeFile(input.logPath, '{"version":40}\n');
+  await fs.writeFile(target, '{"version":999}\n');
+  const open = vi.mocked(fs.open).getMockImplementation()!;
+  vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    const readLines = handle.readLines.bind(handle);
+    vi.spyOn(handle, "readLines").mockImplementationOnce((options) => {
+      renameSync(input.logPath, parked);
+      symlinkSync(target, input.logPath, "file");
+      return readLines(options);
+    });
+    return handle;
+  });
+  await expect(editDatabaseAtPath(input)).rejects.toThrow(/link.*must be a file/);
+  expect(fs.open).toHaveBeenCalledTimes(1);
+  const counter = new DatabaseSync(input.statePath);
+  try {
+    expect(counter.prepare("SELECT value FROM database_operation_state WHERE key = 'last_version'").get()?.value).toBe(41);
+  } finally { counter.close(); }
+  expect(await fs.readFile(target, "utf8")).toBe('{"version":999}\n');
+  expect(await fs.readFile(parked, "utf8")).toBe('{"version":40}\n');
   expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
 });
 
