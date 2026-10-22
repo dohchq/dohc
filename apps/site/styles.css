@@ -295,6 +295,7 @@ body {
 
 .download-other:hover { color: var(--ink); }
 /* Every build is an alpha. Drawn like Drive's "Coming soon", one size down. */
+.nav-start { display: flex; align-items: center; gap: 12px; }
 .alpha-tag { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, var(--bg)); color: var(--ink); font: 600 11px/1.4 var(--font-sans); }
 
 :focus-visible {
@@ -474,7 +475,7 @@ body {
   .hero-with-engine { grid-template-columns: 1fr; text-align: center; gap: 28px; }
   .hero-with-engine h1 { margin-inline: auto; }
   .hero-with-engine .hero-sub { margin-inline: auto; }
-  .hero-with-engine .hero-cta, .hero-with-engine .download-control, .hero-facts { justify-content: center; }
+  .hero-with-engine .hero-cta, .hero-facts { justify-content: center; }
   .hero-engine-view { height: auto; aspect-ratio: 1 / 1; }
 }
 
@@ -2042,6 +2043,11 @@ p { text-wrap: pretty; }
 @media (max-width: 720px) {
   .nav-links a[href='#demo'],
   .nav-end .nav-download { display: none; }
+}
+
+/* The alpha tag beside the logo leaves a phone room for one section link. */
+@media (max-width: 420px) {
+  .nav-links a[href='#drive'] { display: none; }
 }
 
 /* ---------- buttons ---------- */
