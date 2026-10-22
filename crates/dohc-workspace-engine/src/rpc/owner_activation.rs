@@ -176,7 +176,7 @@ impl EngineService {
             }
             (session.key, None)
         } else {
-            let db_path = open.db_path.clone();
+            let db_path = open.actor.database_path().to_path_buf();
             let workspace_id = open.workspace_id.clone();
             let path = params.path.clone();
             let namespace = namespace.clone();
