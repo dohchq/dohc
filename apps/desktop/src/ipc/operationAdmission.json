@@ -82,6 +82,8 @@
   "desktop:restrict-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-crash-report": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:send-crash-report": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:read-collection-copies-left": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:remove-collection-copies-left": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-diagnostics": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:save-diagnostics": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-reports-notice": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

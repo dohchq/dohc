@@ -171,6 +171,7 @@ import {
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
+  collectionCopiesLeftOperations,
   workspaceTrustOperations,
   reportingOperations,
   usageRecordOperations,
@@ -1025,7 +1026,18 @@ type CloudSessionCredentials = NonNullable<
 let cachedCredentials: CloudSessionCredentials | null = null;
 let clearButtonInspections: (() => void) | undefined;
 let retryStopAndRestoreReleases: (() => void) | undefined;
-const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
+// The folders an account change has not removed yet, and the accounts that
+// left, stay in this record. The next start removes those folders before any
+// copy opens. Every window shows what is left.
+const ownerDatasetCopies = createOwnerDatasetCopyRegistry({
+  record: join(stateDir(), "dataset-copy-removals.json"),
+  workspaces: () => listWorkspaces().map(workspace => workspace.rootPath),
+  onLeftover: () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.collectionCopiesLeftChanged);
+    }
+  },
+});
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
 let receivedShareCredentialsChanged: ((current: CloudSessionCredentials | null, settled: boolean) => void) | undefined;
@@ -7136,6 +7148,14 @@ function registerIpcHandlers(): void {
   settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
+
+  registerOperations(operationBoundary, collectionCopiesLeftOperations, {
+    readCollectionCopiesLeft: () => ownerDatasetCopies.leftover(),
+    removeCollectionCopiesLeft: async () => {
+      await ownerDatasetCopies.removeLeftover().catch(error => console.error("Collection copy cleanup failed", error));
+      return ownerDatasetCopies.leftover();
+    },
+  });
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),
