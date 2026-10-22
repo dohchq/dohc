@@ -234,7 +234,7 @@ it("records a folder it could not remove, and the next start removes it before a
   void next.credentialsChanged(other.ownerKey);
   await next.get(other);
   expect(leftAtOpen).toBe(false);expect(next.leftover()).toEqual(nothing);
-  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
 });
 it("tells the windows once the start has tried its record, though a read before it saw nothing left",async()=>{
   const f=await failedSignOut(),onLeftover=vi.fn(),next=restart(f.record,[],onLeftover);
@@ -258,7 +258,7 @@ it.skipIf(process.platform==="win32"||process.getuid?.()===0)("says when it cann
   await next.removeLeftover();
   expect(await readdir(dirname(f.directory))).toEqual([]);
   expect(next.leftover()).toEqual(nothing);expect(onLeftover).toHaveBeenCalledTimes(2);
-  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
 });
 it("records what a sign-out will remove before any copy closes, so a stop part way leaves it for the next start",async()=>{
   const f=await fixture(),copy=await f.registry.get(f.input),{directory}=mocks.open.mock.calls[0]![0] as {directory:string};
@@ -346,7 +346,7 @@ it.each(["Try again","the next start"])("keeps the look in every workspace owed 
   // An unchanged owner answers with the start's own cleanup.
   await (when==="Try again"?registry.removeLeftover():registry.credentialsChanged(null));
   await expect(lstat(copy)).rejects.toThrow("ENOENT");
-  expect(registry.leftover()).toEqual(nothing);await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  expect(registry.leftover()).toEqual(nothing);expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
 });
 it("removes only the copies of accounts that left in a look still owed, never the signed-in account's, after a restart",async()=>{
   const earlier=await mkdtemp(join(tmpdir(),"dohc-copy-registry-earlier-"));cleanups.push(()=>rm(earlier,{recursive:true,force:true}));
@@ -368,5 +368,33 @@ it("removes only the copies of accounts that left in a look still owed, never th
   await restart(f.record,[f.input.rootPath,earlier]).credentialsChanged(null);
   for(const copy of mine)expect(await readdir(copy)).toEqual(["owned.sqlite"]);
   for(const copy of [first,tagged,untagged])await expect(lstat(copy)).rejects.toThrow("ENOENT");
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
+});
+it.skipIf(process.platform==="win32"||process.getuid?.()===0)("forgets the signed-in account's own folders in a record it reads late, and leaves its open copy",async()=>{
+  const f=await failedSignOut();files.busy.clear();
+  await chmod(f.record,0o000);cleanups.push(()=>chmod(f.record,0o600).catch(()=>undefined));
+  // The record can't be read at the next start, and the account that left signs in again and opens its copy.
+  const next=restart(f.record,[f.input.rootPath]);
+  await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
+  await expect(next.credentialsChanged(f.input.ownerKey)).rejects.toThrow("EACCES");
+  await next.get({...f.input,lifetime:new AbortController().signal});
+  expect(mocks.open.mock.calls[1]![0].directory).toBe(f.directory);
+  await chmod(f.record,0o600);
+  await next.removeLeftover();
+  expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);expect(next.leftover()).toEqual(nothing);
   await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+});
+it("keeps the tags of accounts that left, so a later cleanup removes a copy no earlier one looked at",async()=>{
+  const away=await mkdtemp(join(tmpdir(),"dohc-copy-registry-away-"));cleanups.push(()=>rm(away,{recursive:true,force:true}));
+  const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  // A copy of the same account in a workspace that is not in the list when it signs out.
+  const stranded=join(away,".dohc","local","dataset-copies",`${basename(directory).slice(0,16)}-${"1".repeat(64)}`);
+  await mkdir(stranded,{recursive:true});await writeFile(join(stranded,"replica.sqlite"),"account data");
+  await f.registry.credentialsChanged(null);
+  expect(await readdir(stranded)).toEqual(["replica.sqlite"]);
+  // After a restart the workspace is listed again, and another account signs in and out.
+  const next=restart(f.record,[f.input.rootPath,away]),b=datasetCopyOwnerKey({serverUrl:"https://account",userId:"b"});
+  await next.credentialsChanged(b);await next.credentialsChanged(null);
+  await expect(lstat(stranded)).rejects.toThrow("ENOENT");
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag,tag]});
 });

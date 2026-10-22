@@ -1026,9 +1026,9 @@ type CloudSessionCredentials = NonNullable<
 let cachedCredentials: CloudSessionCredentials | null = null;
 let clearButtonInspections: (() => void) | undefined;
 let retryStopAndRestoreReleases: (() => void) | undefined;
-// The folders an account change has not removed yet stay in this record,
-// and the next start removes them before any copy opens. Every window shows
-// what is left.
+// The folders an account change has not removed yet, and the accounts that
+// left, stay in this record. The next start removes those folders before any
+// copy opens. Every window shows what is left.
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry({
   record: join(stateDir(), "dataset-copy-removals.json"),
   workspaces: () => listWorkspaces().map(workspace => workspace.rootPath),
