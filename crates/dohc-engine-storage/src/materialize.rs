@@ -450,6 +450,27 @@ pub fn pending_switch_jobs_in(
         .map_err(StorageError::corrupt_public)
 }
 
+/// Pending merge deletes in a workspace, including legacy unscoped rows, that
+/// expect `preimage_sha256` at their path.
+pub(crate) fn pending_merge_deletes_expecting(
+    conn: &Connection,
+    workspace_id: &str,
+    preimage_sha256: &str,
+) -> Result<Vec<MaterializationJob>, StorageError> {
+    let sql = format!(
+        "SELECT {JOB_COLUMNS} FROM materialization_jobs \
+         WHERE status = 'pending' AND operation = 'delete' AND job_id GLOB 'merge-mat_*' \
+           AND workspace_id IN (?1, '') AND preimage_present = 1 AND preimage_sha256 = ?2 \
+         ORDER BY created_at_ms ASC, job_id ASC"
+    );
+    let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id, preimage_sha256], row_to_job)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
 pub(crate) fn has_pending_job_for_path(
     conn: &Connection,
     workspace_id: &str,

@@ -2567,12 +2567,12 @@ fn create_from_temp(
 }
 
 /// A merge that renames a file only by case or normalization deletes the old
-/// spelling before it creates the new one. On a disk that ignores the
-/// difference, a create that finds its name held by the old spelling, while
-/// that delete is still pending, runs the delete first. This finds that
-/// delete when the file at the target is stored on disk under the delete's
-/// path and holds the bytes the delete expects. The two spellings can differ
-/// in a folder name, the file name, or both.
+/// path before it creates the new one. On a disk that ignores the difference,
+/// a create that finds its name held by the file that delete must still
+/// remove runs the delete first. This finds that delete when its path
+/// reaches the same file on disk as the target, and the file holds the bytes
+/// the delete expects. Either path can be spelled differently from the name
+/// the disk stores.
 fn pending_respelled_delete(
     store: &EngineStore,
     root: &Path,
@@ -2580,23 +2580,21 @@ fn pending_respelled_delete(
     job: &MaterializationJob,
     current_sha256: &str,
 ) -> Result<Option<MaterializationJob>, MaterializeError> {
-    let stored = std::fs::canonicalize(target).ok().and_then(|stored| {
-        let relative = stored.strip_prefix(root).ok()?.to_str()?;
-        Some(relative.replace('\\', "/"))
-    });
-    let Some(stored) = stored.filter(|stored| *stored != job.target_path) else {
+    let Some(file) = std::fs::canonicalize(target)
+        .ok()
+        .filter(|file| file.starts_with(root))
+    else {
         return Ok(None);
     };
-    let expected = Preimage::Present(current_sha256.to_owned());
     Ok(store
-        .list_pending_materialization_jobs()?
+        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
         .into_iter()
         .find(|delete| {
-            delete.operation == MaterializationOperation::Delete
-                && delete.job_id.starts_with("merge-mat_")
-                && (delete.workspace_id == job.workspace_id || delete.workspace_id.is_empty())
-                && delete.target_path == stored
-                && delete.preimage == expected
+            delete.target_path != job.target_path
+                && resolve_target(root, &delete.target_path)
+                    .ok()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .is_some_and(|path| path == file)
         }))
 }
 
