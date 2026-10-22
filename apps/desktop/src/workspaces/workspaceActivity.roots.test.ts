@@ -44,3 +44,26 @@ it.each(["native", "registry"] as const)("keeps activity and agent checks on one
     await activity.stop(state);
   }
 });
+
+it("reopens a capture with the preserved run's root after admitting another spelling", async () => {
+  const folder = await createTestScratch("activity-reopen-root-");
+  const rootPath = realpathSync.native(folder);
+  const workspace = { workspaceId: "workspace", rootPath, attachmentId: Symbol("attachment"),
+    kind: "personal" as const, mode: "local-first" as const };
+  const capture = { start: vi.fn(), stop: vi.fn(async () => undefined),
+    setActiveAgentRun: vi.fn(async () => undefined), settleAndCloseAllLiveSessions: vi.fn(async () => undefined) };
+  const captureFor = vi.fn((_workspace: { rootPath: string }) => ({ shareView: false, capture: capture as never }));
+  const activity = createWorkspaceActivity(vi.fn(), { observationFor: idleObservation, captureFor });
+  const state = new WorkspaceActivityState();
+  try {
+    await activity.open(workspace, state);
+    await activity.claimAgentRun(workspace, state, { agentId: "agent", onBehalfOf: "person", agentRunId: "run", depth: 0 });
+    await activity.close(workspace, state, { preserveAgentRun: true });
+    await activity.open({ ...workspace, rootPath: `${canonicalWorkspaceRoot(folder)}/` }, state);
+    expect(captureFor).toHaveBeenCalledTimes(2);
+    expect(captureFor.mock.calls[1]?.[0].rootPath).toBe(rootPath);
+    expect(activity.workspaceRootPath(state)).toBe(rootPath);
+  } finally {
+    await activity.stop(state);
+  }
+});

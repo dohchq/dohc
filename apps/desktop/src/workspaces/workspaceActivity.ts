@@ -351,16 +351,17 @@ export function createWorkspaceActivity(
   }
 
   async function open(
-    workspace: ActivityWorkspace,
+    requestedWorkspace: ActivityWorkspace,
     state: WorkspaceActivityState,
   ): Promise<SyncStatusResult> {
     const current = state.entry;
     const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
-    if (rootPath !== undefined && !workspaceRootsMatch(rootPath, workspace.rootPath)) {
+    if (rootPath !== undefined && !workspaceRootsMatch(rootPath, requestedWorkspace.rootPath)) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
     }
+    const workspace = rootPath === undefined ? requestedWorkspace : { ...requestedWorkspace, rootPath };
     if (!current) {
       const entry: WatchedWorkspace = {
         workspace,
