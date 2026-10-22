@@ -1047,8 +1047,9 @@ fn nested_contract_item_setext_text_trims_like_marked() {
 
 #[test]
 fn nested_contract_item_setext_bang_and_pipe_lines_follow_marked() {
-    // marked starts `<!` block HTML only before a letter, a comment or CDATA,
-    // and a table divider holds no tab, so the first lines are heading text.
+    // marked starts `<!` block HTML only before a letter, a comment or CDATA
+    // in any case, and a table divider holds no tab, so the first lines are
+    // heading text.
     for (source, heading) in [
         ("- <!-x\n  =", Some("<!-x")),
         ("- <!\n  =", Some("<!")),
@@ -1058,6 +1059,8 @@ fn nested_contract_item_setext_bang_and_pipe_lines_follow_marked() {
         ("- <!a\n  =", None),
         ("- <!--x\n  =", None),
         ("- <![CDATA[x\n  =", None),
+        ("- <![cdata[x\n  =", None),
+        ("- <![CdAtA[x\n  =", None),
     ] {
         let blocks = parse_markdown_blocks(source, MarkdownReading::Source);
         let [MdBlock::BulletList(items)] = blocks.as_slice() else {

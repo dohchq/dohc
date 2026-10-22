@@ -2637,7 +2637,9 @@ fn setext_text(line: &str) -> Option<bool> {
             Some(bang) => {
                 bang.starts_with(|c: char| c.is_ascii_alphabetic())
                     || bang.starts_with("--")
-                    || bang.starts_with("[CDATA[")
+                    || bang
+                        .get(..7)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[CDATA["))
             }
             None => html_block(rest),
         };

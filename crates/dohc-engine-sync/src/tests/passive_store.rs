@@ -318,6 +318,8 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
     // refuses a `--` heading over two lines, so both settles write its
     // projection, as main did. A bare `-` heading over two lines, and an `=`
     // heading that marked and main both read, keep their file, as on main.
+    // So does an `=` heading beside a `--` line that starts CDATA in any case,
+    // which only the file reading can prove.
     for (name, file, with_file) in [
         (
             "lexical-16",
@@ -344,6 +346,16 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
             "list-heading-equals-pipe-tab",
             "- |\t|\n  =\n",
             "- |\t|\n  =\n",
+        ),
+        (
+            "list-heading-cdata-lowercase",
+            "- a\n  =\n- <![cdata[x\n  --\n",
+            "- a\n  =\n- <![cdata[x\n  --\n",
+        ),
+        (
+            "list-heading-cdata-mixed-case",
+            "- a\n  =\n- <![CdAtA[x\n  --\n",
+            "- a\n  =\n- <![CdAtA[x\n  --\n",
         ),
     ] {
         let vector = vectors
