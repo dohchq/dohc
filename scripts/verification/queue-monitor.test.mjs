@@ -177,6 +177,8 @@ function get(port, path, { host = `127.0.0.1:${port}`, method = "GET", headers =
 
 test("the server answers reads only on this host's names and the tailnet", async t => {
   const root = await queueRoot(t);
+  // The server reads the clock; give it the fixture's, so the fixture's runs stay within its window.
+  t.mock.timers.enable({ apis: ["Date"], now });
   const server = startMonitor({ root, port: 0 });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");

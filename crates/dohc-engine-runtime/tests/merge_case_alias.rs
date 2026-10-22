@@ -66,7 +66,7 @@ async fn secret_merge_replay(
         return;
     }
     let db = engine_db_path(&root).unwrap();
-    let key = create_key_file(&root).unwrap();
+    let key = create_key_file(&root.join(".dohc/engine")).unwrap();
     {
         let mut store = EngineStore::open(&db, 1).unwrap();
         VersionedTextStore::new(&mut store)
@@ -238,7 +238,7 @@ async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
     // Main's tip-present check completes this delete before alias retirement runs.
     let root = ScratchDir::new().unwrap();
     let db = engine_db_path(&root).unwrap();
-    let key = create_key_file(&root).unwrap();
+    let key = create_key_file(&root.join(".dohc/engine")).unwrap();
     {
         let mut store = EngineStore::open(&db, 1).unwrap();
         VersionedTextStore::new(&mut store)

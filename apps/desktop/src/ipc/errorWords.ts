@@ -41,8 +41,9 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
- * kind of item, or another user's. The message names the reason, then the
- * path from the workspace's root: one of the paths below, and nothing else.
+ * kind of item, another user's, or on a disk dohc can't check. The message
+ * names the reason, then the path from the workspace's root: one of the
+ * paths below, and nothing else.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
   /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
@@ -53,6 +54,7 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
+  ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
@@ -353,6 +355,32 @@ export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
 export const COLLECTIONS_REFUSAL_CODE = "collections-";
 /** The control that keeps Collections no computer keeps yet on this one. */
 export const KEEP_COLLECTIONS_HERE = "Keep the Collections on this computer";
+
+/**
+ * Where another computer keeps a workspace's Collections, and the two ways
+ * on. `others`: this computer lists some of them from its server.
+ */
+export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }, others = false): string {
+  const where = computer.sameName ? `${computer.label}, another installation of dohc with this computer's name` : computer.label;
+  return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
+}
+
+/**
+ * The code of a Collections list this computer's server didn't give, where
+ * another computer keeps the workspace's own Collections.
+ */
+export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
+
+/**
+ * main's words for that list: on the first line, where the workspace's
+ * Collections are. After it, the server's error, which reads as it would alone.
+ */
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; failure: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
+  const [elsewhere = "", ...failure] = message.split("\n");
+  return elsewhere ? { elsewhere, failure: failure.join("\n") } : null;
+}
 
 /** main's refusal to use a workspace's Collections here, with its words. */
 export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {

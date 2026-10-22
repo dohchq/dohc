@@ -90,9 +90,11 @@ export function notAFileRefusal(
 }
 
 // The path is a real folder, but another user owns it or can write in it, so
-// they could replace what dohc keeps there.
+// they could replace what dohc keeps there. The folder can hold what only
+// this computer has, such as the Collections or the workspace trash, so the
+// way out keeps it.
 export function notOnlyYoursRefusal(guard: DohcPathGuard): string {
-  return `${guard.lead} Another user can change ${guard.path}, which must be a folder only you can change. Remove or rename it. Then retry.`;
+  return `${guard.lead} Another user can change ${guard.path}. Make it a folder only you can change. Then retry.`;
 }
 
 // The path is a real folder, but it leads out of the workspace. With the root

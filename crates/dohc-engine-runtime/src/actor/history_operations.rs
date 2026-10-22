@@ -646,16 +646,15 @@ pub(super) fn test_undo_in_turns(
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, now)?.actor;
     let link_drain = actor.hold_link_drain();
+    // Keyed by the fixture's path: on a Mac the actor's store opens by its
+    // folder's ID.
+    let hook = fixture_hooks().lock().unwrap().remove(&db);
     let outcome = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 tokio::runtime::Runtime::new().unwrap().block_on(async {
                     actor
                         .run(|store, _| {
-                            let hook = fixture_hooks()
-                                .lock()
-                                .unwrap()
-                                .remove(store.database_path());
                             if let Some(hook) = hook {
                                 hook(store);
                             }

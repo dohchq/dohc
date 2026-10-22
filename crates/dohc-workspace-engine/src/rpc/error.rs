@@ -654,7 +654,7 @@ pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireErr
         }
         // The message is the one a Mac sends as `NotPrivate`.
         #[cfg(not(target_os = "macos"))]
-        root_binding::RootBindingError::LocalStateNotPrivate(_) => ErrorCode::Internal,
+        root_binding::RootBindingError::NotPrivate(..) => ErrorCode::Internal,
         _ => ErrorCode::InvalidParams,
     };
     WireError::new(code, error.to_string())
@@ -957,6 +957,11 @@ mod tests {
                 ".dohc/engine/engine.db-wal",
                 NotPrivateReason::NotFile,
                 "engine-folder-not-private: not-file .dohc/engine/engine.db-wal",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::UncheckedVolume,
+                "engine-folder-not-private: unchecked-volume .dohc/engine",
             ),
         ] {
             let refused = NotPrivate {
