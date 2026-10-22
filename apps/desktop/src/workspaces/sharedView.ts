@@ -1718,12 +1718,15 @@ async function captureSharedViewLocalDivergence(input: {
   );
   const pendingPaths = new Set([...pendingState.paths].filter(pathIsInScope));
   let collisionRecordQuarantined = false;
+  // Every recorded path, in this capture's scope or not: a recorded spelling
+  // outside a scoped capture is still held, so it owns no file here.
+  const everyCollisionRecordedPath = new Set(
+    await readCollisionRecordPaths(records, shareId, () => {
+      collisionRecordQuarantined = true;
+    }),
+  );
   const collisionRecordedPaths = new Set(
-    [
-      ...(await readCollisionRecordPaths(records, shareId, () => {
-        collisionRecordQuarantined = true;
-      })),
-    ].filter(pathIsInScope),
+    [...everyCollisionRecordedPath].filter(pathIsInScope),
   );
   if (preservedPaths === null) {
     for (const path of [...pendingPaths, ...collisionRecordedPaths]) preserved.add(path);
@@ -1994,7 +1997,10 @@ async function captureSharedViewLocalDivergence(input: {
         // A spelling given the file owns it now, for the rows after this one too.
         if (owners.length > 0) {
           await clearCollisionRecordPaths(records, shareId, owners);
-          for (const owner of owners) collisionRecordedPaths.delete(owner);
+          for (const owner of owners) {
+            collisionRecordedPaths.delete(owner);
+            everyCollisionRecordedPath.delete(owner);
+          }
         }
         return;
       }
@@ -2005,7 +2011,7 @@ async function captureSharedViewLocalDivergence(input: {
 
   // Held spellings: their files are other spellings', not unsaved work.
   const held = new Set<string>();
-  const knownSpellings = spellingGroups(new Set([...spellings.values()].flat().concat([...pendingPaths, ...collisionRecordedPaths])));
+  const knownSpellings = spellingGroups(new Set([...spellings.values()].flat().concat([...pendingState.paths, ...everyCollisionRecordedPath])));
   const executeWork = async (
     work: CaptureWorkItem,
   ): Promise<CaptureVerdict> => {
@@ -2015,7 +2021,7 @@ async function captureSharedViewLocalDivergence(input: {
     // no longer live.
     if (work.collision) {
       const owner = await withCaptureMutationLock(rootDir, work.path, workspaceLease, (resolvedTarget) =>
-        spellingSharingFile(rootDir, work.path, resolvedTarget, spellings, (other) => !collisionRecordedPaths.has(other)),
+        spellingSharingFile(rootDir, work.path, resolvedTarget, spellings, (other) => !everyCollisionRecordedPath.has(other)),
       ).catch(() => null);
       if (owner !== null && work.tracked === null) {
         return { kind: "repaired", action: { kind: "none" }, resolveCollision: true };
@@ -2134,6 +2140,7 @@ async function captureSharedViewLocalDivergence(input: {
       settlement.resolvedCollisionPaths.push(work.path);
       // The rows after this one see a resolved spelling as an owner.
       collisionRecordedPaths.delete(work.path);
+      everyCollisionRecordedPath.delete(work.path);
       return;
     }
     if (work.pending && !work.collision) {

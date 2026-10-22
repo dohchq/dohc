@@ -2166,6 +2166,30 @@ describe("shared view refresh", () => {
     });
   }
 
+  // A capture scoped to one path, as a save, move or delete runs before it
+  // acts, still treats a recorded spelling outside its scope as held. Here
+  // this machine's own notes.md blocks both incoming spellings, so neither
+  // owns the file, and the capture of notes.md keeps its local collision.
+  it("keeps a local collision blocking in a capture scoped to one spelling", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      await writeFile(join(view.rootDir, "notes.md"), "mine\n");
+      view.relay.addWrite("notes.md", "n\n");
+      view.relay.addWrite("Notes.md", "N\n");
+      await view.reconcile();
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["notes.md", "Notes.md"]));
+      const captured = await captureStandaloneShareViewDivergence({
+        rootDir: view.rootDir, workspaceId: WORKSPACE, store: view.store,
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" }, shareId: SHARE_ID, ended: false, paths: ["notes.md"],
+      });
+
+      expect(captured.unjournalablePaths).toEqual([{ path: "notes.md", reason: "local-collision" }]);
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("mine\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
   // A pull that deleted the owner in the store and stopped before the disk
   // leaves the owner pending and its file in place. A capture that keeps
   // every path aside then never saves the owner's text as the held spelling's.
