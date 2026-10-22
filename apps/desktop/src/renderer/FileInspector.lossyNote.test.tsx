@@ -2,7 +2,7 @@
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
@@ -11,6 +11,12 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 
 setupFileInspectorTests();
+
+// A lossy note shows in read mode, whose renderer loads lazily. Loading it
+// once here keeps a cold transform out of the first test's wait.
+beforeAll(async () => {
+  await import("./markdown/IncrementalMarkdownDocument");
+});
 
 afterEach(async () => {
   cleanup();
@@ -148,6 +154,22 @@ describe("a note dohc wrote", () => {
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
     expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  });
+
+  it("checks no saved text once the open is clear", async () => {
+    const bridge = bridgeFor([
+      { text: WRITTEN, contentHash: "c".repeat(64) },
+      { text: `${WRITTEN}\nTyped.\n`, contentHash: "e".repeat(64) },
+    ]);
+    const posted = vi.spyOn(globalThis.Worker.prototype, "postMessage");
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
+    expect(posted).toHaveBeenCalledTimes(1);
+
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(posted).toHaveBeenCalledTimes(1);
+    posted.mockRestore();
   });
 
   it("opens again with no check once its bytes have a verdict", async () => {

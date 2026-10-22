@@ -118,7 +118,9 @@ export function useLossyNote(input: {
     opened.current = {open: input.open, readSeq: input.readSeq, clear: false, lossy: false};
   }
   const current = opened.current;
-  const hash = input.applies && input.readSeq !== current.readSeq && input.markdown !== null
+  // Once clear, the engine's own saves change the file; checking them again
+  // would only spend work while the person types.
+  const hash = input.applies && !current.clear && input.readSeq !== current.readSeq && input.markdown !== null
     ? input.contentHash
     : null;
   const [answer, setAnswer] = useState<{open: string; contentHash: string; lossy: boolean} | null>(null);
