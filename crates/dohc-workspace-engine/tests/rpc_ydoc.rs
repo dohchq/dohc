@@ -6405,7 +6405,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 /// close must settle to disk exactly as before the skip existed.
 ///
 /// Mutation kill: make the settle skip unconditional (drop the single-update
-/// proof from `seed_only_lineage_source`) and this test goes red — the edit
+/// proof from `pristine_seed_lineage_source`) and this test goes red — the edit
 /// never reaches the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
@@ -6743,7 +6743,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
 /// records nothing — closes.
 ///
 /// Mutation kill: drop the exactly-one-update requirement from
-/// `seed_only_lineage_source` and this test goes red — the resumed lineage
+/// `pristine_seed_lineage_source` and this test goes red — the resumed lineage
 /// prunes without ever writing the edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replayed_prior_session_ops_still_settle_on_close() {
