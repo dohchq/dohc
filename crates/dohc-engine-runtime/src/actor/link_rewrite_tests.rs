@@ -478,6 +478,219 @@ async fn a_capture_hold_acquired_during_parse_makes_the_source_unchecked() {
     f.close().await;
 }
 
+async fn seed_middle_lineage(f: &Fixture, body: &str) {
+    f.edit("source-0001", "source-0001.md", body).await;
+    let ws = f.ws.clone();
+    let body = body.to_owned();
+    f.actor
+        .run(move |store, cache| {
+            let key = DocKey::new(&ws, "main", "source-0001")?;
+            let snapshot = VersionedTextStore::new(store)
+                .read_text(&ws, "main", "source-0001.md")?
+                .unwrap();
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(
+                dohc_engine_collab::ContentKind::Richdoc,
+                &body,
+            )?;
+            dohc_engine_collab::record_local_update(
+                store,
+                cache,
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some("source-0001.md"),
+                        content_kind: dohc_engine_collab::ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    seed_source_sha256: Some(&snapshot.blob_sha256),
+                    ..Default::default()
+                },
+                &NoFaults,
+                4,
+                |_tx, _outcome, _sha| Ok(()),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn middle_source_state(f: &Fixture) -> (Vec<u8>, i64, i64, i64) {
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            store.read_with(|conn| {
+                let key = DocKey::new(&ws, "main", "source-0001")?;
+                let state = dohc_engine_collab::load_doc_in(conn, &key)?.encode_full_state();
+                let (moments, jobs, files, holds): (i64, i64, i64, i64) = conn.query_row(
+                    "SELECT \
+                     (SELECT count(*) FROM moments WHERE workspace_id=?1 AND object_id='source-0001'), \
+                     (SELECT count(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path='source-0001.md'), \
+                     (SELECT count(*) FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND object_id='source-0001'), \
+                     (SELECT count(*) FROM capture_file_holds WHERE workspace_id=?1 AND path='source-0001.md')",
+                    [&ws],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).map_err(StorageError::corrupt_public)?;
+                assert_eq!(holds, 0);
+                Ok::<_, RuntimeError>((state, moments, jobs, files))
+            })
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
+    let f = Fixture::new(3, 3);
+    let body = "- parent [[old]]\n  - child\n";
+    seed_middle_lineage(&f, body).await;
+    let before = middle_source_state(&f).await;
+    let result = f.pass("unrepresentable", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(
+        result,
+        json!({"documents":2,"links":4,"unchecked":["source-0001.md"],"uncheckedCount":1,"complete":false})
+    );
+    for path in ["source-0000.md", "source-0002.md"] {
+        assert_eq!(
+            f.text(path).await,
+            "[[new#part|label]] [[./new.md]] [old](old.md)"
+        );
+    }
+    assert_eq!(f.text("source-0001.md").await, body);
+    assert_eq!(middle_source_state(&f).await, before);
+    assert_eq!(
+        f.pass("unrepresentable", Arc::new(NoFaults)).await.unwrap(),
+        result
+    );
+    assert_eq!(
+        f.pass("unrepresentable-retry", Arc::new(NoFaults))
+            .await
+            .unwrap(),
+        json!({"documents":0,"links":0,"unchecked":["source-0001.md"],"uncheckedCount":1,"complete":false})
+    );
+    assert_eq!(middle_source_state(&f).await, before);
+    let operation = f
+        .actor
+        .history_operation(f.ws.clone(), OP.into())
+        .await
+        .unwrap();
+    assert_eq!(operation.moments.len(), 3);
+    assert!(
+        operation
+            .moments
+            .iter()
+            .all(|moment| moment.object_id != "source-0001")
+    );
+    f.publish().await;
+    let undone = f.undo().await.unwrap();
+    assert_eq!(undone.moments.len(), 3);
+    assert!(
+        undone
+            .moments
+            .iter()
+            .all(|moment| moment.object_id != "source-0001")
+    );
+    let placed = f
+        .actor
+        .history_undo_place(
+            f.ws.clone(),
+            undone,
+            f.root.to_path_buf(),
+            Arc::new(()),
+            11,
+            |_| {},
+        )
+        .await;
+    assert!(placed.materialized);
+    for path in ["source-0000.md", "source-0002.md"] {
+        assert_eq!(f.text(path).await, BODY);
+        assert_eq!(std::fs::read_to_string(f.root.join(path)).unwrap(), BODY);
+    }
+    assert_eq!(f.text("source-0001.md").await, body);
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
+        body
+    );
+    assert_eq!(middle_source_state(&f).await, before);
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            store.read_with(|conn| {
+                let plan: String = conn
+                    .query_row(
+                        "SELECT plan_json FROM history_undo_plans WHERE workspace_id=?1",
+                        [ws],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::corrupt_public)?;
+                let plan: Value = serde_json::from_str(&plan).unwrap();
+                assert_eq!(plan["members"].as_array().unwrap().len(), 3);
+                assert!(
+                    plan["members"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|member| member["effect"]["objectId"] != "source-0001")
+                );
+                Ok::<_, RuntimeError>(())
+            })
+        })
+        .await
+        .unwrap();
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrelated_invalid_ydoc_input_still_stops_the_link_pass() {
+    use yrs::{Map, ReadTxn, StateVector, Transact, updates::decoder::Decode};
+
+    let f = Fixture::new(3, 3);
+    seed_middle_lineage(&f, BODY).await;
+    let ws = f.ws.clone();
+    f.actor
+        .run(move |store, _| {
+            let key = DocKey::new(&ws, "main", "source-0001")?;
+            let original = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
+            let doc = yrs::Doc::new();
+            doc.transact_mut()
+                .apply_update(yrs::Update::decode_v1(&original.encode_full_state()).unwrap())
+                .unwrap();
+            doc.get_or_insert_map(dohc_engine_collab::ROOT_META)
+                .insert(&mut doc.transact_mut(), "schemaVersion", 2);
+            let bytes = doc.transact().encode_state_as_update_v1(&StateVector::default());
+            // Simulate a stored document whose schema this engine cannot rewrite.
+            store.write_with(&NoFaults, |tx| {
+                let sha = dohc_engine_storage::put_binary_blob(tx, &bytes)?;
+                tx.execute(
+                    "UPDATE ydoc_updates SET update_blob_sha256=?2 WHERE workspace_id=?1 AND object_id='source-0001'",
+                    params![ws, sha],
+                ).map_err(StorageError::persist_public)?;
+                Ok::<_, RuntimeError>(())
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = f.pass("invalid-projection", Arc::new(NoFaults)).await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::InvalidInput {
+                    reason: "Markdown conflict resolution fold failed"
+                }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_ne!(f.text("source-0000.md").await, BODY);
+    assert_eq!(f.text("source-0001.md").await, BODY);
+    assert_eq!(f.text("source-0002.md").await, BODY);
+    f.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
     let f = Fixture::new(1, 1);
