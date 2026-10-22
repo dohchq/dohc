@@ -61,10 +61,10 @@ import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
-import { collectionsHolderRequired, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
+import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
-import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, createServerCollectionsData, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
@@ -73,7 +73,7 @@ import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecov
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
 import { localStateOpened, LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
-import { createDatasetHandler } from "./ipc/datasetIpc";
+import { createDatasetHandler, type ServerCollections } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
 import { type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -4701,6 +4701,30 @@ async function stillHeld(slot: DatasetHostSlot, pending: Promise<LocalDatasetHos
   }
   return host;
 }
+// On a computer that doesn't keep a workspace's Collections, the ones moved
+// to this computer's signed-in server. It asks through that session alone:
+// the workspace does not start syncing, and its server and account stay as
+// they are. Null where this computer keeps them, or where it has no session
+// for the workspace's server and account. The local store then refuses.
+async function serverCollectionsFor(workspace: RegistryEntry & { attachmentId?: symbol }, signal: AbortSignal): Promise<ServerCollections | null> {
+  // A store open here that this computer still keeps answers without reading the record.
+  const slot = withWorkspaceAttachment(workspace, lease => lease.state.datasetHost);
+  if (slot?.pending && await stillHeld(slot, slot.pending).then(() => true, () => false)) return null;
+  const elsewhere = await collectionsKeptElsewhere(workspace.rootPath, workspace.workspaceId, collectionsHolderCheck(workspace.workspaceId));
+  if (elsewhere === null) return null;
+  await warmCredentialCache().catch(() => undefined);
+  signal.throwIfAborted();
+  const credentials = cachedCredentials, credentialGeneration = credentialCacheGeneration;
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  if (!credentials?.relayUrl || (remote && !workspaceRemoteMatchesCredentials(remote, credentials))) return null;
+  return {
+    data: createServerCollectionsData({ workspaceId: workspace.workspaceId, credentials, credentialGeneration, signal,
+      currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: () => signal.throwIfAborted(),
+      relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init, { retainNotFound: true }),
+      elsewhere: new CollectionsRefusalError(elsewhere) }),
+    elsewhere: { server: new URL(credentials.relayUrl).origin, computer: { label: elsewhere.computer.label, sameName: elsewhere.sameName } },
+  };
+}
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
@@ -6490,6 +6514,7 @@ function registerIpcHandlers(): void {
   const datasetForWorkspace = localDatasetHostFor;
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    serverCollectionsFor,
     automationName: async (workspace: DesktopRendererWorkspaceOperation["workspace"], automationId: string) =>
       await collectionAutomationsOf(workspace.workspaceId)?.nameForHistory(automationId) ?? null,
     currentCredentialGeneration: () => credentialCacheGeneration,
