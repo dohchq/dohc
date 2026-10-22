@@ -770,8 +770,11 @@ async function storeHere(root: string): Promise<string | null> {
 
 const sqlite = () => createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 
-function openStore(path: string): DatabaseSync {
-  return new (sqlite().DatabaseSync)(path, { allowExtension: false });
+// A read-only connection still reads the -wal, but never checkpoints into
+// the store or removes its -wal and -shm when it closes. It may create the
+// -shm index, and an empty -wal when there is none.
+function openStore(path: string, readOnly = false): DatabaseSync {
+  return new (sqlite().DatabaseSync)(path, { allowExtension: false, readOnly });
 }
 
 /** The id the store keeps for the record to name, or null when it keeps none. */
@@ -795,28 +798,29 @@ async function flush(path: string, folder = false): Promise<void> {
  * syncs, to `path` in .dohc/local, which it skips. With Optimize Mac
  * Storage, iCloud Drive can keep a synced file's bytes only in iCloud, and
  * moving such a file out of the synced folder can lose them. So SQLite
- * reads the old store, which downloads it, and copies it, -wal included.
- * The copy is checked and flushed under another name, then renamed to
- * `path`, so `path` is either missing or this store whole. A crash before
- * the rename leaves the old store, which the next open copies again.
+ * reads the old store read-only, which downloads it, and its backup API
+ * copies it page by page, -wal included, off the main thread. The copy is
+ * reopened to check its id and flushed under another name. Just before it
+ * is renamed to `path`, `held` checks that the record still names this
+ * installation and store, so `path` is either missing or this store whole.
+ * A crash before the rename leaves the old store, which the next open
+ * copies again.
  */
-async function copyOldStore(root: string, path: string, storeId: string): Promise<void> {
+async function copyOldStore(root: string, path: string, storeId: string, held: () => void): Promise<void> {
   const folder = await storeFolderOf(root, OLD_STORE_PATH), old = folder && join(folder, STORE_FILE);
   if (!old || !(await statOrNull(old))) throw new CollectionsRefusalError({ kind: "missing" });
   await assertStoreFiles(old);
   const copy = join(dirname(path), MOVING_FILE);
   try {
-    const source = openStore(old);
+    const source = openStore(old, true);
     try {
       if (storeIdOf(source) !== storeId) throw new CollectionsRefusalError({ kind: "replaced", path: OLD_STORE_PATH });
       await sqlite().backup(source, copy);
     } finally { source.close(); }
     const db = openStore(copy);
-    try {
-      const checked = db.prepare("PRAGMA integrity_check").all();
-      if (checked.length !== 1 || checked[0]!.integrity_check !== "ok" || storeIdOf(db) !== storeId) throw new Error("The copy is not the store.");
-    } finally { db.close(); }
+    try { if (storeIdOf(db) !== storeId) throw new Error("The copy is not the store."); } finally { db.close(); }
     await flush(copy);
+    held();
     await renameWithRetry(copy, path);
   } catch (error) {
     await Promise.all(sqliteFiles(copy).map(file => rm(file, { force: true }))).catch(() => undefined);
@@ -831,9 +835,11 @@ async function copyOldStore(root: string, path: string, storeId: string): Promis
  * in the system trash, where a person can still recover it: a store with
  * this store's id, then its -wal, -shm and -journal, and those files alone
  * once their store is gone. A store with another id may be another
- * computer's, so it stays. A failure leaves the files for the next open.
+ * computer's, so it stays. Before each file, `held` checks that the record
+ * still names this installation and store, and its refusal stops the trash.
+ * Any other failure leaves the files for the next open.
  */
-async function trashOldStore(root: string, storeId: string, trashItem: ((path: string) => Promise<void>) | undefined): Promise<void> {
+async function trashOldStore(root: string, storeId: string, trashItem: ((path: string) => Promise<void>) | undefined, held: () => void): Promise<void> {
   if (!trashItem) return;
   try {
     const folder = await storeFolderOf(root, OLD_STORE_PATH);
@@ -841,12 +847,14 @@ async function trashOldStore(root: string, storeId: string, trashItem: ((path: s
     const [store, ...sidecars] = sqliteFiles(join(folder, STORE_FILE));
     if (await statOrNull(store)) {
       await assertStoreFiles(store);
-      const db = openStore(store);
+      const db = openStore(store, true);
       try { if (storeIdOf(db) !== storeId) return; } finally { db.close(); }
+      held();
       await trashItem(store);
     }
-    for (const file of sidecars) if (await statOrNull(file)) await trashItem(file);
+    for (const file of sidecars) if (await statOrNull(file)) { held(); await trashItem(file); }
   } catch (error) {
+    if (error instanceof CollectionsRefusalError) throw error;
     console.warn(`[desktop] dohc left the Collections store in ${OLD_STORE_PATH} and will try again at the next open:`, error);
   }
 }
@@ -859,15 +867,18 @@ async function trashOldStore(root: string, storeId: string, trashItem: ((path: s
 // so it waits for the engine's open to prepare that folder. A store the
 // record names that is still in .dohc/datasets is copied here first, unless
 // one is here already: that one wins, and a store with another id here is
-// refused without touching either.
+// refused without touching either. The record can change while this waits
+// for the engine or copies, so it is checked again before the copy takes
+// the store's place and before the old store goes to the trash.
 async function openHeldStore(root: string, localState: LocalStateWorkspace, holder: CollectionsHolderCheck, trashItem: ((path: string) => Promise<void>) | undefined): Promise<{ db: DatabaseSync; path: string }> {
   const { workspaceId } = localState;
   const admission: CollectionsAdmission = await admitCollectionsStore(root, workspaceId, holder);
   const path = join(await folderOnceOpened(localState, "store"), STORE_FILE);
+  const held = createHoldingCheck(root, workspaceId, holder, () => admission.kind === "open" ? admission.storeId : null);
   if (admission.kind === "open") {
     // A copy a crash left before its rename.
     await Promise.all(sqliteFiles(join(dirname(path), MOVING_FILE)).map(file => rm(file, { force: true })));
-    if (!(await statOrNull(path))) await copyOldStore(root, path, admission.storeId);
+    if (!(await statOrNull(path))) await copyOldStore(root, path, admission.storeId, held);
   }
   await assertStoreFiles(path);
   if (admission.kind === "create") {
@@ -885,7 +896,7 @@ async function openHeldStore(root: string, localState: LocalStateWorkspace, hold
       catch (error) { db.exec("ROLLBACK"); throw error; }
       await recordCollectionsStore(root, workspaceId, holder.here(), admission.storeId, admission.seen);
     }
-    if (admission.kind === "open") await trashOldStore(root, admission.storeId, trashItem);
+    if (admission.kind === "open") { held(); await trashOldStore(root, admission.storeId, trashItem, held); }
     return { db, path };
   } catch (error) {
     db.close();
@@ -900,7 +911,7 @@ async function openHeldStore(root: string, localState: LocalStateWorkspace, hold
 export async function localDatasetStoreId(workspaceRoot: string): Promise<string | null> {
   const path = await storeHere(await realpath(workspaceRoot));
   if (path === null) return null;
-  const db = openStore(path);
+  const db = openStore(path, true);
   try { return storeIdOf(db); } finally { db.close(); }
 }
 

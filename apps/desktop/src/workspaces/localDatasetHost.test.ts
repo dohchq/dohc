@@ -3,7 +3,7 @@ import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalS
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, rename, writeFile, rm, symlink } from "node:fs/promises";
-import { createReadStream, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1192,6 +1192,38 @@ describe("the computer that keeps a workspace's Collections", () => {
       expect(trash.items.slice(-2).sort()).toEqual(["state.sqlite-shm", "state.sqlite-wal"]);
     });
 
+    // Another computer keeps the Collections meanwhile, with this store's id, as an "earlier installation" Keep there does.
+    const keptElsewhere = (root: string, storeId: string | null, when: () => boolean) => {
+      let kept = false;
+      return { here: () => here, required: () => {
+        if (!kept && when()) { kept = true; writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId })); }
+        return true;
+      } };
+    };
+    const oldBytes = async (root: string) => Promise.all(["state.sqlite", "state.sqlite-wal"].map(file => readFile(join(oldFolder(root), file))));
+
+    it("throws the copy away and refuses when the record changes before the copy takes the store's place", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const before = await oldBytes(root), trash = systemTrash();
+      // The record changes once the copy is made, before its rename.
+      const holder = keptElsewhere(root, storeId, () => existsSync(`${localStore(root)}.moving`));
+      expect((await refusedOpen(root, { holder, trashItem: trash.trashItem })).refusal).toMatchObject({ kind: "elsewhere", computer: laptop });
+      expect(await datasetFiles(root), "no store and no copy here").toEqual([]);
+      expect(await oldBytes(root)).toEqual(before);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+      expect(await readRecord(root)).toMatchObject({ installId: "install-laptop", storeId });
+    });
+
+    it("keeps the moved store but trashes nothing and refuses when the record changes after the rename", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const before = await oldBytes(root), trash = systemTrash();
+      const holder = keptElsewhere(root, storeId, () => existsSync(localStore(root)) && existsSync(join(oldFolder(root), "state.sqlite")));
+      expect((await refusedOpen(root, { holder, trashItem: trash.trashItem })).refusal).toMatchObject({ kind: "elsewhere", computer: laptop });
+      expect(storeIdIn(root), "the moved store stays").toBe(storeId);
+      expect(await oldBytes(root)).toEqual(before);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
     it("refuses, touching nothing, when the store in .dohc/local has another id", async () => {
       const { root } = await storeInOldPlace();
       const other = await storeWithoutRecord();
@@ -1208,11 +1240,12 @@ describe("the computer that keeps a workspace's Collections", () => {
     it("leaves the old files where they are when the trash refuses them, and trashes them at the next open", async () => {
       const { root, approved } = await storeInOldPlace();
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const trash = systemTrash();
+      const trash = systemTrash(), before = await oldBytes(root);
       trash.refuses = true;
       const first = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
       expect(await names(first.host, approved)).toEqual(["Camera"]);
-      expect(await oldFiles(root)).toContain("state.sqlite");
+      // Read only: nothing was checkpointed into the old store, and its -wal stays.
+      expect(await oldBytes(root)).toEqual(before);
       expect(warned).toHaveBeenCalled();
       await first.host.close(); hosts.splice(hosts.indexOf(first.host), 1);
       trash.refuses = false;
