@@ -1412,7 +1412,7 @@ export const captureRecoveryOperations = {
     capabilityId: "capture.held.retry",
     channel: "desktop:retry-held-capture",
     payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
-    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    result: z.object({ deferredWrites: z.array(z.string().min(1)), settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },
@@ -5759,6 +5759,9 @@ export const UpdateStateEvent = z.object({
   canInstall: z.boolean().optional(),
   version: z.string().min(1).max(200).optional(),
   percent: z.number().finite().min(0).max(100).optional(),
+  // A Linux .deb that did not install: the terminal command that installs it. Its
+  // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
+  installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -5767,6 +5770,8 @@ export const UpdateActionResult = z.object({
   // True when the exit round was cancelled: a window's recovery dialog
   // went back. A decision, not an install failure.
   cancelled: z.boolean().optional(),
+  // Why an install did not go ahead, when the updater said.
+  reason: z.string().min(1).max(500).optional(),
   state: UpdateStateEvent,
 });
 export type UpdateActionResult = z.infer<typeof UpdateActionResult>;

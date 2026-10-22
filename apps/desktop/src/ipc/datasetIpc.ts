@@ -16,7 +16,7 @@ import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryResto
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
-import { assertSourcePathsNotHeld } from "../workspaces/datasetSourceCapture";
+import { assertSourcePathsNotHeld, assertSourcePathsNotDeferred, type SourceCaptureStatus } from "../workspaces/datasetSourceCapture";
 
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -40,7 +40,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
-  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<readonly { path: string }[]>;
+  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<SourceCaptureStatus>;
   /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
   withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
@@ -66,9 +66,9 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         catch (error) { throw new DatasetScopeError(error); }
       };
       current();
-      let heldFiles: readonly { path: string }[] = [];
+      let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
       const flushSourceCapture = async () => {
-        heldFiles = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+        sourceCapture = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
         current();
       };
       const withSourceAdapter = <T extends {}>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
@@ -78,7 +78,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
         captureSourceMetadata: input => {
           current();
-          assertSourcePathsNotHeld(heldFiles, input.paths);
+          assertSourcePathsNotHeld(sourceCapture.heldFiles, input.paths);
+          assertSourcePathsNotDeferred(sourceCapture.deferredWrites, input.paths);
           return adapter.captureSourceMetadata(input);
         },
       }));

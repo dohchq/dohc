@@ -287,6 +287,7 @@ type DemoDesktopBridge = Pick<
   | "leaveSharedChannel"
   | "revokeRelayShare"
   | "startDm"
+  | "exportDocumentFile"
 >;
 
 export type DemoSearchOptions = {
@@ -730,6 +731,31 @@ const demoBridge = {
   },
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
+  },
+  // A browser saves an export as a download. A PDF opens the browser's print
+  // dialog, where the person saves it as a PDF.
+  async exportDocumentFile(payload: { suggestedName: string; content: string; kind: "markdown" | "html" | "pdf" }) {
+    if (payload.kind === "pdf") {
+      const frame = document.createElement("iframe");
+      frame.sandbox.add("allow-same-origin", "allow-modals");
+      frame.style.cssText = "position: fixed; width: 0; height: 0; border: 0";
+      frame.srcdoc = payload.content;
+      document.body.append(frame);
+      await new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+      frame.contentWindow?.addEventListener("afterprint", () => frame.remove(), { once: true });
+      frame.contentWindow?.print();
+      return { path: null };
+    }
+    const markdown = payload.kind === "markdown";
+    const url = URL.createObjectURL(
+      new Blob([payload.content], { type: markdown ? "text/markdown" : "text/html" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${payload.suggestedName}.${markdown ? "md" : "html"}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { path: null };
   },
 } satisfies DemoDesktopBridge;
 

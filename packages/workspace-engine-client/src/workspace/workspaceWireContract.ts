@@ -1055,6 +1055,7 @@ const CaptureFileHoldSchema = mutableStruct({
 });
 
 const CaptureFlushResultSchema = mutableStruct({
+  deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
   heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
   settled: Schema.Boolean,
   running: Schema.Boolean,

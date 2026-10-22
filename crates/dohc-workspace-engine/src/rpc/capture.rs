@@ -519,6 +519,8 @@ impl EngineService {
             "running": outcome.running,
             "degraded": outcome.degraded,
             "heldFiles": held_files,
+            "deferredWrites": lock(&open.capture).as_ref()
+                .map(|driver| driver.status().deferred_writes()).unwrap_or_default(),
         }))
     }
 

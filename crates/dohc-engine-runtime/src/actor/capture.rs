@@ -2601,17 +2601,18 @@ fn ensure_capture_target_not_leased(
     object_id: &str,
 ) -> Result<(), RuntimeError> {
     let key = DocKey::new(workspace_id, version_id, object_id)?;
-    if !leases.is_held(&key) {
-        return Ok(());
-    }
     // Session releases wake deferred capture. Internal leases still fail
     // and retry because their release does not wake the driver.
+    let session = leases.is_held_by_session(&key);
+    if !session && !leases.is_held(&key) {
+        return Ok(());
+    }
     let recorded = dohc_engine_domain::object_has_live_alias(conn, workspace_id, object_id)?;
     Err(RuntimeError::Sync(
         dohc_engine_sync::SyncError::RetryableState {
-            reason: if recorded && leases.is_held_by_session(&key) {
+            reason: if recorded && session {
                 CAPTURE_WRITE_WAITS_FOR_SESSION
-            } else if recorded || !leases.is_held_by_session(&key) {
+            } else if recorded || !session {
                 CAPTURE_RECORDED_FILE_LIVE
             } else {
                 CAPTURE_NEW_FILE_LIVE
@@ -2624,7 +2625,7 @@ fn ensure_capture_target_not_leased(
 /// store has a head for it.
 pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
 
-/// The capture refusal for a recorded file a lease holds.
+/// An internal attempt holds the capture target; fail and retry on a later pass.
 const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
 
 /// An outside write waits until the open document releases its lease.

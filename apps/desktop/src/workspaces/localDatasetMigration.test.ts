@@ -183,7 +183,7 @@ describe("owner Collection migration", () => {
   it("routes owner IPC and CLI review/approval through the same actual host", async () => {
     const { host } = await open(), f = fixture(); await activate(host, f); f.next();
     const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
-    const handler = createDatasetHandler({ flushSourceCapture: async () => [], withWorkspaceOperation: async (_caller, _id, work) => {
+    const handler = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), withWorkspaceOperation: async (_caller, _id, work) => {
       let active = true;
       try { return await work({ workspace, signal, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
       finally { active = false; }

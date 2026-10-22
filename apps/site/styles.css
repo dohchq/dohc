@@ -319,6 +319,14 @@ body {
 
 [data-theme='dark'] .demo-stage { background: #131211; }
 
+.demo-caption {
+  margin: 14px auto 0;
+  max-width: 64ch;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
 #desktop-demo {
   display: block;
   width: 100%;

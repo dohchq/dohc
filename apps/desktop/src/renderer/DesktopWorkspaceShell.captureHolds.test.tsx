@@ -17,7 +17,7 @@ function fixture() {
   let files = [held];
   const original = bridge.getSyncStatus.getMockImplementation()!;
   bridge.getSyncStatus.mockImplementation(async () => ({ ...await original(), heldFiles: files }));
-  const retryHeldCapture = vi.fn(async () => { listener?.({ workspaceId: WORKSPACE.workspaceId, heldFiles: files }); return { settled: true, running: true, degraded: false, retried: true, heldFiles: files }; });
+  const retryHeldCapture = vi.fn(async () => { listener?.({ workspaceId: WORKSPACE.workspaceId, heldFiles: files }); return { deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: files }; });
   Object.assign(bridge, { retryHeldCapture });
   let listener: ((event: { workspaceId: string; heldFiles: CaptureFileHold[] }) => void) | undefined;
   Object.assign(bridge, { onCaptureHolds: vi.fn((callback: typeof listener) => {
@@ -159,14 +159,14 @@ it("ignores a retry that answers after leaving and reopening the same workspace"
   await waitFor(() => expect(screen.queryByText(message)).toBeNull());
   f.set([held]); view.rerender(shell(WORKSPACE));
   await screen.findByText(message);
-  await act(async () => stale.resolve({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] }));
+  await act(async () => stale.resolve({ deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: [] }));
   expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(message);
 });
 
 it.each([true, false])("keeps an unfinished healthy retry out of degraded capture notices (running=%s)", async running => {
   const f = fixture(); const user = userEvent.setup(); renderShell(f.bridge);
   const toast = await screen.findByTestId("workspace-shell-notice");
-  f.retryHeldCapture.mockResolvedValueOnce({ settled: false, running, degraded: false, retried: true, heldFiles: [held] });
+  f.retryHeldCapture.mockResolvedValueOnce({ deferredWrites: [], settled: false, running, degraded: false, retried: true, heldFiles: [held] });
   await user.click(within(toast).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(f.retryHeldCapture).toHaveBeenCalledOnce());
   await user.click(screen.getByTestId("notice-center-toggle"));
@@ -178,7 +178,7 @@ it.each([true, false])("keeps an unfinished healthy retry out of degraded captur
 it("reports genuine degraded capture after retry", async () => {
   const f = fixture(); const user = userEvent.setup(); renderShell(f.bridge);
   const toast = await screen.findByTestId("workspace-shell-notice");
-  f.retryHeldCapture.mockResolvedValueOnce({ settled: false, running: true, degraded: true, retried: true, heldFiles: [held] });
+  f.retryHeldCapture.mockResolvedValueOnce({ deferredWrites: [], settled: false, running: true, degraded: true, retried: true, heldFiles: [held] });
   await user.click(within(toast).getByRole("button", { name: "Try again" }));
   await screen.findByText("dohc could not record outside edits. Reopen the workspace.");
 });
