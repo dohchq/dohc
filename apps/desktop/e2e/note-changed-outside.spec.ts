@@ -13,7 +13,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-const NOTICE = "This file changed outside dohc. Reload to see the new version. dohc keeps your text in a copy beside it.";
+const NOTICE = "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
 const RECOVERED_COPY = /^(.+) \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
 
 async function openNote(page: Page, path: string): Promise<void> {
@@ -87,7 +87,7 @@ test("an open note that changed outside dohc reloads, or keeps the person's typi
     await expect(notice).toHaveCount(0);
     await expect.poll(() => recoveredCopy(temp.rootPath, "typed-reload.md"), { timeout: 30_000 }).toContain("Typed by me.");
     expect(await readFile(join(temp.rootPath, "typed-reload.md"), "utf8")).toContain("Written by an agent.");
-    await expect(page.getByTestId("workspace-shell-notice").filter({ hasText: "Typing kept in History" }).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("workspace-shell-notice").filter({ hasText: "Text kept in History" }).first()).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: test.info().outputPath("reloaded-with-copy-dark.png") });
 
     // Unsaved typing, then the person closes the note instead.

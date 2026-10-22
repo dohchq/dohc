@@ -267,6 +267,18 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     }
   }
 
+  // Main says the file changed outside dohc, and whether it counted unsaved edits.
+  function emitChangedOutside(unsaved: boolean, seq: number): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const event = {
+      sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md",
+      ...engineSaveState(unsaved ? "changed-on-disk" : "saved"), changedOutside: { unsaved }, seq,
+    };
+    act(() => {
+      for (const listener of [...saveStateListeners]) listener(event);
+    });
+  }
+
   // Main refused an edit and is about to restore the admitted document.
   function emitEditRefusal(message: string, seq: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
@@ -285,6 +297,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     emit,
     emitNow,
     emitEditRefusal,
+    emitChangedOutside,
     emitRemoteEdit,
     emitLineageReplacement,
     applied,

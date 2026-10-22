@@ -153,6 +153,9 @@ type EngineDocOpenOutcome =
     }
   | { kind: "unavailable" }
   | { kind: "capture-held" }
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet.
+  | { kind: "outside-write-waiting" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
@@ -343,6 +346,8 @@ export type EngineDocLeaseSnapshot = {
 type EngineDocSession = {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => EngineDocLeaseSnapshot;
+  // Edits this editor made that main has not confirmed, asked at the moment.
+  localEditsPending: () => boolean;
   start: () => void;
   dispose: () => Promise<void>;
   whenClosed: () => Promise<void>;
@@ -547,10 +552,20 @@ function createEngineDocSession(
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
+  const localEditsPending = (): boolean => deliveryPending || localSeq.current > confirmedLocalSeq;
+  // The file changed outside dohc. Edits main has not confirmed are unsaved
+  // whatever main counted, so the document must not reload over them.
+  const noteChangedOutside = (unsaved: boolean): void => {
+    const current = snapshot.changedOutside;
+    if (current?.token === token && (current.unsaved || !unsaved)) return;
+    publish((latest) => ({ ...latest, changedOutside: { token, unsaved } }));
+  };
+
   const onDeliveryPendingChange = (pending: boolean): void => {
     deliveryPending = pending;
     if (pending) {
       pendingSavedSeq = null;
+      if (snapshot.changedOutside?.token === token) noteChangedOutside(true);
       return;
     }
     if (
@@ -1039,6 +1054,7 @@ function createEngineDocSession(
       captureDeletion(doc, cause);
       return;
     }
+    if (event.changedOutside) noteChangedOutside(event.changedOutside.unsaved || localEditsPending());
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
@@ -1047,10 +1063,6 @@ function createEngineDocSession(
       return;
     }
     if (writesRefused.current) return;
-    const changedOutside = event.changedOutside;
-    if (changedOutside && snapshot.changedOutside?.token !== token) {
-      publish((current) => ({ ...current, changedOutside: { token, unsaved: changedOutside.unsaved } }));
-    }
     if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
@@ -1316,6 +1328,7 @@ function createEngineDocSession(
     getSnapshot() {
       return snapshot;
     },
+    localEditsPending,
     start() {
       if (started) return;
       started = true;
@@ -1363,6 +1376,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.captureHeld) {
               setOutcome({ kind: "capture-held" });
+            } else if (bound.outsideWriteWaiting) {
+              setOutcome({ kind: "outside-write-waiting" });
             } else if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.sharedWaiting) {
@@ -1609,6 +1624,9 @@ function createEngineDocLease(
     },
     getSnapshot() {
       return snapshot;
+    },
+    localEditsPending() {
+      return activeSession?.localEditsPending() ?? false;
     },
     startAfter(barrier) {
       if (started) return;

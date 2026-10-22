@@ -79,11 +79,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "dohc";
     case "ydoc":
       return "Live edit";
-    // Typing capture kept when its file changed outside dohc, in the words
+    // Text capture kept when its file changed outside dohc, in the words
     // of its notice. Dismissing or restoring it leaves the same change.
     case "capture-recovery":
     case "capture-recovery-cleared":
-      return "Typing kept";
+      return "Text kept";
     default:
       return "Unknown source";
   }

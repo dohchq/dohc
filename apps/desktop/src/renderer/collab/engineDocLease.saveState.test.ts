@@ -237,6 +237,40 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   expect(retained.snapshot.saveState.kind).toBe("saved-here");
 });
 
+// #2463. Main counts the edits it has. A change outside dohc must not read as
+// nothing unsaved while this editor still has edits main has not confirmed.
+it("counts an edit main has not confirmed when the file changed outside dohc", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+});
+
+it("makes a change outside dohc unsaved when typing lands after it", async () => {
+  await retainBound();
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(false);
+  act(() => {
+    editDocument();
+  });
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+  // A later report from main cannot make it saved again.
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+});
+
+it("keeps a change outside dohc reported while a history replacement installs", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  harness.emitChangedOutside(true, 0);
+  // The replacement keeps only the newest save state for after it installs.
+  harness.emit("settling", 0);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+});
+
 it("observes unsaved edits on a replacement document", async () => {
   await retainBound();
   harness.emitLineageReplacement("winner");

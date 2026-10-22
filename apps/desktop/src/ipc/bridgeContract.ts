@@ -6706,6 +6706,9 @@ export const engineYDocSaveOperations = {
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   captureHeld: z.boolean().optional(),
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet. Opening again waits for it.
+  outsideWriteWaiting: z.boolean().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),

@@ -390,6 +390,12 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
   return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
 }
 
+// A note changed outside dohc closed, but capture has not recorded the new
+// version, so the note did not open again. Try again sits beside it.
+export function outsideVersionWaitingMessage(path: string): string {
+  return `dohc could not open the new version of "${path}". History has not recorded it yet.`;
+}
+
 export function captureHeldLiveMessage(path: string): string {
   return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
 }

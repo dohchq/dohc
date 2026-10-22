@@ -30,6 +30,7 @@ import {
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
+import { outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
@@ -152,7 +153,7 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
 }
 
 export const CHANGED_OUTSIDE_NOTICE =
-  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in a copy beside it.";
+  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
 
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
@@ -168,7 +169,7 @@ function ChangedOutsideNotice(props: { onReload: () => void }) {
       <button
         type="button"
         onClick={props.onReload}
-        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
+        className="shrink-0 whitespace-nowrap text-muted hover:text-ink"
       >
         Reload
       </button>
@@ -724,22 +725,51 @@ export function MarkdownView(props: {
   // The file changed outside dohc. Reopening closes this session first, and
   // main lets the disk version stand, keeping any unsaved text in a copy
   // beside the file. A document with nothing unsaved reopens by itself.
-  const { onRetryEngineOpen } = props;
-  const [reloads, setReloads] = useState(0);
+  // It reloads by itself at most once per open note, and never over edits
+  // main has not confirmed; otherwise the notice asks the person.
+  const { onRetryEngineOpen, onButtonError } = props;
+  const [reloading, setReloading] = useState(false);
+  const [reloadedItself, setReloadedItself] = useState(false);
   const reloadChangedOutside = useCallback(() => {
-    setReloads((count) => count + 1);
+    setReloading(true);
     onRetryEngineOpen();
   }, [onRetryEngineOpen]);
+  const reloadsItself = engine.changedOutside === "saved" && !reloadedItself;
   useEffect(() => {
-    if (engine.changedOutside === "saved") reloadChangedOutside();
-  }, [engine.changedOutside, reloadChangedOutside]);
+    if (!reloadsItself) return;
+    setReloadedItself(true);
+    if (!engine.localEditsPending()) reloadChangedOutside();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadsItself, reloadChangedOutside]);
+  const changedOutsideNotice = engine.outsideWriteWaiting || engine.changedOutside === "unsaved" ||
+    (engine.changedOutside === "saved" && reloadedItself && !reloading);
+  // The Reloaded sign starts when the reopened document binds.
+  const [reloadedSign, setReloadedSign] = useState(0);
+  const reloadedBound = reloading && engine.available && engine.changedOutside === null;
+  useEffect(() => {
+    if (reloadedBound) {
+      setReloading(false);
+      setReloadedSign((count) => count + 1);
+    }
+  }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
   useEffect(() => {
-    if (reloads === 0) return;
+    if (reloadedSign === 0) return;
     setReloadedShown(true);
     const timer = setTimeout(() => setReloadedShown(false), RELOADED_SIGN_MS);
     return () => clearTimeout(timer);
-  }, [reloads]);
+  }, [reloadedSign]);
+  // Capture has not recorded the version changed outside dohc, so the note
+  // did not open again. The notice stays, and Try again reloads.
+  useEffect(() => {
+    if (!engine.outsideWriteWaiting) return;
+    setReloading(false);
+    const message = outsideVersionWaitingMessage(props.path);
+    onButtonError?.(message, new Error(message), () => {
+      if (!unmounted.current) reloadChangedOutside();
+    }, `outside-write-waiting:${props.workspaceId}:${props.path}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine.outsideWriteWaiting]);
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
@@ -899,6 +929,7 @@ export function MarkdownView(props: {
     engine.readOnlyWhileEditing ||
     engine.permanentFailureWhileEditing ||
     engine.removalInProgress !== null ||
+    engine.outsideWriteWaiting ||
     // The engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
@@ -1964,7 +1995,7 @@ export function MarkdownView(props: {
   if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
-      {engine.changedOutside === "unsaved" && !engine.deletedWhileEditing ? (
+      {changedOutsideNotice && !engine.deletedWhileEditing ? (
         <ChangedOutsideNotice onReload={reloadChangedOutside} />
       ) : null}
       {engine.deletedWhileEditing ? (

@@ -98,9 +98,9 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
     title: "This file changed outside dohc. dohc opened the new version.",
   },
   "changed-on-disk": {
-    label: "Changed on disk",
+    label: "Changed outside dohc",
     mark: "attention",
-    title: "This file changed outside dohc while it was open. Open History to restore your text.",
+    title: "This file changed outside dohc while it was open. dohc keeps your text in History.",
   },
   deleted: {
     label: "Deleted",
