@@ -3,14 +3,14 @@ import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalS
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { adoptLocalDatasetStore, createLocalDatasetHost, reconcileExistingLocalCollectionApps, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
-import { CollectionsRefusalError, keepCollectionsHere, recordNewCollectionsHolder } from "./collectionsHolder";
+import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
+import { CollectionsRefusalError, keepCollectionsHere, recordNewCollectionsHolder, type KeepSteps } from "./collectionsHolder";
 import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { compileDatasetOperations as relayCompileDatasetOperations } from "../../../../services/sync-relay/src/datasetCompiler";
 import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
@@ -863,6 +863,9 @@ describe("the computer that keeps a workspace's Collections", () => {
     hosts.splice(hosts.indexOf(first.host), 1);
     return { root: first.workspaceRoot, approved };
   }
+  // Keep's steps as main gives them, with the person's answer.
+  const keepSteps = (root: string, confirm = true): KeepSteps => ({ adoptStore: storeId => adoptLocalDatasetStore(root, "w", storeId),
+    storeIdHere: () => localDatasetStoreId(root), madeBy: async () => null, confirm: async () => confirm });
   async function refusedOpen(root: string) {
     const error = await open({ workspaceRoot: root, holder: guarded }).then(() => null, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(CollectionsRefusalError);
@@ -893,7 +896,7 @@ describe("the computer that keeps a workspace's Collections", () => {
     expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
     expect(storeIdIn(root)).toBe("no table");
     expect(await present(recordFile(root))).toBe(false);
-    await keepCollectionsHere(root, "w", here, storeId => adoptLocalDatasetStore(root, "w", storeId));
+    await keepCollectionsHere(root, "w", here, keepSteps(root));
     expect(storeIdIn(root)).toBe((await readRecord(root)).storeId);
     const kept = await open({ workspaceRoot: root, holder: guarded });
     expect((await kept.host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
@@ -941,7 +944,7 @@ describe("the computer that keeps a workspace's Collections", () => {
     expect(await present(join(root, "record.json"))).toBe(false);
   });
 
-  it("stops an open host from taking new work once the record names another computer or store", async () => {
+  it("refuses the next piece of work, a write too, as soon as the record names another computer or store", async () => {
     for (const change of [
       (root: string) => writeRecord(root, laptop, null),
       (root: string) => writeRecord(root, here, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f"),
@@ -952,16 +955,81 @@ describe("the computer that keeps a workspace's Collections", () => {
       await recordNewCollectionsHolder(root, "w", here);
       const { host } = await open({ workspaceRoot: root, holder: guarded });
       const approved = await activate(host);
-      await host.held();
+      await host.action(call(approved, id(6), "add", { name: "Camera" }));
       await change(root);
-      const refused = await host.held().then(() => null, (error: unknown) => error);
+      // Nothing checks in between: the write itself reads the changed record.
+      const refused = await host.action(call(approved, id(6), "add-after", { name: "Lens" })).then(() => null, (error: unknown) => error);
       expect(refused).toBeInstanceOf(CollectionsRefusalError);
       // Every later use refuses the same way, including one that reads nothing from disk.
       expect(() => host.list()).toThrow(refused as Error);
       expect(() => host.automations.next()).toThrow(refused as Error);
-      await expect(host.action(call(approved, id(6), "add-after", { name: "Lens" }))).rejects.toThrow(refused as Error);
-      await expect(host.held()).rejects.toThrow(refused as Error);
+      expect(() => host.held()).toThrow(refused as Error);
     }
+  });
+
+  it("names the store a creation made, whichever runs first when the person keeps the Collections meanwhile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    const [opened, kept] = await Promise.allSettled([open({ workspaceRoot: root, holder: guarded }), keepCollectionsHere(root, "w", here, keepSteps(root))]);
+    expect(opened.status).toBe("fulfilled");
+    if (kept.status === "rejected") expect((kept.reason as CollectionsRefusalError).refusal).toEqual({ kind: "changed" });
+    const { storeId } = await readRecord(root);
+    expect(storeId).not.toBeNull();
+    expect(storeIdIn(root)).toBe(storeId);
+  });
+
+  it("refuses a new store when the record changes before it names it, and keeps the newer record", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    let asked = 0;
+    // The second ask comes after the store is made, just before the record names it: another computer's record arrives then.
+    const holder = { required: () => true, here: () => { if (++asked === 2) writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId: null })); return here; } };
+    const error = await open({ workspaceRoot: root, holder }).then(() => null, (caught: unknown) => caught);
+    expect((error as CollectionsRefusalError).refusal).toEqual({ kind: "changed" });
+    expect(await readRecord(root)).toMatchObject({ installId: "install-laptop", storeId: null });
+  });
+
+  it("never keeps a store with nothing in it, and never opens one for a record that names a store", async () => {
+    for (const empty of [async (path: string) => writeFile(path, ""), async (path: string) => { new DatabaseSync(path).close(); }]) {
+      const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+      await mkdir(join(root, ".dohc", "datasets"), { recursive: true });
+      const store = join(root, ".dohc", "datasets", "state.sqlite");
+      await empty(store);
+      const before = await readFile(store);
+      await expect(keepCollectionsHere(root, "w", here, keepSteps(root)))
+        .rejects.toThrow(".dohc/datasets/state.sqlite is empty here, and may still be syncing from another computer. Try again once it has synced.");
+      expect(await readFile(store)).toEqual(before);
+      expect(await present(recordFile(root))).toBe(false);
+      await writeRecord(root, here, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
+      expect((await refusedOpen(root)).refusal).toEqual({ kind: "replaced" });
+      expect(await readFile(store)).toEqual(before);
+    }
+  });
+
+  it("keeps an earlier installation's Collections on this computer only from the store the record names, keeping its id", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    const before = { installId: "install-before", label: "Studio" };
+    await recordNewCollectionsHolder(root, "w", before);
+    const first = await open({ workspaceRoot: root, holder: { here: () => before, required: () => true } });
+    const approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const { storeId } = await readRecord(root);
+    expect((await refusedOpen(root)).refusal.kind).toBe("elsewhere");
+    expect(await keepCollectionsHere(root, "w", here, keepSteps(root, false)), "not confirmed").toBe(false);
+    expect(await readRecord(root)).toMatchObject({ installId: "install-before", storeId });
+    expect(await keepCollectionsHere(root, "w", here, keepSteps(root))).toBe(true);
+    expect(await readRecord(root)).toMatchObject({ installId: "install-here", storeId });
+    const kept = await open({ workspaceRoot: root, holder: guarded });
+    expect((await kept.host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+    await kept.host.close();
+    // Another computer's copy of the store is not the one the record names.
+    await writeRecord(root, before, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
+    await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow("This computer doesn't have Studio's copy of the Collections.");
+    expect(await readRecord(root)).toMatchObject({ installId: "install-before", storeId: "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f" });
   });
 
   it("does not reconcile local app responses in a store another computer keeps", async () => {
@@ -972,11 +1040,11 @@ describe("the computer that keeps a workspace's Collections", () => {
     expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
   });
 
-  it("opens as before, with no record, in a workspace that syncs through a server", async () => {
+  it("opens as before, with no record, where no holder is required, as in a received share", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
     const { host } = await open({ workspaceRoot: root, holder: { here: () => here, required: () => false } });
     await activate(host);
-    await host.held();
+    host.held();
     expect(await present(recordFile(root))).toBe(false);
   });
 });

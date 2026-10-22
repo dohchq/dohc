@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, KEEP_COLLECTIONS_HERE, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -196,13 +196,15 @@ export function useShellError(workspaceId: string) {
     };
     return { label: "Open System Settings", run };
   }, [push]);
-  // Keeps Collections that no computer keeps yet on this one, then runs
-  // `then`, such as the step that was refused. A failure files its own row.
+  // Keeps the workspace's Collections on this computer, then runs `then`,
+  // such as the step that was refused. Main asks first when another
+  // computer may have them, and nothing runs when the person cancels. A
+  // failure files its own row.
   const keepCollectionsHere = useCallback((then: (() => void) | null) => {
     const owner = currentWorkspace.current;
     const run = (): void => {
-      bridge().keepCollectionsHere({ workspaceId: owner }).then(() => {
-        if (currentWorkspace.current === owner) then?.();
+      bridge().keepCollectionsHere({ workspaceId: owner }).then(({ kept }) => {
+        if (kept && currentWorkspace.current === owner) then?.();
       }, (error: unknown) => {
         if (currentWorkspace.current !== owner) return;
         const { cause } = readError(error);
@@ -326,7 +328,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         retry,
         ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
-          : readCollectionsRefusal(error)?.kind === "unclaimed" ? { action: { label: KEEP_COLLECTIONS_HERE, run: () => keepCollectionsHere(retry), ends: true } }
+          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: KEEP_COLLECTIONS_HERE, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
       });

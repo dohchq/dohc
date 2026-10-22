@@ -17,7 +17,7 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEP_COLLECTIONS_HERE, readCollectionsRefusal, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -190,9 +190,11 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   if ((!dataset || !columns) && refusal && !loading) {
     const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
     return <EmptyState data-testid="collection-refusal" icon={held ? Laptop : TriangleAlert} tone={held ? "warning" : "danger"} title={refusal.words}>
-      {refusal.kind === "unclaimed" && onKeepCollections
-        ? <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>
-        : <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
+      <div className="flex flex-wrap justify-center gap-2">
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections &&
+          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
+      </div>
     </EmptyState>;
   }
   if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">

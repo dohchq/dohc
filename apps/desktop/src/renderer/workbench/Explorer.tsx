@@ -53,7 +53,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { KEEP_COLLECTIONS_HERE, type CollectionsRefusalKind } from "../../ipc/errorWords";
+import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, type CollectionsRefusalKind } from "../../ipc/errorWords";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -2052,9 +2052,10 @@ function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
         <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${held ? "text-warning" : "text-danger"}`} />
         <span className="wrap-anywhere">{refusal.words}</span>
       </p>
-      {refusal.kind === "unclaimed"
-        ? onKeep && <SecondaryButton size="compact" data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>
-        : onRetry && <SecondaryButton size="compact" onClick={() => onRetry()}>Try again</SecondaryButton>}
+      <div className="flex flex-wrap gap-1.5">
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton size="compact" data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton size="compact" onClick={() => onRetry()}>Try again</SecondaryButton>}
+      </div>
     </div>
   );
 }

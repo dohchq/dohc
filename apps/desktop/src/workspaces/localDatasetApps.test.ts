@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { unguardedCollections } from "../testing/collectionsHolder";
+import { recordNewCollectionsHolder, type CollectionsHolderCheck } from "./collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -38,11 +39,12 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
-async function fixture(agentRun?: () => LocalDatasetAgent | null) {
+async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
-  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
+  if (holder.required()) await recordNewCollectionsHolder(workspaceRoot, "w", holder.here());
+  const host = await createLocalDatasetHost({ holder, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
   files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
@@ -95,6 +97,15 @@ function approveAsOlderBuild(db: DatabaseSync, app: Awaited<ReturnType<typeof fi
 }
 
 describe("local approved dataset apps", () => {
+  it("refuses a running app's next write once another computer keeps the Collections, with nothing else asked first", async () => {
+    const f = await fixture(undefined, { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true });
+    expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
+    await writeFile(join(f.workspaceRoot, ".dohc", "collections.json"),
+      JSON.stringify({ version: 1, workspaceId: "w", installId: "install-laptop", label: "Laptop", storeId: null }));
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation("Blake", "submit-two"))).rejects.toThrow("These Collections are on Laptop.");
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow("These Collections are on Laptop.");
+  });
+
   it("persists approval provenance with the captured candidate without changing app authority", async () => {
     const f = await fixture();
     await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);

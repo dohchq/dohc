@@ -234,6 +234,18 @@ async function keep(rootPath: string, name: Mark): Promise<true> {
   return true;
 }
 
+/**
+ * The installation that made the workspace, as its record says, or null
+ * when the record names none or dohc cannot read it. A synced workspace
+ * made by dohc still has one.
+ */
+export async function workspaceMadeBy(rootPath: string): Promise<Computer | null> {
+  const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false }).catch(() => null);
+  if (metadata === null) return null;
+  const read = await readGuardedFile(join(metadata, "sync-history.json"), at(".dohc/sync-history.json"));
+  return read.kind === "text" ? parseRecord(read.text)?.host ?? null : null;
+}
+
 /** What the workspace's history says. */
 export async function readSyncHistory(rootPath: string): Promise<SyncHistory> {
   return (await readHistory(rootPath)).history;

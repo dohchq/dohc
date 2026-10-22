@@ -517,7 +517,7 @@ describe("a Collection this computer cannot use", () => {
     const onError = vi.fn(), onKeepCollections = vi.fn();
     render(<ConnectedTransactionalCollection {...props} onError={onError} onKeepCollections={onKeepCollections} />);
     expect((await screen.findByTestId("collection-refusal")).textContent).toContain(words);
-    expect(screen.queryByRole("button", { name: "Keep the Collections on this computer" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Keep the Collections on this computer" })).toBeTruthy();
     expect(onError).not.toHaveBeenCalled();
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));

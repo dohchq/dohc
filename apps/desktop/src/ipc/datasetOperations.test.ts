@@ -12,7 +12,7 @@ function fixture() {
     assertTrustedSender(event) { if (event.sender === "untrusted") throw new Error("Untrusted IPC sender."); },
     withActiveWorkspace: vi.fn(async () => { throw new Error("Unexpected outer workspace operation."); }),
   } satisfies OperationBoundary<{ sender: string }, never>;
-  const keep = vi.fn(async () => {});
+  const keep = vi.fn(async () => ({ kept: true }));
   registerOperations(boundary, datasetOperations, { dataset: handler, keepCollectionsHere: keep });
   const invoke = (event: { sender: string }, payload: unknown) => listeners.get(datasetOperations.dataset.channel)!(event, payload);
   const keepHere = (event: { sender: string }, payload: unknown) => listeners.get(datasetOperations.keepCollectionsHere.channel)!(event, payload);

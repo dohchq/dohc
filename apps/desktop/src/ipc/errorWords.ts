@@ -342,10 +342,13 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
 
 /**
  * Why this computer cannot use a workspace's Collections: no computer keeps
- * them yet, another one keeps them, dohc cannot read which one, or the
- * store this computer keeps is not there or was replaced.
+ * them yet, another one keeps them, dohc cannot read which one, the store
+ * this computer keeps is not there or was replaced, or the record changed
+ * while dohc wrote it.
  */
-export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced"] as const;
+export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced", "changed"] as const;
+/** Refusals that keeping the Collections here can answer, after the person confirms where needed. */
+export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
 export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
 export const COLLECTIONS_REFUSAL_CODE = "collections-";
 /** The control that keeps Collections no computer keeps yet on this one. */

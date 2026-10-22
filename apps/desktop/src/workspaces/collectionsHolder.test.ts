@@ -5,10 +5,13 @@ import {
   admitCollectionsStore,
   collectionsHolderRequired,
   CollectionsRefusalError,
-  heldHere,
+  createHoldingCheck,
+  holderWork,
   keepCollectionsHere,
+  keepQuestionWords,
   recordCollectionsStore,
   recordNewCollectionsHolder,
+  type KeepSteps,
 } from "./collectionsHolder";
 import { createTestScratch } from "./testTemp";
 
@@ -33,6 +36,12 @@ const refusal = async (work: Promise<unknown>) => {
   return error as CollectionsRefusalError;
 };
 const exists = (path: string) => lstat(path).then(() => true, () => false);
+// Keep's steps: no store here to name, nobody else made the workspace, and the person confirms.
+const steps = (overrides: Partial<KeepSteps> = {}): KeepSteps => ({
+  adoptStore: vi.fn(async () => {}), storeIdHere: vi.fn(async () => null), madeBy: vi.fn(async () => null),
+  confirm: vi.fn(async () => true), ...overrides,
+});
+const recordNow = async () => JSON.parse(await readFile(recordPath(), "utf8")) as Record<string, unknown>;
 
 beforeEach(async () => {
   root = await createTestScratch("dohc-collections-holder-");
@@ -43,7 +52,7 @@ describe("a workspace's Collections holder", () => {
   it("names the installation that made a new workspace, with no store yet, and keeps a record already there", async () => {
     await recordNewCollectionsHolder(root, workspaceId, here);
     expect(JSON.parse(await readFile(recordPath(), "utf8"))).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: null });
-    expect(await admitCollectionsStore(root, workspaceId, required)).toEqual({ kind: "create", storeId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    expect(await admitCollectionsStore(root, workspaceId, required)).toMatchObject({ kind: "create", storeId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
     await recordNewCollectionsHolder(root, workspaceId, laptop);
     expect(JSON.parse(await readFile(recordPath(), "utf8")).installId).toBe("install-here");
   });
@@ -96,15 +105,32 @@ describe("a workspace's Collections holder", () => {
     expect(await exists(join(root, ".dohc", "datasets", "state.sqlite"))).toBe(false);
   });
 
-  it("checks an open store against the record, so a changed record stops it", async () => {
+  it("checks an open store against the record before each use, reading it again only after it changed", async () => {
     await named(here, storeId);
-    await expect(heldHere(root, workspaceId, here, storeId)).resolves.toEqual({ computer: here, storeId });
-    expect((await refusal(heldHere(root, workspaceId, here, "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f"))).refusal).toEqual({ kind: "replaced" });
-    expect((await refusal(heldHere(root, workspaceId, here, null))).refusal).toEqual({ kind: "replaced" });
+    let open: string | null = storeId;
+    const check = createHoldingCheck(root, workspaceId, required, () => open);
+    check();
+    // Unchanged, the record is not read again: a store id that changed meanwhile goes unnoticed until the record changes.
+    open = "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
+    check();
+    const stop = (expected: object) => { try { check(); } catch (error) { expect((error as CollectionsRefusalError).refusal).toMatchObject(expected); return; } throw new Error("Expected a refusal."); };
+    await named(here, storeId);
+    stop({ kind: "replaced" });
+    open = storeId;
     await named(laptop, storeId);
-    expect((await refusal(heldHere(root, workspaceId, here, storeId))).refusal.kind).toBe("elsewhere");
+    stop({ kind: "elsewhere" });
     await named(here);
-    expect((await refusal(heldHere(root, workspaceId, here, storeId))).refusal, "an open store the record does not name").toEqual({ kind: "unclaimed" });
+    stop({ kind: "unclaimed" });
+    await rm(recordPath());
+    stop({ kind: "unclaimed" });
+    await writeFile(recordPath(), "{");
+    stop({ kind: "unreadable" });
+    await named(here, storeId);
+    check();
+    // The same bytes rewritten in place still count as a change, and are read again.
+    await writeFile(recordPath(), await readFile(recordPath()));
+    check();
+    expect(() => createHoldingCheck(root, workspaceId, { here: () => here, required: () => false }, () => null)()).not.toThrow();
   });
 
   it.each([
@@ -122,9 +148,9 @@ describe("a workspace's Collections holder", () => {
     expect(refused.code).toBe("collections-unreadable");
     expect(refused.message).toBe("dohc could not read which computer keeps this workspace's Collections. Restore .dohc/collections.json, or update dohc. Then retry.");
     // Keeping them here does not replace a record dohc cannot read.
-    const adopt = vi.fn(async () => {});
-    await refusal(keepCollectionsHere(root, workspaceId, here, adopt));
-    expect(adopt).not.toHaveBeenCalled();
+    const kept = steps();
+    await refusal(keepCollectionsHere(root, workspaceId, here, kept));
+    expect(kept.adoptStore).not.toHaveBeenCalled();
     expect(await readFile(recordPath(), "utf8")).toBe(text);
   });
 
@@ -133,7 +159,7 @@ describe("a workspace's Collections holder", () => {
     await symlink(target, recordPath());
     const link = await refusal(admitCollectionsStore(root, workspaceId, required));
     expect(link.message).toBe("dohc could not read which computer keeps this workspace's Collections. A link is at .dohc/collections.json, which must be a file. Remove or rename that link. Then retry.");
-    expect((await refusal(keepCollectionsHere(root, workspaceId, here, async () => {}))).message).toBe(link.message);
+    expect((await refusal(keepCollectionsHere(root, workspaceId, here, steps()))).message).toBe(link.message);
     await expect(recordNewCollectionsHolder(root, workspaceId, here)).rejects.toThrow("A link is at .dohc/collections.json");
     expect(await exists(target), "the link's target").toBe(false);
     await rm(recordPath());
@@ -148,23 +174,48 @@ describe("a workspace's Collections holder", () => {
     expect((await refusal(admitCollectionsStore(root, workspaceId, required))).code).toBe("collections-unreadable");
   });
 
-  it("needs no holder in a workspace that syncs through a server, even paused, or opened as a share", async () => {
+  it("needs a holder in every workspace of the person's own, synced through a server or not, and none in a received share", async () => {
     expect(await admitCollectionsStore(root, workspaceId, { here: () => here, required: () => false })).toEqual({ kind: "unguarded" });
     expect(collectionsHolderRequired({})).toBe(true);
     expect(collectionsHolderRequired(undefined)).toBe(true);
-    expect(collectionsHolderRequired({ remote: { serverUrl: "https://server.dohc.test" } })).toBe(false);
-    expect(collectionsHolderRequired({ pausedRemote: { serverUrl: "https://server.dohc.test" } })).toBe(false);
+    // A server's sync never carries .dohc, so the record cannot travel through it.
+    expect(collectionsHolderRequired({ remote: { serverUrl: "https://server.dohc.test" } } as { shareView?: unknown })).toBe(true);
+    expect(collectionsHolderRequired({ pausedRemote: { serverUrl: "https://server.dohc.test" } } as { shareView?: unknown })).toBe(true);
     expect(collectionsHolderRequired({ shareView: { shareId: "s" } })).toBe(false);
   });
 
-  it("names a new store once it is created, only while the record still names this computer without one", async () => {
+  it("names a new store once it is created, only while the record is still the one admission read", async () => {
     await named(here);
-    await recordCollectionsStore(root, workspaceId, here, storeId);
-    expect(JSON.parse(await readFile(recordPath(), "utf8")).storeId).toBe(storeId);
-    expect((await refusal(recordCollectionsStore(root, workspaceId, here, storeId))).refusal).toEqual({ kind: "replaced" });
+    const admitted = await admitCollectionsStore(root, workspaceId, required);
+    if (admitted.kind !== "create") throw new Error("Expected a new store.");
+    // Another computer's record arrives while the store is made.
     await named(laptop);
-    expect((await refusal(recordCollectionsStore(root, workspaceId, here, storeId))).refusal.kind).toBe("elsewhere");
+    const changed = await refusal(recordCollectionsStore(root, workspaceId, here, admitted.storeId, admitted.seen));
+    expect(changed.message).toBe("dohc did not record which computer keeps this workspace's Collections, because .dohc/collections.json changed meanwhile. Try again.");
+    expect(await recordNow()).toMatchObject({ installId: "install-laptop", storeId: null });
+    await named(here);
+    const again = await admitCollectionsStore(root, workspaceId, required);
+    if (again.kind !== "create") throw new Error("Expected a new store.");
+    await recordCollectionsStore(root, workspaceId, here, again.storeId, again.seen);
+    expect((await recordNow()).storeId).toBe(again.storeId);
   });
+});
+
+it("runs claims, adoptions and new stores in one workspace one at a time, whether each succeeds or not", async () => {
+  const order: string[] = [];
+  let release!: () => void;
+  const first = holderWork("w-queue", async () => {
+    order.push("first starts");
+    await new Promise<void>((resolve) => { release = resolve; });
+    order.push("first fails");
+    throw new Error("first");
+  });
+  const second = holderWork("w-queue", async () => { order.push("second"); });
+  await holderWork("w-other", async () => { order.push("another workspace"); });
+  release();
+  await expect(first).rejects.toThrow("first");
+  await second;
+  expect(order).toEqual(["first starts", "another workspace", "first fails", "second"]);
 });
 
 describe("keeping the Collections on this computer", () => {
@@ -172,38 +223,109 @@ describe("keeping the Collections on this computer", () => {
     await addStore();
     const order: string[] = [];
     let adopted = "";
-    await keepCollectionsHere(root, workspaceId, here, async (id) => {
+    expect(await keepCollectionsHere(root, workspaceId, here, steps({ adoptStore: async (id) => {
       adopted = id;
       order.push(await exists(recordPath()) ? "record first" : "store first");
-    });
+    } }))).toBe(true);
     expect(order).toEqual(["store first"]);
-    expect(JSON.parse(await readFile(recordPath(), "utf8"))).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: adopted });
+    expect(await recordNow()).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: adopted });
     expect(await admitCollectionsStore(root, workspaceId, required)).toEqual({ kind: "open", storeId: adopted });
   });
 
   it("names this computer for Collections that have no store yet, so it may create one", async () => {
-    const adopt = vi.fn(async () => {});
-    await keepCollectionsHere(root, workspaceId, here, adopt);
-    expect(adopt).not.toHaveBeenCalled();
+    const kept = steps();
+    await keepCollectionsHere(root, workspaceId, here, kept);
+    expect(kept.adoptStore).not.toHaveBeenCalled();
+    expect(kept.confirm).not.toHaveBeenCalled();
     expect(await admitCollectionsStore(root, workspaceId, required)).toMatchObject({ kind: "create" });
   });
 
-  it("never takes Collections another computer keeps, and leaves this computer's as they are", async () => {
-    await named(laptop, storeId);
-    await addStore();
-    const adopt = vi.fn(async () => {});
-    expect((await refusal(keepCollectionsHere(root, workspaceId, here, adopt))).refusal.kind).toBe("elsewhere");
+  it("leaves Collections this computer keeps as they are", async () => {
     await named(here, storeId);
-    await keepCollectionsHere(root, workspaceId, here, adopt);
-    expect(adopt).not.toHaveBeenCalled();
-    expect(JSON.parse(await readFile(recordPath(), "utf8")).storeId).toBe(storeId);
+    await addStore();
+    const kept = steps();
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(true);
+    expect(kept.adoptStore).not.toHaveBeenCalled();
+    expect((await recordNow()).storeId).toBe(storeId);
   });
 
   it("adopts a store the record names this computer for but no store id, as a creation cut short leaves it", async () => {
     await named(here);
     await addStore();
     let adopted = "";
-    await keepCollectionsHere(root, workspaceId, here, async (id) => { adopted = id; });
-    expect(JSON.parse(await readFile(recordPath(), "utf8")).storeId).toBe(adopted);
+    await keepCollectionsHere(root, workspaceId, here, steps({ adoptStore: async (id) => { adopted = id; } }));
+    expect((await recordNow()).storeId).toBe(adopted);
+  });
+
+  it("asks first when another computer made the workspace, since its Collections may still be syncing", async () => {
+    const declined = steps({ madeBy: async () => laptop, confirm: vi.fn(async () => false) });
+    expect(await keepCollectionsHere(root, workspaceId, here, declined)).toBe(false);
+    expect(declined.confirm).toHaveBeenCalledWith({ kind: "made-elsewhere", computer: laptop });
+    expect(await exists(recordPath()), "nothing kept").toBe(false);
+    expect(keepQuestionWords({ kind: "made-elsewhere", computer: laptop })).toEqual({
+      message: "Keep the Collections on this computer?",
+      detail: "Laptop made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace Laptop's Collections.",
+    });
+    const accepted = steps({ madeBy: async () => laptop });
+    expect(await keepCollectionsHere(root, workspaceId, here, accepted)).toBe(true);
+    expect(await recordNow()).toMatchObject({ installId: "install-here", storeId: null });
+    // This computer made it: nothing to ask.
+    await rm(recordPath());
+    const own = steps({ madeBy: async () => here });
+    await keepCollectionsHere(root, workspaceId, here, own);
+    expect(own.confirm).not.toHaveBeenCalled();
+  });
+
+  it("refuses a record that changes while the store here takes its new id, and keeps the newer record", async () => {
+    await addStore();
+    const kept = steps({ adoptStore: async () => { await named(laptop, storeId); } });
+    expect((await refusal(keepCollectionsHere(root, workspaceId, here, kept))).refusal).toEqual({ kind: "changed" });
+    expect(await recordNow()).toMatchObject({ installId: "install-laptop", storeId });
+  });
+
+  it("refuses to write a record it read before another step named a store, so no store id is lost", async () => {
+    // Keep reads no record; a new store is named before Keep writes.
+    const kept = steps({ madeBy: async () => { await named(here, storeId); return null; } });
+    expect((await refusal(keepCollectionsHere(root, workspaceId, here, kept))).refusal).toEqual({ kind: "changed" });
+    expect((await recordNow()).storeId).toBe(storeId);
+    expect(kept.adoptStore).not.toHaveBeenCalled();
+  });
+});
+
+describe("keeping the Collections of an earlier installation of dohc on this computer", () => {
+  it("asks, then names this installation for the store the record names, keeping its id", async () => {
+    await named({ installId: "install-old", label: "Studio" }, storeId);
+    await addStore();
+    const kept = steps({ storeIdHere: async () => storeId });
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(true);
+    expect(kept.confirm).toHaveBeenCalledWith({ kind: "earlier-installation", computer: { installId: "install-old", label: "Studio" } });
+    expect(kept.adoptStore).not.toHaveBeenCalled();
+    expect(await recordNow()).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId });
+    expect(keepQuestionWords({ kind: "earlier-installation", computer: laptop })).toEqual({
+      message: "Keep the Collections on this computer?",
+      detail: "Laptop keeps these Collections. If Laptop was this computer before dohc was set up again, keep them here. If Laptop is another computer that still uses them, don't, or its changes can be lost.",
+    });
+  });
+
+  it("refuses when the store here is not the one the record names, or there is none, and changes nothing", async () => {
+    await named(laptop, storeId);
+    for (const id of [null, "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f"]) {
+      await expect(keepCollectionsHere(root, workspaceId, here, steps({ storeIdHere: async () => id })))
+        .rejects.toThrow("This computer doesn't have Laptop's copy of the Collections.");
+      expect(await recordNow()).toMatchObject({ installId: "install-laptop", storeId });
+    }
+    // A record with no store yet names nothing this computer could have.
+    await named(laptop);
+    const kept = steps({ storeIdHere: async () => null });
+    expect((await refusal(keepCollectionsHere(root, workspaceId, here, kept))).refusal.kind).toBe("elsewhere");
+    expect(kept.confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps nothing when the person does not confirm", async () => {
+    await named(laptop, storeId);
+    const kept = steps({ storeIdHere: vi.fn(async () => storeId), confirm: async () => false });
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(false);
+    expect(kept.storeIdHere).not.toHaveBeenCalled();
+    expect((await recordNow()).installId).toBe("install-laptop");
   });
 });

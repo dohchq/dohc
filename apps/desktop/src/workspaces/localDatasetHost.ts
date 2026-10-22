@@ -1,6 +1,6 @@
 import { createLocalDatasetHistoryReader } from "./localDatasetHistoryReader";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,7 +29,7 @@ import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 import { existingLocalDatasetExports, localDatasetFolder, type LocalDatasetFolder } from "./localDatasetFolders";
 import { localStateOpened, LocalStateUnavailableError } from "./workspaceLocalState";
-import { admitCollectionsStore, CollectionsRefusalError, heldHere, recordCollectionsStore, type CollectionsAdmission, type CollectionsHolderCheck } from "./collectionsHolder";
+import { admitCollectionsStore, CollectionsRefusalError, createHoldingCheck, holderWork, recordCollectionsStore, type CollectionsAdmission, type CollectionsHolderCheck } from "./collectionsHolder";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
@@ -59,7 +59,7 @@ export interface LocalDatasetHostOptions {
   workspaceRoot: string;
   /**
    * Whether this installation keeps the workspace's Collections, read
-   * before the store is opened or created and again by `held`.
+   * before the store is opened or created and again before each piece of work.
    */
   holder: CollectionsHolderCheck;
   /** The attachment whose engine open prepares `.dohc/local`, where workers and exports live. */
@@ -156,16 +156,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     return compiler.compileDatasetOperations(source, path, { signal });
   });
   const root = await realpath(options.workspaceRoot);
-  // Before anything is made: another computer's Collections, or a store
-  // this computer should have but cannot find, are refused here.
-  const admission = await admitCollectionsStore(root, options.workspaceId, options.holder);
-  const path = await storagePath(root, admission.kind !== "open");
-  if (admission.kind === "open" && !(await lstat(path).catch(() => null))) throw new CollectionsRefusalError({ kind: "missing" });
-  const db = openStore(path);
-  try { checkStore(db, admission); }
-  catch (error) { db.close(); throw error; }
+  const { db, path } = await holderWork(options.workspaceId, () => openHeldStore(root, options.workspaceId, options.holder));
   const historyReader = createLocalDatasetHistoryReader(path, options.workspaceId);
-  // Set once a later read of the record refuses: every use after refuses too.
+  const holding = createHoldingCheck(root, options.workspaceId, options.holder, () => storeIdOf(db));
+  // Set once the record names another computer or store: every use after refuses too.
   let refusal: CollectionsRefusalError | null = null;
   let closed = false, closePromise: Promise<void> | undefined, transactionSequence = 0;
   const lifetime = new AbortController(), active = new Set<Promise<unknown>>();
@@ -182,17 +176,27 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   const ownerAuthority = (context: LocalContext) => context === owner || agentContexts.has(context as AgentContext);
   const pending = new Map<string, { preparation: LocalDatasetPreparation; schemaSql: string; operationSource: string; expires: number }>();
   function assertCurrent() {
-    if (refusal) throw refusal;
     if (closed) throw new Error("This Collection session ended. Reopen the workspace.");
+    assertHeld();
     options.assertCurrent?.();
+  }
+  // Every admission and every write checks the record first, app requests too.
+  function assertHeld() {
+    if (refusal) throw refusal;
+    try { holding(); }
+    catch (error) { if (error instanceof CollectionsRefusalError) refusal = error; throw error; }
   }
   function signal(input?: AbortSignal) { assertCurrent(); return input ? AbortSignal.any([input, lifetime.signal]) : lifetime.signal; }
   function transaction<T>(work: () => T): T {
     assertCurrent();
     return commit(work);
   }
-  /** Without the session check: admitted Collection creates still record their outcomes while the host closes. */
+  /**
+   * Without the session check, so admitted Collection creates still record
+   * their outcomes while the host closes. The record check stays.
+   */
   function commit<T>(work: () => T): T {
+    assertHeld();
     const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
     db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
     try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
@@ -227,10 +231,6 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       CREATE TABLE IF NOT EXISTS local_dataset_recovery_files(import_id TEXT NOT NULL,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,attached_revision INTEGER NOT NULL,storage_bytes INTEGER NOT NULL,PRIMARY KEY(import_id,file_id)) STRICT;`);
       db.prepare("INSERT OR IGNORE INTO local_dataset_identity VALUES(1,?)").run(workspaceId);
       if (db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get()!.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
-      if (admission.kind === "create") {
-        db.exec(STORE_TABLE);
-        db.prepare("INSERT INTO local_dataset_store VALUES(1,?)").run(admission.storeId);
-      }
       db.prepare("INSERT OR IGNORE INTO local_dataset_budget VALUES(1,0)").run();
       db.prepare("INSERT OR IGNORE INTO local_collection_app_usage VALUES(1,0)").run();
       // Collection app storage is outside Dataset usage, so a build without it refuses the store.
@@ -238,8 +238,6 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       const tracked = Number(db.prepare("SELECT coalesce(sum(bytes),0)+(SELECT bytes FROM local_collection_app_usage) AS bytes FROM local_dataset_usage").get()!.bytes);
       if (budget !== tracked) throw new Error("This development Collection store predates per-Collection storage accounting. Export it with the previous build before resetting the store.");
     });
-    // The record names the new store only once it holds its id.
-    if (admission.kind === "create") await recordCollectionsStore(root, workspaceId, options.holder.here(), admission.storeId);
     const journal = createDatasetJournal({ db, transaction });
     const attempts = createDatasetAttempts({ db, transaction, account: (scope, bytes) => charge(scope.datasetId,bytes) });
     // Workers and exports are this computer's, in `.dohc/local`, which only
@@ -453,17 +451,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {
       /**
-       * Reads the record again before new work, as every caller that reuses
-       * an open host does: a host whose installation no longer keeps this
-       * store refuses this and everything after.
+       * Throws when this installation no longer keeps this store, as every
+       * use after does, so a caller that reuses an open host can close it.
        */
-      async held(): Promise<void> {
-        assertCurrent();
-        if (!options.holder.required()) return;
-        try { await heldHere(root, workspaceId, options.holder.here(), storeIdOf(db)); }
-        catch (error) { if (error instanceof CollectionsRefusalError) refusal ??= error; throw error; }
-        assertCurrent();
-      },
+      held(): void { assertCurrent(); },
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
       approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })).then(changed); },
@@ -750,14 +741,45 @@ function storeIdOf(db: DatabaseSync): string | null {
   return row ? String(row.store_id) : null;
 }
 
-// Before the store changes: a new store must be empty, so a store that
-// arrived since the record was read is not taken as new, and an existing
-// one must be the store the record names.
-function checkStore(db: DatabaseSync, admission: CollectionsAdmission): void {
-  if (admission.kind === "create" && Number(db.prepare("SELECT count(*) AS count FROM sqlite_master").get()!.count) !== 0) {
-    throw new CollectionsRefusalError({ kind: "unclaimed" });
+const tableCount = (db: DatabaseSync) => Number(db.prepare("SELECT count(*) AS count FROM sqlite_master").get()!.count);
+
+// Opens the store this installation keeps, or creates it, before anything
+// else is made: another computer's Collections, a store that is not
+// there, and a store the record does not name are refused. A new store is
+// a file this call creates, never one that arrived meanwhile, even empty.
+// It takes its id before the record names it.
+async function openHeldStore(root: string, workspaceId: string, holder: CollectionsHolderCheck): Promise<{ db: DatabaseSync; path: string }> {
+  const admission: CollectionsAdmission = await admitCollectionsStore(root, workspaceId, holder);
+  const path = await storagePath(root, admission.kind !== "open");
+  if (admission.kind === "open" && !(await lstat(path).catch(() => null))) throw new CollectionsRefusalError({ kind: "missing" });
+  if (admission.kind === "create") {
+    await writeFile(path, "", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+      throw error.code === "EEXIST" ? new CollectionsRefusalError({ kind: "unclaimed" }) : error;
+    });
   }
-  if (admission.kind === "open" && storeIdOf(db) !== admission.storeId) throw new CollectionsRefusalError({ kind: "replaced" });
+  const db = openStore(path);
+  try {
+    if (admission.kind === "open" && storeIdOf(db) !== admission.storeId) throw new CollectionsRefusalError({ kind: "replaced" });
+    if (admission.kind === "create") {
+      if (tableCount(db) !== 0) throw new CollectionsRefusalError({ kind: "unclaimed" });
+      db.exec(`BEGIN IMMEDIATE; ${STORE_TABLE};`);
+      try { db.prepare("INSERT INTO local_dataset_store VALUES(1,?)").run(admission.storeId); db.exec("COMMIT"); }
+      catch (error) { db.exec("ROLLBACK"); throw error; }
+      await recordCollectionsStore(root, workspaceId, holder.here(), admission.storeId, admission.seen);
+    }
+    return { db, path };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+/** The id the workspace's store keeps, or null when it keeps none or is not there. Creates no store. */
+export async function localDatasetStoreId(workspaceRoot: string): Promise<string | null> {
+  const root = await realpath(workspaceRoot);
+  if (!(await lstat(join(root, ".dohc", "datasets", "state.sqlite")).catch(() => null))) return null;
+  const db = openStore(await storagePath(root, false));
+  try { return storeIdOf(db); } finally { db.close(); }
 }
 
 /**
@@ -774,6 +796,8 @@ export async function adoptLocalDatasetStore(workspaceRoot: string, workspaceId:
   try {
     db.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
     try {
+      // A file with no store in it may be one still syncing from another computer.
+      if (tableCount(db) === 0) throw new Error(`.dohc/datasets/state.sqlite is empty here, and may still be syncing from another computer. Try again once it has synced.`);
       const identity = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_dataset_identity'").get()
         ? db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get() : undefined;
       if (identity && identity.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");

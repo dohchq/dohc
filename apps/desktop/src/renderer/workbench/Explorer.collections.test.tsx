@@ -140,9 +140,15 @@ describe("Collections this computer cannot use", () => {
     expect(within(section).queryByText("Restore from recovery file")).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Keep the Collections on this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
+    expect(within(section).queryByRole("button", { name: "Try again" })).toBeNull();
     rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: "These Collections are on Laptop." }, onKeepCollections, onRetryCollections })} />);
-    expect(screen.queryByRole("button", { name: "Keep the Collections on this computer" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetryCollections).toHaveBeenCalledOnce();
+    // Behind main's question, which names the other computer.
+    fireEvent.click(screen.getByRole("button", { name: "Keep the Collections on this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledTimes(2);
+    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." }, onKeepCollections, onRetryCollections })} />);
+    expect(screen.queryByRole("button", { name: "Keep the Collections on this computer" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
