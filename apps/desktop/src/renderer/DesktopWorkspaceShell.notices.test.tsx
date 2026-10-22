@@ -1163,6 +1163,45 @@ describe("crash report notice", () => {
   });
 });
 
+it("names the workspaces that still hold a previous account's offline copies, with Try again and Copy", async () => {
+  const user = userEvent.setup();
+  const bridge = makeBridge(Promise.resolve(null));
+  renderShell(bridge);
+  await waitFor(() => expect(bridge.readCollectionCopiesLeft).toHaveBeenCalledOnce());
+  // The sign-out's cleanup fails after the shell opened, and main says so.
+  bridge.readCollectionCopiesLeft.mockResolvedValue({ workspaces: ["/Users/ana/Trip", "/Users/ana/Fundraiser"] });
+  act(() => bridge.emitCollectionCopiesLeftChanged());
+  const message = "dohc could not remove offline copies of Collections from a previous account. They are still in Trip and Fundraiser.";
+  expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+  // Try again closes Notices, so each row is read from Notices opened again.
+  const rowOf = async (text: string) => {
+    await waitFor(() => expect(screen.getAllByText(text).length).toBeGreaterThan(0));
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    return (await within(screen.getByTestId("notice-center")).findByText(text)).closest("li")!;
+  };
+  const row = await rowOf(message);
+  expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  // Try again that still leaves one says which, and one that removes them all ends the row.
+  bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ workspaces: ["/Users/ana/Trip"] });
+  await user.click(within(row).getByRole("button", { name: "Try again" }));
+  const left = "dohc could not remove offline copies of Collections from a previous account. They are still in Trip.";
+  const again = await rowOf(left);
+  expect(screen.queryByText(message)).toBeNull();
+  const removed = deferred<{ workspaces: string[] }>();
+  bridge.removeCollectionCopiesLeft.mockImplementationOnce(() => removed.promise);
+  await user.click(within(again).getByRole("button", { name: "Try again" }));
+  await act(async () => removed.resolve({ workspaces: [] }));
+  expect(bridge.removeCollectionCopiesLeft).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(left)).toBeNull();
+  // A later account change that removes them ends a row too.
+  bridge.readCollectionCopiesLeft.mockResolvedValue({ workspaces: ["/Users/ana/Trip"] });
+  act(() => bridge.emitCollectionCopiesLeftChanged());
+  await rowOf(left);
+  bridge.readCollectionCopiesLeft.mockResolvedValue({ workspaces: [] });
+  act(() => bridge.emitCollectionCopiesLeftChanged());
+  await waitFor(() => expect(screen.queryByText(left)).toBeNull());
+});
+
 describe("notices sent to you", () => {
   function sentNotices(notices: NoticeRow[]): SentNotices {
     return {

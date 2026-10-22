@@ -1,4 +1,4 @@
-import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -7,8 +7,9 @@ import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalS
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
-// The registry's own file calls: how many are running, and which folders it removed.
-const files = vi.hoisted(() => ({ running: 0, removed: [] as string[] }));
+// The registry's own file calls: how many are running, which folders it
+// removed, and the folders whose removal fails as a busy folder's would.
+const files = vi.hoisted(() => ({ running: 0, removed: [] as string[], busy: new Set<string>() }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   async function counted<T>(work: Promise<T>): Promise<T> {
@@ -18,22 +19,32 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual,
     lstat: ((...args: Parameters<typeof actual.lstat>) => counted(actual.lstat(...args))) as typeof actual.lstat,
     realpath: ((...args: Parameters<typeof actual.realpath>) => counted(actual.realpath(...args))) as typeof actual.realpath,
-    rm: async (...args: Parameters<typeof actual.rm>) => { await counted(actual.rm(...args)); files.removed.push(String(args[0])); } };
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (files.busy.has(String(args[0]))) throw Object.assign(new Error(`EBUSY: resource busy or locked, rmdir '${String(args[0])}'`), { code: "EBUSY" });
+      await counted(actual.rm(...args)); files.removed.push(String(args[0]));
+    } };
 });
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
+afterEach(async () => { files.busy.clear(); for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
+// The next start of dohc, with the same record.
+function restart(record: string) {
+  const registry = createOwnerDatasetCopyRegistry({ record });
+  cleanups.push(() => registry.closeAll());
+  return registry;
+}
 async function fixture({ opened = true } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-copy-registry-")), lifetime = new AbortController();
   if (opened) await openedLocalState({ workspaceId: "w", rootPath });
-  const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" }), registry = createOwnerDatasetCopyRegistry();
-  cleanups.push(async () => { await registry.closeAll(); await rm(rootPath, { recursive: true, force: true }); });
+  const state = await mkdtemp(join(tmpdir(), "dohc-copy-registry-state-")), record = join(state, "dataset-copy-removals.json"), onLeftover = vi.fn();
+  const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" }), registry = createOwnerDatasetCopyRegistry({ record, onLeftover });
+  cleanups.push(async () => { await registry.closeAll(); await rm(rootPath, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); });
   await registry.credentialsChanged(ownerKey);
   mocks.open.mockImplementation(async options => {
     await writeFile(join(options.directory,"owned.sqlite"),"copy");
     return { close: vi.fn(async () => {}), assertOwner: options.assertOwner, data: vi.fn((_remote,_source,signal) => ({signal})) };
   });
   const input = {rootPath,lifetime:lifetime.signal,workspaceId:"w",datasetId:"00000000-0000-4000-8000-000000000001",origin:"https://relay",ownerKey,assertOwner(){}};
-  return {registry,input,lifetime};
+  return {registry,input,lifetime,record,onLeftover};
 }
 it("shares one opening, retains same-owner token refresh, and serializes workspace replacement",async()=>{
   const f=await fixture(); const [first,second]=await Promise.all([f.registry.get(f.input),f.registry.get(f.input)]);
@@ -186,4 +197,66 @@ it("still raises at quit a copy an account change could not close, beside a fold
   await rm(directory,{recursive:true});await symlink(outside,directory,"dir");
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("The copy's worker did not stop.");
   await expect(f.registry.closeAll()).rejects.toThrow("The copy's worker did not stop.");
+});
+
+// A sign-out whose removal of the copy's folder fails, as a busy folder's would.
+async function failedSignOut() {
+  const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  files.busy.add(directory);
+  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("EBUSY");
+  return {...f,directory,root:await realpath(f.input.rootPath)};
+}
+it("names the workspace that still holds a copy it could not remove, and removes it on Try again",async()=>{
+  const f=await failedSignOut();
+  expect(f.registry.leftover()).toEqual([f.root]);expect(f.onLeftover).toHaveBeenCalledOnce();
+  expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
+  files.busy.clear();
+  await f.registry.removeLeftover();
+  expect(await readdir(dirname(f.directory))).toEqual([]);
+  expect(f.registry.leftover()).toEqual([]);expect(f.onLeftover).toHaveBeenCalledTimes(2);
+});
+it("records a folder it could not remove, and the next start removes it before another account's copy opens",async()=>{
+  const f=await failedSignOut();
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
+  files.busy.clear();
+  const next=restart(f.record),other={...f.input,lifetime:new AbortController().signal,ownerKey:datasetCopyOwnerKey({serverUrl:"https://account",userId:"other"})};
+  let leftAtOpen:boolean|undefined;
+  mocks.open.mockImplementationOnce(async options=>{
+    leftAtOpen=await lstat(f.directory).then(()=>true,()=>false);
+    return {close:vi.fn(async()=>{}),assertOwner:options.assertOwner,data:vi.fn()};
+  });
+  void next.credentialsChanged(other.ownerKey);
+  await next.get(other);
+  expect(leftAtOpen).toBe(false);expect(next.leftover()).toEqual([]);
+  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+});
+it.each(["the next account change","Try again"])("removes what a failed cleanup left at %s, and opens another account's copies meanwhile",async when=>{
+  const f=await failedSignOut(),other={...f.input,lifetime:new AbortController().signal,ownerKey:datasetCopyOwnerKey({serverUrl:"https://account",userId:"other"})};
+  if(when==="Try again"){
+    await expect(f.registry.credentialsChanged(other.ownerKey)).rejects.toThrow("EBUSY");
+    // Its copy has a folder of its own, so it opens beside the one left.
+    await f.registry.get(other);
+    const {directory}=mocks.open.mock.calls[1]![0] as {directory:string};
+    files.busy.clear();await f.registry.removeLeftover();
+    expect(await readdir(dirname(f.directory))).toEqual([basename(directory)]);
+  } else {
+    files.busy.clear();await f.registry.credentialsChanged(other.ownerKey);
+    expect(await readdir(dirname(f.directory))).toEqual([]);
+    await f.registry.get(other);expect(mocks.open).toHaveBeenCalledTimes(2);
+  }
+  expect(f.registry.leftover()).toEqual([]);
+});
+it.skipIf(process.platform==="win32")("follows no link swapped in for a recorded folder, and removes nothing a record names outside a workspace's copies",async()=>{
+  const f=await failedSignOut();files.busy.clear();
+  const outside=await mkdtemp(join(tmpdir(),"dohc-copy-registry-outside-")),stray=await mkdtemp(join(tmpdir(),"dohc-copy-registry-stray-"));
+  cleanups.push(()=>rm(outside,{recursive:true,force:true}),()=>rm(stray,{recursive:true,force:true}));
+  await writeFile(join(outside,"keep.txt"),"not dohc's");await writeFile(join(stray,"keep.txt"),"not dohc's");
+  await rm(f.directory,{recursive:true});await symlink(outside,f.directory,"dir");
+  await writeFile(f.record,JSON.stringify({folders:[f.directory,stray]}));
+  const next=restart(f.record);
+  // An unchanged owner answers with the start's own removal.
+  await expect(next.credentialsChanged(null)).rejects.toThrow("Collection copy storage changed. Its files were not removed.");
+  expect(await readFile(join(outside,"keep.txt"),"utf8")).toBe("not dohc's");expect((await lstat(f.directory)).isSymbolicLink()).toBe(true);
+  expect(await readFile(join(stray,"keep.txt"),"utf8")).toBe("not dohc's");
+  expect(next.leftover()).toEqual([f.root]);expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
 });

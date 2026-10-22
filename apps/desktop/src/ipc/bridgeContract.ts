@@ -6065,6 +6065,27 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Offline copies of Collections that an account change could not remove, by
+// the workspaces that hold them. Empty when none are left. Remove tries again
+// and answers what is still left.
+export const CollectionCopiesLeft = z.object({ workspaces: z.array(z.string().min(1).max(4096)).max(1000) });
+export type CollectionCopiesLeft = z.infer<typeof CollectionCopiesLeft>;
+export const CollectionCopiesLeftChangedEvent = z.undefined();
+export const collectionCopiesLeftOperations = {
+  readCollectionCopiesLeft: {
+    capabilityId: "collection.copies.left.read",
+    scope: "device",
+    channel: "desktop:read-collection-copies-left",
+    payload: z.object({}), result: CollectionCopiesLeft, guard: "trusted-sender",
+  },
+  removeCollectionCopiesLeft: {
+    capabilityId: "collection.copies.left.remove",
+    scope: "device",
+    channel: "desktop:remove-collection-copies-left",
+    payload: z.object({}), result: CollectionCopiesLeft, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Crash reports. Main keeps each crash on this computer as plain text and
 // sends nothing on its own. A report leaves only after the person confirms
 // in main's own dialog, which names where it goes and can show the exact
@@ -6998,6 +7019,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
+    OperationBridge<typeof collectionCopiesLeftOperations>,
     OperationBridge<typeof workspaceTrustOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
@@ -7216,6 +7238,9 @@ export interface DohcDesktopBridge
   // Live push: the crash report changed. A poke, not the report; the
   // subscriber reads it again. Returns an unsubscribe function.
   onCrashReportChanged(listener: () => void): () => void;
+  // Live push: the offline copies an account change left changed. A poke;
+  // the subscriber reads them again.
+  onCollectionCopiesLeftChanged(listener: () => void): () => void;
   onWorkspaceTrustChanged(
     listener: (event: WorkspaceTrustAnswer) => void,
   ): () => void;
