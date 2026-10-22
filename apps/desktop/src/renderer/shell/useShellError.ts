@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEP_COLLECTIONS_HERE, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -196,6 +196,26 @@ export function useShellError(workspaceId: string) {
     };
     return { label: "Open System Settings", run };
   }, [push]);
+  // Keeps Collections that no computer keeps yet on this one, then runs
+  // `then`, such as the step that was refused. A failure files its own row.
+  const keepCollectionsHere = useCallback((then: (() => void) | null) => {
+    const owner = currentWorkspace.current;
+    const run = (): void => {
+      bridge().keepCollectionsHere({ workspaceId: owner }).then(() => {
+        if (currentWorkspace.current === owner) then?.();
+      }, (error: unknown) => {
+        if (currentWorkspace.current !== owner) return;
+        const { cause } = readError(error);
+        push({
+          message: withErrorWords("dohc could not keep the Collections on this computer.", error),
+          ...(cause ? { details: [["Cause", cause]] } : {}),
+          retry: run,
+          identity: "keep-collections",
+        });
+      });
+    };
+    run();
+  }, [push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
@@ -305,11 +325,13 @@ export function useShellError(workspaceId: string) {
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
-        ...(isPrivacyDenied(error) ? { action: privacySettingsAction } : {}),
+        ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
+          : readCollectionsRefusal(error)?.kind === "unclaimed" ? { action: { label: KEEP_COLLECTIONS_HERE, run: () => keepCollectionsHere(retry), ends: true } }
+          : {}),
         ...(kind ? { kind } : {}),
       });
     },
-    [push, privacySettingsAction],
+    [push, privacySettingsAction, keepCollectionsHere],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -768,5 +790,6 @@ export function useShellError(workspaceId: string) {
     retryShellError,
     runShellErrorAction,
     privacySettingsAction,
+    keepCollectionsHere,
   };
 }

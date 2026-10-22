@@ -128,3 +128,21 @@ describe("Explorer collection folders", () => {
     );
   });
 });
+
+describe("Collections this computer cannot use", () => {
+  it("says where they are, and offers to keep Collections no computer keeps here", () => {
+    const onKeepCollections = vi.fn(), onRetryCollections = vi.fn();
+    const words = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+    const { rerender } = render(<Explorer {...explorerProps({ collectionsRefusal: { kind: "unclaimed", words }, onKeepCollections, onRetryCollections,
+      dataCollections: [], onRestoreCollection: vi.fn() })} />);
+    const section = screen.getByRole("region", { name: "Collections" });
+    expect(within(section).getByTestId("collections-refusal").textContent).toContain(words);
+    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Keep the Collections on this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledOnce();
+    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: "These Collections are on Laptop." }, onKeepCollections, onRetryCollections })} />);
+    expect(screen.queryByRole("button", { name: "Keep the Collections on this computer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryCollections).toHaveBeenCalledOnce();
+  });
+});

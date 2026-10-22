@@ -60,7 +60,8 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { collectionsHolderRequired, CollectionsRefusalError, keepCollectionsHere, type CollectionsHolderCheck } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
@@ -3696,7 +3697,7 @@ async function openWorkspaceActivityForOperation(
 // restart settle once the engine is back. Only an existing store opens.
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
-    .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
+    .catch(error => { if (!(error instanceof CollectionsRefusalError)) console.warn("[desktop] local Collection app reconciliation:", error); });
 }
 
 function openWorkspaceActivityWith(
@@ -4621,7 +4622,7 @@ function createCollectionAutomationsFor(
       // one only for what a person asked about; otherwise it waits for the
       // Collections list or a dataset action to open it.
       const opened = datasetHost.pending;
-      if (opened) return await work((await opened).automations);
+      if (opened) return await work((await stillHeld(datasetHost, opened)).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
@@ -4675,6 +4676,23 @@ async function closeLocalDatasetHost(slot: DatasetHostSlot): Promise<void> {
     activeDatasetHosts.delete(pending);
   }
 }
+// Whether this installation keeps a workspace's Collections, read from the
+// registry at each use, since sync can start or stop while a host is open.
+function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
+  return { here: thisComputer, required: () => collectionsHolderRequired(findWorkspace(workspaceId)) };
+}
+// An open host serves new work only while this installation still keeps its
+// store. One that no longer does closes, and the next use reads the record anew.
+async function stillHeld(slot: DatasetHostSlot, pending: Promise<LocalDatasetHost>): Promise<LocalDatasetHost> {
+  const host = await pending;
+  try {
+    await host.held();
+  } catch (error) {
+    if (error instanceof CollectionsRefusalError && slot.pending === pending) void closeLocalDatasetHost(slot);
+    throw error;
+  }
+  return host;
+}
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
@@ -4686,6 +4704,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
       pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+        holder: collectionsHolderCheck(workspace.workspaceId),
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -4729,7 +4748,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
       void pending.then(() => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(), () => undefined);
       void pending.catch(() => { if (slot.pending === ownedPending) slot.pending = null; activeDatasetHosts.delete(ownedPending); });
     }
-    const host = await pending;
+    const host = await stillHeld(slot, pending);
     signal.throwIfAborted(); operation.assertCurrent();
     return host;
   });
@@ -6666,6 +6685,14 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, datasetOperations, {
     dataset: (request, { event }) => datasetHandler(event.sender, request),
+    keepCollectionsHere: async (_input, { operation }) => {
+      const { workspace } = operation;
+      const holder = collectionsHolderCheck(workspace.workspaceId);
+      if (!holder.required()) throw new Error("This workspace syncs through a server, so no computer needs to keep its Collections.");
+      await keepCollectionsHere(workspace.rootPath, workspace.workspaceId, holder.here(),
+        storeId => adoptLocalDatasetStore(workspace.rootPath, workspace.workspaceId, storeId));
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+    },
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),

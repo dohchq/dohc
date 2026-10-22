@@ -13,8 +13,10 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  Laptop,
   Pin,
   RefreshCw,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import {
@@ -51,6 +53,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
+import { KEEP_COLLECTIONS_HERE, type CollectionsRefusalKind } from "../../ipc/errorWords";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -119,6 +122,12 @@ export interface ExplorerProps {
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
+  // Why this computer cannot list the workspace's Collections, in main's
+  // words, such as another computer keeping them. The section says so in
+  // place of the list.
+  collectionsRefusal?: { kind: CollectionsRefusalKind; words: string } | null;
+  onKeepCollections?: () => void;
+  onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
   // A rejected begin (a flush failure, an unresolved collection write)
@@ -1637,8 +1646,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
@@ -1647,6 +1657,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
           {props.onRestoreCollection && !props.shareView && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          </>}
         </section>}
         <section
           data-testid="open-editors-section"
@@ -2025,3 +2036,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     </>
   );
 });
+
+// The Collections section when this computer cannot use them: where they
+// are, or what went wrong, and the one step that helps.
+function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
+  refusal: { kind: CollectionsRefusalKind; words: string };
+  onKeep?: () => void;
+  onRetry?: () => void;
+}) {
+  const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
+  const Icon = held ? Laptop : TriangleAlert;
+  return (
+    <div role="status" data-testid="collections-refusal" className="flex flex-col items-start gap-1.5 px-2 py-1">
+      <p className="m-0 flex gap-1.5 text-[12px] text-muted">
+        <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${held ? "text-warning" : "text-danger"}`} />
+        <span className="wrap-anywhere">{refusal.words}</span>
+      </p>
+      {refusal.kind === "unclaimed"
+        ? onKeep && <SecondaryButton size="compact" data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>
+        : onRetry && <SecondaryButton size="compact" onClick={() => onRetry()}>Try again</SecondaryButton>}
+    </div>
+  );
+}

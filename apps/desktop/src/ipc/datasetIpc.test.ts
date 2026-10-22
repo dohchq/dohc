@@ -1,4 +1,4 @@
-import { readFile, readdir, unlink } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createDatasetSources, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
@@ -8,7 +8,7 @@ import { expect, it, vi } from "vitest";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
-import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
@@ -16,7 +16,9 @@ import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
 function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
-  automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>) {
+  automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
+  // Main's own host, which export opens first as main's does.
+  localHost?: () => Promise<LocalDatasetHost>) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -50,7 +52,8 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
       if (!current) throw Error("stale workspace");
       return result;
     },
-    hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
+    hostForWorkspace: vi.fn(localHost ?? (async () => host as unknown as LocalDatasetHost)),
+    ...(localHost ? { exportArchive: async () => { await localHost(); return null; } } : {}),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
     withAdapter, createSources, ...(automationName ? { automationName } : {}),
@@ -457,4 +460,49 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
   expect(f.sources.get(definition.schemaPath)).toBe("SCHEMA");
   expect(f.sources.get(definition.operationsPath)).toBe("OPERATIONS");
   expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
+});
+
+it.each([
+  ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
+    (root: string) => writeFile(join(root, ".dohc", "collections.json"),
+      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"]],
+  ["no record names a computer for a store already here", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.",
+    async (root: string) => { await mkdir(join(root, ".dohc", "datasets")); await writeFile(join(root, ".dohc", "datasets", "state.sqlite"), ""); }, ["datasets"]],
+] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left) => {
+  const root = await createTestScratch("dohc-dataset-ipc-holder-");
+  await mkdir(join(root, ".dohc"));
+  await arrange(root);
+  const localHost = () => createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, localPersonId: () => "person-local",
+    holder: { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true } });
+  const f = fixture(undefined, undefined, undefined, localHost);
+  const selected = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
+  const pinned = { ...selected, revision: 1, revisionSha256: f.revision.revisionSha256 };
+  for (const request of [
+    { workspaceId: "workspace", action: "list" },
+    { ...selected, action: "describe" },
+    { ...selected, action: "history" },
+    { ...selected, action: "permissions" },
+    { ...selected, action: "lifecycle" },
+    { ...selected, action: "archive" },
+    { ...selected, action: "export", savePath: join(root, "out.dohc-recovery") },
+    { ...pinned, action: "invoke", operationId: datasetId, input: {}, idempotencyKey: "k" },
+    { ...pinned, action: "file", fileId: "f".repeat(16) },
+    { workspaceId: "workspace", action: "prepareRecovery", sourcePath: join(root, "in.dohc-recovery") },
+    { workspaceId: "workspace", action: "discardRecovery", transferId: datasetId },
+    { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" },
+    { workspaceId: "workspace", action: "approve", preparationId: datasetId, revisionSha256: f.revision.revisionSha256 },
+  ]) {
+    for (const caller of ["window", "cli"]) await expect(f.handler(caller, request), request.action).rejects.toThrow(words);
+  }
+  expect(await readdir(join(root, ".dohc"))).toEqual(left);
+  if ((left as readonly string[]).includes("datasets")) expect(await readdir(join(root, ".dohc", "datasets")), "not opened").toEqual(["state.sqlite"]);
+});
+
+it("reads a received share's Collections through its server, never the local store, whoever keeps the local one", async () => {
+  const named = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), describe: vi.fn(), invoke: vi.fn(), upload: vi.fn(), file: vi.fn() };
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => { throw new Error("Unexpected local store."); });
+  const f = fixture(undefined, named as unknown as Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">, undefined, localHost);
+  f.workspace.shareView = { shareId: "s" };
+  expect(await f.handler("window", { workspaceId: "workspace", action: "list" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
+  expect(localHost).not.toHaveBeenCalled();
 });

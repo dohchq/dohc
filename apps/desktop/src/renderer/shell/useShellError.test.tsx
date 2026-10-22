@@ -276,6 +276,31 @@ describe("useShellError", () => {
     expect(result.current.shellErrors.map((error) => error.message)).toEqual(["Could not load History."]);
   });
 
+  it("offers to keep Collections no computer keeps on this one, then retries what was refused", async () => {
+    const keepCollectionsHere = vi.fn(async () => {});
+    vi.stubGlobal("dohcDesktop", { keepCollectionsHere });
+    try {
+      const retry = vi.fn();
+      const { result } = renderHook(() => useShellError("ws-a"));
+      const words = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-unclaimed]: ${words}`), retry));
+      const row = result.current.shellErrors[0]!;
+      expect(row.message).toBe(`Could not create the Collection. ${words}`);
+      expect(row.action?.label).toBe("Keep the Collections on this computer");
+      await act(async () => { result.current.runShellErrorAction(row.id); });
+      expect(keepCollectionsHere).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+      expect(retry).toHaveBeenCalledOnce();
+      expect(result.current.shellErrors).toEqual([]);
+      // Collections another computer keeps offer no such step.
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error("Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]: These Collections are on Laptop.")));
+      expect(result.current.shellErrors[0]!.action).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {
     const send = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));

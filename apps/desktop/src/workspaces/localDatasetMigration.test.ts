@@ -15,6 +15,7 @@ import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import { deferred } from "../testing/deferred";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -37,7 +38,7 @@ async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra, holder: extra.holder ?? unguardedCollections });
   hosts.push(host); return { host, workspaceRoot };
 }
 function fixture() {
@@ -223,7 +224,7 @@ describe("a Collection change during an engine run", () => {
       await first.host.close();
       // Opened before the engine, so the host takes its worker folder at the first worker.
       await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
-      const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
+      const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
         attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
       hosts.push(host);
       // The dataset IPC prepares a change inside an engine run. A rebind's close waits for that run.
@@ -247,7 +248,7 @@ describe("a Collection change during an engine run", () => {
     // Windows can't remove the first host's worker lock while that host is open.
     await first.host.close();
     await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
       attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
     hosts.push(host);
     void sessions.run(workspace, async () => undefined).catch(() => undefined);
