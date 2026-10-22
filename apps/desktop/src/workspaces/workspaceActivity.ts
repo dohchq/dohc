@@ -51,6 +51,8 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  // True once the check finds the root on a network share.
+  onNetworkShare: boolean;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
@@ -105,6 +107,9 @@ export interface WorkspaceActivityOptions {
   // reads through the owner's open, so it answers only once that open, which
   // abandons a pull when sync is paused, succeeded.
   collectionsWaitingFor?: (workspace: ActivityWorkspace) => Promise<boolean>;
+  // Whether the root is on a network share. Asked once per open, without
+  // holding up the open.
+  onNetworkShare?: (rootPath: string) => Promise<boolean>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -279,6 +284,7 @@ export function createWorkspaceActivity(
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       heldFiles: w?.heldFiles ?? [],
@@ -374,6 +380,7 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        onNetworkShare: false,
         recoveryUnavailable: false,
         keptFiles: [],
         heldFiles: [],
@@ -382,6 +389,11 @@ export function createWorkspaceActivity(
         collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
+      void options.onNetworkShare?.(workspace.rootPath).then((shared) => {
+        if (!shared || state.entry !== entry) return;
+        entry.onNetworkShare = true;
+        notify({ workspaceId: workspace.workspaceId });
+      }, (error) => console.error(`[desktop] could not check whether ${workspace.rootPath} is on a network share:`, error));
       // Resolve the engine capture before the watcher starts, so the mode is
       // known from the first batch. A capture failure leaves the workspace
       // with no recorder, surfaced via the history-off notice, never a

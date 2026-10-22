@@ -1,6 +1,10 @@
 import {
   databaseFolderName,
   databaseOpLogPath,
+  DOHC_DATABASES_GUARD,
+  hardLinkedFileRefusal,
+  notAFileRefusal,
+  notARealFolderRefusal,
   mediaTypeForPath,
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
@@ -8,6 +12,7 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { createHash, randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   realpath,
   rm,
@@ -38,6 +43,7 @@ import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabaseWorker";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { UNCOUNTABLE_LOG_VERSION } from "./workspaceDatabaseProtocol";
 
 export type {
@@ -144,6 +150,39 @@ export function readDatabasePageFromBytes(
     offset,
     signal: options.signal,
   });
+}
+
+async function prepareDatabaseFolder(directory: string, path: string) {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const stats = await lstat(directory, { bigint: true });
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(notARealFolderRefusal({ ...DOHC_DATABASES_GUARD, path }, stats));
+  }
+  return stats;
+}
+
+async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
+  const metadata = await resolveWorkspaceMetadataDir(rootPath);
+  const slug = databaseFolderName(databasePath);
+  const databases = join(metadata, "databases");
+  // Check each folder before creating anything beneath it.
+  await prepareDatabaseFolder(databases, ".dohc/databases");
+  const directory = join(databases, slug);
+  const { dev, ino } = await prepareDatabaseFolder(directory, `.dohc/databases/${slug}`);
+  const logPath = join(directory, "operations.jsonl");
+  try {
+    const stats = await lstat(logPath);
+    const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${slug}/operations.jsonl` };
+    if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
+    if (stats.nlink > 1) throw new Error(hardLinkedFileRefusal(guard));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return { logPath, storageIdentity: { dev, ino } };
 }
 
 // Atomically writes bytes to a new workspace-relative path, enforcing
@@ -301,12 +340,13 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     const statePath = await operationCounterPath(input.workspace, resolved.normalized);
     if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
     const source = await prepareWorkspaceFileRead(rootPath, resolved.resolvedPath);
+    const storage = await prepareDatabaseStorage(rootPath, resolved.normalized);
     const logPath = databaseOpLogPath(resolved.normalized);
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
         absolutePath,
         path: resolved.normalized,
-        logPath: join(rootPath, logPath),
+        ...storage,
         statePath,
         edit: input.edit,
         operation: {

@@ -2,6 +2,7 @@
 //! Changed bytes must be durably imported before the quiet clock restarts.
 use super::materialize::{
     MAX_MATERIALIZE_BYTES, MaterializeError, ensure_target_symlink_free, open_displaced,
+    stored_name, stored_path,
 };
 use dohc_engine_storage::{DisplacementSpec, EngineStore, RetainedDisplacement, hex_sha256};
 use std::io::Read;
@@ -44,11 +45,7 @@ pub(super) fn register_known(
         .metadata()
         .map_err(|e| MaterializeError::io(path, &e))?;
     let (device, inode, size, mtime, ctime) = stamp(&meta);
-    let source_path = path
-        .strip_prefix(root)
-        .map_err(|_| MaterializeError::UnsafeTargetPath)?
-        .to_string_lossy()
-        .replace('\\', "/");
+    let source_path = stored_name(store.database_path(), root, path)?;
     let id = store.retain_displacement(&RetainedDisplacement {
         displacement_id: 0,
         job_id: spec.job_id.clone(),
@@ -134,15 +131,17 @@ impl Release {
 
 /// An unchanged source is kept, unread, until both its quiet period and
 /// `retry_at_ms` have passed. The caller backs off a refused release with
-/// `retry_at_ms`. A changed stamp is read at once.
+/// `retry_at_ms`. A changed stamp is read at once. The source is reached
+/// through the engine folder the store at `database` opened through.
 pub fn inspect(
     root: &Path,
+    database: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
     retry_at_ms: i64,
 ) -> Result<Inspection, MaterializeError> {
-    inspect_with_reader(root, row, now_ms, held, retry_at_ms, read_source)
+    inspect_with_reader(root, database, row, now_ms, held, retry_at_ms, read_source)
 }
 
 fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, MaterializeError> {
@@ -155,6 +154,7 @@ fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, Materialize
 
 fn inspect_with_reader(
     root: &Path,
+    database: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
@@ -170,8 +170,8 @@ fn inspect_with_reader(
         return Err(MaterializeError::UnsafeTargetPath);
     }
     let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
-    let path = root.join(rel);
-    ensure_target_symlink_free(&root, &path)?;
+    let (base, path) = stored_path(database, &root, rel);
+    ensure_target_symlink_free(&base, &path)?;
     let file = match open_displaced(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inspection::Missing),
@@ -278,6 +278,7 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     use std::cell::Cell;
     let scratch = dohc_test_scratch::ScratchDir::new_named("held-inspection-reads").unwrap();
     let root = scratch.path();
+    let db = &root.join("engine.db");
     let source = root.join("source");
     std::fs::write(&source, b"before").unwrap();
     let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
@@ -302,14 +303,14 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     };
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap(),
+            inspect_with_reader(root, db, &row, 60_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     println!("10 quiet held inspections: {} reads", reads.get());
     assert_eq!(reads.get(), 0, "quiet held sources must not be read");
     std::fs::write(&source, b"late outside write").unwrap();
-    match inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap() {
+    match inspect_with_reader(root, db, &row, 60_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -320,13 +321,13 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     assert_eq!(reads.get(), 1);
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
+            inspect_with_reader(root, db, &row, 90_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     assert_eq!(reads.get(), 1, "imported held sources must not be re-read");
     row.device = "previous mount".into();
-    match inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap() {
+    match inspect_with_reader(root, db, &row, 90_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -334,12 +335,12 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
         _ => panic!("held remounts must refresh the stamp once"),
     }
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
+        inspect_with_reader(root, db, &row, 90_000, true, 0, read).unwrap(),
         Inspection::Keep
     ));
     assert_eq!(reads.get(), 2);
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, false, 0, read).unwrap(),
+        inspect_with_reader(root, db, &row, 90_000, false, 0, read).unwrap(),
         Inspection::Release(_)
     ));
     assert_eq!(reads.get(), 3);
@@ -354,6 +355,7 @@ fn a_backed_off_source_is_read_only_after_its_retry_time_or_a_change() {
     use std::cell::Cell;
     let scratch = dohc_test_scratch::ScratchDir::new_named("backed-off-reads").unwrap();
     let root = scratch.path();
+    let db = &root.join("engine.db");
     let source = root.join("source");
     std::fs::write(&source, b"before").unwrap();
     let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
@@ -378,7 +380,7 @@ fn a_backed_off_source_is_read_only_after_its_retry_time_or_a_change() {
     };
     let reader = std::fs::File::open(&source).unwrap();
     let Inspection::Release(release) =
-        inspect_with_reader(root, &row, 60_000, false, 0, read).unwrap()
+        inspect_with_reader(root, db, &row, 60_000, false, 0, read).unwrap()
     else {
         panic!("a quiet unchanged source is released");
     };
@@ -389,20 +391,20 @@ fn a_backed_off_source_is_read_only_after_its_retry_time_or_a_change() {
     drop(release);
     for now in 60_001..60_011 {
         assert!(matches!(
-            inspect_with_reader(root, &row, now, false, 90_000, read).unwrap(),
+            inspect_with_reader(root, db, &row, now, false, 90_000, read).unwrap(),
             Inspection::Keep
         ));
     }
     assert_eq!(reads.get(), 1, "a backed-off source is not read");
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, false, 90_000, read).unwrap(),
+        inspect_with_reader(root, db, &row, 90_000, false, 90_000, read).unwrap(),
         Inspection::Release(_)
     ));
     assert_eq!(reads.get(), 2, "every release attempt reads first");
     drop(reader);
     std::fs::write(&source, b"changed").unwrap();
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_001, false, 1_000_000, read).unwrap(),
+        inspect_with_reader(root, db, &row, 90_001, false, 1_000_000, read).unwrap(),
         Inspection::Changed { .. }
     ));
     assert_eq!(reads.get(), 3, "a changed stamp is read at once");
