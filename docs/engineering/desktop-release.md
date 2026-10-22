@@ -345,8 +345,10 @@ The command stops before it builds unless all of these are true:
 - The release has no macOS files, or only part of an upload that the command
   can finish, as [Finish an upload that stopped](#finish-an-upload-that-stopped) describes.
 - A Desktop Release run dispatched on `main` published the tag's commit: its
-  `Publish` job succeeded for that commit. For a nightly, that run and attempt
-  are the ones in the tag. The workflow runs `Publish` only after Preflight
+  `Publish` job succeeded for that commit. For a nightly, that run is the one
+  in the tag. Its attempt is the tag's attempt, or a later attempt that re-ran
+  only the failed jobs and so kept the tag attempt's Preflight, which stamped
+  the version. The workflow runs `Publish` only after Preflight
   passes on `refs/heads/main`, so a run dispatched on a tag named `main` does
   not count. The commit must also be on the `main` branch's current commit.
 - The version is the one the workflow stamped. The command resolves it with

@@ -46,7 +46,7 @@ import {
 } from "./mock-update-server.mjs";
 import { scriptsWithoutChunkIds, sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 import {
-  DEFAULT_KEYCHAIN, PUBLISH_JOB, SAVED_PASSWORD_SERVICE, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
+  DEFAULT_KEYCHAIN, PREFLIGHT_JOB, PUBLISH_JOB, SAVED_PASSWORD_SERVICE, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
   macFileNames, macUploadPlan, parseMacReleaseArgs, preflightMacRelease, publishMacFiles, releaseEnvironment, signatureChecks,
   signingEnvironment, unlockReleaseKeychain, unlockedSigning, uploadCommands, verifyKeptFiles, withReleaseKeychain, RELEASE_REPOSITORY, releaseMac,
 } from "./release-desktop-macos.mjs";
@@ -1064,10 +1064,11 @@ const HEAD_COMMIT = "e".repeat(40);
 const IDENTITY = "Developer ID Application: Example Maker (TEAM123456)";
 const KEYCHAIN = "/Users/maker/Library/Keychains/dohc-release.keychain-db";
 const NIGHTLY_TAG = "v0.1.1-nightly.20261019.42.1";
+const PREFLIGHT_START = "2026-10-19T04:00:00Z";
 const lines = values => values.map(value => JSON.stringify(value)).join("\n") + "\n";
 const publishJobs = (overrides = {}) => ({
   "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines([
-    { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT },
+    { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, started_at: PREFLIGHT_START },
     { name: "Publish", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, ...overrides },
   ]) },
 });
@@ -1125,6 +1126,7 @@ test("the Mac release command reads its release from a version or tag and a chan
 test("the Mac release relies on the workflow's Publish job running only after Preflight passes on refs/heads/main", () => {
   const { jobs } = releaseWorkflow;
   assert.equal(jobs.publish.name, PUBLISH_JOB);
+  assert.equal(jobs.preflight.name, PREFLIGHT_JOB);
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.publish, jobs.build]) assert.ok([job.needs].flat().includes("preflight"), "Publish runs only after Preflight");
   assert.ok([jobs.publish.needs].flat().includes("build"));
@@ -1140,7 +1142,7 @@ test("the Mac release preflight ties the tag to a dispatched run's Publish job o
   assert.equal(plan.reporting.POSTHOG_CLI_API_KEY, undefined, "the PostHog key is read only after unlocking");
   for (const call of [
     `gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs?head_sha=${RELEASE_COMMIT}&event=workflow_dispatch&per_page=100 --jq .workflow_runs[] | {id, run_number, event}`,
-    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs?filter=all&per_page=100 --jq .jobs[] | {name, conclusion, run_attempt, head_sha}",
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs?filter=all&per_page=100 --jq .jobs[] | {name, conclusion, run_attempt, head_sha, started_at}",
     `gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}...${MAIN_COMMIT} --jq .status`,
     `gh api repos/dohchq/dohc/compare/${HEAD_COMMIT}...${MAIN_COMMIT} --jq .status`,
     `security find-certificate -a -c Developer ID Application -Z ${KEYCHAIN}`,
@@ -1176,6 +1178,22 @@ test("the Mac release preflight refuses another host, a release it cannot read, 
   await assert.rejects(preflight({ ...stableRelease, ...publishJobs({ conclusion: "skipped" }) }, {}, ["--version", "0.1.0", "--channel", "latest"]),
     /no dispatched Desktop Release run published that commit from main/);
   await assert.rejects(preflight({ [`gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}`]: { stdout: "diverged\n" } }), new RegExp(`${RELEASE_COMMIT}, the commit of ${NIGHTLY_TAG.replaceAll(".", "\\.")}, is not on main at ${MAIN_COMMIT}`));
+});
+
+test("the Mac release preflight accepts a nightly that a re-run of its failed jobs published", async () => {
+  const rerun = preflightStart => ({
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines([
+      { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, started_at: PREFLIGHT_START },
+      { name: "Publish", conclusion: "skipped", run_attempt: 1, head_sha: RELEASE_COMMIT },
+      { name: "Preflight", conclusion: "success", run_attempt: 2, head_sha: RELEASE_COMMIT, started_at: preflightStart },
+      { name: "Publish", conclusion: "success", run_attempt: 2, head_sha: RELEASE_COMMIT },
+    ]) },
+  });
+  const preflight = answers => preflightMacRelease(parseMacReleaseArgs(nightlyArgs), { run: fakeMac(answers).run, ...macHost() });
+  // Attempt 2 kept attempt 1's Preflight, so it published the version attempt 1 stamped.
+  assert.equal((await preflight(rerun(PREFLIGHT_START))).commit, RELEASE_COMMIT);
+  // Attempt 2 ran its own Preflight, so it published its own version.
+  await assert.rejects(preflight(rerun("2026-10-19T05:00:00Z")), /no dispatched Desktop Release run 42, attempt 1, published that commit from main/);
 });
 
 test("a real Mac release runs only from a clean checkout on main, and a dry run says where it runs from", async () => {
