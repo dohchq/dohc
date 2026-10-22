@@ -1,42 +1,27 @@
 import { execFile } from "node:child_process";
 import { realpath, statfs } from "node:fs/promises";
-import { homedir } from "node:os";
 
-// Where a workspace is kept, when that changes what dohc can promise about it:
-// - "icloud-drive": iCloud Drive syncs each file of the Collections database
-//   on its own and keeps one whole copy when two Macs change it (#2371).
-// - "network-share": the share's server, not dohc, decides who can read the
-//   workspace's History (#2379).
-// Only the root's path and its volume decide: no folder is listed and no
-// file is read.
-export type WorkspaceLocation = "icloud-drive" | "network-share";
-
-/** Finder's records of iCloud Drive's Desktop & Documents Folders option. */
-export type FinderICloudSetting = "FXICloudDriveDesktop" | "FXICloudDriveDocuments";
+// On a network share, the share's server, not dohc, decides who can read the
+// workspace's History (#2379). Only the root's path and its volume decide:
+// no folder is listed and no file is read.
 
 /** What the check reads from this computer. Tests replace it. */
-export interface LocationProbe {
+export interface NetworkShareProbe {
   platform: NodeJS.Platform;
-  home: string;
   realpath: (path: string) => Promise<string>;
-  finderSetting: (key: FinderICloudSetting) => Promise<boolean>;
   // macOS: the output of /sbin/mount.
   mounts: () => Promise<string>;
   // Linux: the volume's f_type.
   fileSystemType: (path: string) => Promise<number>;
 }
 
-const run = (file: string, args: string[]) =>
-  new Promise<string>((resolve, reject) => {
-    execFile(file, args, { timeout: 2_000, encoding: "utf8" }, (error, out) => (error ? reject(error) : resolve(out)));
-  });
-
-const systemProbe: LocationProbe = {
+const systemProbe: NetworkShareProbe = {
   platform: process.platform,
-  home: homedir(),
   realpath: (path) => realpath(path),
-  finderSetting: (key) => run("/usr/bin/defaults", ["read", "com.apple.finder", key]).then((out) => out.trim() === "1", () => false),
-  mounts: () => run("/sbin/mount", []),
+  mounts: () =>
+    new Promise<string>((resolve, reject) => {
+      execFile("/sbin/mount", [], { timeout: 2_000, encoding: "utf8" }, (error, out) => (error ? reject(error) : resolve(out)));
+    }),
   fileSystemType: async (path) => (await statfs(path)).type,
 };
 
@@ -60,25 +45,19 @@ function linuxFuseShare(root: string): boolean {
   return (gvfs !== undefined && GVFS_NETWORK_BACKENDS.has(gvfs)) || (kio !== undefined && KIO_NETWORK_PROTOCOLS.has(kio));
 }
 
-/** Where the workspace at rootPath is kept, or null for this computer's own disk. */
-export async function workspaceLocation(
-  rootPath: string,
-  probe: LocationProbe = systemProbe,
-): Promise<WorkspaceLocation | null> {
+/** True when the workspace at rootPath is on a network share. */
+export async function onNetworkShare(rootPath: string, probe: NetworkShareProbe = systemProbe): Promise<boolean> {
   switch (probe.platform) {
     case "darwin": {
-      // A share mounted inside a folder iCloud Drive holds is still a share.
-      // Without a mount listing, iCloud Drive is still checked.
-      const [root, home, listing] = await Promise.all([
+      // Without a mount listing, the root reads as on this computer.
+      const [root, listing] = await Promise.all([
         probe.realpath(rootPath),
-        probe.realpath(probe.home),
         probe.mounts().catch((error: unknown) => {
-          console.error(`[desktop] could not list volumes to check where ${rootPath} is kept:`, error);
+          console.error(`[desktop] could not list volumes to check whether ${rootPath} is on a network share:`, error);
           return "";
         }),
       ]);
-      if (!macVolumeIsLocal(root, listing)) return "network-share";
-      return (await inICloudDrive(root, home, probe)) ? "icloud-drive" : null;
+      return !macVolumeIsLocal(root, listing);
     }
     case "win32": {
       // A mapped network drive resolves to the server's path too. A path
@@ -86,15 +65,14 @@ export async function workspaceLocation(
       // computer's.
       const root = await probe.realpath(rootPath).catch(() => rootPath);
       const server = /^\\\\([^\\]+)\\/u.exec(root)?.[1];
-      return server !== undefined && !/^(?:[?.]|wsl\$|wsl\.localhost)$/iu.test(server) ? "network-share" : null;
+      return server !== undefined && !/^(?:[?.]|wsl\$|wsl\.localhost)$/iu.test(server);
     }
     case "linux": {
       const root = await probe.realpath(rootPath);
-      if (linuxFuseShare(root)) return "network-share";
-      return LINUX_NETWORK_TYPES.has(await probe.fileSystemType(root)) ? "network-share" : null;
+      return linuxFuseShare(root) || LINUX_NETWORK_TYPES.has(await probe.fileSystemType(root));
     }
     default:
-      return null;
+      return false;
   }
 }
 
@@ -103,15 +81,6 @@ export async function workspaceLocation(
 function within(path: string, folder: string): boolean {
   const base = folder.replace(/\/$/u, "");
   return path === base || path.startsWith(`${base}/`);
-}
-
-// Under ~/Library/Mobile Documents, or under ~/Desktop or ~/Documents while
-// Finder says iCloud Drive holds that folder.
-async function inICloudDrive(root: string, home: string, probe: LocationProbe): Promise<boolean> {
-  if (within(root, `${home}/Library/Mobile Documents`)) return true;
-  if (within(root, `${home}/Desktop`)) return probe.finderSetting("FXICloudDriveDesktop");
-  if (within(root, `${home}/Documents`)) return probe.finderSetting("FXICloudDriveDocuments");
-  return false;
 }
 
 // mount lists each volume as "<device> on <folder> (<type>, <flags>)", and
