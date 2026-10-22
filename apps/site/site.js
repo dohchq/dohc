@@ -42,6 +42,12 @@ const downloadBuilds = {
     platform: 'mac', label: 'macOS', detail: 'Apple silicon, .dmg', icon: 'apple',
     matches: matchesBuild('.dmg', 'arm64'),
   },
+  // A Mac whose browser does not report its chip. dohc ships for Apple silicon
+  // only, so this card opens the releases page, where the person can check.
+  mac: {
+    platform: 'mac', label: 'macOS', detail: 'Apple silicon, .dmg', icon: 'apple',
+    matches: matchesBuild('.dmg', 'arm64'), releasesPage: true,
+  },
   'linux-x64': {
     platform: 'linux', label: 'Linux', detail: 'x64, .deb', icon: 'linux',
     matches: matchesBuild('.deb', 'amd64'),
@@ -54,7 +60,10 @@ const downloadBuilds = {
   },
 };
 
-Object.values(downloadBuilds).forEach((build) => { build.url = RELEASES_URL; });
+// Each build's url stays undefined until GitHub answers. Then it is the
+// installer, null when GitHub has none to offer, or the releases page when
+// GitHub does not answer. Until then a link leads to the platforms below, so
+// a click that opens a new tab never reaches a missing releases page.
 
 function detectedDesktopPlatform() {
   const fingerprint = `${navigator.userAgentData?.platform ?? ''} ${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
@@ -88,15 +97,30 @@ const standaloneDownloadLinks = Array.from(document.querySelectorAll('[data-down
 // A plain link to one build. It never becomes the card for this device.
 const assetDownloadLinks = Array.from(document.querySelectorAll('[data-download-asset]'));
 
+// A build GitHub has not published keeps its place and says so, instead of
+// sending the visitor to a missing or empty releases page.
+function showAvailability(link, build, missingText) {
+  const text = (link.querySelector('.download-card-action') ?? link).firstChild;
+  link.dataset.availableText ??= text.textContent;
+  link.href = build.url ?? '#downloads';
+  link.toggleAttribute('data-unavailable', build.url === null);
+  text.textContent = build.url === null ? missingText(link.dataset.availableText) : link.dataset.availableText;
+}
+
 function updateStandaloneDownloadLinks() {
   standaloneDownloadLinks.forEach((link) => {
     const build = downloadBuilds[link.dataset.downloadCard];
-    if (build) link.href = build.url;
+    if (build) showAvailability(link, build, () => 'No build yet ');
   });
   assetDownloadLinks.forEach((link) => {
     const build = downloadBuilds[link.dataset.downloadAsset];
-    if (build) link.href = build.url;
+    if (build) showAvailability(link, build, (name) => `No ${name.trim()} yet`);
   });
+}
+
+function refreshDownloadLinks() {
+  updateStandaloneDownloadLinks();
+  downloadControls.forEach(control => control.updateResolvedDownloads?.());
 }
 
 updateStandaloneDownloadLinks();
@@ -109,12 +133,15 @@ function configureDownloadControl(control, preferredKey) {
 
   const updatePrimary = () => {
     const build = preferredKey ? downloadBuilds[preferredKey] : null;
+    const missing = build?.url === null;
     primary.dataset.downloadBuild = preferredKey ?? '';
-    primary.href = build?.url ?? RELEASES_URL;
-    primaryLabel.textContent = build ? `Download for ${build.label}` : 'Download dohc';
+    // Without a build for this device, the button leads to every platform.
+    primary.href = build?.url ?? '#downloads';
+    primary.toggleAttribute('data-unavailable', missing);
+    primaryLabel.textContent = !build ? 'Download dohc' : missing ? `No ${build.label} build yet` : `Download for ${build.label}`;
     primaryIcon.setAttribute('href', `#os-${build?.icon ?? 'download'}`);
     primary.closest('[data-download-control]').dataset.detectedPlatform = build?.platform ?? 'unknown';
-    primary.setAttribute('aria-label', build ? `Download for ${build.label}, ${build.detail}` : 'Download dohc');
+    primary.setAttribute('aria-label', !build || missing ? primaryLabel.textContent : `Download for ${build.label}, ${build.detail}`);
   };
 
   control.updateResolvedDownloads = updatePrimary;
@@ -125,7 +152,7 @@ preferredDownloadKey().then((key) => {
   downloadControls.forEach((control) => configureDownloadControl(control, key));
   const platform = key ? downloadBuilds[key].platform : null;
   standaloneDownloadLinks.forEach((link) => {
-    const cardPlatform = link.dataset.downloadCard === 'mac' ? 'mac' : downloadBuilds[link.dataset.downloadCard]?.platform;
+    const cardPlatform = downloadBuilds[link.dataset.downloadCard]?.platform;
     const matches = platform !== null && cardPlatform === platform;
     link.classList.toggle('is-preferred', matches);
     if (matches) {
@@ -143,26 +170,28 @@ let resolvingDownloads;
 let downloadPending = false;
 const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((assets) => {
   Object.values(downloadBuilds).forEach((build) => {
-    const asset = assets.find((candidate) => build.matches(candidate.name));
-    if (asset?.browser_download_url) build.url = asset.browser_download_url;
+    const asset = assets?.find((candidate) => build.matches(candidate.name));
+    build.url = assets === null || (asset && build.releasesPage) ? RELEASES_URL
+      : asset?.browser_download_url ?? null;
   });
-  updateStandaloneDownloadLinks();
-  downloadControls.forEach(control => control.updateResolvedDownloads?.());
+  refreshDownloadLinks();
 });
 for (const link of document.querySelectorAll('[data-download-primary], [data-download-card], [data-download-asset]')) {
-  const canResolve = () => Boolean(downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild ?? link.dataset.downloadAsset]);
-  const prepare = () => { if (canResolve()) void resolveDownloads(); };
-  link.addEventListener('pointerenter', prepare, { once: true });
-  link.addEventListener('focus', prepare, { once: true });
+  const buildFor = () => downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild ?? link.dataset.downloadAsset];
+  const canResolve = () => Boolean(buildFor());
+  // GitHub hears from a visitor only when they click to download.
   link.addEventListener('click', async event => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
+    // "Download dohc" scrolls to the platforms below.
+    if (!canResolve() && link.matches('[data-download-primary]')) return;
     event.preventDefault();
     if (downloadPending) return;
-    if (!canResolve()) { location.assign(RELEASES_URL); return; }
     downloadPending = true;
+    document.querySelector('[data-download-status]')?.remove();
     const label = link.querySelector('[data-download-primary-label], .download-card-action');
     const originalText = label?.firstChild?.textContent;
     const status = document.createElement('span');
+    status.dataset.downloadStatus = '';
     status.className = 'visually-hidden';
     status.setAttribute('role', 'status');
     link.parentElement.append(status);
@@ -178,9 +207,15 @@ for (const link of document.querySelectorAll('[data-download-primary], [data-dow
       link.removeAttribute('aria-busy');
       link.removeAttribute('aria-disabled');
       if (label?.firstChild) label.firstChild.textContent = originalText;
-      status.remove();
+      refreshDownloadLinks();
       downloadPending = false;
     }
+    const build = buildFor();
+    if (build?.url === null) {
+      status.textContent = `No ${build.label} build is published yet.`;
+      return;
+    }
+    status.remove();
     location.assign(link.href);
   });
 }
