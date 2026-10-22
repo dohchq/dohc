@@ -193,13 +193,15 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
   /**
    * Without the session check, so admitted Collection creates still record
-   * their outcomes while the host closes. The record check stays.
+   * their outcomes while the host closes. The record check stays, before
+   * the work and again after it: a record that changed while the work ran
+   * rolls the work back, savepoint or transaction.
    */
   function commit<T>(work: () => T): T {
     assertHeld();
     const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
     db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
-    try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
+    try { const result = work(); assertHeld(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
     catch (error) { db.exec(nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK"); throw error; }
   }
   async function tracked<T>(work: () => Promise<T>): Promise<T> {

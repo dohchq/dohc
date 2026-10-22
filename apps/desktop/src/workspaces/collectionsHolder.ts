@@ -330,36 +330,46 @@ export interface KeepSteps {
  * A person chose to keep the workspace's Collections on this computer.
  * False when they did not confirm a question this asked first.
  *
- * - No record, or one naming this computer without a store: a store here
- *   takes a new id, then the record names it. When another computer made
- *   the workspace, the person confirms first, since its Collections may
- *   still be syncing.
+ * - No record, or one naming this computer without a store id: a store
+ *   here takes a new id, then the record names it. When another computer
+ *   made the workspace, the person confirms first, since its Collections
+ *   may still be syncing. Without that, a store here with no record naming
+ *   it is one a creation cut short left.
  * - A record naming another installation: this computer may be that one
  *   before dohc was set up again. The person confirms, and only the store
  *   the record names, here, is kept: the record changes installation and
- *   label, never the store id.
+ *   label, never the store id. A record naming no store yet can be kept
+ *   only where there is no store, since no store here could match it.
  */
 export async function keepCollectionsHere(rootPath: string, workspaceId: string, here: Computer, steps: KeepSteps): Promise<boolean> {
   const seen = await readRecord(rootPath, workspaceId);
   const elsewhere = seen.kind === "holder" && seen.holder.computer.installId !== here.installId ? seen.holder : null;
   if (seen.kind === "holder" && elsewhere === null && seen.holder.storeId !== null) return true;
+  const refuseElsewhere = (holder: CollectionsHolder) =>
+    refused({ kind: "elsewhere", computer: holder.computer, sameName: holder.computer.label === here.label });
   let question: KeepQuestion | null = null;
   if (elsewhere !== null) {
-    if (elsewhere.storeId === null) throw refused({ kind: "elsewhere", computer: elsewhere.computer, sameName: elsewhere.computer.label === here.label });
+    if (elsewhere.storeId === null && await collectionsStorePresent(rootPath)) throw refuseElsewhere(elsewhere);
     question = { kind: "earlier-installation", computer: elsewhere.computer };
-  } else if (seen.kind === "absent") {
+  } else {
     const madeBy = await steps.madeBy();
     if (madeBy !== null && madeBy.installId !== here.installId) question = { kind: "made-elsewhere", computer: madeBy };
   }
   if (question !== null && !(await steps.confirm(question))) return false;
   return holderWork(workspaceId, async () => {
     await assertUnchanged(rootPath, workspaceId, seen);
+    const present = await collectionsStorePresent(rootPath);
     if (elsewhere !== null) {
+      if (elsewhere.storeId === null) {
+        if (present) throw refuseElsewhere(elsewhere);
+        await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: null });
+        return true;
+      }
       if ((await steps.storeIdHere()) !== elsewhere.storeId) throw new Error(`This computer doesn't have ${elsewhere.computer.label}'s copy of the Collections.`);
       await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: elsewhere.storeId });
       return true;
     }
-    if (!(await collectionsStorePresent(rootPath))) {
+    if (!present) {
       await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: null });
       return true;
     }

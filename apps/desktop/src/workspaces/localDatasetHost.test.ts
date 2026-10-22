@@ -967,6 +967,36 @@ describe("the computer that keeps a workspace's Collections", () => {
     }
   });
 
+  it.each(["a transaction", "a savepoint inside one"])("rolls back %s whose record changes while its work runs, and stops", async (shape) => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    // The host's own transaction, which file associations write through.
+    let storage!: { db: { prepare(sql: string): { run(...values: unknown[]): unknown } }; transaction<T>(run: () => T): T };
+    const { host } = await open({ workspaceRoot: root, holder: guarded, resources: (given) => { storage = given; return {}; } });
+    const dump = () => {
+      const db = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+      try {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => String(row.name));
+        return JSON.stringify(tables.map(table => [table, db.prepare(`SELECT * FROM "${table}"`).all()]));
+      } finally { db.close(); }
+    };
+    const before = dump();
+    // An outside sync process replaces the record after the write, before the commit.
+    const work = () => {
+      storage.db.prepare("INSERT INTO local_dataset_usage VALUES(?,?)").run("probe", 1);
+      writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId: null }));
+    };
+    const refused = (() => {
+      try { storage.transaction(() => (shape === "a transaction" ? work() : storage.transaction(work))); }
+      catch (error) { return error; }
+      return null;
+    })();
+    expect((refused as CollectionsRefusalError).refusal).toMatchObject({ kind: "elsewhere" });
+    expect(dump(), "nothing committed").toBe(before);
+    expect(() => host.list()).toThrow(refused as Error);
+  });
+
   it("names the store a creation made, whichever runs first when the person keeps the Collections meanwhile", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
     await mkdir(join(root, ".dohc"));

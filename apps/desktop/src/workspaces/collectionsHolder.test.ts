@@ -252,8 +252,27 @@ describe("keeping the Collections on this computer", () => {
   it("adopts a store the record names this computer for but no store id, as a creation cut short leaves it", async () => {
     await named(here);
     await addStore();
+    for (const madeBy of [null, here]) {
+      await named(here);
+      let adopted = "";
+      const kept = steps({ madeBy: async () => madeBy, adoptStore: async (id) => { adopted = id; } });
+      await keepCollectionsHere(root, workspaceId, here, kept);
+      expect(kept.confirm, "this computer made it, or nobody says who did").not.toHaveBeenCalled();
+      expect((await recordNow()).storeId).toBe(adopted);
+    }
+  });
+
+  it("asks before adopting a store the record names no id for, when another computer made the workspace", async () => {
+    await named(here);
+    await addStore();
+    const declined = steps({ madeBy: async () => laptop, confirm: vi.fn(async () => false) });
+    expect(await keepCollectionsHere(root, workspaceId, here, declined)).toBe(false);
+    expect(declined.confirm).toHaveBeenCalledWith({ kind: "made-elsewhere", computer: laptop });
+    expect(declined.adoptStore).not.toHaveBeenCalled();
+    expect((await recordNow()).storeId).toBeNull();
     let adopted = "";
-    await keepCollectionsHere(root, workspaceId, here, steps({ adoptStore: async (id) => { adopted = id; } }));
+    const accepted = steps({ madeBy: async () => laptop, adoptStore: async (id) => { adopted = id; } });
+    expect(await keepCollectionsHere(root, workspaceId, here, accepted)).toBe(true);
     expect((await recordNow()).storeId).toBe(adopted);
   });
 
@@ -314,11 +333,25 @@ describe("keeping the Collections of an earlier installation of dohc on this com
         .rejects.toThrow("This computer doesn't have Laptop's copy of the Collections.");
       expect(await recordNow()).toMatchObject({ installId: "install-laptop", storeId });
     }
-    // A record with no store yet names nothing this computer could have.
+  });
+
+  it("keeps a record that names no store yet only where there is no store, since no store here could match it", async () => {
     await named(laptop);
-    const kept = steps({ storeIdHere: async () => null });
-    expect((await refusal(keepCollectionsHere(root, workspaceId, here, kept))).refusal.kind).toBe("elsewhere");
-    expect(kept.confirm).not.toHaveBeenCalled();
+    await addStore("state.sqlite-shm");
+    const withStore = steps();
+    expect((await refusal(keepCollectionsHere(root, workspaceId, here, withStore))).refusal.kind).toBe("elsewhere");
+    expect(withStore.confirm).not.toHaveBeenCalled();
+    expect((await recordNow()).installId).toBe("install-laptop");
+    await rm(join(root, ".dohc", "datasets"), { recursive: true });
+    const declined = steps({ confirm: vi.fn(async () => false) });
+    expect(await keepCollectionsHere(root, workspaceId, here, declined)).toBe(false);
+    expect(declined.confirm).toHaveBeenCalledWith({ kind: "earlier-installation", computer: laptop });
+    expect((await recordNow()).installId).toBe("install-laptop");
+    const kept = steps();
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(true);
+    expect(await recordNow()).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: null });
+    expect(kept.adoptStore).not.toHaveBeenCalled();
+    expect(await admitCollectionsStore(root, workspaceId, required)).toMatchObject({ kind: "create" });
   });
 
   it("keeps nothing when the person does not confirm", async () => {
