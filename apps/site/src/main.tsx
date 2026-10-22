@@ -44,6 +44,15 @@ if (host) {
         import("react"),
       ]);
       await hydrateDemoWorkspaceAssets();
+      // Browsers ignore @property inside a shadow root, which leaves
+      // Tailwind's borders and shadows without their initial values.
+      // Registered on the page, they reach the shadow root too.
+      if (!document.querySelector("style[data-demo-properties]")) {
+        const properties = document.createElement("style");
+        properties.dataset.demoProperties = "";
+        properties.textContent = (demoCss.match(/@property\s[^{]+\{[^}]*\}/g) ?? []).join("\n");
+        document.head.append(properties);
+      }
       const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
       const style = document.createElement("style");
       style.textContent = demoCss;

@@ -238,9 +238,10 @@ describe("renderer rows use the full state fills", () => {
   });
 });
 
-// Two more stylesheets carry copies of the palette: the marketing demo's
-// shadow root (apps/site) and the light-only document export. The names
-// they spell are the tokens.ts keys, so a changed value must land in all.
+// The light-only document export carries a copy of the palette. The names it
+// spells are the tokens.ts keys, so a changed value must land in both. The
+// marketing demo's shadow root (apps/site) uses styles.css itself: its build
+// also applies the :root tokens to :host.
 describe("copies of the palette mirror tokens.ts", () => {
   const keyOf = Object.fromEntries(
     Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]),
@@ -248,21 +249,9 @@ describe("copies of the palette mirror tokens.ts", () => {
   const declarations = (css: string) =>
     [...css.matchAll(/(--dohc-[a-z0-9-]+): ([^;]+);/g)].map(([, name, value]) => [name!, value!] as const);
 
-  it("the site demo", () => {
+  it("the site demo keeps no copy that could drift", () => {
     const css = readFileSync(new URL("../../../site/src/demo.css", import.meta.url), "utf8");
-    const block = (selector: string) => {
-      const start = css.indexOf(selector);
-      expect(start, selector).toBeGreaterThanOrEqual(0);
-      return css.slice(start, css.indexOf("}", start));
-    };
-    // The first `.demo-window {` is the `:host, .demo-window` token block.
-    for (const [mode, selector] of [["light", ".demo-window {"], ["dark", '.demo-window[data-theme="dark"] {']] as const) {
-      const found = declarations(block(selector)).filter(([name]) => name in keyOf);
-      expect(found.length, `${mode} tokens in demo.css`).toBeGreaterThan(0);
-      for (const [name, value] of found) {
-        expect(value, `${name} (${mode})`).toBe(palette[mode][keyOf[name]!]);
-      }
-    }
+    expect(declarations(css).filter(([name]) => name in keyOf)).toEqual([]);
   });
 
   it("the document export", () => {

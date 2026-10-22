@@ -219,6 +219,8 @@ describe("a Collection change during an engine run", () => {
     const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
     try {
       readLocalStateFrom(sessions);
+      // Windows can't remove the first host's worker lock while that host is open.
+      await first.host.close();
       // Opened before the engine, so the host takes its worker folder at the first worker.
       await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
       const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
@@ -242,6 +244,8 @@ describe("a Collection change during an engine run", () => {
     // The open's own preparation stalls, before the daemon deadline starts. Nothing closes these sessions: a close would wait for that open.
     vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockReturnValue(new Promise<void>(() => {}));
     readLocalStateFrom(sessions);
+    // Windows can't remove the first host's worker lock while that host is open.
+    await first.host.close();
     await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
     const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: first.workspaceRoot,
       attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
