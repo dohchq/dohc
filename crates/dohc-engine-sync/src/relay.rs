@@ -2675,6 +2675,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             holding,
             rounds_done: false,
             settlements: Default::default(),
+            archived_protected: Vec::new(),
         }
     }
 
@@ -2795,25 +2796,41 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             p.made_progress = false;
             p.held = p.holding.held_at_round(&p.durable);
         }
-        match crate::ydoc_apply::drain_inactive_ydoc_updates(
+        // The inactive drain's refusals reach the pass as pending refusals.
+        // A document whose archived lineage released tails protect holds
+        // for it. Each lineage is decided again here.
+        let archived = match crate::ydoc_apply::drain_inactive_ydoc_updates(
             store,
-            workspace_id,
+            crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
             &cache.released_tails(store),
+            &mut Vec::new(),
             faults,
         ) {
-            Ok(_) => {}
+            Ok(drained) => drained.holds,
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
             Err(error) => return Err(local(error)),
-        }
+        };
+        p.pass.replace_drain_holds(
+            archived
+                .iter()
+                .map(|(object_id, hold)| (object_id.clone(), Some(hold.clone())))
+                .collect(),
+        );
         // Each pass decides again for queued work a drain held, so its
         // document frees once that work no longer needs holding. What those
         // drains commit is the pass's, once, even when one then waits.
         if matches!(p.holding, Holding::ByDocument { .. }) {
-            let released =
-                crate::ydoc_apply::drain_released_holds(store, cache, workspace_id, faults, leases)
-                    .map_err(local)?;
+            let released = crate::ydoc_apply::drain_released_holds(
+                store,
+                cache,
+                workspace_id,
+                &archived,
+                faults,
+                leases,
+            )
+            .map_err(local)?;
             p.pass.replace_drain_holds(released.holds);
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
@@ -2914,11 +2931,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Ok(());
             }
         }
+        // Archived work queued before the op applies first, except of a
+        // lineage an earlier op's drain found protected. A hold it leaves
+        // stands in its document's row, which the pass reads when it settles
+        // that document.
         if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
             crate::ydoc_apply::drain_inactive_ydoc_updates(
                 store,
-                workspace_id,
+                crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
                 &cache.released_tails(store),
+                &mut p.archived_protected,
                 faults,
             )
             .map_err(local)?;
@@ -5052,6 +5074,10 @@ struct ApplyProgress {
     rounds_done: bool,
     /// The owner settlements the pass reports so far.
     settlements: crate::moment_apply::pending::PendingSettlementReport,
+    /// The archived lineages, as `[version, object, lineage]`, that the
+    /// inactive drains before its ops found released tails protect. Those
+    /// drains pass over them; the end of the pass decides them again.
+    archived_protected: Vec<[String; 3]>,
 }
 
 /// What applying a pass came to.

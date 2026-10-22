@@ -1,6 +1,8 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
-use dohc_engine_collab::live_update_application::{ReleasedLineageBinding, ReleasedTails};
+use dohc_engine_collab::live_update_application::{
+    IncomingCoordinate, ProtectedTails, ReleasedLineageBinding, ReleasedTails,
+};
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
     ReplicationApplyOutcome, WriterDocCache, apply_remote_update_in_transaction_with_projection,
@@ -15,6 +17,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
+use std::sync::Arc;
 
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
@@ -254,6 +257,10 @@ pub struct YdocDrainResult {
     /// work a released chain's tail retains. The update stays queued,
     /// neither applied nor refused.
     pub released_hold: Option<crate::HostedHold>,
+    /// The hold the document is left with because released tails protect an
+    /// archived lineage its queued updates would change. Those updates stay
+    /// queued, and the binding names that lineage and the state it keeps.
+    pub archived_hold: Option<crate::HostedHold>,
     /// The drain stopped at a row whose decision waits for released-tail
     /// validation. Everything above is the committed prefix before it; that
     /// row and every later one stay queued. Once validation completes, the
@@ -271,6 +278,7 @@ impl YdocDrainResult {
         self.lineage_replacements.extend(later.lineage_replacements);
         self.record_facts.extend(later.record_facts);
         self.released_hold = later.released_hold;
+        self.archived_hold = later.archived_hold;
         self.waiting = later.waiting;
     }
 }
@@ -754,15 +762,19 @@ pub(crate) struct ReleasedDrains {
 
 /// Drain again each held hosted document of the scope that still has queued
 /// application work, so a fresh decision admits what no longer needs
-/// holding. A document a live session holds, or whose drain stops before
-/// its held update, keeps the hold its row records, marked stale, and its
-/// queued work waits. Everything a drain applies is refused or materialized
-/// as any drain's is, and reported once. A drain that waits for validation
-/// stops the rest, and the answer carries that wait.
+/// holding. A document whose queued updates of an archived lineage the
+/// pass's inactive drain just held keeps that hold, from `archived`, and one
+/// its drain frees has its archived lineages decided again. One a live
+/// session holds, or whose drain stops before its held update, keeps the
+/// hold its row records, marked stale, and its queued work waits.
+/// Everything a drain applies is refused or materialized as any drain's is,
+/// and reported once. A drain that waits for validation stops the rest, and
+/// the answer carries that wait.
 pub(crate) fn drain_released_holds(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     workspace_id: &str,
+    archived: &std::collections::BTreeMap<String, crate::HostedHold>,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ReleasedDrains, SyncError> {
@@ -809,8 +821,12 @@ pub(crate) fn drain_released_holds(
         }
     }
     for key in keys {
+        let archived = archived.get(&key.object_id).cloned();
         if leases.is_live(&key) {
-            let standing = standing_released_hold(store, &key)?;
+            let standing = match archived {
+                Some(hold) => Some(hold),
+                None => standing_released_hold(store, &key)?,
+            };
             examined(&mut result.holds, key.object_id, standing);
             continue;
         }
@@ -836,12 +852,35 @@ pub(crate) fn drain_released_holds(
         result
             .changes
             .extend(drained_head_change(store, &key, before.as_ref())?);
-        let hold = match drained.released_hold.take() {
+        let hold = match drained.released_hold.take().or(archived) {
             Some(hold) => Some(hold),
             None => standing_released_hold(store, &key)?,
         };
-        examined(&mut result.holds, key.object_id, hold);
         result.drained.absorb(drained);
+        // A document this drain freed still holds for an archived lineage it
+        // queues that released tails protect: the pass's inactive drain left
+        // that lineage to the hold that stood then.
+        let hold = match hold {
+            Some(hold) => Some(hold),
+            None => match drain_inactive_ydoc_updates(
+                store,
+                InactiveScope::Document(&key),
+                &cache.released_tails(store),
+                &mut Vec::new(),
+                faults,
+            ) {
+                Ok(inactive) => {
+                    result.drained.refusals.extend(inactive.refusals);
+                    inactive.holds.into_values().next()
+                }
+                Err(SyncError::ValidationPending(pending)) => {
+                    result.drained.waiting = Some(pending);
+                    break;
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        examined(&mut result.holds, key.object_id, hold);
     }
     Ok(result)
 }
@@ -1313,6 +1352,29 @@ fn requeue_held(
     }
 }
 
+/// `row`, an update of a lineage that is not the head's, and each later
+/// update of that lineage before the queue's next base, taken out of
+/// `queue`. An archive keeps its own state, so their order against the
+/// head's rows does not matter; a base can move lineages, so none passes one.
+fn take_lineage_rows(
+    row: DeferredRow,
+    queue: &mut std::collections::VecDeque<DeferredRow>,
+) -> Vec<DeferredRow> {
+    let base = queue
+        .iter()
+        .position(|later| later.5.is_base_state)
+        .unwrap_or(queue.len());
+    let after = queue.split_off(base);
+    let (same, other): (Vec<_>, Vec<_>) = std::mem::take(queue)
+        .into_iter()
+        .partition(|later| later.4 == row.4);
+    queue.extend(other);
+    queue.extend(after);
+    let mut rows = vec![row];
+    rows.extend(same);
+    rows
+}
+
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -1322,13 +1384,9 @@ fn drain_deferred_ydoc(
     recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
     let tails = cache.released_tails(store);
-    let idle = |refusals, waiting: Option<Box<_>>| {
+    let idle = || {
         (
-            YdocDrainResult {
-                refusals,
-                waiting,
-                ..YdocDrainResult::default()
-            },
+            YdocDrainResult::default(),
             YdocDrainCleanup {
                 workspace_id: key.workspace_id.clone(),
                 coordinates: Vec::new(),
@@ -1338,17 +1396,6 @@ fn drain_deferred_ydoc(
                 released_hold: false,
             },
         )
-    };
-    let inactive_refusals = if matches!(mode, DeferredDrainMode::All) {
-        match drain_inactive_ydoc_updates(store, &key.workspace_id, &tails, faults) {
-            Ok(refusals) => refusals,
-            Err(SyncError::ValidationPending(pending)) => {
-                return Ok(idle(Vec::new(), Some(pending)));
-            }
-            Err(error) => return Err(error),
-        }
-    } else {
-        Vec::new()
     };
     let pending: Vec<DeferredRow> =
         store.read_with(|conn| {
@@ -1423,7 +1470,7 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        return Ok(idle(inactive_refusals, None));
+        return Ok(idle());
     }
     let unresolved: bool = store.read_with(|conn| {
         conn.query_row(
@@ -1452,11 +1499,11 @@ fn drain_deferred_ydoc(
     if materialization_pending {
         // Return to the caller so settlement can replay the pending job.
         // Keep every queued coordinate until its projection can commit.
-        return Ok(idle(inactive_refusals, None));
+        return Ok(idle());
     }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
-    let mut refusals = inactive_refusals;
+    let mut refusals = Vec::new();
     let mut sharing_declined = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
@@ -1475,6 +1522,9 @@ fn drain_deferred_ydoc(
     // past them brings them back to be decided against the new head.
     let mut held_rows: Vec<DeferredRow> = Vec::new();
     let mut released_hold = None;
+    let mut archived_hold = None;
+    // Whether released tails keep an archived lineage's rows queued.
+    let mut archived_held = false;
     let mut waiting = None;
     let mut queue: std::collections::VecDeque<DeferredRow> = pending.into();
     while let Some(row) = queue.pop_front() {
@@ -1487,20 +1537,31 @@ fn drain_deferred_ydoc(
             && !matches!(mode, DeferredDrainMode::Live(_))
             && store.read_with(|conn| inactive_lineage_exists(conn, key, &lineage_claim_id))?
         {
+            // A batch drain leaves archived lineages to its pass's inactive
+            // drain. Any other takes this lineage's queued updates together.
             if matches!(mode, DeferredDrainMode::All) {
-                match drain_inactive_ydoc_updates(store, &key.workspace_id, &tails, faults) {
-                    Ok(drained) => refusals.extend(drained),
+                let rows = take_lineage_rows(row, &mut queue);
+                match drain_off_head_rows(
+                    store,
+                    key,
+                    &rows,
+                    &tails,
+                    search_policy.as_ref(),
+                    faults,
+                    recovery_leases,
+                ) {
+                    Ok(off_head) => {
+                        drained_coordinates.extend(off_head.drained);
+                        refusals.extend(off_head.refused);
+                        archived_held |= off_head.held;
+                        archived_hold = archived_hold.or(off_head.hold);
+                    }
                     Err(SyncError::ValidationPending(pending)) => {
                         waiting = Some(pending);
                         break;
                     }
                     Err(error) => return Err(error),
                 }
-                // A row its lineage's protection keeps queued is not drained.
-                if store.read_with(|conn| deferred_row_queued(conn, key, &origin_id, origin_seq))? {
-                    continue;
-                }
-                drained_coordinates.push((origin_id, origin_seq));
             }
             continue;
         }
@@ -1614,60 +1675,32 @@ fn drain_deferred_ydoc(
         let winner_claim_id = marker.lineage_claim_id.ok_or(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity",
         })?;
+        // A lineage that lost arbitration keeps nothing of its rows; one
+        // archived since the row was checked above takes them as its archive
+        // does. Later rows of the head's lineage go on either way.
         if lineage_claim_id != winner_claim_id {
-            let retained = store.write_with(faults, |tx| {
-                if let Some(leases) = recovery_leases {
-                    require_recovery_closed(tx, key, leases)?;
+            let rows = take_lineage_rows(row, &mut queue);
+            match drain_off_head_rows(
+                store,
+                key,
+                &rows,
+                &tails,
+                search_policy.as_ref(),
+                faults,
+                recovery_leases,
+            ) {
+                Ok(off_head) => {
+                    drained_coordinates.extend(off_head.drained);
+                    refusals.extend(off_head.refused);
+                    archived_held |= off_head.held;
+                    archived_hold = archived_hold.or(off_head.hold);
                 }
-                apply_inactive_delta_in_tx(
-                    tx,
-                    key,
-                    &payload,
-                    &bytes,
-                    recorded_at_ms,
-                    search_policy.as_ref(),
-                    &tails,
-                )
-            });
-            let retained = match retained {
-                Ok(retained) => retained,
-                // Its archived lineage's protection keeps it queued; later
-                // rows of the active lineage go on.
-                Err(SyncError::RetryableState {
-                    reason: INACTIVE_LINEAGE_PROTECTED,
-                }) => continue,
                 Err(SyncError::ValidationPending(pending)) => {
                     waiting = Some(pending);
                     break;
                 }
-                Err(error) => {
-                    if let Some(reason) = crate::apply::refusal_reason(&error) {
-                        refusals.push(refuse_deferred_ydoc(
-                            store,
-                            key,
-                            &origin_id,
-                            origin_seq,
-                            reason.message(),
-                            faults,
-                        )?);
-                        continue;
-                    }
-                    return Err(error);
-                }
-            };
-            match retained {
-                TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
-                TxnOutcome::Committed(InactiveDeltaOutcome {
-                    refusal: Some(reason),
-                    ..
-                }) => {
-                    refusals.push(refuse_deferred_ydoc(
-                        store, key, &origin_id, origin_seq, reason, faults,
-                    )?);
-                }
-                TxnOutcome::Committed(_) => {}
+                Err(error) => return Err(error),
             }
-            drained_coordinates.push((origin_id, origin_seq));
             continue;
         }
         let established_kind = dohc_engine_collab::read_marker(store, key)
@@ -1955,6 +1988,7 @@ fn drain_deferred_ydoc(
             lineage_replacements,
             record_facts,
             released_hold,
+            archived_hold,
             waiting,
         },
         YdocDrainCleanup {
@@ -1963,7 +1997,7 @@ fn drain_deferred_ydoc(
             projection_refusal,
             applied_refusals,
             projected: projected_lineage,
-            released_hold: !held_rows.is_empty(),
+            released_hold: !held_rows.is_empty() || archived_held,
         },
     ))
 }
@@ -2005,22 +2039,6 @@ pub fn deferred_ydoc_opened_conflict(conn: &Connection, key: &DocKey) -> Result<
         }
     }
     Ok(false)
-}
-
-/// Whether the queued update at this coordinate is still queued.
-fn deferred_row_queued(
-    conn: &Connection,
-    key: &DocKey,
-    origin_id: &str,
-    origin_seq: i64,
-) -> Result<bool, SyncError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
-         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
-        params![key.workspace_id, origin_id, origin_seq],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
 }
 
 /// The record-event decision an earlier drain committed with this parked
@@ -2488,29 +2506,10 @@ fn hold_released_lineage(
     tails: &ReleasedTails,
     incoming: Incoming<'_>,
 ) -> Result<Option<Box<ReleasedLineageBinding>>, SyncError> {
-    use dohc_engine_collab::live_update_application::IncomingCoordinate;
-    // A binding names a relay position from 1; any other is none.
-    let relay_seq = relay_seq.filter(|seq| *seq > 0);
-    let identity: Option<(String, String)> = tx
-        .query_row(
-            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
-            [&key.workspace_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let (replication_epoch, stream_identity) = identity.clone().unwrap_or_default();
+    let (coordinate, identified, unrecorded) =
+        ingress_coordinate(tx, key, op, relay_seq, relay_namespace)?;
     // Retained work whose feed was never recorded holds a protected lineage
     // whatever it does, as a queued Y.Doc row with none does.
-    let unrecorded = retained_unrecorded(tx, op)?;
-    let coordinate = IncomingCoordinate {
-        relay_namespace: relay_namespace.filter(|_| !unrecorded).map(str::to_owned),
-        replication_epoch,
-        stream_identity,
-        origin_id: op.origin_id.clone(),
-        origin_seq: op.origin_seq,
-        relay_seq: relay_seq.unwrap_or_default(),
-    };
     let incoming = if unrecorded {
         Incoming::Replacement
     } else {
@@ -2520,21 +2519,69 @@ fn hold_released_lineage(
     if matches!(decision, ReleasedDecision::Unprotected) {
         return Ok(None);
     }
-    if identity.is_none() {
-        return Err(local_corruption(
-            "a protected lineage's replica has no sync identity",
-        ));
-    }
-    if relay_seq.is_none() {
-        return Err(SyncError::RetryableState {
-            reason: "a row held for a released lineage has no relay sequence",
-        });
-    }
+    bindable(identified, coordinate.relay_seq)?;
     match decision {
         ReleasedDecision::Held { binding, .. } => Err(SyncError::ReleasedLineageUnsettled(binding)),
         ReleasedDecision::Admitted(binding) => Ok(Some(binding)),
         ReleasedDecision::Unprotected => Ok(None),
     }
+}
+
+/// The coordinate an incoming `op` names on the feed `relay_namespace`
+/// names, whether the replica has a sync identity, and whether `op` is
+/// retained work whose feed was never recorded, which names no namespace. A
+/// relay position below 1 is none.
+fn ingress_coordinate(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    op: &ReplicationEnvelope,
+    relay_seq: Option<i64>,
+    relay_namespace: Option<&str>,
+) -> Result<(IncomingCoordinate, bool, bool), SyncError> {
+    let identity: Option<(String, String)> = tx
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let identified = identity.is_some();
+    let (replication_epoch, stream_identity) = identity.unwrap_or_default();
+    let unrecorded = retained_unrecorded(tx, op)?;
+    let coordinate = IncomingCoordinate {
+        relay_namespace: relay_namespace.filter(|_| !unrecorded).map(str::to_owned),
+        replication_epoch,
+        stream_identity,
+        origin_id: op.origin_id.clone(),
+        origin_seq: op.origin_seq,
+        relay_seq: relay_seq.filter(|seq| *seq > 0).unwrap_or_default(),
+    };
+    Ok((coordinate, identified, unrecorded))
+}
+
+/// Hold `op`, an update of `key`'s archived `lineage`, while released tails
+/// protect that lineage, decided from the tails alone. Any update changes
+/// the state the archive keeps, so none is inspected. It is neither
+/// acknowledged nor queued: its document's read stops before it, as at a
+/// frozen hold, with a binding of the lineage and that state.
+fn hold_archived_lineage(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    lineage: &str,
+    op: &ReplicationEnvelope,
+    relay_seq: Option<i64>,
+    relay_namespace: Option<&str>,
+    tails: &ReleasedTails,
+) -> Result<(), SyncError> {
+    let Some(protected) = archived_protection(tx, key, lineage, tails)? else {
+        return Ok(());
+    };
+    let (coordinate, identified, _) = ingress_coordinate(tx, key, op, relay_seq, relay_namespace)?;
+    bindable(identified, coordinate.relay_seq)?;
+    Err(SyncError::ReleasedLineageUnsettled(archived_binding(
+        tx, key, lineage, coordinate, protected,
+    )?))
 }
 
 /// What released protection decides for a synced row.
@@ -2636,6 +2683,32 @@ fn drain_decision(
     tails: &ReleasedTails,
     incoming: Incoming<'_>,
 ) -> Result<ReleasedDecision, SyncError> {
+    let (coordinate, identified) =
+        deferred_coordinate(tx, key, feed, origin_id, origin_seq, relay_seq)?;
+    let incoming = if feed.ingress_kind == "legacy-unknown" {
+        Incoming::Replacement
+    } else {
+        incoming
+    };
+    let decision = released_decision(tx, key, lineage, &coordinate, tails, incoming)?;
+    if matches!(decision, ReleasedDecision::Unprotected) {
+        return Ok(decision);
+    }
+    bindable(identified, relay_seq)?;
+    Ok(decision)
+}
+
+/// The coordinate a queued update's recorded `feed` names, and whether the
+/// replica has a sync identity. A row whose feed was never recorded names
+/// no namespace.
+fn deferred_coordinate(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    feed: &DeferredFeed,
+    origin_id: &str,
+    origin_seq: i64,
+    relay_seq: i64,
+) -> Result<(IncomingCoordinate, bool), SyncError> {
     let current: Option<(String, String)> = tx
         .query_row(
             "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
@@ -2645,12 +2718,13 @@ fn drain_decision(
         .optional()
         .map_err(SyncError::corrupt)?;
     let hosted = feed.ingress_kind == "hosted";
+    let identified = current.is_some();
     let (replication_epoch, stream_identity) =
         match (hosted, &feed.replication_epoch, &feed.stream_identity) {
             (true, Some(epoch), Some(stream)) => (epoch.clone(), stream.clone()),
-            _ => current.clone().unwrap_or_default(),
+            _ => current.unwrap_or_default(),
         };
-    let coordinate = dohc_engine_collab::live_update_application::IncomingCoordinate {
+    let coordinate = IncomingCoordinate {
         relay_namespace: feed.relay_namespace.clone().filter(|_| hosted),
         replication_epoch,
         stream_identity,
@@ -2658,28 +2732,24 @@ fn drain_decision(
         origin_seq,
         relay_seq,
     };
-    let unrecorded = feed.ingress_kind == "legacy-unknown";
-    let incoming = if unrecorded {
-        Incoming::Replacement
-    } else {
-        incoming
-    };
-    let decision = released_decision(tx, key, lineage, &coordinate, tails, incoming)?;
-    if matches!(decision, ReleasedDecision::Unprotected) {
-        return Ok(decision);
-    }
-    if current.is_none() {
+    Ok((coordinate, identified))
+}
+
+/// Whether a protected lineage's hold can bind the row at `relay_seq` on a
+/// replica that is `identified`: a binding names the replica's feed and a
+/// relay position from 1.
+fn bindable(identified: bool, relay_seq: i64) -> Result<(), SyncError> {
+    if !identified {
         return Err(local_corruption(
             "a protected lineage's replica has no sync identity",
         ));
     }
-    // A binding names a relay position from 1, as at ingress.
     if relay_seq <= 0 {
         return Err(SyncError::RetryableState {
             reason: "a row held for a released lineage has no relay sequence",
         });
     }
-    Ok(decision)
+    Ok(())
 }
 
 /// Persist `hold` for the document its binding names, unless its row
@@ -2807,8 +2877,9 @@ fn protection_failure(
 }
 
 /// Whether `binding` still names what its held row would change: the
-/// document's lineage, path, restore generation and head, the replica's feed,
-/// and every protected tail with its retained work, as `conn` reads them now.
+/// document's lineage, path, restore generation and head, or the archived
+/// lineage it names and the state its archive keeps, the replica's feed, and
+/// every protected tail with its retained work, as `conn` reads them now.
 /// [`SyncError::ValidationPending`] while those tails wait for validation.
 pub(crate) fn released_binding_current(
     conn: &rusqlite::Connection,
@@ -2833,13 +2904,24 @@ pub(crate) fn released_binding_current(
         .optional()
         .map_err(SyncError::corrupt)?;
     let incoming = &binding.incoming;
-    if lineage.as_deref() != Some(binding.lineage_claim_id.as_str())
-        || feed
-            .as_ref()
-            .map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))
-            != Some((&incoming.replication_epoch, &incoming.stream_identity))
+    if feed
+        .as_ref()
+        .map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))
+        != Some((&incoming.replication_epoch, &incoming.stream_identity))
     {
         return Ok(false);
+    }
+    if lineage.as_deref() != Some(binding.lineage_claim_id.as_str()) {
+        let archived = &binding.lineage_claim_id;
+        if !inactive_lineage_exists(conn, &doc, archived)? {
+            return Ok(false);
+        }
+        return Ok(match archived_protection(conn, &doc, archived, tails)? {
+            Some(protected) => {
+                *archived_binding(conn, &doc, archived, incoming.clone(), protected)? == *binding
+            }
+            None => false,
+        });
     }
     let key = ProtectionKey {
         doc: &doc,
@@ -4332,86 +4414,142 @@ struct InactiveDeltaOutcome {
     rejected: Vec<(usize, String)>,
 }
 
-/// Apply queued updates of archived lineages, in batches. A lineage a
-/// released tail protects keeps its rows queued, and later batches of the
-/// call pass over it. [`SyncError::ValidationPending`] while its tails wait
-/// for validation, with that batch rolled back.
+/// The archived lineages an inactive drain takes up: a workspace's, or one
+/// document's.
+#[derive(Clone, Copy)]
+pub(crate) enum InactiveScope<'a> {
+    Workspace(&'a str),
+    Document(&'a DocKey),
+}
+
+impl InactiveScope<'_> {
+    fn workspace_id(&self) -> &str {
+        match self {
+            Self::Workspace(workspace_id) => workspace_id,
+            Self::Document(key) => &key.workspace_id,
+        }
+    }
+
+    /// What keeps a queued row `d` in the scope, a document's version and
+    /// object bound from parameter `first`.
+    fn condition(&self, first: usize) -> String {
+        match self {
+            Self::Workspace(_) => String::new(),
+            Self::Document(_) => {
+                format!(" AND d.version_id=?{first} AND d.object_id=?{}", first + 1)
+            }
+        }
+    }
+
+    /// `leading`, then a document's version and object.
+    fn params<'a>(&'a self, leading: &[&'a dyn rusqlite::ToSql]) -> Vec<&'a dyn rusqlite::ToSql> {
+        let mut params = leading.to_vec();
+        if let Self::Document(key) = self {
+            params.push(&key.version_id);
+            params.push(&key.object_id);
+        }
+        params
+    }
+}
+
+/// What an inactive drain did.
+#[derive(Default)]
+pub(crate) struct InactiveDrain {
+    pub(crate) refusals: Vec<crate::ReplicationRefusal>,
+    /// The hold each document whose archived lineage released tails protect
+    /// is left with, by object id, when a hosted document stores it.
+    pub(crate) holds: std::collections::BTreeMap<String, crate::HostedHold>,
+}
+
+/// One admitted update is at most 20 MiB, plus a 256 KiB payload.
+const ARCHIVED_BATCH_BYTES: usize = 24 * 1024 * 1024;
+
+/// Whether a queued row `d` is of none of the lineages the JSON array `?2`
+/// names as `[version, object, lineage]`.
+const NOT_PASSED_OVER: &str = "NOT EXISTS(SELECT 1 FROM json_each(?2) x \
+     WHERE json_extract(x.value,'$[0]')=d.version_id AND json_extract(x.value,'$[1]')=d.object_id \
+     AND json_extract(x.value,'$[2]')=d.lineage_claim_id)";
+
+/// Apply the scope's queued updates of archived lineages, in batches. A
+/// lineage released tails protect, decided from the tails before anything of
+/// it loads, keeps its rows queued, holds its document with its first row's
+/// binding, and joins `protected`, the lineages as `[version, object,
+/// lineage]` that the call, and any later one given them, passes over.
+/// [`SyncError::ValidationPending`] while its tails wait for validation,
+/// with that batch rolled back.
 pub(crate) fn drain_inactive_ydoc_updates(
     store: &mut EngineStore,
-    workspace_id: &str,
+    scope: InactiveScope<'_>,
     tails: &ReleasedTails,
+    protected: &mut Vec<[String; 3]>,
     faults: &dyn FaultInjector,
-) -> Result<Vec<crate::ReplicationRefusal>, SyncError> {
+) -> Result<InactiveDrain, SyncError> {
+    let workspace_id = scope.workspace_id();
+    let excluded = serde_json::to_string(&*protected).map_err(SyncError::corrupt)?;
     let pending = store.read_with(|conn| conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
+        &format!("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
          ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id AND l.object_id=d.object_id \
-         AND l.lineage_claim_id=d.lineage_claim_id WHERE d.workspace_id=?1)",
-        [workspace_id], |row| row.get::<_,bool>(0),
+         AND l.lineage_claim_id=d.lineage_claim_id WHERE d.workspace_id=?1 AND {NOT_PASSED_OVER}{})", scope.condition(3)),
+        scope.params(&[&workspace_id, &excluded]).as_slice(), |row| row.get::<_,bool>(0),
     )).map_err(SyncError::corrupt)?;
     if !pending {
-        return Ok(Vec::new());
+        return Ok(InactiveDrain::default());
     }
     let search_policy = search_policy_for_store(store);
-    let mut all_refusals = Vec::new();
-    // Each protected lineage as `[version, object, lineage]`.
-    let mut blocked: Vec<[String; 3]> = Vec::new();
+    let mut drained = InactiveDrain::default();
     loop {
-        let excluded = serde_json::to_string(&blocked).map_err(SyncError::corrupt)?;
+        let excluded = serde_json::to_string(&*protected).map_err(SyncError::corrupt)?;
         let result = store.write_with(faults, |tx| {
-        let mut statement = tx.prepare(
-            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length \
+        let mut statement = tx.prepare(&format!(
+            "SELECT d.origin_id,d.origin_seq,d.relay_seq,r.recorded_at_ms,d.lineage_claim_id,r.payload_json, \
+             d.ingress_kind,d.relay_namespace,d.replication_epoch,d.stream_identity,b.byte_length \
              FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
              ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id \
              AND l.object_id=d.object_id AND l.lineage_claim_id=d.lineage_claim_id \
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
              LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
-             WHERE d.workspace_id=?1 AND NOT EXISTS(SELECT 1 FROM json_each(?2) x \
-               WHERE json_extract(x.value,'$[0]')=d.version_id AND json_extract(x.value,'$[1]')=d.object_id \
-               AND json_extract(x.value,'$[2]')=d.lineage_claim_id) \
+             WHERE d.workspace_id=?1{} AND {NOT_PASSED_OVER} \
              ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
-        ).map_err(SyncError::corrupt)?;
-        let rows = statement.query_map(params![workspace_id, excluded], |row| Ok((
-            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?,
+            scope.condition(3),
+        )).map_err(SyncError::corrupt)?;
+        let rows = statement.query_map(scope.params(&[&workspace_id, &excluded]).as_slice(), |row| Ok((
+            (row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,i64>(3)?, row.get::<_,String>(4)?, row.get::<_,String>(5)?,
+             DeferredFeed { ingress_kind: row.get(6)?, relay_namespace: row.get(7)?, replication_epoch: row.get(8)?, stream_identity: row.get(9)? }),
+            row.get::<_,Option<i64>>(10)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
-        let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+        let mut groups = std::collections::BTreeMap::<_, Vec<DeferredRow>>::new();
         let mut batch_bytes = 0;
         let mut processed = 0;
-        for (origin, seq, at, json, byte_length) in rows {
+        for ((origin, seq, relay_seq, at, lineage, json, feed), byte_length) in rows {
             let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
-            // One admitted update is at most 20 MiB, plus a 256 KiB payload.
-            if batch_bytes + cost > 24 * 1024 * 1024 {
+            if batch_bytes + cost > ARCHIVED_BATCH_BYTES {
                 if processed == 0 { return Err(SyncError::BlobInvalid); }
                 break;
             }
             batch_bytes += cost;
             processed += 1;
             let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
-            let bytes = get_binary_blob(tx, &payload.update_blob_sha256).map_err(SyncError::Storage)?.ok_or(SyncError::BlobInvalid)?;
-            if hex_sha256(&bytes) != payload.update_blob_sha256 { return Err(SyncError::BlobInvalid); }
             groups.entry((payload.version_id.clone(),payload.object_id.clone(),payload.lineage_claim_id.clone()))
-                .or_default().push((origin,seq,at,payload,bytes));
+                .or_default().push((origin,seq,relay_seq,at,lineage,payload,feed));
         }
         let mut refusals = Vec::new();
-        let mut protected = Vec::new();
+        let mut holds = std::collections::BTreeMap::new();
+        let mut held = Vec::new();
         for ((version,object,lineage), rows) in groups {
             let key = DocKey::new(workspace_id, version.clone(), object.clone()).map_err(map_collab_hard_error)?;
-            let last = rows.last().unwrap();
-            let updates = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
-            let outcome = match apply_inactive_batch_in_tx(tx, &key, &last.3, &updates, last.2, search_policy.as_ref(), tails) {
-                Err(SyncError::RetryableState { reason: INACTIVE_LINEAGE_PROTECTED }) => {
-                    processed -= rows.len();
-                    protected.push([version, object, lineage]);
-                    continue;
+            if let Some(tails) = archived_protection(tx, &key, &lineage, tails)? {
+                if let Some(hold) = hold_archived_rows_in_tx(tx, &key, &lineage, &rows[0], tails)? {
+                    holds.insert(object.clone(), hold);
                 }
-                outcome => outcome?,
-            };
-            let last_accepted = (0..rows.len()).rev().find(|index| !outcome.rejected.iter().any(|(rejected,_)| rejected == index));
-            for (index, (origin,seq,_,_,_)) in rows.iter().enumerate() {
-                let reason = outcome.rejected.iter().find(|(rejected,_)| *rejected == index).map(|(_,reason)| reason)
-                    .or_else(|| (Some(index) == last_accepted).then_some(outcome.refusal.as_ref()).flatten());
+                processed -= rows.len();
+                held.push([version, object, lineage]);
+                continue;
+            }
+            let reasons = apply_archived_rows_in_tx(tx, &key, &rows, search_policy.as_ref())?;
+            for ((origin,seq,..), reason) in rows.iter().zip(reasons) {
                 if let Some(reason) = reason {
-                    let refusal = deferred_ydoc_refusal(&key, origin, *seq, reason.clone());
+                    let refusal = deferred_ydoc_refusal(&key, origin, *seq, reason);
                     crate::apply::persist_refusal(tx, &refusal)?;
                     refusals.push(refusal);
                 }
@@ -4419,21 +4557,259 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>((processed,refusals,protected))
+        Ok::<_,SyncError>((processed,refusals,holds,held))
     })?;
         match result {
-            TxnOutcome::Committed((processed, refusals, protected)) => {
-                all_refusals.extend(refusals);
-                if processed == 0 && protected.is_empty() {
-                    return Ok(all_refusals);
+            TxnOutcome::Committed((processed, refusals, holds, held)) => {
+                drained.refusals.extend(refusals);
+                drained.holds.extend(holds);
+                if processed == 0 && held.is_empty() {
+                    return Ok(drained);
                 }
-                blocked.extend(protected);
+                protected.extend(held);
             }
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
     }
 }
 
+/// The tails that protect `key`'s archived `lineage`, decided from the tails
+/// alone, before anything of the archive loads; none while nothing does.
+/// [`SyncError::ValidationPending`] while they wait for validation.
+fn archived_protection(
+    conn: &Connection,
+    key: &DocKey,
+    lineage: &str,
+    tails: &ReleasedTails,
+) -> Result<Option<Arc<ProtectedTails>>, SyncError> {
+    use dohc_engine_collab::live_update_application::{LineageProtection, lineage_protection};
+    match lineage_protection(conn, key, lineage, tails).map_err(protection_failure)? {
+        LineageProtection::Unprotected => Ok(None),
+        LineageProtection::Protected(tails) => Ok(Some(tails)),
+        LineageProtection::Pending(pending) => Err(SyncError::ValidationPending(pending)),
+    }
+}
+
+/// The binding an update at `coordinate` of `key`'s archived `lineage`
+/// names while `tails` protect it: that lineage, and the digest of the full
+/// state its archive keeps. Never the head's.
+fn archived_binding(
+    conn: &Connection,
+    key: &DocKey,
+    lineage: &str,
+    coordinate: IncomingCoordinate,
+    tails: Arc<ProtectedTails>,
+) -> Result<Box<ReleasedLineageBinding>, SyncError> {
+    let state_digest: String = conn
+        .query_row(
+            "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![key.workspace_id, key.version_id, key.object_id, lineage],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let key = dohc_engine_collab::live_update_application::ProtectionKey {
+        doc: key,
+        lineage_claim_id: lineage,
+        incoming: &coordinate,
+    };
+    ReleasedLineageBinding::archived(conn, &key, tails, state_digest)
+        .map(Box::new)
+        .map_err(protection_failure)
+}
+
+/// Hold `key`'s document for `row`, the first of its queued updates of the
+/// archived `lineage` that `tails` protect, and answer the hold it is left
+/// with: a frozen one with `row`'s binding, unless a hold of another lineage
+/// whose row is still queued stands there, or no hosted document stores it.
+/// One already recorded with the same binding stays as it is, so nothing
+/// counts a commit again.
+fn hold_archived_rows_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    lineage: &str,
+    row: &DeferredRow,
+    tails: Arc<ProtectedTails>,
+) -> Result<Option<crate::HostedHold>, SyncError> {
+    let (origin_id, origin_seq, relay_seq, _, _, _, feed) = row;
+    let (coordinate, identified) =
+        deferred_coordinate(tx, key, feed, origin_id, *origin_seq, *relay_seq)?;
+    bindable(identified, *relay_seq)?;
+    let binding = archived_binding(tx, key, lineage, coordinate, tails)?;
+    let standing = crate::hosted::queued_released_hold(tx, &key.workspace_id, &key.object_id)?;
+    let continuation = crate::ReleasedHoldContinuation::Frozen;
+    match &standing {
+        Some(crate::HostedHold::ReleasedLineageUnsettled { binding: held, .. })
+            if held.lineage_claim_id != binding.lineage_claim_id =>
+        {
+            return Ok(None);
+        }
+        // Derived again just now, it claims currency even where the row
+        // recorded it stale.
+        Some(crate::HostedHold::ReleasedLineageUnsettled { binding: held, .. })
+            if **held == *binding => {}
+        _ => {
+            if !crate::hosted::hold_released_in_tx(tx, &binding, continuation, false)? {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(crate::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation,
+        binding_stale: false,
+    }))
+}
+
+/// Apply `rows`, queued updates of one of `key`'s archived lineages, in
+/// order, to the archive that keeps it, and answer each row's refusal.
+fn apply_archived_rows_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    rows: &[DeferredRow],
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<Vec<Option<String>>, SyncError> {
+    let Some(last) = rows.last() else {
+        return Ok(Vec::new());
+    };
+    let mut updates = Vec::with_capacity(rows.len());
+    for (.., payload, _) in rows {
+        let bytes = get_binary_blob(tx, &payload.update_blob_sha256)
+            .map_err(SyncError::Storage)?
+            .ok_or(SyncError::BlobInvalid)?;
+        if hex_sha256(&bytes) != payload.update_blob_sha256 {
+            return Err(SyncError::BlobInvalid);
+        }
+        updates.push(bytes);
+    }
+    let outcome = apply_inactive_batch_in_tx(tx, key, &last.5, &updates, last.3, search_policy)?;
+    // A projection refusal names the last update it accepted.
+    let last_accepted = (0..rows.len()).rev().find(|index| {
+        !outcome
+            .rejected
+            .iter()
+            .any(|(rejected, _)| rejected == index)
+    });
+    Ok((0..rows.len())
+        .map(|index| {
+            outcome
+                .rejected
+                .iter()
+                .find(|(rejected, _)| *rejected == index)
+                .map(|(_, reason)| reason.clone())
+                .or_else(|| {
+                    (Some(index) == last_accepted)
+                        .then(|| outcome.refusal.clone())
+                        .flatten()
+                })
+        })
+        .collect())
+}
+
+/// What a drain did with queued updates of one lineage that is not the
+/// head's.
+#[derive(Default)]
+struct OffHeadRows {
+    /// Rows applied to their archive, or kept by no lineage, that the
+    /// drain's cleanup removes.
+    drained: Vec<(String, i64)>,
+    refused: Vec<crate::ReplicationRefusal>,
+    /// Released tails protect the archived lineage, so the rest stay queued.
+    held: bool,
+    /// The hold the document is left with for them, when one stands.
+    hold: Option<crate::HostedHold>,
+}
+
+/// Apply `rows`, queued updates of one of `key`'s lineages that is not the
+/// head's, in order and a batch at a time, to the archive that keeps it. A
+/// lineage with no archive keeps nothing of them. Released tails that
+/// protect the archived lineage, decided from the tails before anything of
+/// it loads, keep the rest queued and hold the document with the first
+/// one's binding. [`SyncError::ValidationPending`] while those tails wait for
+/// validation.
+fn drain_off_head_rows(
+    store: &mut EngineStore,
+    key: &DocKey,
+    rows: &[DeferredRow],
+    tails: &ReleasedTails,
+    search_policy: Option<&SearchPolicySnapshot>,
+    faults: &dyn FaultInjector,
+    recovery_leases: Option<&dyn crate::LeaseProbe>,
+) -> Result<OffHeadRows, SyncError> {
+    enum Decided {
+        Absent,
+        Held(Option<crate::HostedHold>),
+        Applied(Vec<Option<String>>),
+    }
+    let mut result = OffHeadRows::default();
+    let mut next = 0;
+    while next < rows.len() {
+        let rest = &rows[next..];
+        let decided = store.write_with(faults, |tx| {
+            if let Some(leases) = recovery_leases {
+                require_recovery_closed(tx, key, leases)?;
+            }
+            let lineage = &rest[0].4;
+            if !inactive_lineage_exists(tx, key, lineage)? {
+                return Ok(Decided::Absent);
+            }
+            if let Some(tails) = archived_protection(tx, key, lineage, tails)? {
+                return hold_archived_rows_in_tx(tx, key, lineage, &rest[0], tails)
+                    .map(Decided::Held);
+            }
+            let (mut taken, mut bytes) = (0, 0);
+            for (.., payload, _) in rest {
+                let length: Option<i64> = tx
+                    .query_row(
+                        "SELECT byte_length FROM binary_blobs WHERE sha256=?1",
+                        [&payload.update_blob_sha256],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)?;
+                let length = usize::try_from(length.ok_or(SyncError::BlobInvalid)?)
+                    .map_err(SyncError::corrupt)?;
+                if taken > 0 && bytes + length > ARCHIVED_BATCH_BYTES {
+                    break;
+                }
+                (taken, bytes) = (taken + 1, bytes + length);
+            }
+            apply_archived_rows_in_tx(tx, key, &rest[..taken], search_policy).map(Decided::Applied)
+        })?;
+        match decided {
+            TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+            TxnOutcome::Committed(Decided::Absent) => {
+                let coordinates = rest.iter().map(|row| (row.0.clone(), row.1));
+                result.drained.extend(coordinates);
+                break;
+            }
+            TxnOutcome::Committed(Decided::Held(hold)) => {
+                (result.held, result.hold) = (true, hold);
+                break;
+            }
+            TxnOutcome::Committed(Decided::Applied(reasons)) => {
+                next += reasons.len();
+                for ((origin_id, origin_seq, ..), reason) in rest.iter().zip(reasons) {
+                    match reason {
+                        Some(reason) => result.refused.push(refuse_deferred_ydoc(
+                            store,
+                            key,
+                            origin_id,
+                            *origin_seq,
+                            reason,
+                            faults,
+                        )?),
+                        None => result.drained.push((origin_id.clone(), *origin_seq)),
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Apply `bytes` to the archived lineage `payload` names, if it has one; its
+/// refusal names the update. The caller has decided its protection.
 fn apply_inactive_delta_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -4441,31 +4817,18 @@ fn apply_inactive_delta_in_tx(
     bytes: &[u8],
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
-    tails: &ReleasedTails,
 ) -> Result<InactiveDeltaOutcome, SyncError> {
-    let mut outcome = apply_inactive_batch_in_tx(
-        tx,
-        key,
-        payload,
-        &[bytes.to_vec()],
-        now_ms,
-        search_policy,
-        tails,
-    )?;
+    let mut outcome =
+        apply_inactive_batch_in_tx(tx, key, payload, &[bytes.to_vec()], now_ms, search_policy)?;
     if let Some((_, reason)) = outcome.rejected.pop() {
         outcome.refusal = Some(reason);
     }
     Ok(outcome)
 }
 
-/// Why an update of an archived lineage a released tail protects stays
-/// where it is: queued, or before the cursor at ingress.
-const INACTIVE_LINEAGE_PROTECTED: &str = "ydoc-inactive-lineage-protected";
-
 /// Apply `updates` to the archived lineage `payload` names, if it has one.
-/// One a released tail protects changes nothing:
-/// [`INACTIVE_LINEAGE_PROTECTED`]. Nothing inspects it against the active
-/// head, which is another lineage.
+/// Its caller decides first whether released tails protect that lineage.
+/// Nothing inspects it against the active head, which is another lineage.
 fn apply_inactive_batch_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -4473,7 +4836,6 @@ fn apply_inactive_batch_in_tx(
     updates: &[Vec<u8>],
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
-    tails: &ReleasedTails,
 ) -> Result<InactiveDeltaOutcome, SyncError> {
     let archived: Option<InactiveLineage> = tx.query_row(
         "SELECT b.bytes,l.content_kind,l.last_surfaced_projection_sha256,l.path,l.full_state_blob_sha256,l.state_vector_blob_sha256,l.pending_authors_json FROM ydoc_inactive_lineages l \
@@ -4494,35 +4856,6 @@ fn apply_inactive_batch_in_tx(
     else {
         return Ok(InactiveDeltaOutcome::default());
     };
-    {
-        use dohc_engine_collab::live_update_application::{
-            IncomingCoordinate, Protection, ProtectionKey, protection,
-        };
-        // Only whether a tail protects the archived lineage counts here, so
-        // the coordinate names nothing.
-        let incoming = IncomingCoordinate {
-            relay_namespace: None,
-            replication_epoch: String::new(),
-            stream_identity: String::new(),
-            origin_id: String::new(),
-            origin_seq: 0,
-            relay_seq: 0,
-        };
-        let key = ProtectionKey {
-            doc: key,
-            lineage_claim_id: &payload.lineage_claim_id,
-            incoming: &incoming,
-        };
-        match protection(tx, &key, tails).map_err(protection_failure)? {
-            Protection::Unprotected => {}
-            Protection::Protected { .. } => {
-                return Err(SyncError::RetryableState {
-                    reason: INACTIVE_LINEAGE_PROTECTED,
-                });
-            }
-            Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
-        }
-    }
     let path = path.as_deref().unwrap_or(&payload.path);
     let kind = ContentKind::parse(&kind).map_err(map_collab_hard_error)?;
     let dohc_engine_collab::ReplayBatch { doc, outcomes } =
@@ -5567,17 +5900,48 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             },
         );
     }
-    if !payload.is_base_state && store.read_with(|conn| conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-        params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id], |row| row.get::<_,bool>(0),
-    )).map_err(SyncError::corrupt)? {
+    if !payload.is_base_state
+        && store.read_with(|conn| inactive_lineage_exists(conn, &key, &payload.lineage_claim_id))?
+    {
+        // What a protected archive would take stays in the feed, unqueued.
         let mut outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
-            defer_ydoc_update_in_tx(tx, &key, op, &payload.lineage_claim_id, relay_seq, relay_namespace)?;
-            Ok(YdocApplyResult { deferred: true, reason: Some("ydoc-inactive-lineage"), conflicts_opened: 0, lineage_replacement: None, record_facts: Vec::new() })
+            hold_archived_lineage(
+                tx,
+                &key,
+                &payload.lineage_claim_id,
+                op,
+                Some(relay_seq),
+                relay_namespace,
+                tails,
+            )?;
+            defer_ydoc_update_in_tx(
+                tx,
+                &key,
+                op,
+                &payload.lineage_claim_id,
+                relay_seq,
+                relay_namespace,
+            )?;
+            Ok(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-inactive-lineage"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: Vec::new(),
+            })
         })?;
         if !batch_inactive && !leases.is_live(&key) {
-            let refusals = drain_inactive_ydoc_updates(store, &key.workspace_id, tails, faults)?;
-            if let Some(refusal) = refusals.iter().find(|refusal| refusal.origin_id == envelope.origin_id && refusal.origin_seq == envelope.origin_seq) {
+            let refusals = drain_inactive_ydoc_updates(
+                store,
+                InactiveScope::Document(&key),
+                tails,
+                &mut Vec::new(),
+                faults,
+            )?
+            .refusals;
+            if let Some(refusal) = refusals.iter().find(|refusal| {
+                refusal.origin_id == envelope.origin_id && refusal.origin_seq == envelope.origin_seq
+            }) {
                 outcome.primary = ApplyDisposition::Refused(refusal.clone());
             }
             outcome.refusals.extend(refusals);
@@ -6161,6 +6525,17 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 envelope,
                 faults,
                 move |tx, op| {
+                    if inactive_lineage_exists(tx, &deferred_key, &payload.lineage_claim_id)? {
+                        hold_archived_lineage(
+                            tx,
+                            &deferred_key,
+                            &payload.lineage_claim_id,
+                            op,
+                            Some(relay_seq),
+                            relay_namespace,
+                            tails,
+                        )?;
+                    }
                     let inactive = apply_inactive_delta_in_tx(
                         tx,
                         &deferred_key,
@@ -6168,7 +6543,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         &bytes,
                         op.recorded_at_ms,
                         search_policy.as_ref(),
-                        tails,
                     )?;
                     if let Some(reason) = inactive.refusal {
                         return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
@@ -6256,6 +6630,17 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                             Incoming::Replacement,
                         )?;
                     }
+                    if inactive_lineage_exists(tx, &key, &payload.lineage_claim_id)? {
+                        hold_archived_lineage(
+                            tx,
+                            &key,
+                            &payload.lineage_claim_id,
+                            op,
+                            Some(relay_seq),
+                            relay_namespace,
+                            tails,
+                        )?;
+                    }
                     let inactive = apply_inactive_delta_in_tx(
                         tx,
                         &key,
@@ -6263,7 +6648,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         &bytes,
                         op.recorded_at_ms,
                         search_policy.as_ref(),
-                        tails,
                     )?;
                     if let Some(reason) = inactive.refusal {
                         return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {

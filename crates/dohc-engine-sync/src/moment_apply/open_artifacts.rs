@@ -212,7 +212,7 @@ pub fn drain_open_document_artifacts(
                     cache.remove(&key);
                     break;
                 }
-                let left = match drained.released_hold {
+                let left = match drained.released_hold.or(drained.archived_hold) {
                     Some(hold) => Some(hold),
                     None => crate::ydoc_apply::standing_released_hold(store, &key)?,
                 };

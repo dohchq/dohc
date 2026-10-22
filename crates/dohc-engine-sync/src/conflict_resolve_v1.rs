@@ -4079,7 +4079,14 @@ mod tests {
     ) -> Result<Vec<crate::ReplicationRefusal>, SyncError> {
         let tails =
             dohc_engine_collab::live_update_application::ReleasedTails::default().bound_to(store);
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, "ws", &tails, faults)
+        crate::ydoc_apply::drain_inactive_ydoc_updates(
+            store,
+            crate::ydoc_apply::InactiveScope::Workspace("ws"),
+            &tails,
+            &mut Vec::new(),
+            faults,
+        )
+        .map(|drained| drained.refusals)
     }
 
     fn sync_as_domain(error: SyncError) -> dohc_engine_domain::DomainError {

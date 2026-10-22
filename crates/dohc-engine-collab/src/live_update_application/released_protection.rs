@@ -43,13 +43,15 @@ pub struct ReleasedLineageBinding {
     pub workspace_id: String,
     pub main_version_id: String,
     pub object_id: String,
+    /// The lineage the update would change: the head's, or an archived one.
     pub lineage_claim_id: String,
     /// The document's path; none when no alias holds it.
     pub current_path: Option<String>,
     /// Its restore generation, 0 before any restore; none while one fences it.
     pub restore_generation: Option<i64>,
     pub incoming: IncomingCoordinate,
-    /// The SHA-256 of the head's full state before the update.
+    /// The SHA-256 of that lineage's full state before the update: the
+    /// head's, or the state an archived lineage keeps.
     pub head_digest: String,
     /// Shared with every decision the same validation answers.
     pub tails: Arc<ProtectedTails>,
@@ -130,6 +132,15 @@ pub enum Protection {
     /// Nothing validated answers the generation the deciding transaction
     /// reads. The caller ends that transaction, waits for
     /// [`PendingValidation::validate`], and decides again in a fresh one.
+    Pending(Box<PendingValidation>),
+}
+
+/// What [`lineage_protection`] decides from the tails alone.
+pub enum LineageProtection {
+    Unprotected,
+    /// The tails that protect the lineage, as a binding names them.
+    Protected(Arc<ProtectedTails>),
+    /// As [`Protection::Pending`].
     Pending(Box<PendingValidation>),
 }
 
@@ -1048,29 +1059,79 @@ pub fn protection(
     key: &ProtectionKey<'_>,
     tails: &ReleasedTails,
 ) -> Result<Protection, ApplicationError> {
-    let doc = key.doc;
-    let tails = match tails.read(conn, doc, key.lineage_claim_id)? {
+    let tails = match tails.read(conn, key.doc, key.lineage_claim_id)? {
         Read::Tails(Some(tails)) => tails,
         Read::Tails(None) => return Ok(Protection::Unprotected),
         Read::Pending(pending) => return Ok(Protection::Pending(Box::new(pending))),
     };
-    let current_path = conn
-        .query_row(
-            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![doc.workspace_id, doc.version_id, doc.object_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(read_sql)?;
-    let restore_generation = match restore_fence::current_generation(conn, doc) {
-        Ok(generation) => Some(generation.unwrap_or(0)),
-        Err(CollabError::RestoreFenced) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let head = durable::load_doc_in(conn, doc)?;
+    #[cfg(any(test, feature = "test-support"))]
+    HEAD_LOADS_HERE.with(|loads| loads.set(loads.get() + 1));
+    let head = durable::load_doc_in(conn, key.doc)?;
     let head_digest = hex_sha256(&head.encode_full_state());
     Ok(Protection::Protected {
-        binding: Box::new(ReleasedLineageBinding {
+        binding: Box::new(ReleasedLineageBinding::bound(
+            conn,
+            key,
+            tails,
+            head_digest,
+        )?),
+        head,
+    })
+}
+
+/// Whether the released window protects `doc`'s `lineage`, from the tails
+/// [`ReleasedTails::read`] answers alone: nothing of the document is loaded.
+/// For a lineage no decision inspects the state of, such as an archived one.
+pub fn lineage_protection(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+    tails: &ReleasedTails,
+) -> Result<LineageProtection, ApplicationError> {
+    #[cfg(any(test, feature = "test-support"))]
+    LINEAGE_CHECKS_HERE.with(|checks| checks.set(checks.get() + 1));
+    Ok(match tails.read(conn, doc, lineage)? {
+        Read::Tails(Some(tails)) => LineageProtection::Protected(tails),
+        Read::Tails(None) => LineageProtection::Unprotected,
+        Read::Pending(pending) => LineageProtection::Pending(Box::new(pending)),
+    })
+}
+
+impl ReleasedLineageBinding {
+    /// The binding a hold of an archived lineage names: `key`'s lineage, its
+    /// document's path and restore generation, the incoming update, the
+    /// `tails` that protect it, and `state_digest`, the digest of the full
+    /// state the archive keeps, in place of a head's. Never the head's.
+    pub fn archived(
+        conn: &Connection,
+        key: &ProtectionKey<'_>,
+        tails: Arc<ProtectedTails>,
+        state_digest: String,
+    ) -> Result<Self, ApplicationError> {
+        Self::bound(conn, key, tails, state_digest)
+    }
+
+    fn bound(
+        conn: &Connection,
+        key: &ProtectionKey<'_>,
+        tails: Arc<ProtectedTails>,
+        head_digest: String,
+    ) -> Result<Self, ApplicationError> {
+        let doc = key.doc;
+        let current_path = conn
+            .query_row(
+                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![doc.workspace_id, doc.version_id, doc.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(read_sql)?;
+        let restore_generation = match restore_fence::current_generation(conn, doc) {
+            Ok(generation) => Some(generation.unwrap_or(0)),
+            Err(CollabError::RestoreFenced) => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
             workspace_id: doc.workspace_id.clone(),
             main_version_id: doc.version_id.clone(),
             object_id: doc.object_id.clone(),
@@ -1080,9 +1141,23 @@ pub fn protection(
             incoming: key.incoming.clone(),
             head_digest,
             tails,
-        }),
-        head,
-    })
+        })
+    }
+}
+
+/// How many times the calling thread loaded a head to decide its protection.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn released_head_loads_on_this_thread() -> u64 {
+    HEAD_LOADS_HERE.with(std::cell::Cell::get)
+}
+
+/// How many times the calling thread decided a lineage's protection from its
+/// tails alone.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn lineage_protection_checks_on_this_thread() -> u64 {
+    LINEAGE_CHECKS_HERE.with(std::cell::Cell::get)
 }
 
 /// How many times this process read a released window's tails from a store,
@@ -1129,6 +1204,8 @@ pub fn released_tail_commitments_on_this_thread() -> u64 {
 thread_local! {
     static SCANS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMMITMENTS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static HEAD_LOADS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LINEAGE_CHECKS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The tails of the released window that protect the document's lineage, or

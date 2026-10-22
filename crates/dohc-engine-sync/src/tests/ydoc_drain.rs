@@ -2744,6 +2744,9 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE object_id='inactive-refusal' ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", []).unwrap();
             Ok::<_,SyncError>(())
         }).unwrap();
+        // A drain that waits for its projection decides nothing, its
+        // archived lineage's update included. That update stays queued, and
+        // the drain that applies it to the archive reports its refusal once.
         let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
             &mut engine,
             &mut Default::default(),
@@ -2752,12 +2755,28 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             &NoFaults,
         )
         .unwrap();
-        assert_eq!(
-            drained.refusals.len(),
-            1,
-            "waiting must return committed inactive refusals"
-        );
-        assert_eq!(drained.drained, 0);
+        assert_eq!((drained.refusals.len(), drained.drained), (0, 0));
+        let queued: bool = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE origin_id='late-peer')",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(queued, "the archived lineage's update waits");
+        let tails =
+            dohc_engine_collab::live_update_application::ReleasedTails::default().bound_to(&engine);
+        let inactive = crate::ydoc_apply::drain_inactive_ydoc_updates(
+            &mut engine,
+            crate::ydoc_apply::InactiveScope::Document(&key),
+            &tails,
+            &mut Vec::new(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(inactive.refusals.len(), 1, "{:?}", inactive.refusals);
         return;
     }
     let drained =
@@ -2772,10 +2791,10 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
 }
 
 #[test]
-fn ydoc_drain_waiting_empty_queue_returns_inactive_refusals() {
+fn ydoc_drain_waiting_empty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 1);
 }
 #[test]
-fn ydoc_drain_waiting_nonempty_queue_returns_inactive_refusals() {
+fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
 }

@@ -48,16 +48,18 @@ pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
+pub use released_protection::{
+    lineage_protection, protection, IncomingCoordinate, LineageProtection, PendingValidation,
+    ProtectedTail, ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding,
+    ReleasedTails, RetainedContribution, RetainedCoverage, TailRelease, UnprovenCommitment,
+    Validation, ValidationError,
+};
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use released_protection::{
-    on_released_tail_reader, released_tail_commitments_on_this_thread, released_tail_scans,
-    released_tail_scans_on_this_thread,
-};
-pub use released_protection::{
-    protection, IncomingCoordinate, PendingValidation, ProtectedTail, ProtectedTails, Protection,
-    ProtectionKey, ReleasedLineageBinding, ReleasedTails, RetainedContribution, RetainedCoverage,
-    TailRelease, UnprovenCommitment, Validation, ValidationError,
+    lineage_protection_checks_on_this_thread, on_released_tail_reader,
+    released_head_loads_on_this_thread, released_tail_commitments_on_this_thread,
+    released_tail_scans, released_tail_scans_on_this_thread,
 };
 mod restore_content;
 pub(crate) mod restore_fence;

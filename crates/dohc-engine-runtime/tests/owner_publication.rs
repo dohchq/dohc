@@ -8110,6 +8110,461 @@ async fn a_queued_update_with_no_recorded_feed_holds_a_protected_lineage() {
     }
 }
 
+/// Archive the window's lineage as a rejected base leaves one: the archive
+/// keeps the document's state, and the head moves to a lineage no released
+/// tail names, so only the archived lineage is protected. Answers the digest
+/// of the state the archive keeps.
+fn archive_lineage(w: &mut RetainedWindow) -> String {
+    let state = w.native();
+    let vector = w.head().encode_state_vector();
+    let full = w.store.put_binary_blob(&state).unwrap();
+    let vector = w.store.put_binary_blob(&vector).unwrap();
+    let winner = w.store.put_binary_blob(b"the winning lineage").unwrap();
+    execute(
+        &mut w.store,
+        &format!(
+            "INSERT INTO ydoc_inactive_lineages (workspace_id,version_id,object_id, \
+               lineage_claim_id,disposition,content_kind,path,full_state_blob_sha256, \
+               state_vector_blob_sha256,recorded_at_ms,updated_at_ms) \
+             VALUES ('workspace','main','object','{}','rejected-base','richdoc', \
+               '{WINDOW_PATH}','{full}','{vector}',1,1)",
+            w.lineage
+        ),
+    );
+    write_unchecked(
+        w,
+        &format!("UPDATE ydoc_docs SET lineage_claim_id='{winner}' WHERE object_id='object'"),
+    );
+    full
+}
+
+/// The digest of the state the archive of `lineage` keeps.
+fn archived_state(store: &EngineStore, lineage: &str) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages \
+                 WHERE object_id='object' AND lineage_claim_id=?1",
+                [lineage],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Each queued Y.Doc update of the store, in relay order: its coordinate,
+/// relay position, lineage and the whole feed it recorded.
+fn queued_feeds(store: &EngineStore) -> Vec<String> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT json_array(origin_id,origin_seq,relay_seq,lineage_claim_id,ingress_kind, \
+                 relay_namespace,replication_epoch,stream_identity) \
+                 FROM ydoc_deferred_updates ORDER BY relay_seq",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+}
+
+/// Each of `ops`' update blobs is still stored.
+fn blobs_kept(store: &EngineStore, ops: &[dohc_engine_sync::ReplicationEnvelope]) {
+    for op in ops {
+        let blob = op.payload["updateBlobSha256"].as_str().unwrap();
+        assert!(store.get_binary_blob(blob).unwrap().is_some(), "{blob}");
+    }
+}
+
+/// The window, with the neighbour ready beside it, whose lineage was
+/// archived after `appends` desktop appends of it queued while the host's
+/// session held the document. Answers the window, the desktop, the feed, the
+/// queued appends in relay order, and the digest of the archived state.
+async fn archived_window(
+    appends: usize,
+) -> (
+    RetainedWindow,
+    Desktop,
+    dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    Vec<dohc_engine_sync::ReplicationEnvelope>,
+    String,
+) {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let mut queued = Vec::new();
+    for index in 0..appends {
+        let (append, bytes) = desktop
+            .append(&w.lineage, &format!("Archived paragraph {index}."))
+            .await;
+        queued.push(feed.serve(append, bytes));
+    }
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let live = live_hosted_pass(&mut w.store, &client);
+    assert!(pass_commit(&mut w.store, &client, &live).committed);
+    assert_eq!(queued_updates(&w.store).len(), appends);
+    let archive = archive_lineage(&mut w);
+    (w, desktop, client, queued, archive)
+}
+
+/// `hold` names the window's archived `lineage`, the `archive` state it
+/// keeps and the queued `first` update, on the feed it arrived on: frozen,
+/// and claiming currency.
+fn holds_archived(
+    hold: Option<&dohc_engine_sync::HostedHold>,
+    lineage: &str,
+    archive: &str,
+    first: &dohc_engine_sync::ReplicationEnvelope,
+) -> bool {
+    let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+        binding_stale: false,
+    }) = hold
+    else {
+        return false;
+    };
+    binding.lineage_claim_id == lineage
+        && binding.head_digest == archive
+        && binding.incoming.relay_namespace.as_deref() == Some("relay")
+        && (
+            binding.incoming.origin_id.as_str(),
+            binding.incoming.origin_seq,
+            binding.incoming.relay_seq,
+        ) == (
+            first.origin_id.as_str(),
+            first.origin_seq,
+            first.relay_seq.unwrap(),
+        )
+}
+
+/// Hosted passes until one commits, at most two: a pass that stores a hold
+/// counts a commit, so its own cursor no longer stands.
+fn committed_pass(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+) -> dohc_engine_sync::HostedPassOutcome {
+    for _ in 0..2 {
+        let pass = hosted_pass(
+            store,
+            client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        if pass_commit(store, client, &pass).committed {
+            return pass;
+        }
+    }
+    panic!("no pass committed");
+}
+
+/// Sol's fifth test, the pass's inactive drain: queued updates of an
+/// archived lineage released tails protect stay queued with their blobs and
+/// feeds, and the archive keeps its state. The document holds with a binding
+/// of that lineage and its archived state, durably and in the pass, while a
+/// neighbour's writes apply in the same passes. The hold stands through
+/// committed passes and reads back after a restart. Once nothing protects the
+/// lineage, the next pass applies the queued updates to the archive, names no
+/// hold, and the document becomes ready.
+#[tokio::test]
+async fn a_pass_holds_a_protected_archived_lineage_and_continues_once_it_is_free() {
+    let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+    let rows = queued_feeds(&w.store);
+    let created = client
+        .transport()
+        .create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(journaled(&w.store, &created), "the neighbour applied");
+    assert!(
+        holds_archived(pass.held.get("object"), &w.lineage, &archive, &queued[0]),
+        "{pass:?}"
+    );
+    let held = dohc_engine_sync::HostedDocumentStatus::Held(pass.held["object"].clone());
+    assert_eq!(hosted_status(&w.store, "object"), held);
+    assert_eq!(queued_feeds(&w.store), rows, "rows and feeds stay");
+    assert_eq!(
+        archived_state(&w.store, &w.lineage),
+        archive,
+        "nothing applied"
+    );
+    blobs_kept(&w.store, &queued);
+    let committed = committed_pass(&mut w.store, &client);
+    assert_eq!(committed.held.get("object"), pass.held.get("object"));
+    assert_eq!(hosted_status(&w.store, "object"), held);
+
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(hosted_status(&w.store, "object"), held, "after a restart");
+    assert_eq!(queued_feeds(&w.store), rows);
+    let edited = client.transport().write(
+        "neighbour",
+        NEIGHBOUR_PATH,
+        Some("A neighbour.\n"),
+        "A neighbour, edited.\n",
+    );
+    let again = committed_pass(&mut w.store, &client);
+    assert!(journaled(&w.store, &edited), "the neighbour goes on");
+    assert_eq!(again.held.get("object"), pass.held.get("object"));
+    assert_eq!(hosted_status(&w.store, "object"), held);
+    assert_eq!(queued_feeds(&w.store), rows);
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    blobs_kept(&w.store, &queued);
+
+    write_unchecked(
+        &w,
+        &format!(
+            "DELETE FROM live_owner_activations WHERE lineage_claim_id='{}'",
+            w.lineage
+        ),
+    );
+    let free = committed_pass(&mut w.store, &client);
+    assert!(
+        !matches!(
+            free.held.get("object"),
+            Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { .. })
+        ),
+        "{free:?}"
+    );
+    assert_eq!(
+        queued_updates(&w.store),
+        Vec::new(),
+        "the archive took them"
+    );
+    assert_ne!(archived_state(&w.store, &w.lineage), archive);
+    for _ in 0..2 {
+        if hosted_status(&w.store, "object") == dohc_engine_sync::HostedDocumentStatus::Ready {
+            break;
+        }
+        committed_pass(&mut w.store, &client);
+    }
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Ready
+    );
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's fifth test, the drain a document's own operations run: its queued
+/// updates of an archived lineage released tails protect stay queued with
+/// their blobs and feeds, the archive keeps its state, and the drain reports
+/// and stores the document's hold of that lineage. After a restart the drain
+/// holds again with nothing written. Once nothing protects the lineage, the
+/// drain applies the updates to the archive and leaves no hold.
+#[tokio::test]
+async fn a_documents_drain_holds_its_protected_archived_lineage() {
+    let (mut w, desktop, _client, queued, archive) = archived_window(2).await;
+    let rows = queued_feeds(&w.store);
+    let drained = settled_drain(&mut w.store);
+    assert!(
+        holds_archived(
+            drained.archived_hold.as_ref(),
+            &w.lineage,
+            &archive,
+            &queued[0]
+        ),
+        "{drained:?}"
+    );
+    assert_eq!((drained.drained, drained.refusals.len()), (0, 0));
+    assert_eq!(drained.released_hold, None);
+    assert_eq!(queued_feeds(&w.store), rows);
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    blobs_kept(&w.store, &queued);
+    let held = dohc_engine_sync::HostedDocumentStatus::Held(drained.archived_hold.clone().unwrap());
+    assert_eq!(hosted_status(&w.store, "object"), held);
+
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(hosted_status(&w.store, "object"), held, "after a restart");
+    let again = settled_drain(&mut w.store);
+    assert_eq!(again.archived_hold, drained.archived_hold);
+    assert_eq!(again.drained, 0);
+    assert_eq!(queued_feeds(&w.store), rows);
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    assert_eq!(hosted_status(&w.store, "object"), held);
+
+    write_unchecked(
+        &w,
+        &format!(
+            "DELETE FROM live_owner_activations WHERE lineage_claim_id='{}'",
+            w.lineage
+        ),
+    );
+    // The archive takes both; a hosted replica refuses the recovered copy
+    // its projection would write.
+    let free = settled_drain(&mut w.store);
+    assert_eq!(
+        (
+            free.archived_hold.as_ref(),
+            free.drained + free.refusals.len()
+        ),
+        (None, 2),
+        "{free:?}"
+    );
+    assert_eq!(queued_feeds(&w.store), Vec::<String>::new());
+    assert_ne!(archived_state(&w.store, &w.lineage), archive);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Opus's focus question 4: an update of an archived lineage released tails
+/// protect is neither acknowledged nor queued. The document's read stops
+/// before it with the archived lineage's binding, the update and the one
+/// behind it stay in the feed, a neighbour's write after them applies in the
+/// same pass, and the pass commits that hold, again after a restart. Once
+/// nothing protects the lineage, both updates reach the archive.
+#[tokio::test]
+async fn an_update_of_a_protected_archived_lineage_stays_in_the_feed() {
+    let mut w = retained_window(Retained::Carried).await;
+    add_neighbour(&mut w.store);
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let archive = archive_lineage(&mut w);
+    let (first, first_bytes) = desktop.append(&w.lineage, "An archived paragraph.").await;
+    let (second, second_bytes) = desktop.append(&w.lineage, "Another one.").await;
+    let feed = HostedFeed::new(&[("neighbour", NEIGHBOUR_PATH), ("object", WINDOW_PATH)]);
+    let first = feed.serve(first, first_bytes);
+    let second = feed.serve(second, second_bytes);
+    let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    for restarted in [false, true] {
+        if restarted {
+            w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+        }
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        assert!(journaled(&w.store, &created), "the neighbour applied");
+        let binding = held_binding(&pass, &first).expect("held before the update");
+        assert!(holds_archived(
+            pass.held.get("object"),
+            &w.lineage,
+            &archive,
+            &first
+        ));
+        assert_eq!(binding.lineage_claim_id, w.lineage);
+        for op in [&first, &second] {
+            assert!(!journaled(&w.store, op), "{}", op.origin_seq);
+        }
+        assert_eq!(queued_feeds(&w.store), Vec::<String>::new());
+        assert_eq!(archived_state(&w.store, &w.lineage), archive);
+        assert!(pass_commit(&mut w.store, &client, &pass).committed);
+    }
+
+    write_unchecked(
+        &w,
+        &format!(
+            "DELETE FROM live_owner_activations WHERE lineage_claim_id='{}'",
+            w.lineage
+        ),
+    );
+    let free = committed_pass(&mut w.store, &client);
+    assert!(
+        !matches!(
+            free.held.get("object"),
+            Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { .. })
+        ),
+        "{free:?}"
+    );
+    for op in [&first, &second] {
+        assert!(journaled(&w.store, op), "{}", op.origin_seq);
+    }
+    assert_eq!(queued_feeds(&w.store), Vec::<String>::new());
+    assert_ne!(archived_state(&w.store, &w.lineage), archive);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Opus's second finding: deciding a protected archived lineage reads its
+/// tails alone, never a head. A document's drain decides it once for all its
+/// queued updates, and a pass decides it before its first op and at its end,
+/// whatever it queues and however many ops the pass applies.
+#[tokio::test]
+async fn protected_archived_rows_cost_the_same_however_many_are_queued() {
+    let decided = || {
+        (
+            lineage_protection_checks_on_this_thread(),
+            released_head_loads_on_this_thread(),
+        )
+    };
+    let since = |(checks, loads): (u64, u64)| {
+        let (now_checks, now_loads) = decided();
+        (now_checks - checks, now_loads - loads)
+    };
+    let mut counts = Vec::new();
+    for (appends, writes) in [(2, 1), (6, 4)] {
+        let (mut w, desktop, client, _, _) = archived_window(appends).await;
+        let before = decided();
+        settled_drain(&mut w.store);
+        let drain = since(before);
+        let mut text = "A neighbour.\n".to_owned();
+        let mut ops = vec![
+            client
+                .transport()
+                .create("neighbour", NEIGHBOUR_PATH, &text),
+        ];
+        for index in 1..writes {
+            let next = format!("A neighbour, written {index} times.\n");
+            ops.push(
+                client
+                    .transport()
+                    .write("neighbour", NEIGHBOUR_PATH, Some(&text), &next),
+            );
+            text = next;
+        }
+        let before = decided();
+        hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        let pass = since(before);
+        for op in &ops {
+            assert!(journaled(&w.store, op), "{appends}: the neighbour applied");
+        }
+        assert_eq!((drain.1, pass.1), (0, 0), "{appends}: no head loads");
+        assert_eq!(queued_updates(&w.store).len(), appends);
+        counts.push((drain.0, pass.0));
+        desktop.close().await;
+        w.close().await;
+    }
+    // Each decision that waits for validation is made once more after it.
+    assert_eq!(counts, [(2, 3), (2, 3)]);
+}
+
+/// Opus's gap under focus question 1: the drain another document's open
+/// and close each run, on tails that never validated this document's
+/// lineage, takes up only that document's queued work. It neither waits for
+/// the validation of this one's protected archived lineage nor changes
+/// anything of it.
+#[tokio::test]
+async fn another_documents_open_and_close_drains_do_not_wait_on_an_archived_lineage() {
+    let (mut w, desktop, _client, _, archive) = archived_window(2).await;
+    let rows = queued_feeds(&w.store);
+    let status = hosted_status(&w.store, "object");
+    let neighbour = DocKey::new("workspace", "main", "neighbour").unwrap();
+    for operation in ["open", "close"] {
+        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &neighbour,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(drained.waiting.is_none(), "{operation}: {drained:?}");
+        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(&mut w.store, cleanup, &NoFaults)
+            .unwrap();
+    }
+    assert_eq!(queued_feeds(&w.store), rows);
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    assert_eq!(hosted_status(&w.store, "object"), status);
+    desktop.close().await;
+    w.close().await;
+}
+
 /// A binding names a relay position from 1, so a row the window would hold
 /// at relay position 0 has none: it waits unapplied and unacknowledged
 /// instead of holding with a binding no store could read back.
