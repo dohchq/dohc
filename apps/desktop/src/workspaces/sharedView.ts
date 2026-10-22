@@ -1993,7 +1993,7 @@ async function captureSharedViewLocalDivergence(input: {
         );
         // A spelling given the file owns it now, for the rows after this one too.
         if (owners.length > 0) {
-          await clearCollisionRecordPaths(rootDir, shareId, owners);
+          await clearCollisionRecordPaths(records, shareId, owners);
           for (const owner of owners) collisionRecordedPaths.delete(owner);
         }
         return;
@@ -2470,7 +2470,7 @@ async function refreshSharedViewOnce(input: {
   );
   // A spelling given a deleted spelling's file owns it now, so it is no
   // longer held, and the spellings still held behind it see it as owner.
-  if (owners.length > 0) await clearCollisionRecordPaths(input.rootDir, input.shareId, owners);
+  if (owners.length > 0) await clearCollisionRecordPaths(records, input.shareId, owners);
   // A held spelling that reaches none of its group's written files has its
   // own, on a disk that keeps them apart. It is written, and its record ends,
   // one at a time, so a later one that reaches it stays held behind it.
@@ -2490,7 +2490,7 @@ async function refreshSharedViewOnce(input: {
       continue;
     }
     await materializeSharedViewPaths(input.rootDir, input.workspaceId, [change], input.store, input.protectedPaths);
-    await clearCollisionRecordPaths(input.rootDir, input.shareId, [change.path]);
+    await clearCollisionRecordPaths(records, input.shareId, [change.path]);
     group.push(change.path);
     releasedPaths.add(change.path);
     pendingMaterializationPaths.push(change.path);
