@@ -1,7 +1,6 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
@@ -262,17 +261,6 @@ if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fata
 if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
 if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
 if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
-const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
-  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
-    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
-const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
-const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
-// Worker files are disposable materializations. The relay database retains authority and recovery history.
-const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
-const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
-  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
-}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -292,7 +280,8 @@ let lookupUserDisplayName: (
 ) => Promise<string | null> | string | null;
 const resolveAccountActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
-  : (() => {
+  : await (async () => {
+      const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
       });
@@ -310,6 +299,18 @@ const resolveAccountActor: ResolveActor = testAuthSeam
       });
       return createSessionActorResolver(auth);
   })();
+
+const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
+  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
+    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
+const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+// Worker files are disposable materializations. The relay database retains authority and recovery history.
+const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
+  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 const resolveActor = resolveAccountActor;
 if (automationsOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
