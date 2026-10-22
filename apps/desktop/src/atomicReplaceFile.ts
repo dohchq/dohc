@@ -154,9 +154,9 @@ export async function atomicReplaceFile(
 }
 
 /**
- * Publish complete, flushed bytes without replacing an existing entry.
- * True means this creator won. Opting into direct writes permits a cut-off
- * destination after a crash on filesystems where hard links fail.
+ * Create without replacing an existing entry. True means this creator won.
+ * Hard links publish complete, flushed bytes. Failed direct writes remove
+ * their new entry; a crash during a direct write can still leave it cut off.
  * Node cannot open directories for fsync on Windows.
  */
 export async function atomicCreateFile(
@@ -202,7 +202,14 @@ export async function atomicCreateFile(
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           created = false;
         }
-        if (handle) await writeAndFlush(handle);
+        if (handle) {
+          try {
+            await writeAndFlush(handle);
+          } catch (error) {
+            await remove(destination, { force: true }).catch(() => undefined);
+            throw error;
+          }
+        }
       }
     }
     await remove(temporary).catch(() => undefined);

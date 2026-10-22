@@ -110,6 +110,40 @@ describe("durable create-once publication", () => {
     expect(await readdir(root)).toEqual(["record"]);
   });
 
+  it.each(["write", "sync"] as const)("a failed fallback %s removes its new entry and allows a retry", async (phase) => {
+    const root = await createTestScratch("dohc-create-once-");
+    const path = join(root, "record.json");
+    const payload = '{"version":1}\n';
+    const failure = Object.assign(new Error(phase), { code: phase === "write" ? "ENOSPC" : "EIO" });
+    let fail = true;
+    const dependencies = {
+      allowDirectWrite: true,
+      link: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); },
+      open: async (name: string, flags: string, mode?: number) => {
+        const handle = await open(name, flags, mode);
+        if (name !== path) return handle;
+        return {
+          writeFile: async (data: string) => {
+            if (fail && phase === "write") { await handle.writeFile("{"); throw failure; }
+            await handle.writeFile(data);
+          },
+          sync: async () => {
+            if (fail && phase === "sync") throw failure;
+            await handle.sync();
+          },
+          close: () => handle.close(),
+        };
+      },
+    };
+    await expect(atomicCreateFile(path, payload, 0o666, dependencies)).rejects.toBe(failure);
+    await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(root)).toEqual([]);
+    fail = false;
+    expect(await atomicCreateFile(path, payload, 0o666, dependencies)).toBe(true);
+    expect(await readFile(path, "utf8")).toBe(payload);
+    expect(await readdir(root)).toEqual(["record.json"]);
+  });
+
   it("still flushes the folder when removing a published key's temporary file fails", async () => {
     const root = await createTestScratch("dohc-create-once-");
     const path = join(root, "secret.key");
