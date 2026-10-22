@@ -44,6 +44,7 @@ const engineDocState: UseEngineDoc = {
   deletedDraftId: null,
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
+  changedOutside: null,
   readOnlyWhileEditing: false,
   readOnlyDraftId: null,
   readOnlyCause: null,

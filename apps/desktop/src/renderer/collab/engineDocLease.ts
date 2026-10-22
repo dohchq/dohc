@@ -327,6 +327,9 @@ export type EngineDocLeaseSnapshot = {
     retry?: () => void;
   } | null;
   permanentFailure: { token: number } | null;
+  // The file changed outside dohc while this session held it, and whether
+  // the document then had edits no save carried.
+  changedOutside: { token: number; unsaved: boolean } | null;
   // The drafts holding edits a history replacement set aside, once the new
   // history shows.
   replacedDraftIds: readonly number[];
@@ -369,6 +372,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
+    changedOutside: null,
     replacedDraftIds: [],
     sceneRecoveryAssets: null,
   };
@@ -1043,6 +1047,10 @@ function createEngineDocSession(
       return;
     }
     if (writesRefused.current) return;
+    const changedOutside = event.changedOutside;
+    if (changedOutside && snapshot.changedOutside?.token !== token) {
+      publish((current) => ({ ...current, changedOutside: { token, unsaved: changedOutside.unsaved } }));
+    }
     if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;

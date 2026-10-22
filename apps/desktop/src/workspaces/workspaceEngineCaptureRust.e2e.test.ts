@@ -1376,6 +1376,113 @@ it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
   60_000,
 );
 
+// An agent replaces an open note's file, by rename or in place.
+async function writeOutside(absolute: string, text: string, style: "rename" | "in-place"): Promise<void> {
+  if (style === "rename") {
+    await writeFile(`${absolute}.tmp`, text, "utf8");
+    await rename(`${absolute}.tmp`, absolute);
+    return;
+  }
+  const file = await open(absolute, "r+");
+  try {
+    await file.truncate(0);
+    await file.writeFile(text, "utf8");
+  } finally {
+    await file.close();
+  }
+}
+
+// The editor's part of an open note: its Y.Doc, the save states main
+// reports, and what main says when the file changed outside dohc.
+async function openNote(capture: Awaited<ReturnType<typeof openRealCapture>>["capture"]) {
+  const editor = new Y.Doc();
+  const states: string[] = [];
+  const changedOutside: boolean[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md", contentKind: "plaintext",
+    onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+    onSaveState: (state) => states.push(state),
+    onChangedOutside: (unsaved) => changedOutside.push(unsaved),
+  });
+  Y.applyUpdate(editor, session.initialUpdate);
+  const type = (text: string) => {
+    const vector = Y.encodeStateVector(editor);
+    editor.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector));
+  };
+  return { editor, session, states, changedOutside, type, text: () => editor.getText("plainText").toString() };
+}
+
+const RECOVERED_COPY = /^note \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
+
+it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
+  "reloads an open note with nothing unsaved after a %s write outside dohc (#2463)",
+  async (style) => {
+    const opened = await openRealCapture(`reload-untouched-${style}`, { settleDebounceMs: 60_000 });
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const note = await openNote(opened.capture);
+      await writeOutside(absolute, "written outside dohc\n", style);
+      opened.capture.start();
+      await vi.waitFor(() => expect(note.changedOutside).toEqual([false]), { timeout: REAL_DAEMON_DEADLINE_MS });
+      const reported = note.states.length;
+      // The editor reopens by itself: its close saves nothing and answers
+      // once capture recorded the disk version.
+      await note.session.close();
+      expect(note.states.slice(reported)).not.toContain("error");
+      const reopened = await openNote(opened.capture);
+      expect(reopened.text()).toBe("written outside dohc\n");
+      await reopened.session.close();
+      expect(await readdir(opened.root)).toEqual([".dohc", "note.md"]);
+      expect(await readFile(absolute, "utf8")).toBe("written outside dohc\n");
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing).each([
+  ["reload", "rename"], ["reload", "in-place"], ["close", "rename"], ["close", "in-place"],
+] as const)(
+  "keeps unsaved typing in a copy when the person chooses %s after a %s write outside dohc (#2463)",
+  async (action, style) => {
+    const opened = await openRealCapture(`reload-unsaved-${action}-${style}`, { settleDebounceMs: 60_000 });
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const note = await openNote(opened.capture);
+      note.type("typed ");
+      await writeOutside(absolute, "written outside dohc\n", style);
+      opened.capture.start();
+      await vi.waitFor(() => expect(note.changedOutside).toEqual([true]), { timeout: REAL_DAEMON_DEADLINE_MS });
+      // The editor keeps the person's text until they act.
+      expect(note.text()).toBe("typed base\n");
+      // Reload closes the session and opens it again. Closing the note is
+      // the same close without the reopen.
+      await note.session.close();
+      if (action === "reload") {
+        const reopened = await openNote(opened.capture);
+        expect(reopened.text()).toBe("written outside dohc\n");
+        await reopened.session.close();
+      }
+      expect(await readFile(absolute, "utf8")).toBe("written outside dohc\n");
+      const copies = (await readdir(opened.root)).filter((name) => RECOVERED_COPY.test(name));
+      expect(copies).toHaveLength(1);
+      expect(await readFile(join(opened.root, copies[0]!), "utf8")).toBe("typed base\n");
+      expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
+
 it.skipIf(engine.missing)("keeps two open files' outside writes independent (#2463)", async () => {
   const opened = await openRealCapture("two-deferred-writes", { settleDebounceMs: 60_000 });
   try {

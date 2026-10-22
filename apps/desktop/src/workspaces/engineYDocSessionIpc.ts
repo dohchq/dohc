@@ -162,6 +162,7 @@ interface SessionEvent {
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
+  changedOutside?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["changedOutside"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -682,6 +683,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
           signals.emit(event);
@@ -743,6 +745,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onObjectChanged: () => {
               publish(() => markObjectChanged());
+            },
+            onChangedOutside: (unsaved) => {
+              publish(() => emit({
+                state: unsaved ? "changed-on-disk" : "saved", seq: saveSeq.dirtySeq, changedOutside: { unsaved },
+              }));
             },
           });
         } catch (error) {

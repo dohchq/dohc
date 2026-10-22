@@ -151,6 +151,31 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
     : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
 }
 
+export const CHANGED_OUTSIDE_NOTICE =
+  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in a copy beside it.";
+
+// How long the save chip says Reloaded after the document took in a change
+// made outside dohc.
+const RELOADED_SIGN_MS = 4_000;
+
+function ChangedOutsideNotice(props: { onReload: () => void }) {
+  return (
+    <div
+      data-testid="changed-outside-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>{CHANGED_OUTSIDE_NOTICE}</span>
+      <button
+        type="button"
+        onClick={props.onReload}
+        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
+      >
+        Reload
+      </button>
+    </div>
+  );
+}
+
 function DeletedWhileEditingNotice(props: {
   cause: DocumentGoneCause | null;
   hasSetAsideEdit: boolean;
@@ -696,13 +721,35 @@ export function MarkdownView(props: {
         ? ("recovery" as const)
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
+  // The file changed outside dohc. Reopening closes this session first, and
+  // main lets the disk version stand, keeping any unsaved text in a copy
+  // beside the file. A document with nothing unsaved reopens by itself.
+  const { onRetryEngineOpen } = props;
+  const [reloads, setReloads] = useState(0);
+  const reloadChangedOutside = useCallback(() => {
+    setReloads((count) => count + 1);
+    onRetryEngineOpen();
+  }, [onRetryEngineOpen]);
+  useEffect(() => {
+    if (engine.changedOutside === "saved") reloadChangedOutside();
+  }, [engine.changedOutside, reloadChangedOutside]);
+  const [reloadedShown, setReloadedShown] = useState(false);
+  useEffect(() => {
+    if (reloads === 0) return;
+    setReloadedShown(true);
+    const timer = setTimeout(() => setReloadedShown(false), RELOADED_SIGN_MS);
+    return () => clearTimeout(timer);
+  }, [reloads]);
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
   const engineChipState =
     engine.saveState.kind === "saved-here" && orphanedDrafts.length > 0
       ? ("recovery" as const)
-      : engine.goneCause ?? engine.saveState;
+      : engine.goneCause ??
+        (reloadedShown && engine.saveState.kind === "saved-here" && engine.changedOutside === null
+          ? ("reloaded" as const)
+          : engine.saveState);
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -1917,6 +1964,9 @@ export function MarkdownView(props: {
   if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
+      {engine.changedOutside === "unsaved" && !engine.deletedWhileEditing ? (
+        <ChangedOutsideNotice onReload={reloadChangedOutside} />
+      ) : null}
       {engine.deletedWhileEditing ? (
         <DeletedWhileEditingNotice
           cause={engine.goneCause}
@@ -1958,6 +2008,9 @@ export function MarkdownView(props: {
               title={
                 engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
                   ? "Your access to this document ended."
+                  : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
+                    engine.saveState.kind === "changed-on-disk"
+                  ? CHANGED_OUTSIDE_NOTICE
                   : (engineChipState === "deleted" ||
                   engineChipState === "object-changed") &&
                 hasSetAsideEdit

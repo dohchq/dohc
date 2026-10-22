@@ -2567,6 +2567,7 @@ describe("workspaceEngineCapture batch capture", () => {
               running: true,
               degraded,
               terminal: false,
+              deferredWrites: [],
             });
           }
           if (property === "flushCapture") return async () => undefined;
@@ -2615,7 +2616,7 @@ describe("workspaceEngineCapture batch capture", () => {
         await release.promise;
         if (failFirst) throw new Error("temporary watcher failure");
       }
-      return { running: true, degraded: false, terminal: false, recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
     });
     const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
     const outcomes: WorkspaceEngineCaptureFailure[] = [];
@@ -2669,7 +2670,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const polled = deferred();
     const watcherStatus = vi.fn(async () => {
       polled.resolve();
-      return { running: true, degraded: false, terminal: false, noAtomicPlacement: true };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], noAtomicPlacement: true };
     });
     const daemonStore = new Proxy(liveStore, {
       get(target, property) {
@@ -2733,7 +2734,7 @@ describe("workspaceEngineCapture batch capture", () => {
                   },
                 });
               }
-              return { running: true, degraded: false, terminal: false };
+              return { running: true, degraded: false, terminal: false, deferredWrites: [] };
             };
           }
           if (property === "flushCapture") return async () => undefined;

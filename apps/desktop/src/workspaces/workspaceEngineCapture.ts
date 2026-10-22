@@ -227,6 +227,9 @@ export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
+// How long a close waits for capture to record a change made outside dohc
+// to its file, after the close released the file.
+const OUTSIDE_WRITE_RECORD_DEADLINE_MS = 10_000;
 // An engine-originated removal the chain is about to make on disk. The
 // detached-debt cleanup reads it to tell dohc's own removal from an external
 // delete; a failing-close session reads it to arm its removal suppression.
@@ -581,6 +584,10 @@ export interface WorkspaceEngineCapture {
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
     onObjectChanged?: () => void;
+    // The file changed outside dohc, and capture holds that change until
+    // this session closes. `unsaved` is whether the document has edits no
+    // save carried. Called once per session.
+    onChangedOutside?: (unsaved: boolean) => void;
     contentKind?: YdocContentKind;
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.
@@ -1904,6 +1911,8 @@ export function createWorkspaceEngineCapture(
     // caps at the same 10s as that TTL, so a delete landing right after
     // one retry can otherwise expire before the next retry arrives to ask.
     armRemovalSuppression: (expected: boolean, deletedSeq: number) => void;
+    // Capture holds a change made outside dohc to this session's file.
+    changedOutside: () => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
   // Set-aside drafts of a deleted file's text that a newer draft or a save
@@ -4249,6 +4258,7 @@ export function createWorkspaceEngineCapture(
           options.onKeptFiles?.(status.keptFiles);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onHeldFiles?.(status.heldFiles);
+          for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine);
@@ -4406,6 +4416,9 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
+        // Set by the capture health poll while capture holds a change made
+        // outside dohc to this file. The session keeps it until it closes.
+        let changedOutside = false;
         // How many settles this session has started, so the open can tell a
         // refusal before its settle started from that settle's own failure.
         let settleStarts = 0;
@@ -4649,7 +4662,7 @@ export function createWorkspaceEngineCapture(
           }
           if (isConflictStaleTargetCause(error)) setTextAside();
           reportSaveState(
-            settleFailureSaveState(error),
+            changedOutside && isConflictStaleTargetCause(error) ? "changed-on-disk" : settleFailureSaveState(error),
             saveToken,
             "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
@@ -5309,6 +5322,32 @@ export function createWorkspaceEngineCapture(
         // The close was refused and eviction released the lease. The absent-head
         // checks below must not treat that release as a successful settlement.
         let dischargedByEvict = false;
+        // Whether capture holds an outside change to this file for this
+        // session. Asked only after a close refused its save as stale.
+        const outsideWriteWaits = async (): Promise<boolean> => {
+          if (changedOutside) return true;
+          const engine = await engineStore();
+          await engine.flushCapture?.();
+          return (await engine.watcherStatus?.())?.deferredWrites.includes(input.path) ?? false;
+        };
+        // Once the lease is gone, the close answers only after capture stops
+        // holding the outside change, so a reopen shows the disk version. A
+        // reopen within capture's next tick would take the lease again first.
+        const recordOutsideWrite = async (): Promise<void> => {
+          const deadline = Date.now() + OUTSIDE_WRITE_RECORD_DEADLINE_MS;
+          try {
+            const engine = await engineStore();
+            for (let attempt = 1; ; attempt += 1) {
+              await engine.flushCapture?.();
+              const status = await engine.watcherStatus?.();
+              if (stopped || !status?.deferredWrites.includes(input.path)) return;
+              if (Date.now() >= deadline) throw new Error("capture still holds the change made outside dohc");
+              await new Promise(resolve => setTimeout(resolve, Math.min(25 * 2 ** attempt, 500)));
+            }
+          } catch (error) {
+            onError(`capture of ${input.path} after its close`, error);
+          }
+        };
         let closeInFlight: Promise<void> | null = null;
         let quitClose: Promise<void> | null = null;
         let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
@@ -5371,6 +5410,8 @@ export function createWorkspaceEngineCapture(
           const effective: WorkspaceEngineYDocCloseOptions | undefined =
             liveEntry.orphaned || (liveEntry.status === "failing-close" && suppressSettleForRemoval())
               ? { ...opts, settle: false, settleOnRefusal: false }
+              // Nothing to save, and a save would be refused over the change.
+              : changedOutside && updatesSeen === updatesSettled ? { ...opts, settle: false }
               : opts;
           try {
             if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
@@ -5458,10 +5499,17 @@ export function createWorkspaceEngineCapture(
             // cancelled writes also cannot settle. Eviction journals pending
             // text or preserves a recovered draft before releasing the lease.
             // Interactive close/switch failures keep their guard for retry.
-            if (shuttingDown ||
+            // The file changed outside dohc over unsaved edits. The disk version
+            // stands: eviction leaves the edits in the document's history, and
+            // capturing the disk version saves them in a recovered copy beside
+            // the file (ydoc_recovery.rs) and as kept typing in History.
+            const keepDiskVersion = !shuttingDown && isConflictStaleTargetCause(error) &&
+              (await outsideWriteWaits().catch(() => false));
+            if (shuttingDown || keepDiskVersion ||
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
               try {
                 await session.evict();
+                if (keepDiskVersion) await recordOutsideWrite();
                 quitEvictionFailure = null;
                 dischargedByEvict = true;
                 if (liveYDocSessions.get(input.path) === liveEntry) {
@@ -5491,6 +5539,7 @@ export function createWorkspaceEngineCapture(
           if (liveYDocSessions.get(input.path) === liveEntry) {
             liveYDocSessions.delete(input.path);
           }
+          if (changedOutside) await recordOutsideWrite();
         };
         const liveEntry: LiveYDocSession = {
           path: input.path,
@@ -5503,6 +5552,15 @@ export function createWorkspaceEngineCapture(
           orphaned: false,
           close: closeEntry,
           armRemovalSuppression,
+          changedOutside: () => {
+            if (changedOutside) return;
+            changedOutside = true;
+            try {
+              input.onChangedOutside?.(updatesSeen !== updatesSettled);
+            } catch {
+              // Observer boundary, like the save-state hook.
+            }
+          },
         };
         entry = liveEntry;
         // A session whose release failed is still the daemon's: a refused
