@@ -678,14 +678,14 @@ impl HostedHold {
 
     /// The binding's canonical JSON, continuation and staleness a
     /// released-lineage hold stores; none and fresh for any other.
-    fn released(&self) -> (Option<String>, Option<&'static str>, bool) {
-        match self {
+    fn released(&self) -> Result<(Option<String>, Option<&'static str>, bool), SyncError> {
+        Ok(match self {
             Self::ReleasedLineageUnsettled {
                 binding,
                 continuation,
                 binding_stale,
             } => (
-                Some(binding.canonical_json()),
+                Some(stored_binding(binding)?),
                 Some(continuation.as_str()),
                 *binding_stale,
             ),
@@ -694,8 +694,20 @@ impl HostedHold {
             | Self::WorkWaiting
             | Self::ScopePathMismatch { .. }
             | Self::LiveEditUnadmitted => (None, None, false),
-        }
+        })
     }
+}
+
+/// `binding`'s canonical JSON, once it reads back as the same binding. A
+/// stored hold that does not read back would report the replica damaged.
+fn stored_binding(binding: &ReleasedLineageBinding) -> Result<String, SyncError> {
+    let json = binding.canonical_json();
+    if ReleasedLineageBinding::from_canonical_json(&json).as_ref() != Some(binding) {
+        return Err(crate::error::local_corruption(
+            "a released-lineage binding does not read back",
+        ));
+    }
+    Ok(json)
 }
 
 const SCOPE_PATH_MISMATCH: &str = "hosted-scope-path-mismatch";
@@ -1126,7 +1138,7 @@ pub fn commit_hosted_cursor(
             let position = released.map_or(read.cursor, |first| read.cursor.min(first - 1));
             let (binding, continuation, binding_stale) = hold
                 .as_ref()
-                .map_or((None, None, false), HostedHold::released);
+                .map_or(Ok((None, None, false)), HostedHold::released)?;
             tx.execute(
                 "UPDATE hosted_documents SET backfill_cursor=?3,state=?4, \
                  held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8, \
@@ -1208,6 +1220,20 @@ fn completed_hold(
     }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
+    }
+    // Queued Y.Doc work a drain held keeps its hold until a drain frees it.
+    if let Some(hold @ HostedHold::ReleasedLineageUnsettled { .. }) =
+        recorded_hold(conn, workspace_id, object_id)?
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+                 WHERE workspace_id=?1 AND object_id=?2)",
+                params![workspace_id, object_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(SyncError::corrupt)?
+    {
+        return Ok(Some(hold));
     }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
@@ -1342,10 +1368,6 @@ pub(crate) fn hold_unadmitted_in_tx(
 /// transaction counts a commit and that pass's commit no longer stands. A
 /// ready document's own read starts where the main feed is, as for
 /// [`hold_unadmitted_in_tx`]. A parked document is no longer hosted.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deferred drains hold their documents here")
-)]
 pub(crate) fn hold_released_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &ReleasedLineageBinding,
@@ -1364,7 +1386,7 @@ pub(crate) fn hold_released_in_tx(
                 binding.workspace_id,
                 binding.object_id,
                 RELEASED_LINEAGE_UNSETTLED,
-                binding.canonical_json(),
+                stored_binding(binding)?,
                 continuation.as_str(),
                 binding_stale
             ],

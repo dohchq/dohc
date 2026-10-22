@@ -30,6 +30,8 @@ export type ServiceHostedHold = HostedPass["held"][number];
 export interface ServiceHostedPullPage {
   /** False when the pass adopted a new scope, or the scope moved before its commit: none of it committed. */
   readonly committed: boolean;
+  /** The pass adopted a new scope instead of reading, so it says nothing of any document. */
+  readonly adoptedScope: boolean;
   readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
   readonly refusals: HostedPass["refusals"];
   readonly sharingDeclined: readonly SharingDeclined[];
@@ -126,7 +128,7 @@ export class ServiceHostedReplication {
           hasMore = !committed || pass.hasMore || commit.hasMore;
           sharingDeclined.push(...commit.sharingDeclined);
         }
-        const page = {committed, fetched: pass.fetched, applied: pass.applied, refused: pass.refused, skipped: pass.skipped,
+        const page = {committed, adoptedScope: !pendingCursor, fetched: pass.fetched, applied: pass.applied, refused: pass.refused, skipped: pass.skipped,
           conflictsOpened: pass.conflictsOpened, refusals: pass.refusals, sharingDeclined,
           changedPaths: pass.changedPaths.map(row => row.path), held: pass.held};
         pages.push(page);

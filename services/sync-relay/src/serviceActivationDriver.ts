@@ -123,11 +123,15 @@ export class ServiceActivationDriver {
    * Clears readiness of documents a hosted pass left held. The engine has
    * already ended their sessions; each activates again once its capture
    * succeeds. Until then they do not hold back their workspace's pulls,
-   * which bring what they wait for.
+   * which bring what they wait for. `holds` is every document the pass left
+   * held, so one it no longer holds for released retained work is free of
+   * that hold.
    */
   hold(workspaceId:string,holds:readonly ServiceHostedHold[]){
     for(const [key,objectId] of this.#objects){
-      const hold=JSON.parse(key)[0]===workspaceId?holds.find(row=>row.objectId===objectId):undefined;
+      if(JSON.parse(key)[0]!==workspaceId)continue;
+      const hold=holds.find(row=>row.objectId===objectId);
+      if(hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
       if(!hold)continue;
       this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.

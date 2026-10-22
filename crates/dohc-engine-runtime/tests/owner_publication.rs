@@ -7356,6 +7356,286 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     w.close().await;
 }
 
+/// The window's document, live on the host.
+struct WindowLive;
+
+impl dohc_engine_sync::LeaseProbe for WindowLive {
+    fn is_live(&self, key: &DocKey) -> bool {
+        *key == window_key()
+    }
+}
+
+/// [`hosted_pass`] while the window's document is live on the host.
+fn live_hosted_pass(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+) -> dohc_engine_sync::HostedPassOutcome {
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    loop {
+        match client.pull_hosted_workspace(
+            store,
+            &mut cache,
+            "workspace",
+            Some("relay"),
+            &NoFaults,
+            &WindowLive,
+        ) {
+            Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                pending.validate().wait().unwrap();
+            }
+            pass => return pass.unwrap(),
+        }
+    }
+}
+
+/// The window document's drain as its session ends, run again after each
+/// released-tail validation it waits for completes.
+fn settled_drain(store: &mut EngineStore) -> dohc_engine_sync::YdocDrainResult {
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    loop {
+        match dohc_engine_sync::drain_deferred_ydoc_for_key(
+            store,
+            &mut cache,
+            &window_key(),
+            &NoFaults,
+        ) {
+            Err(dohc_engine_sync::SyncError::ValidationPending(pending)) => {
+                pending.validate().wait().unwrap();
+            }
+            drained => return drained.unwrap(),
+        }
+    }
+}
+
+/// Each queued Y.Doc update of the store: its coordinate and the feed it
+/// recorded.
+fn queued_updates(store: &EngineStore) -> Vec<(String, i64, String, Option<String>)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_id,origin_seq,ingress_kind,relay_namespace FROM ydoc_deferred_updates \
+                 ORDER BY relay_seq",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+}
+
+/// What the host's commit of `pass`'s cursor did.
+fn pass_commit(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    pass: &dohc_engine_sync::HostedPassOutcome,
+) -> dohc_engine_sync::HostedCommit {
+    let committed = client
+        .commit_hosted_cursor(
+            store,
+            "workspace",
+            pass.pending_cursor.as_ref().unwrap(),
+            &ReleasedTails::uncached(),
+            &NoFaults,
+        )
+        .unwrap();
+    let dohc_engine_storage::TxnOutcome::Committed(committed) = committed else {
+        panic!("no fault was injected");
+    };
+    committed
+}
+
+/// A destructive update deferred while the host's session is live, with
+/// the feed it arrived on, stays queued when the session ends: the drain
+/// holds it with a binding that names that feed, applies and refuses
+/// nothing, and the document keeps the retained text. The hold and the
+/// queued update read back after a restart, and each later pass decides
+/// again and holds again with nothing written.
+#[tokio::test]
+async fn a_deferred_destructive_update_stays_queued_with_its_hold_through_a_drain_and_a_restart() {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let fold = feed.serve(fold, fold_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let native = w.native();
+    let live = live_hosted_pass(&mut w.store, &client);
+    assert!(pass_commit(&mut w.store, &client, &live).committed);
+    assert!(journaled(&w.store, &fold), "its deferral acknowledged it");
+    let queued = vec![(
+        fold.origin_id.clone(),
+        fold.origin_seq,
+        "hosted".to_owned(),
+        Some("relay".to_owned()),
+    )];
+    assert_eq!(queued_updates(&w.store), queued);
+    assert_eq!(w.native(), native);
+
+    let drained = settled_drain(&mut w.store);
+    let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+        binding_stale: false,
+    }) = &drained.released_hold
+    else {
+        panic!("{drained:?}");
+    };
+    assert_eq!(binding.incoming.relay_namespace.as_deref(), Some("relay"));
+    assert_eq!(
+        (
+            binding.incoming.origin_id.as_str(),
+            binding.incoming.origin_seq
+        ),
+        (fold.origin_id.as_str(), fold.origin_seq)
+    );
+    assert_eq!((drained.drained, drained.refusals.len()), (0, 0));
+    assert_eq!(w.native(), native);
+    assert!(w.text().contains(RETAINED));
+    assert_eq!(
+        queued_updates(&w.store),
+        queued,
+        "the held update stays queued"
+    );
+    let held = dohc_engine_sync::HostedDocumentStatus::Held(drained.released_hold.clone().unwrap());
+    let status = |store: &EngineStore| {
+        dohc_engine_sync::read_hosted_replica(store, "workspace")
+            .unwrap()
+            .unwrap()
+            .documents["object"]
+            .status
+            .clone()
+    };
+    assert_eq!(status(&w.store), held);
+
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(
+        status(&w.store),
+        held,
+        "the hold reads back after a restart"
+    );
+    assert_eq!(queued_updates(&w.store), queued);
+    for _ in 0..2 {
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        assert_eq!(
+            pass.held.get("object"),
+            drained.released_hold.as_ref(),
+            "{pass:?}"
+        );
+        assert!(pass_commit(&mut w.store, &client, &pass).committed);
+        assert_eq!(status(&w.store), held);
+        assert_eq!(
+            (w.native(), queued_updates(&w.store)),
+            (native.clone(), queued.clone())
+        );
+    }
+    assert!(w.text().contains(RETAINED));
+    desktop.close().await;
+    w.close().await;
+}
+
+/// An update queued before deferrals recorded their feed, of the protected
+/// lineage, stays queued and holds the document with a binding that names
+/// no namespace, though it only adds content: nothing shows the feed it
+/// arrived on. The same update with the feed it recorded drains.
+#[tokio::test]
+async fn a_queued_update_with_no_recorded_feed_holds_a_protected_lineage() {
+    for legacy in [true, false] {
+        let mut w = retained_window(Retained::Carried).await;
+        let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+        let (added, added_bytes) = desktop.append(&w.lineage, "A desktop paragraph.").await;
+        let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+        let added = feed.serve(added, added_bytes);
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let live = live_hosted_pass(&mut w.store, &client);
+        assert!(pass_commit(&mut w.store, &client, &live).committed);
+        if legacy {
+            execute(
+                &mut w.store,
+                "UPDATE ydoc_deferred_updates SET ingress_kind='legacy-unknown', \
+                 relay_namespace=NULL,replication_epoch=NULL,stream_identity=NULL",
+            );
+        }
+        let drained = settled_drain(&mut w.store);
+        if !legacy {
+            assert_eq!(
+                (drained.drained, &drained.released_hold),
+                (1, &None),
+                "{drained:?}"
+            );
+            assert!(queued_updates(&w.store).is_empty());
+            assert!(w.text().contains("A desktop paragraph"));
+        } else {
+            let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { binding, .. }) =
+                &drained.released_hold
+            else {
+                panic!("{drained:?}");
+            };
+            assert_eq!(binding.incoming.relay_namespace, None);
+            assert_eq!(
+                (
+                    binding.incoming.origin_id.as_str(),
+                    binding.incoming.origin_seq
+                ),
+                (added.origin_id.as_str(), added.origin_seq)
+            );
+            assert_eq!(drained.drained, 0);
+            assert_eq!(
+                queued_updates(&w.store),
+                [(
+                    added.origin_id.clone(),
+                    added.origin_seq,
+                    "legacy-unknown".to_owned(),
+                    None
+                )]
+            );
+            assert!(!w.text().contains("A desktop paragraph"));
+        }
+        assert!(w.text().contains(RETAINED));
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// A binding names a relay position from 1, so a row the window would hold
+/// at relay position 0 has none: it waits unapplied and unacknowledged
+/// instead of holding with a binding no store could read back.
+#[tokio::test]
+async fn a_row_at_relay_position_zero_waits_without_a_binding() {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (mut fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    w.store.put_binary_blob(&fold_bytes).unwrap();
+    fold.relay_seq = Some(0);
+    let native = w.native();
+    let applied = settled_apply(
+        &mut w.store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &fold,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    );
+    assert!(
+        matches!(
+            applied,
+            Err(dohc_engine_sync::SyncError::RetryableState {
+                reason: "a row held for a released lineage has no relay sequence"
+            })
+        ),
+        "{applied:?}"
+    );
+    assert!(!journaled(&w.store, &fold));
+    assert_eq!(w.native(), native);
+    desktop.close().await;
+    w.close().await;
+}
+
 /// A fence row that resumed the document at restore generation 1.
 fn restored(w: &RetainedWindow) {
     write_unchecked(
@@ -8950,12 +9230,14 @@ fn main_cursor(store: &EngineStore) -> i64 {
 /// released window the owner types in another paragraph on the desktop and
 /// its editor settles. The update only adds content, so it applies and the
 /// host writes the head it projects, the retained text with it. The
-/// settlement's preimage is then not the host's head, so it opens a sync
-/// conflict rather than settling the lineage to text without the retained
-/// work. Nothing stalls: a later row of the document and a neighbour apply,
-/// the pass commits, the cursor advances, and the next pass progresses.
+/// settlement's preimage is then not the host's head, so it would open a
+/// sync conflict no host could close. It holds before anything of that
+/// conflict is written: no moment, file object or conflict, and the document
+/// waits at it, with its later row unapplied, held for released retained
+/// work. Nothing else stalls: a neighbour applies, the pass commits, the
+/// cursor advances, and the next pass progresses.
 #[tokio::test]
-async fn a_desktop_edit_in_the_released_window_never_stalls_the_hosted_feed() {
+async fn a_desktop_edit_in_the_released_window_holds_its_settlement_before_a_conflict() {
     let mut w = retained_window(Retained::Carried).await;
     add_neighbour(&mut w.store);
     let mut desktop = desktop_of(&w.base, &w.lineage, &[]).await;
@@ -8977,24 +9259,43 @@ async fn a_desktop_edit_in_the_released_window_never_stalls_the_hosted_feed() {
         &client,
         &mut dohc_engine_collab::WriterDocCache::new(),
     );
-    assert_eq!(pass.applied, 4, "{:?}", pass.pending_cursor);
-    assert_eq!(pass.conflicts_opened, 1, "the settlement");
-    for op in [&update, &settlement, &later, &created] {
+    assert_eq!(pass.applied, 2, "{:?}", pass.pending_cursor);
+    assert_eq!(pass.conflicts_opened, 0);
+    for op in [&update, &created] {
         assert!(journaled(&w.store, op), "{}", op.origin_id);
     }
+    for op in [&settlement, &later] {
+        assert!(!journaled(&w.store, op), "{}", op.origin_id);
+    }
+    assert!(held_binding(&pass, &settlement).is_some(), "{pass:?}");
+    let written = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM conflicts) \
+                     + (SELECT COUNT(*) FROM moments WHERE moment_id=?1)",
+                    [settlement.payload["momentId"].as_str().unwrap()],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(written(&w.store), 0, "nothing of the conflict is written");
     let projected = w.text();
     assert!(
         projected.contains("A desktop paragraph")
             && projected.contains(RETAINED)
-            && projected.contains("After the settlement"),
+            && !projected.contains("After the settlement"),
         "{projected}"
     );
     commit_pass(&mut w.store, &client, &pass);
     assert_eq!(main_cursor(&w.store), created.relay_seq.unwrap());
-    assert_eq!(
+    assert!(matches!(
         hosted_status(&w.store, "object"),
-        dohc_engine_sync::HostedDocumentStatus::Ready
-    );
+        dohc_engine_sync::HostedDocumentStatus::Held(
+            dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { .. }
+        )
+    ));
     let edited = client.transport().write(
         "neighbour",
         NEIGHBOUR_PATH,
@@ -9008,8 +9309,10 @@ async fn a_desktop_edit_in_the_released_window_never_stalls_the_hosted_feed() {
     );
     assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
     assert!(journaled(&w.store, &edited));
+    assert!(held_binding(&again, &settlement).is_some(), "{again:?}");
     commit_pass(&mut w.store, &client, &again);
     assert_eq!(main_cursor(&w.store), edited.relay_seq.unwrap());
+    assert_eq!(written(&w.store), 0);
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
     w.close().await;

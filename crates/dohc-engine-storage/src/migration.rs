@@ -3767,8 +3767,12 @@ CREATE TABLE hosted_parked_path_aliases (
 ) STRICT;
 CREATE INDEX hosted_parked_path_aliases_by_document
   ON hosted_parked_path_aliases(workspace_id, object_id, version_id, path);
-INSERT INTO hosted_parked_snapshots SELECT * FROM temp.hosted_parked_snapshots_kept;
-INSERT INTO hosted_parked_path_aliases SELECT * FROM temp.hosted_parked_path_aliases_kept;
+INSERT INTO hosted_parked_snapshots (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,
+    latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary,metadata_correlation_id)
+  SELECT workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,
+    content_kind,binary_sha256,metadata_summary,metadata_correlation_id FROM temp.hosted_parked_snapshots_kept;
+INSERT INTO hosted_parked_path_aliases (workspace_id,version_id,path,object_id)
+  SELECT workspace_id,version_id,path,object_id FROM temp.hosted_parked_path_aliases_kept;
 DROP TABLE temp.hosted_parked_snapshots_kept;
 DROP TABLE temp.hosted_parked_path_aliases_kept;
 ALTER TABLE ydoc_deferred_updates ADD COLUMN relay_namespace TEXT
@@ -3783,6 +3787,16 @@ ALTER TABLE ydoc_deferred_updates ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 
         AND stream_identity IS NOT NULL AND relay_seq IS NOT NULL AND relay_seq > 0)));
 UPDATE ydoc_deferred_updates SET ingress_kind='local'
   WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=ydoc_deferred_updates.workspace_id);
+ALTER TABLE relay_deferred_ops ADD COLUMN relay_namespace TEXT
+    CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
+ALTER TABLE relay_deferred_ops ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
+    CHECK (ingress_kind IN ('local','hosted','legacy-unknown')
+      AND (ingress_kind <> 'hosted' OR (relay_namespace IS NOT NULL
+        AND length(CAST(replication_epoch AS BLOB)) > 0 AND length(CAST(stream_identity AS BLOB)) > 0
+        AND json_type(envelope_json,'$.relaySeq') IS 'integer'
+        AND json_extract(envelope_json,'$.relaySeq') > 0)));
+UPDATE relay_deferred_ops SET ingress_kind='local'
+  WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=relay_deferred_ops.workspace_id);
 ";
 
 /// The triggers that keep and move a released tail generation. A store
@@ -4835,7 +4849,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "12bb8ccd43398979b41fbd2088c52826fef0f5a4d2141e223edb35fbfd469a4f",
+                "bf5221160dadf8277eaa3f75420b83a376ed92da8c0486055c9740aeb688f8d5",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5576,19 +5590,28 @@ mod tests {
         INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
           VALUES ('hosted','held',0),('ordinary','doc',0); \
         INSERT INTO blobs (sha256,byte_length,text) VALUES (printf('%064d',0),1,'x'); \
+        INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (printf('%064d',1),1,x'01'); \
         INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,held_path, \
           held_by,backfill_cursor,scope_generation,unmaterialized_seq) \
           VALUES ('hosted','held','a.md','held','hosted-backfill-path-held','a.md','ready',4,2,NULL), \
                  ('hosted','ready','b.md','ready',NULL,NULL,NULL,7,2,9), \
-                 ('hosted','parked','c.md','parked',NULL,NULL,NULL,3,1,NULL); \
+                 ('hosted','parked','c.md','parked',NULL,NULL,NULL,3,1,NULL), \
+                 ('hosted','image','d.png','parked',NULL,NULL,NULL,2,1,NULL); \
         INSERT INTO hosted_parked_snapshots (workspace_id,version_id,object_id,path,blob_sha256, \
-          updated_at_ms,latest_moment_id,metadata_origin,content_kind) \
-          VALUES ('hosted','main','parked','c.md',printf('%064d',0),5,'moment','sync','text'); \
+          updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary, \
+          metadata_correlation_id) \
+          VALUES ('hosted','main','parked','c.md',printf('%064d',0),5,'moment','sync','text',NULL,NULL,NULL), \
+                 ('hosted','main','image','d.png',NULL,6,'binary-moment','sync','binary', \
+                   printf('%064d',1),'a summary','a correlation'); \
         INSERT INTO hosted_parked_path_aliases (workspace_id,version_id,path,object_id) \
           VALUES ('hosted','main','old/c.md','parked'); \
         INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
           recorded_at_ms,relay_seq) \
-          VALUES ('hosted','main','held','peer',1,5,3),('ordinary','main','doc','peer',1,5,NULL);";
+          VALUES ('hosted','main','held','peer',1,5,3),('ordinary','main','doc','peer',1,5,NULL); \
+        INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+          stream_identity,envelope_json,retained_bytes) \
+          VALUES ('hosted','peer',1,'epoch','stream','{\"relaySeq\":3}',1), \
+                 ('ordinary','peer',1,'epoch','stream','{}',1);";
 
     /// Every row the hosted tables and deferred Y.Doc updates hold, by the
     /// columns both schemas share.
@@ -5599,12 +5622,17 @@ mod tests {
                   held_by,held_conflict_id,backfill_cursor,scope_generation,unmaterialized_seq)) \
                 FROM (SELECT * FROM hosted_documents ORDER BY object_id)), \
                (SELECT json_group_array(json_array(workspace_id,version_id,object_id,path,blob_sha256, \
-                  updated_at_ms,latest_moment_id,metadata_origin,content_kind)) FROM hosted_parked_snapshots), \
+                  updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256, \
+                  metadata_summary,metadata_correlation_id)) \
+                FROM (SELECT * FROM hosted_parked_snapshots ORDER BY object_id)), \
                (SELECT json_group_array(json_array(workspace_id,version_id,path,object_id)) \
                 FROM hosted_parked_path_aliases), \
                (SELECT json_group_array(json_array(workspace_id,version_id,object_id,origin_id,origin_seq, \
                   recorded_at_ms,lineage_claim_id,relay_seq)) \
-                FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)))",
+                FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)), \
+               (SELECT json_group_array(json_array(workspace_id,origin_id,origin_seq,replication_epoch, \
+                  stream_identity,envelope_json,retained_bytes,checked_sequence,report_id)) \
+                FROM (SELECT * FROM relay_deferred_ops ORDER BY workspace_id)))",
             [],
             |row| row.get(0),
         )
@@ -5635,6 +5663,12 @@ mod tests {
              VALUES ('hosted','main','held','peer',2,6,4,'hosted','relay','epoch','stream')",
             "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
              recorded_at_ms,ingress_kind) VALUES ('ordinary','main','doc','peer',2,6,'local')",
+            "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+             stream_identity,envelope_json,retained_bytes,ingress_kind,relay_namespace) \
+             VALUES ('hosted','peer',2,'epoch','stream','{\"relaySeq\":4}',1,'hosted','relay')",
+            "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+             stream_identity,envelope_json,retained_bytes,ingress_kind) \
+             VALUES ('ordinary','peer',2,'epoch','stream','{}',1,'local')",
         ] {
             conn.execute(valid, []).unwrap();
         }
@@ -5661,6 +5695,15 @@ mod tests {
             "UPDATE ydoc_deferred_updates SET stream_identity=NULL WHERE ingress_kind='hosted'",
             "UPDATE ydoc_deferred_updates SET relay_seq=NULL WHERE ingress_kind='hosted'",
             "UPDATE ydoc_deferred_updates SET relay_seq=0 WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET ingress_kind='hosted' WHERE origin_seq=1",
+            "UPDATE relay_deferred_ops SET ingress_kind='remote' WHERE origin_seq=1",
+            "UPDATE relay_deferred_ops SET relay_namespace=NULL WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET relay_namespace='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET replication_epoch='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET stream_identity='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{}' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{\"relaySeq\":0}' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{\"relaySeq\":\"4\"}' WHERE ingress_kind='hosted'",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "{invalid}");
         }
@@ -5681,9 +5724,10 @@ mod tests {
     }
 
     /// The activations migration rebuilds the hosted documents table for the
-    /// released-lineage hold and gives deferred Y.Doc updates their feed. An
-    /// upgrade keeps every hosted document, hold, parked head and alias, and
-    /// deferred row; a deferred row of a workspace that is no hosted replica
+    /// released-lineage hold and gives deferred Y.Doc updates and retained
+    /// relay work their feed. An upgrade keeps every hosted document, hold,
+    /// parked head and alias, and deferred row; a deferred row of a
+    /// workspace that is no hosted replica
     /// is local, and one of a hosted replica keeps an unknown feed. A fresh
     /// store enforces the same rules.
     #[test]
@@ -5725,6 +5769,18 @@ mod tests {
         assert_eq!(
             feeds,
             r#"[["hosted","legacy-unknown",null,null,null],["ordinary","local",null,null,null]]"#
+        );
+        let relay_feeds: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(workspace_id,ingress_kind,relay_namespace)) \
+                 FROM (SELECT * FROM relay_deferred_ops ORDER BY workspace_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            relay_feeds,
+            r#"[["hosted","legacy-unknown",null],["ordinary","local",null]]"#
         );
         released_hold_and_deferred_feed_constraints_hold(&conn);
     }

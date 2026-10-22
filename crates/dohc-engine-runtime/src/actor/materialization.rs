@@ -55,17 +55,35 @@ impl ActorHandle {
         workspace_id: String,
         leases: dohc_engine_collab::LeaseRegistry,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store, cache| {
-            dohc_engine_sync::drain_open_document_artifacts(
-                store,
-                cache,
-                &workspace_id,
-                &leases,
-                &NoFaults,
-            )?;
-            Ok(())
-        })
-        .await
+        // A recovery that waits for released-tail validation has ended its
+        // transactions, so the actor is free while the store's worker
+        // validates; the recovery then runs again.
+        loop {
+            let (workspace_id, leases) = (workspace_id.clone(), leases.clone());
+            let recovered = self
+                .run(move |store, cache| {
+                    dohc_engine_sync::drain_open_document_artifacts(
+                        store,
+                        cache,
+                        &workspace_id,
+                        &leases,
+                        &NoFaults,
+                    )?;
+                    Ok(())
+                })
+                .await;
+            match recovered {
+                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::ValidationPending(
+                    pending,
+                ))) => {
+                    pending
+                        .validate()
+                        .await
+                        .map_err(super::relay::validation_failed)?;
+                }
+                recovered => return recovered,
+            }
+        }
     }
 
     /// The workspace's kept displacements, oldest first: files a replace

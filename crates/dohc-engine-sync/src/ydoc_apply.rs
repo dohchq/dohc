@@ -250,6 +250,10 @@ pub struct YdocDrainResult {
     /// Record facts every drained update committed, in drain order: a parked
     /// update fires the same events an ordinary pull does, post-commit.
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// The hold the drain persisted for a queued update that could destroy
+    /// work a released chain's tail retains. The update stays queued,
+    /// neither applied nor refused.
+    pub released_hold: Option<crate::HostedHold>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -426,6 +430,7 @@ fn apply_deferred_base(
     faults: &dyn FaultInjector,
     search_policy: Option<&SearchPolicySnapshot>,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
+    gate: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SyncError>,
 ) -> Result<Option<YdocLineageReplacement>, SyncError> {
     let incoming_doc = dohc_engine_collab::Ydoc::wire();
     incoming_doc
@@ -438,6 +443,7 @@ fn apply_deferred_base(
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
         if let Some(leases)=recovery_leases { require_recovery_closed(tx,&key,leases)?; }
+        gate(tx)?;
         let already_preserved: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict')",
             [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
@@ -667,6 +673,56 @@ pub fn drain_deferred_ydoc_for_key(
     let (drained, cleanup) =
         drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults, None)?;
     complete_drain(store, drained, cleanup, faults)
+}
+
+/// Drain again each hosted document of the scope a drain held for released
+/// retained work, unless a live session holds its queued work, so a fresh
+/// decision admits what no longer needs holding. Answers the hold each
+/// drain leaves, by object id. Everything a drain applies is refused or
+/// materialized as any drain's is; a held document writes its files once
+/// it is free.
+pub(crate) fn drain_released_holds(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+) -> Result<std::collections::BTreeMap<String, crate::HostedHold>, SyncError> {
+    let keys = store.read_with(|conn| {
+        conn.prepare(
+            "SELECT DISTINCT u.version_id,u.object_id FROM hosted_documents d \
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+               AND h.scope_generation=d.scope_generation \
+             JOIN ydoc_deferred_updates u ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
+             WHERE d.workspace_id=?1 AND d.held_reason=?2 ORDER BY u.object_id,u.version_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(
+                    params![workspace_id, crate::hosted::RELEASED_LINEAGE_UNSETTLED],
+                    |row| {
+                        Ok(DocKey {
+                            workspace_id: workspace_id.to_owned(),
+                            version_id: row.get(0)?,
+                            object_id: row.get(1)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(SyncError::corrupt)
+    })?;
+    let mut holds = std::collections::BTreeMap::new();
+    for key in keys {
+        if leases.is_live(&key) {
+            continue;
+        }
+        let drained = drain_deferred_ydoc_in_batch(store, cache, &key, faults, true)?;
+        if let Some(hold) = drained.released_hold {
+            holds.insert(key.object_id, hold);
+        }
+    }
+    Ok(holds)
 }
 
 fn drain_deferred_ydoc_in_batch(
@@ -910,6 +966,18 @@ pub fn live_session_has_drainable_deferred_ydoc(
     Ok(first.flatten().as_deref() == Some(lineage_claim_id))
 }
 
+/// One queued update a drain replays: its coordinate, relay position,
+/// recording time, lineage, payload and the feed it recorded.
+type DeferredRow = (
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+    YdocUpdatePayload,
+    DeferredFeed,
+);
+
 #[derive(Clone, Copy)]
 enum DeferredDrainMode<'a> {
     All,
@@ -926,6 +994,97 @@ pub struct YdocDrainCleanup {
     projection_refusal: Option<crate::ReplicationRefusal>,
 }
 
+/// The gate a drain runs in the transaction that would apply `row` to the
+/// head's `lineage`: the binding and whether the head waits for
+/// dependencies when the row must stay queued, none when it applies. A row
+/// that applies while earlier ones stay held for `held` changes the head
+/// that hold names, so the same transaction marks its binding stale.
+#[allow(clippy::too_many_arguments)]
+fn drain_gate(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    lineage: &str,
+    row: &DeferredRow,
+    tails: &ReleasedTails,
+    incoming: Incoming<'_>,
+    held: Option<&crate::HostedHold>,
+) -> Result<Option<(Box<ReleasedLineageBinding>, bool)>, SyncError> {
+    let (origin_id, origin_seq, relay_seq, _, _, _, feed) = row;
+    let decision = drain_decision(
+        tx,
+        key,
+        lineage,
+        feed,
+        origin_id,
+        *origin_seq,
+        *relay_seq,
+        tails,
+        incoming,
+    )?;
+    if let ReleasedDecision::Held {
+        binding,
+        head_pending,
+    } = decision
+    {
+        return Ok(Some((binding, head_pending)));
+    }
+    if let Some(crate::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation,
+        ..
+    }) = held
+    {
+        crate::hosted::hold_released_in_tx(tx, binding, *continuation, true)?;
+    }
+    Ok(None)
+}
+
+/// Keep `row`, which a drain's gate held with `binding`, queued: the
+/// earliest such row names the document's hold. A head with no pending
+/// dependencies freezes, so nothing after the row applies; one that waits
+/// for dependencies lets later rows the gate admits apply. Answers whether
+/// the drain stops.
+fn hold_drained_row(
+    store: &mut EngineStore,
+    faults: &dyn FaultInjector,
+    held_rows: &mut Vec<DeferredRow>,
+    released_hold: &mut Option<crate::HostedHold>,
+    row: DeferredRow,
+    binding: Box<ReleasedLineageBinding>,
+    head_pending: bool,
+) -> Result<bool, SyncError> {
+    let continuation = if head_pending {
+        crate::ReleasedHoldContinuation::DependencyDrain
+    } else {
+        crate::ReleasedHoldContinuation::Frozen
+    };
+    if held_rows.is_empty() {
+        let hold = crate::HostedHold::ReleasedLineageUnsettled {
+            binding,
+            continuation,
+            binding_stale: false,
+        };
+        persist_released_hold(store, &hold, faults)?;
+        *released_hold = Some(hold);
+    }
+    held_rows.push(row);
+    Ok(continuation == crate::ReleasedHoldContinuation::Frozen)
+}
+
+/// Bring the rows a drain held back to the front of its queue once a row
+/// applied past them: the head they were decided against changed, so each
+/// is decided again, and the earliest still held names a fresh binding.
+fn requeue_held(
+    queue: &mut std::collections::VecDeque<DeferredRow>,
+    held_rows: &mut Vec<DeferredRow>,
+    released_hold: &mut Option<crate::HostedHold>,
+) {
+    for row in held_rows.drain(..).rev() {
+        queue.push_front(row);
+        *released_hold = None;
+    }
+}
+
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -939,12 +1098,13 @@ fn drain_deferred_ydoc(
     } else {
         Vec::new()
     };
-    let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
+    let pending: Vec<DeferredRow> =
         store.read_with(|conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT log.origin_id,log.origin_seq,deferred.relay_seq,log.recorded_at_ms,
-                        deferred.lineage_claim_id,log.payload_json \
+                        deferred.lineage_claim_id,log.payload_json,deferred.ingress_kind,
+                        deferred.relay_namespace,deferred.replication_epoch,deferred.stream_identity \
                  FROM ydoc_deferred_updates AS deferred \
                  JOIN replication_log AS log \
                    ON log.workspace_id = deferred.workspace_id \
@@ -966,6 +1126,12 @@ fn drain_deferred_ydoc(
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, String>(5)?,
+                            DeferredFeed {
+                                ingress_kind: row.get(6)?,
+                                relay_namespace: row.get(7)?,
+                                replication_epoch: row.get(8)?,
+                                stream_identity: row.get(9)?,
+                            },
                         ))
                     },
                 )
@@ -979,6 +1145,7 @@ fn drain_deferred_ydoc(
                     recorded_at_ms,
                     lineage_claim_id,
                     payload_json,
+                    feed,
                 ) = row.map_err(SyncError::corrupt)?;
                 let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
@@ -998,6 +1165,7 @@ fn drain_deferred_ydoc(
                     recorded_at_ms,
                     lineage_claim_id,
                     payload,
+                    feed,
                 ));
             }
             Ok::<_, SyncError>(pending)
@@ -1068,7 +1236,16 @@ fn drain_deferred_ydoc(
     let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
-    for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+    let tails = cache.released_tails(store);
+    // Rows held for released retained work while the head waits for
+    // dependencies, earliest first. Each stays queued, and each row applied
+    // past them brings them back to be decided against the new head.
+    let mut held_rows: Vec<DeferredRow> = Vec::new();
+    let mut released_hold = None;
+    let mut queue: std::collections::VecDeque<DeferredRow> = pending.into();
+    while let Some(row) = queue.pop_front() {
+        let (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload, _) =
+            row.clone();
         if let Some(leases) = recovery_leases {
             store.read_with(|conn| require_recovery_closed(conn, key, leases))?;
         }
@@ -1125,7 +1302,9 @@ fn drain_deferred_ydoc(
                     "parked Y.Doc base claim does not match its full-state digest",
                 ));
             }
-            if let Some(replacement) = apply_deferred_base(
+            let head_pending = std::cell::Cell::new(false);
+            let held = held_rows.first().and(released_hold.as_ref());
+            let based = apply_deferred_base(
                 store,
                 key,
                 &payload,
@@ -1137,9 +1316,42 @@ fn drain_deferred_ydoc(
                 faults,
                 search_policy.as_ref(),
                 recovery_leases,
-            )? {
-                lineage_replacements.push(replacement);
+                |tx| {
+                    let lineage = dohc_engine_collab::read_marker_in(tx, key)
+                        .map_err(map_collab_hard_error)?
+                        .and_then(|marker| marker.lineage_claim_id);
+                    let Some(lineage) = lineage else {
+                        return Ok(());
+                    };
+                    match drain_gate(tx, key, &lineage, &row, &tails, Incoming::Replacement, held)?
+                    {
+                        None => Ok(()),
+                        Some((binding, pending)) => {
+                            head_pending.set(pending);
+                            Err(SyncError::ReleasedLineageUnsettled(binding))
+                        }
+                    }
+                },
+            );
+            match based {
+                Err(SyncError::ReleasedLineageUnsettled(binding)) => {
+                    if hold_drained_row(
+                        store,
+                        faults,
+                        &mut held_rows,
+                        &mut released_hold,
+                        row,
+                        binding,
+                        head_pending.get(),
+                    )? {
+                        break;
+                    }
+                    continue;
+                }
+                Ok(replacement) => lineage_replacements.extend(replacement),
+                Err(error) => return Err(error),
             }
+            requeue_held(&mut queue, &mut held_rows, &mut released_hold);
             conflicts_opened += store.read_with(|conn| {
                 conn.query_row("SELECT payload_hash FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict'",
                     [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
@@ -1271,6 +1483,9 @@ fn drain_deferred_ydoc(
             origin_seq,
             bytes,
         };
+        // What the gate decided when it kept the row out of the head.
+        let gated = std::cell::Cell::new(None);
+        let held = held_rows.first().and(released_hold.as_ref());
         let apply_result = apply_remote_update_with_guard(
             store,
             cache,
@@ -1280,14 +1495,39 @@ fn drain_deferred_ydoc(
             payload.attribution.as_ref(),
             faults,
             recorded_at_ms,
-            |_| {
+            |tx| {
                 if recovery_leases.is_some_and(|leases| leases.is_live(key)) {
-                    Err(CollabError::LeaseHeld)
-                } else {
-                    Ok(())
+                    return Err(CollabError::LeaseHeld);
+                }
+                let incoming = Incoming::Update {
+                    bytes: &remote.bytes,
+                    path: &payload.path,
+                };
+                match drain_gate(tx, key, &winner_claim_id, &row, &tails, incoming, held) {
+                    Ok(None) => Ok(()),
+                    decided => {
+                        gated.set(Some(decided));
+                        Err(CollabError::LeaseHeld)
+                    }
                 }
             },
         );
+        if let Some(decided) = gated.take() {
+            let (binding, head_pending) = decided?
+                .ok_or_else(|| local_corruption("a drain's gate kept out a row it admitted"))?;
+            if hold_drained_row(
+                store,
+                faults,
+                &mut held_rows,
+                &mut released_hold,
+                row,
+                binding,
+                head_pending,
+            )? {
+                break;
+            }
+            continue;
+        }
         let (outcome, applied_facts) = match apply_result {
             Ok(applied) => (applied.outcome, applied.record_facts),
             Err(CollabError::LeaseHeld) if recovery_leases.is_some() => {
@@ -1309,7 +1549,10 @@ fn drain_deferred_ydoc(
             }
         };
         match outcome {
-            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => applied += 1,
+            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => {
+                applied += 1;
+                requeue_held(&mut queue, &mut held_rows, &mut released_hold);
+            }
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
@@ -1439,6 +1682,7 @@ fn drain_deferred_ydoc(
             sharing_declined,
             lineage_replacements,
             record_facts,
+            released_hold,
         },
         YdocDrainCleanup {
             workspace_id: key.workspace_id.clone(),
@@ -1913,9 +2157,9 @@ fn hold_released_lineage(
     tails: &ReleasedTails,
     incoming: Incoming<'_>,
 ) -> Result<Option<Box<ReleasedLineageBinding>>, SyncError> {
-    use dohc_engine_collab::live_update_application::{
-        IncomingCoordinate, Protection, ProtectionKey, protection,
-    };
+    use dohc_engine_collab::live_update_application::IncomingCoordinate;
+    // A binding names a relay position from 1; any other is none.
+    let relay_seq = relay_seq.filter(|seq| *seq > 0);
     let identity: Option<(String, String)> = tx
         .query_row(
             "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
@@ -1933,21 +2177,10 @@ fn hold_released_lineage(
         origin_seq: op.origin_seq,
         relay_seq: relay_seq.unwrap_or_default(),
     };
-    let protected = protection(
-        tx,
-        &ProtectionKey {
-            doc: key,
-            lineage_claim_id: lineage,
-            incoming: &coordinate,
-        },
-        tails,
-    )
-    .map_err(protection_failure)?;
-    let (binding, head) = match protected {
-        Protection::Protected { binding, head } => (binding, head),
-        Protection::Unprotected => return Ok(None),
-        Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
-    };
+    let decision = released_decision(tx, key, lineage, &coordinate, tails, incoming)?;
+    if matches!(decision, ReleasedDecision::Unprotected) {
+        return Ok(None);
+    }
     if identity.is_none() {
         return Err(local_corruption(
             "a protected lineage's replica has no sync identity",
@@ -1958,19 +2191,253 @@ fn hold_released_lineage(
             reason: "a row held for a released lineage has no relay sequence",
         });
     }
+    match decision {
+        ReleasedDecision::Held { binding, .. } => Err(SyncError::ReleasedLineageUnsettled(binding)),
+        ReleasedDecision::Admitted(binding) => Ok(Some(binding)),
+        ReleasedDecision::Unprotected => Ok(None),
+    }
+}
+
+/// What released protection decides for a synced row.
+enum ReleasedDecision {
+    /// No released tail protects the head's lineage.
+    Unprotected,
+    /// The row destroys nothing a protected tail retains.
+    Admitted(Box<ReleasedLineageBinding>),
+    /// The row could destroy retained work; `head_pending` says whether the
+    /// head it would change waits for dependencies.
+    Held {
+        binding: Box<ReleasedLineageBinding>,
+        head_pending: bool,
+    },
+}
+
+/// Decide for the row `coordinate` names, which would change `key`'s head
+/// `lineage` as `incoming` says: held when it is a replacement, a write that
+/// moves the document, or an update that lands off the tail's binding or that
+/// structural inspection does not admit. [`SyncError::ValidationPending`]
+/// while the lineage's tails wait for validation.
+fn released_decision(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    lineage: &str,
+    coordinate: &dohc_engine_collab::live_update_application::IncomingCoordinate,
+    tails: &ReleasedTails,
+    incoming: Incoming<'_>,
+) -> Result<ReleasedDecision, SyncError> {
+    use dohc_engine_collab::live_update_application::{Protection, ProtectionKey, protection};
+    let protected = protection(
+        tx,
+        &ProtectionKey {
+            doc: key,
+            lineage_claim_id: lineage,
+            incoming: coordinate,
+        },
+        tails,
+    )
+    .map_err(protection_failure)?;
+    let (binding, head) = match protected {
+        Protection::Protected { binding, head } => (binding, head),
+        Protection::Unprotected => return Ok(ReleasedDecision::Unprotected),
+        Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
+    };
     let destructive = match incoming {
         Incoming::Replacement => true,
         Incoming::Write { path } => binding.current_path.as_deref() != Some(path),
         Incoming::Update { bytes, path } => {
-            binding.moved(path)
+            let destructive = binding.moved(path)
                 || dohc_engine_collab::inspect_update(&head, bytes)
-                    != dohc_engine_collab::UpdateInspection::Admissible
+                    != dohc_engine_collab::UpdateInspection::Admissible;
+            // Bytes the head cannot replay are refused as anywhere else,
+            // never held: the ordinary apply refuses them.
+            if destructive
+                && let Err(error) = dohc_engine_collab::validate_replay_parity(&head, bytes)
+            {
+                return match map_collab_payload_error(error, "ydoc.update fails replay parity") {
+                    SyncError::InvalidInput { .. } => Ok(ReleasedDecision::Admitted(binding)),
+                    hard => Err(hard),
+                };
+            }
+            destructive
         }
     };
-    if destructive {
-        return Err(SyncError::ReleasedLineageUnsettled(binding));
+    Ok(if destructive {
+        ReleasedDecision::Held {
+            binding,
+            head_pending: head.has_pending_dependencies(),
+        }
+    } else {
+        ReleasedDecision::Admitted(binding)
+    })
+}
+
+/// The feed a deferred Y.Doc update recorded when it was queued.
+#[derive(Debug, Clone)]
+struct DeferredFeed {
+    ingress_kind: String,
+    relay_namespace: Option<String>,
+    replication_epoch: Option<String>,
+    stream_identity: Option<String>,
+}
+
+/// [`released_decision`] for a deferred update a drain replays, under the
+/// feed the row recorded, never the current configuration. A local row
+/// arrived on this replica's own feed. A row whose feed was never recorded
+/// is held on a protected lineage whatever it does: nothing shows the feed
+/// it came from, so its binding names no namespace.
+#[allow(clippy::too_many_arguments)]
+fn drain_decision(
+    tx: &rusqlite::Connection,
+    key: &DocKey,
+    lineage: &str,
+    feed: &DeferredFeed,
+    origin_id: &str,
+    origin_seq: i64,
+    relay_seq: i64,
+    tails: &ReleasedTails,
+    incoming: Incoming<'_>,
+) -> Result<ReleasedDecision, SyncError> {
+    let current: Option<(String, String)> = tx
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let hosted = feed.ingress_kind == "hosted";
+    let (replication_epoch, stream_identity) =
+        match (hosted, &feed.replication_epoch, &feed.stream_identity) {
+            (true, Some(epoch), Some(stream)) => (epoch.clone(), stream.clone()),
+            _ => current.clone().unwrap_or_default(),
+        };
+    let coordinate = dohc_engine_collab::live_update_application::IncomingCoordinate {
+        relay_namespace: feed.relay_namespace.clone().filter(|_| hosted),
+        replication_epoch,
+        stream_identity,
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        relay_seq,
+    };
+    let unrecorded = feed.ingress_kind == "legacy-unknown";
+    let incoming = if unrecorded {
+        Incoming::Replacement
+    } else {
+        incoming
+    };
+    let decision = released_decision(tx, key, lineage, &coordinate, tails, incoming)?;
+    if matches!(decision, ReleasedDecision::Unprotected) {
+        return Ok(decision);
     }
-    Ok(Some(binding))
+    if current.is_none() {
+        return Err(local_corruption(
+            "a protected lineage's replica has no sync identity",
+        ));
+    }
+    // A binding names a relay position from 1, as at ingress.
+    if relay_seq <= 0 {
+        return Err(SyncError::RetryableState {
+            reason: "a row held for a released lineage has no relay sequence",
+        });
+    }
+    Ok(decision)
+}
+
+/// Persist `hold` for the document its binding names, unless its row
+/// already records exactly that hold: a hold persisted again would count a
+/// commit, and no pass could ever commit.
+fn persist_released_hold(
+    store: &mut EngineStore,
+    hold: &crate::HostedHold,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    let crate::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        continuation,
+        binding_stale,
+    } = hold
+    else {
+        return Ok(());
+    };
+    let persisted = store.write_with(faults, |tx| {
+        if crate::hosted::recorded_hold(tx, &binding.workspace_id, &binding.object_id)?.as_ref()
+            != Some(hold)
+        {
+            crate::hosted::hold_released_in_tx(tx, binding, *continuation, *binding_stale)?;
+        }
+        Ok::<_, SyncError>(())
+    })?;
+    match persisted {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+/// Why a hosted replica defers nothing its trusted configuration names no
+/// feed for: the row stays unacknowledged before the cursor.
+pub(crate) const HOSTED_DEFERRAL_UNNAMED: &str = "a hosted deferral has no trusted feed";
+
+/// Queue `op`, a `ydoc.update` of `key`'s `lineage_claim_id`, for a later
+/// drain, in the transaction that acknowledges it. A hosted replica's row
+/// records the feed it arrived on: the trusted `relay_namespace`, the
+/// replica's epoch and stream, and its relay position from 1. Any other
+/// replica's row is local. A row already queued keeps the feed it recorded;
+/// one its feed cannot describe fails rather than queueing nothing.
+pub(crate) fn defer_ydoc_update_in_tx(
+    tx: &Connection,
+    key: &DocKey,
+    op: &ReplicationEnvelope,
+    lineage_claim_id: &str,
+    relay_seq: i64,
+    relay_namespace: Option<&str>,
+) -> Result<(), SyncError> {
+    let feed = if crate::hosted::is_hosted(tx, &key.workspace_id)? {
+        let identity: Option<(String, String)> = tx
+            .query_row(
+                "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+                [&key.workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        match (
+            relay_namespace.filter(|namespace| !namespace.is_empty()),
+            identity,
+        ) {
+            (Some(namespace), Some((epoch, stream))) if relay_seq > 0 => {
+                ("hosted", Some(namespace), Some(epoch), Some(stream))
+            }
+            _ => {
+                return Err(SyncError::RetryableState {
+                    reason: HOSTED_DEFERRAL_UNNAMED,
+                });
+            }
+        }
+    } else {
+        ("local", None, None, None)
+    };
+    tx.execute(
+        "INSERT INTO ydoc_deferred_updates \
+         (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id, \
+          relay_seq,ingress_kind,relay_namespace,replication_epoch,stream_identity) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT DO NOTHING",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            op.origin_id,
+            op.origin_seq,
+            op.recorded_at_ms,
+            lineage_claim_id,
+            relay_seq,
+            feed.0,
+            feed.1,
+            feed.2,
+            feed.3
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 fn protection_failure(
@@ -4684,12 +5151,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id], |row| row.get::<_,bool>(0),
     )).map_err(SyncError::corrupt)? {
         let mut outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
-            tx.execute(
-                "INSERT OR IGNORE INTO ydoc_deferred_updates \
-                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![key.workspace_id,key.version_id,key.object_id,op.origin_id,op.origin_seq,op.recorded_at_ms,payload.lineage_claim_id,relay_seq],
-            ).map_err(SyncError::persist)?;
+            defer_ydoc_update_in_tx(tx, &key, op, &payload.lineage_claim_id, relay_seq, relay_namespace)?;
             Ok(YdocApplyResult { deferred: true, reason: Some("ydoc-inactive-lineage"), conflicts_opened: 0, lineage_replacement: None, record_facts: Vec::new() })
         })?;
         if !batch_inactive && !leases.is_live(&key) {
@@ -4806,23 +5268,14 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             // the ack: drains replay exactly these rows, never the whole
             // imported history (which after compaction would re-append
             // non-dedupable updates and cost O(history) per open).
-            tx.execute(
-                "INSERT OR IGNORE INTO ydoc_deferred_updates
-                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,
-                  lineage_claim_id,relay_seq)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    deferred_key.workspace_id,
-                    deferred_key.version_id,
-                    deferred_key.object_id,
-                    op.origin_id,
-                    op.origin_seq,
-                    op.recorded_at_ms,
-                    payload.lineage_claim_id,
-                    relay_seq,
-                ],
-            )
-            .map_err(SyncError::persist)?;
+            defer_ydoc_update_in_tx(
+                tx,
+                &deferred_key,
+                op,
+                &payload.lineage_claim_id,
+                relay_seq,
+                relay_namespace,
+            )?;
             Ok(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-session-live"),
@@ -5234,6 +5687,35 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     } else {
         YdocDrainResult::default()
     };
+    // What arrives behind queued work the drain held queues behind it, in
+    // order, so nothing changes the head the hold names before its turn.
+    if drain.released_hold.is_some() {
+        let deferred_key = key.clone();
+        let outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
+            defer_ydoc_update_in_tx(
+                tx,
+                &deferred_key,
+                op,
+                &payload.lineage_claim_id,
+                relay_seq,
+                relay_namespace,
+            )?;
+            Ok(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-released-hold-queued"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: Vec::new(),
+            })
+        })?;
+        let mut outcome = merge_drained_first(
+            merge_lineage_replacements(outcome, drain.lineage_replacements, drain.conflicts_opened),
+            drain.record_facts,
+        );
+        outcome.sharing_declined.extend(drain.sharing_declined);
+        outcome.refusals.extend(drain.refusals);
+        return Ok(outcome);
+    }
     // Only the marker is read before admission. Candidate integration and its
     // projection doc are produced by the replay gate inside the transaction,
     // so neither a cold doc nor the writer cache is mutated before commit.
@@ -5308,23 +5790,14 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         ],
                     )
                     .map_err(SyncError::persist)?;
-                    tx.execute(
-                        "INSERT OR IGNORE INTO ydoc_deferred_updates
-                     (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,
-                      lineage_claim_id,relay_seq)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                        params![
-                            deferred_key.workspace_id,
-                            deferred_key.version_id,
-                            deferred_key.object_id,
-                            op.origin_id,
-                            op.origin_seq,
-                            op.recorded_at_ms,
-                            payload.lineage_claim_id,
-                            relay_seq,
-                        ],
-                    )
-                    .map_err(SyncError::persist)?;
+                    defer_ydoc_update_in_tx(
+                        tx,
+                        &deferred_key,
+                        op,
+                        &payload.lineage_claim_id,
+                        relay_seq,
+                        relay_namespace,
+                    )?;
                     Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
                         deferred: true,
                         reason: Some("ydoc-lineage-absent"),

@@ -1971,6 +1971,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // one for released retained work.
             redelivered: _,
             released: _,
+            drain_holds: _,
         } = pass;
         let has_more = has_more || settled_more;
 
@@ -2489,12 +2490,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             complete: false,
                             heads_written: false,
                         },
-                        None => crate::HostedRead {
-                            cursor,
-                            stopped: None,
-                            complete: !more,
-                            heads_written: false,
-                        },
+                        // Its queued work a drain held stops it where its read is.
+                        None => {
+                            let held = pass.drain_holds.get(&object_id).cloned();
+                            crate::HostedRead {
+                                cursor,
+                                complete: !more && held.is_none(),
+                                stopped: held,
+                                heads_written: false,
+                            }
+                        }
                     };
                     match read.hold(&mut occupancy, &object_id)? {
                         Some(hold) => {
@@ -2513,10 +2518,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     settled.insert(object_id, read);
                 }
                 // A ready document that a refusal of this pass held is held
-                // too. It reads its own rows from the next pass.
+                // too. It reads its own rows from the next pass. One the
+                // pass did not read that is held for released retained work
+                // still is, so every pass names each such hold.
                 for (object_id, document) in &replica.documents {
-                    if document.status == crate::HostedDocumentStatus::Ready
-                        && !settled.contains_key(object_id)
+                    if settled.contains_key(object_id) {
+                        continue;
+                    }
+                    let released = matches!(
+                        document.status,
+                        crate::HostedDocumentStatus::Held(
+                            crate::HostedHold::ReleasedLineageUnsettled { .. }
+                        )
+                    );
+                    if (released || document.status == crate::HostedDocumentStatus::Ready)
                         && let Some(hold) =
                             crate::hosted::recorded_hold(conn, workspace_id, object_id)?
                     {
@@ -2770,7 +2785,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                let unretained = crate::deferred::retain(store, identity, &retained, faults)?;
+                let unretained =
+                    crate::deferred::retain(store, identity, relay_namespace, &retained, faults)?;
                 for op in retained {
                     if let Some(object_id) = crate::hosted::hosted_document(op)
                         .filter(|object_id| unretained.contains(*object_id))
@@ -2792,6 +2808,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
             .map_err(local)?;
+        // Each pass decides again for queued work a drain held, so its
+        // document frees once that work no longer needs holding.
+        if matches!(p.holding, Holding::ByDocument { .. }) {
+            match crate::ydoc_apply::drain_released_holds(
+                store,
+                cache,
+                workspace_id,
+                faults,
+                leases,
+            ) {
+                Ok(holds) => p.pass.drain_holds = holds,
+                Err(SyncError::ValidationPending(pending)) => {
+                    return Ok(Applying::Suspended(pending, Box::new(progress)));
+                }
+                Err(error) => return Err(local(error)),
+            }
+        }
         let drained = crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
@@ -2875,6 +2908,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
                 .map_err(local)?;
         }
+        // Retained work replays under the feed it arrived on.
+        let recorded = match &p.holding {
+            Holding::ByDocument { .. } => crate::deferred::retained_namespace(store, op)?,
+            Holding::ByOrigin => None,
+        };
+        let relay_namespace = recorded.as_ref().map_or(relay_namespace, Option::as_deref);
         let routed = match p.holding.held_before_routing(store, op)? {
             Some(reason) => Err(SyncError::RetryableState { reason }),
             None => crate::router::apply_replication_envelope_in_batch(
@@ -2907,6 +2946,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             Err(SyncError::RetryableState { reason }) => Err(reason),
             routed => Ok(routed),
         };
+        // A later attempt at the coordinate that answers otherwise leaves
+        // no binding for a stop there to take.
+        if !matches!(held_for, Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED))
+            && let Some(object_id) = crate::hosted::hosted_document(op)
+            && p.pass
+                .released
+                .get(object_id)
+                .is_some_and(|(coordinate, _)| {
+                    (coordinate.0.as_str(), coordinate.1) == (op.origin_id.as_str(), op.origin_seq)
+                })
+        {
+            p.pass.released.remove(object_id);
+        }
         match held_for {
             Err(reason) => {
                 p.holding.stop_at_withheld_parent(op, reason);
@@ -4904,6 +4956,9 @@ struct AppliedPass {
     /// Each document an op held for released retained work, with that op's
     /// coordinate and the binding the hold names.
     released: BTreeMap<String, ReleasedStop>,
+    /// Each document whose queued work the pass's drain held for released
+    /// retained work, with that hold.
+    drain_holds: BTreeMap<String, crate::HostedHold>,
 }
 
 type ReleasedStop = (

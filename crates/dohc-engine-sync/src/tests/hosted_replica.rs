@@ -250,7 +250,14 @@ fn hosted_deferred_work_replays_by_coordinate_membership() {
     host_document(&mut store, "doc-a");
     let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
     let (early, late) = (document_op(3, 1, "doc-a"), document_op(7, 2, "doc-a"));
-    crate::deferred::retain(&mut store, &identity, &[&early, &late], &NoFaults).unwrap();
+    crate::deferred::retain(
+        &mut store,
+        &identity,
+        Some("relay"),
+        &[&early, &late],
+        &NoFaults,
+    )
+    .unwrap();
     let waiting = |store: &EngineStore| {
         crate::deferred::read_hosted(store, "ws", &identity)
             .unwrap()
@@ -276,12 +283,154 @@ fn hosted_deferred_work_replays_by_coordinate_membership() {
 
     let mut unplaced = document_op(8, 3, "doc-a");
     unplaced.relay_seq = None;
-    for refused in [op(9, "names no document"), unplaced] {
+    let at_zero = document_op(4, 0, "doc-a");
+    for refused in [op(9, "names no document"), unplaced, at_zero] {
         assert!(
-            crate::deferred::retain(&mut store, &identity, &[&refused], &NoFaults).is_err(),
+            crate::deferred::retain(&mut store, &identity, Some("relay"), &[&refused], &NoFaults)
+                .is_err(),
             "a hosted replica retains its documents' work at its relay position"
         );
     }
+}
+
+/// The feed each retained op and deferred Y.Doc update of `store` recorded,
+/// by origin sequence: its ingress kind, namespace, epoch and stream.
+fn recorded_feeds(store: &EngineStore) -> Vec<(String, i64, String, Option<String>)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT 'relay',origin_seq,ingress_kind,relay_namespace FROM relay_deferred_ops \
+                 UNION ALL SELECT 'ydoc:'||COALESCE(replication_epoch,'-')||'/'||COALESCE(stream_identity,'-'), \
+                   origin_seq,ingress_kind,relay_namespace FROM ydoc_deferred_updates ORDER BY 1,2",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+}
+
+/// Defer a Y.Doc update of `doc` at `seq` as a pull under `namespace` does.
+fn defer_update(
+    store: &mut EngineStore,
+    seq: i64,
+    relay_seq: i64,
+    namespace: Option<&str>,
+) -> Result<(), SyncError> {
+    let key = dohc_engine_collab::DocKey {
+        workspace_id: "ws".to_owned(),
+        version_id: "main".to_owned(),
+        object_id: "doc".to_owned(),
+    };
+    let op = envelope("owner", seq, "ydoc.update", json!({ "objectId": "doc" }));
+    match store.write_with(&NoFaults, |tx| {
+        tx.execute_batch(
+            "INSERT OR IGNORE INTO versioned_workspaces (workspace_id,main_version_id) \
+             VALUES ('ws','main'); \
+             INSERT OR IGNORE INTO file_objects (workspace_id,object_id,created_at_ms) \
+             VALUES ('ws','doc',0);",
+        )
+        .map_err(SyncError::persist)?;
+        crate::ydoc_apply::defer_ydoc_update_in_tx(
+            tx,
+            &key,
+            &op,
+            &"a".repeat(64),
+            relay_seq,
+            namespace,
+        )
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => panic!("no fault was injected"),
+    }
+}
+
+/// A hosted replica records, with each op it retains and each Y.Doc update
+/// it defers, the feed it arrived on: the trusted namespace, its epoch and
+/// stream, and a relay position from 1. Work no namespace names, or with no
+/// relay position, is retained nowhere. A later configuration never
+/// relabels what is queued, and a restart reads the same feed back.
+#[test]
+fn hosted_deferrals_keep_the_feed_they_arrived_on() {
+    let (_scratch, path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
+    let first = document_op(3, 1, "doc-a");
+    assert_eq!(
+        crate::deferred::retain(&mut store, &identity, None, &[&first], &NoFaults).unwrap(),
+        std::collections::BTreeSet::from(["doc-a".to_owned()]),
+        "work no trusted namespace names is not retained"
+    );
+    assert!(matches!(
+        defer_update(&mut store, 1, 5, None),
+        Err(SyncError::RetryableState {
+            reason: crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED
+        })
+    ));
+    assert!(matches!(
+        defer_update(&mut store, 1, 0, Some("relay")),
+        Err(SyncError::RetryableState {
+            reason: crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED
+        })
+    ));
+    assert!(recorded_feeds(&store).is_empty(), "nothing was retained");
+
+    crate::deferred::retain(&mut store, &identity, Some("relay"), &[&first], &NoFaults).unwrap();
+    defer_update(&mut store, 1, 5, Some("relay")).unwrap();
+    let recorded = vec![
+        (
+            "relay".to_owned(),
+            3,
+            "hosted".to_owned(),
+            Some("relay".to_owned()),
+        ),
+        (
+            "ydoc:epoch-1/stream-1".to_owned(),
+            1,
+            "hosted".to_owned(),
+            Some("relay".to_owned()),
+        ),
+    ];
+    assert_eq!(recorded_feeds(&store), recorded);
+    assert_eq!(
+        crate::deferred::retained_namespace(&store, &first).unwrap(),
+        Some(Some("relay".to_owned()))
+    );
+
+    // The trusted configuration now names another namespace.
+    crate::deferred::retain(
+        &mut store,
+        &identity,
+        Some("elsewhere"),
+        &[&first],
+        &NoFaults,
+    )
+    .unwrap();
+    defer_update(&mut store, 1, 5, Some("elsewhere")).unwrap();
+    assert_eq!(
+        recorded_feeds(&store),
+        recorded,
+        "queued work keeps its feed"
+    );
+
+    drop(store);
+    let store = EngineStore::open(&path, 2_000).unwrap();
+    assert_eq!(recorded_feeds(&store), recorded);
+    assert_eq!(
+        crate::deferred::retained_namespace(&store, &first).unwrap(),
+        Some(Some("relay".to_owned())),
+        "a replay after restart decides under the feed the op arrived on"
+    );
+}
+
+/// An ordinary replica's deferrals are local, and need no feed.
+#[test]
+fn ordinary_deferrals_are_local() {
+    let (_scratch, _path, mut store) = open_store();
+    defer_update(&mut store, 1, 5, None).unwrap();
+    assert_eq!(
+        recorded_feeds(&store),
+        [("ydoc:-/-".to_owned(), 1, "local".to_owned(), None)]
+    );
 }
 
 /// Make `object_id` a document of the replica's current scope.
@@ -968,14 +1117,24 @@ fn pass(
     store: &mut EngineStore,
     faults: &dyn dohc_engine_storage::FaultInjector,
 ) -> Result<HostedPassOutcome, RelayError> {
-    client.pull_hosted_workspace(
-        store,
-        &mut WriterDocCache::new(),
-        "ws",
-        None,
-        faults,
-        &NoLiveLeases,
-    )
+    // As the actor's relay coordinator runs it: each released-tail
+    // validation the pass waits for completes, and the pass goes on.
+    let mut cache = WriterDocCache::new();
+    loop {
+        match client.pull_hosted_workspace(
+            store,
+            &mut cache,
+            "ws",
+            Some("relay"),
+            faults,
+            &NoLiveLeases,
+        ) {
+            Err(RelayError::ValidationPending(pending)) => {
+                pending.validate().wait().unwrap();
+            }
+            pass => return pass,
+        }
+    }
 }
 
 fn commit(
@@ -1583,7 +1742,7 @@ fn retain_behind_closed_editor(
     let held = client.transport().log.lock().unwrap()[from - 1..].to_vec();
     let identity = read_sync_identity(store, "ws").unwrap().unwrap();
     let held_refs = held.iter().collect::<Vec<_>>();
-    crate::deferred::retain(store, &identity, &held_refs, &NoFaults).unwrap();
+    crate::deferred::retain(store, &identity, Some("relay"), &held_refs, &NoFaults).unwrap();
     let end = held.last().and_then(|op| op.relay_seq).unwrap();
     store
         .write_with(&NoFaults, |tx| {
@@ -1691,6 +1850,7 @@ fn hosted_replay_takes_turns_by_document() {
     crate::deferred::retain(
         &mut store,
         &identity,
+        Some("relay"),
         &held.iter().collect::<Vec<_>>(),
         &NoFaults,
     )
@@ -2078,9 +2238,15 @@ fn a_held_document_releases_the_work_it_retained_while_ready() {
     ];
     let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
     assert!(
-        crate::deferred::retain(&mut store, &identity, &[&other[0], &other[1]], &NoFaults)
-            .unwrap()
-            .is_empty(),
+        crate::deferred::retain(
+            &mut store,
+            &identity,
+            Some("relay"),
+            &[&other[0], &other[1]],
+            &NoFaults
+        )
+        .unwrap()
+        .is_empty(),
         "another document retains work under the freed cap"
     );
 }
@@ -3337,7 +3503,14 @@ fn parking_keeps_journaled_deferred_updates_and_waits_for_accepted_work() {
     pending_outbox(&mut store, "doc-b");
     let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
     let unjournaled = document_op(9, 99, "doc-b");
-    crate::deferred::retain(&mut store, &identity, &[&unjournaled], &NoFaults).unwrap();
+    crate::deferred::retain(
+        &mut store,
+        &identity,
+        Some("relay"),
+        &[&unjournaled],
+        &NoFaults,
+    )
+    .unwrap();
     assert_eq!(retained(&store), 1);
 
     feed.unshare("doc-b");
@@ -6079,6 +6252,92 @@ fn a_released_hold_outside_a_commit_invalidates_a_pending_pass() {
             backfill_cursor: 7,
         }
     );
+}
+
+/// A binding of `object_id`'s lineage at `path` for an update at `relay_seq`.
+fn released_binding(
+    object_id: &str,
+    path: &str,
+    relay_seq: i64,
+) -> dohc_engine_collab::live_update_application::ReleasedLineageBinding {
+    use dohc_engine_collab::live_update_application::{
+        IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+    };
+    ReleasedLineageBinding {
+        workspace_id: "ws".into(),
+        main_version_id: "main".into(),
+        object_id: object_id.into(),
+        lineage_claim_id: "a".repeat(64),
+        current_path: Some(path.into()),
+        restore_generation: Some(0),
+        incoming: IncomingCoordinate {
+            relay_namespace: Some("relay".into()),
+            replication_epoch: "epoch-1".into(),
+            stream_identity: "stream-1".into(),
+            origin_id: "peer".into(),
+            origin_seq: 3,
+            relay_seq,
+        },
+        head_digest: "b".repeat(64),
+        tails: std::sync::Arc::new(ProtectedTails::Invalid),
+    }
+}
+
+/// A document held for released retained work that nothing holds any more,
+/// with no queued update and no row its read stops at, is ready once its
+/// next pass commits, and that pass names no hold of it, so the relay host
+/// drops the block it kept. A hold an earlier decision stored never outlives
+/// a fresh one.
+#[test]
+fn a_released_hold_nothing_still_justifies_frees_on_the_next_pass() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "first");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::hosted::hold_released_in_tx(
+                tx,
+                &released_binding("doc-a", "a.md", 8),
+                crate::ReleasedHoldContinuation::Frozen,
+                false,
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        document(&store, "doc-a").unwrap().status,
+        HostedDocumentStatus::Held(HostedHold::ReleasedLineageUnsettled { .. })
+    ));
+    let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(!outcome.held.contains_key("doc-a"), "{outcome:?}");
+    assert!(commit(&client, &mut store, &outcome));
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+}
+
+/// A binding names a relay position from 1. One at 0 would not read back,
+/// so no hold stores it: the transaction fails before it counts a commit,
+/// and the document stays as it was.
+#[test]
+fn a_released_hold_whose_binding_does_not_read_back_is_never_stored() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc");
+    let before = read_hosted_replica(&store, "ws").unwrap().unwrap();
+    let binding = released_binding("doc", "doc.md", 0);
+    let held = store.write_with(&NoFaults, |tx| {
+        crate::hosted::hold_released_in_tx(
+            tx,
+            &binding,
+            crate::ReleasedHoldContinuation::Frozen,
+            false,
+        )
+    });
+    assert!(held.is_err(), "{held:?}");
+    assert_eq!(read_hosted_replica(&store, "ws").unwrap().unwrap(), before);
 }
 
 /// Binding version 2 replaced version 1, which nothing reads: a hold that

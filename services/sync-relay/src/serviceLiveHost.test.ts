@@ -1933,6 +1933,31 @@ it("holds a document for released retained work by its binding's digest until th
   expect(driver()!.releasedHold(o.sibling)).toBeUndefined();
 });
 
+// Proves: a document a later pass no longer holds for released retained work
+// is free of that hold, though the pass that held it committed nothing: the
+// engine's fresh gate admitted the work it held. A fresh binding replaces the
+// digest instead, and a pass that adopted a scope says nothing of it.
+it("frees a document once a pass no longer holds it for released retained work", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], driver = heldDriver();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const hold = releasedHold(), refreshed = releasedHold({originSeq: 1});
+  // The pass that holds it goes stale before its commit.
+  o.replies.pass = {held: [hold]}; o.replies.commit = {committed: false};
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(hold)));
+  o.replies.pass = {held: [refreshed]}; o.replies.commit = {};
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBe(digest(refreshed)));
+  o.replies.pass = {pendingCursor: null};
+  await o.nextPull(); await o.nextPull();
+  expect(driver()!.releasedHold(o.sibling)).toBe(digest(refreshed));
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBeUndefined());
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+});
+
 // Proves: a restore's capture of a document held for released retained work
 // clears what its pass held it for, never its binding's digest, so later
 // passes still never capture it. Alone in its workspace, the dormant document

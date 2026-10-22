@@ -2212,7 +2212,7 @@ fn build_debug_http_transport(
 
 /// A validation that ended without a result fails its request, which never
 /// validates any other way. A store that closed is unavailable.
-fn validation_failed(
+pub(super) fn validation_failed(
     error: dohc_engine_collab::live_update_application::ValidationError,
 ) -> RuntimeError {
     use dohc_engine_collab::live_update_application::ValidationError;

@@ -359,11 +359,12 @@ export async function startServiceLiveHost(options: {
         pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
-    // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness.
+    // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness,
+    // and each page that read its documents says which still are.
     const pull = async (attached: HostedAttachment, joined: AbortSignal) => {
       const number = ++attached.pulls, workspaceId = attached.hosted.connection.workspaceId;
       const result = await attached.hosted.pull(joined, page => {
-        if (page.held.length) activation?.hold(workspaceId, page.held);
+        if (!page.adoptedScope) activation?.hold(workspaceId, page.held);
       });
       attached.confirmed = number;
       return result;

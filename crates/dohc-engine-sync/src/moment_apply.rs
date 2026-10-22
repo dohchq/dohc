@@ -1330,6 +1330,19 @@ fn apply_moment_append(
         });
     }
 
+    // A text settlement of the protected lineage's own document that would
+    // open a conflict holds before the conflict writes anything: the conflict
+    // would strand retained work no host could settle. An occupant's
+    // conflict, or any other change, keeps its ordinary behaviour.
+    if let Some(binding) = protected
+        && payload.operation == "write"
+        && after_kind == ContentKind::Text
+        && payload.path == payload.payload_after_path
+        && conflicting_occupant.is_none()
+        && is_ydoc_settlement_moment_id(&payload.moment_id)
+    {
+        return Err(SyncError::ReleasedLineageUnsettled(binding));
+    }
     ensure_file_object(tx, &envelope.workspace_id, payload)?;
     insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
     let current_snapshot = local.as_ref().or(conflicting_occupant.as_ref());
