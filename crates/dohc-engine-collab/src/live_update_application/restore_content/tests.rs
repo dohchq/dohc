@@ -5079,6 +5079,15 @@ fn old_fence_receipts_without_the_selection_are_refused() {
 
 #[test]
 fn fence_rechecks_selected_terminal_after_preflight() {
+    recheck_selected_terminal(false);
+}
+
+#[test]
+fn unknown_history_fence_rechecks_selected_terminal_after_preflight() {
+    recheck_selected_terminal(true);
+}
+
+fn recheck_selected_terminal(unknown_history: bool) {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let mut f = Fixture::new("original\n");
@@ -5089,6 +5098,15 @@ fn fence_rechecks_selected_terminal_after_preflight() {
         journal_cursor: point.journal_cursor,
         receipt_digest: point.receipt_digest,
     };
+    if unknown_history {
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute("DELETE FROM live_accepted_reader_history", [])
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
     let before = binding_state(&f);
     let other = Connection::open(f.dir.join("engine.db")).unwrap();
     let replacement = f.terminal.as_ref().unwrap().update_digest.clone();
@@ -5096,7 +5114,7 @@ fn fence_rechecks_selected_terminal_after_preflight() {
     let seen = begins.clone();
     f.store.read_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
         if matches!(context.action, AuthAction::Transaction { operation: TransactionOperation::Begin })
-            && seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            && seen.fetch_add(1, Ordering::SeqCst) == usize::from(unknown_history) {
             assert_eq!(other.execute("UPDATE live_accepted_updates SET update_sha256=?1 WHERE journal_cursor=3", [&replacement]).unwrap(), 1);
         }
         Authorization::Allow
@@ -5107,7 +5125,10 @@ fn fence_rechecks_selected_terminal_after_preflight() {
     f.store
         .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
-    assert_eq!(begins.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        begins.load(Ordering::SeqCst),
+        1 + usize::from(unknown_history)
+    );
     assert!(
         matches!(result, Err(ApplicationError::Conflict)),
         "{result:?}"

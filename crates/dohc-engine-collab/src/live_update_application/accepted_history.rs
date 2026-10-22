@@ -231,8 +231,8 @@ fn record_reader_history(
     bytes: &[u8],
     initial: bool,
 ) -> Result<(), ApplicationError> {
-    let marker = b"dohcMarkdownSourceReader";
-    if bytes.windows(marker.len()).any(|key| key == marker) {
+    let marker = crate::ydoc::MARKDOWN_SOURCE_READER_META_KEY.as_bytes();
+    if memchr::memmem::find(bytes, marker).is_some() {
         tx.execute(
             "INSERT INTO live_accepted_reader_history VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT DO UPDATE SET may_have_reader=1 WHERE may_have_reader=0",
             p,
