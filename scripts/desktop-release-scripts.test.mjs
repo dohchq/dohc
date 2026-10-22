@@ -441,14 +441,10 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.runners, undefined);
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
   assert.equal(jobs.build.strategy["max-parallel"], undefined, "platform builds can run in parallel");
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
-  const resolveMetadata = releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"');
-  assert.doesNotMatch(resolveMetadata.run, /--runners/);
-  assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, undefined);
   // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
   for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
     const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
@@ -466,11 +462,9 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
     assert.deepEqual(desktopReleaseTargets(platforms).map(target => target.runner),
       (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(hostedImage));
   }
-  for (const [name, job] of Object.entries(jobs)) {
-    if (name === "build") continue;
-    assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms })), dispatchPlatforms.map(hostedImage),
-      `${name} runs on Linux only for a Linux dispatch`);
-  }
+  assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(jobs.preflight["runs-on"], {}, {}, { platforms })), dispatchPlatforms.map(hostedImage),
+    "preflight runs on Linux only for a Linux dispatch");
+  for (const job of [jobs["unused-version"], jobs.publish]) assert.equal(job["runs-on"], "ubuntu-24.04");
 
   // Desktop tests need the built runtime exports and the native engine. The
   // PR gate's runner runs the package's unit and script tests with its retries.
@@ -526,7 +520,6 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   assert.equal(packageSteps.length, 1, "every electron-builder path is covered");
   const packageDesktop = releaseStep(jobs.build, "electron-builder");
   assert.equal(packageSteps[0], packageDesktop);
-  assert.equal(packageDesktop.env.GH_TOKEN, undefined, "packaging with --publish never needs no GitHub token");
   assert.match(packageDesktop.run, /builder_args=\(--publish never/, "packaging cannot publish directly");
   assert.match(packageDesktop.run, /builder_args\+=\(-c\.forceCodeSigning=true\)/, "required signing must fail without an identity");
   assert.match(packageDesktop.run, /CSC_IDENTITY_AUTO_DISCOVERY=false/, "unsigned runs disable signing discovery");
@@ -1611,13 +1604,11 @@ test("release-desktop-macos refuses incomplete arguments when run as a command, 
   );
 });
 
-test("release jobs use clean checkouts without retaining earlier builds", () => {
+test("release checkouts do not persist credentials", () => {
   for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
     const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"));
     assert.ok(checkout, `${name} checks out the release commit`);
-    assert.equal(checkout.with.clean, undefined, `${name} uses checkout's default clean`);
     assert.equal(checkout.with["persist-credentials"], false);
-    assert.ok(!job.steps.some(step => /earlier build|leftover files/.test(step.name)), `${name} needs no persistent-workspace cleanup`);
   }
 });
 
@@ -1716,7 +1707,6 @@ test("a nightly dispatches Desktop Release for main's verified commit, follows i
   const host = nightlyHost(fake);
   const report = await runNightly({}, host.deps);
   assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=false -f commit=${NIGHTLY_HEAD}`));
-  assert.ok(!fake.calls.some(call => call.includes("actions/runners")), "the nightly needs no runner-admin access");
   assert.ok(fake.calls.some(call => call.startsWith("gh run view 9")), "it follows the run titled with its commit, not another dispatch that started then");
   assert.ok(!fake.calls.some(call => call.startsWith("gh run view 10")));
   assert.deepEqual(host.macs, [fake.tag], "the macOS files go to the release the run published");

@@ -62,8 +62,9 @@ Windows and Linux packages build in parallel on separate machines.
 
 | Jobs | Image |
 | --- | --- |
-| Preflight, version check, and Publish for `linux` | `ubuntu-24.04` |
-| Preflight, version check, and Publish for other selections | `windows-2025` |
+| Preflight for `linux` | `ubuntu-24.04` |
+| Preflight for other selections | `windows-2025` |
+| Version check and Publish | `ubuntu-24.04` |
 | Windows x64 package | `windows-2025` |
 | Linux x64 package | `ubuntu-24.04` |
 
@@ -82,6 +83,7 @@ The committed `dohc-release` skill is a public procedure. It contains no credent
 Contributors can use it to build local packages or operate workflows in their own forks.
 They need repository write access to dispatch this repository's workflow.
 Trusted collaborators with write access can also request publication through `dry_run=false`.
+The repository requires approval before workflows from every outside contributor run.
 
 The publish job receives a short-lived token scoped to this repository, with `contents: write`.
 A fork's token does not grant access to this repository's releases or signing secrets.
@@ -177,7 +179,7 @@ node scripts/release-nightly.mjs run --dry-run
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
-Every job for this selection runs on `windows-2025`.
+Preflight and packaging run on `windows-2025`. The version check runs on `ubuntu-24.04`.
 The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
 Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
@@ -197,7 +199,7 @@ Verify the files with `--platform linux`, `--arch x64`, the generated version, a
 The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
 
 Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
-The packages build in parallel. The coordinator jobs run on `windows-2025`.
+The packages build in parallel. Preflight runs on `windows-2025`; the version check and Publish run on `ubuntu-24.04`.
 Download both platform artifacts from the same run.
 
 Only the selected platforms receive installers and update packages.
