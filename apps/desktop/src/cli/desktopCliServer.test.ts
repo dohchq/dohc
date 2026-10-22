@@ -520,6 +520,10 @@ describe("desktop CLI workspace context", () => {
       vi.mocked(f.dependencies.liveDocuments.readDocument)
         .mockResolvedValueOnce({ path: "readme.md", state: Y.encodeStateAsUpdate(markdownToYDoc(lossy)) });
       expect(await context.documents!.read("readme.md")).toEqual({ path: "readme.md", markdown: lossy });
+      // A document an editor holds before its file exists still reads from the editor.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "draft.md", state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")) });
+      expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft" });
 
       const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
       await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });

@@ -162,10 +162,11 @@ export function createDesktopCliServer<State>(
   } = dependencies;
 
   // A lossy note's file text, or null for any other file. The check runs in
-  // the projection worker, which remembers it by the text's SHA-256.
+  // the projection worker, which remembers it by the text's SHA-256. A file
+  // that can't be read is left to the read or edit that follows.
   async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
-    const read = await readWorkspaceText(rootPath, path);
-    if (read.truncated) return null;
+    const read = await readWorkspaceText(rootPath, path).catch(() => null);
+    if (!read || read.truncated) return null;
     const digest = createHash("sha256").update(read.text).digest("hex");
     return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
   }

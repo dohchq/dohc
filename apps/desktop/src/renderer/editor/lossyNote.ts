@@ -8,9 +8,12 @@ import {useEffect, useRef, useState} from 'react';
 
 const VERDICT_LIMIT = 256;
 const IDLE_MS = 30_000;
+// A 2 MB note takes a few seconds. A check that runs past this stops the
+// worker, and its note opens read-only until a later read checks it again.
+const DEADLINE_MS = 30_000;
 const verdicts = new Map<string, boolean>();
 const checks = new Map<string, Promise<boolean>>();
-const requests = new Map<number, {resolve: (lossy: boolean) => void; reject: (error: Error) => void}>();
+const requests = new Map<number, {resolve: (lossy: boolean) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
 let worker: Worker | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
@@ -19,7 +22,10 @@ function stop(error: Error): void {
   clearTimeout(idleTimer);
   worker?.terminate();
   worker = null;
-  for (const request of requests.values()) request.reject(error);
+  for (const request of requests.values()) {
+    clearTimeout(request.timer);
+    request.reject(error);
+  }
   requests.clear();
 }
 
@@ -40,6 +46,7 @@ function startWorker(): Worker {
     const request = requests.get(data.id);
     if (!request) return;
     requests.delete(data.id);
+    clearTimeout(request.timer);
     if (typeof data.lossy === 'boolean') request.resolve(data.lossy);
     else request.reject(new Error(data.error ?? 'The note check failed.'));
     if (!requests.size) idle();
@@ -72,7 +79,8 @@ export function checkLossyNote(contentHash: string, markdown: string): Promise<b
     try {
       worker ??= startWorker();
       const id = ++nextId;
-      requests.set(id, {resolve, reject});
+      const timer = setTimeout(() => stop(new Error('The note check took too long.')), DEADLINE_MS);
+      requests.set(id, {resolve, reject, timer});
       worker.postMessage({id, markdown});
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));

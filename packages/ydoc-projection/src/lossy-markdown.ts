@@ -72,12 +72,18 @@ const sha256 = (text: string) => Array.from(digest(utf8.encode(text)), byte => b
  * Whether a live note's file is a lossy note. Its file holds the source a
  * current witness records, and the next write would change what that source
  * means. A note with no witness, or one an edit already changed, is not.
+ * Neither is one dohc can't write at all; its write refuses on its own.
  */
 export function isLossyDocument(doc: Y.Doc): boolean {
   const meta = doc.getMap('meta')
   const source = meta.get('dohcMarkdownSource')
   if (typeof source !== 'string') return false
-  const canonical = yDocToMarkdown(doc)
+  let canonical: string
+  try {
+    canonical = yDocToMarkdown(doc)
+  } catch {
+    return false
+  }
   return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical)
     && !sameMarkdownMeaning(source, canonical)
 }
