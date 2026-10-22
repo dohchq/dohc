@@ -1,9 +1,23 @@
 import { expect, it } from "vitest";
 import { CompilerProcessError } from "./compilerProcessSupervisor";
 import { appBuildError, appCompilerRefusal } from "./installedAppCompiler";
+import { ipcWireError, readError } from "../ipc/errorWords";
+import { errorDetails } from "../renderer/shell/copyDetails";
 
 const failure = (reason: CompilerProcessError["reason"], diagnostics?: string) =>
   Object.assign(new CompilerProcessError(reason, "Compiler exited (1)."), { diagnostics });
+
+it("keeps safe timeout details through the installed adapter, Electron, and Notice copy", () => {
+  const details = "Last stage: Add-Type done; elapsed=20000ms; owner spawned=5ms, PowerShell running=500ms, Add-Type done=19000ms; stderr tail: [redacted stderr]";
+  const error = Object.assign(failure("timeout"), { details });
+  const translated = appBuildError(error) as Error;
+  const received = new Error(`Error invoking remote method 'desktop:prepare-app': ${String(ipcWireError(translated))}`);
+  const notice = readError(received);
+  expect(translated.message).toBe("The app took too long to build. Remove files the app does not use, then try again.");
+  expect(notice.words).toBe(translated.message);
+  expect(errorDetails([["Cause", notice.cause]])).toContain(details);
+  expect(error.details).toBe(details);
+});
 
 it("passes the compiler's reason on in place of the supervisor's code", () => {
   expect(appBuildError(failure("exit", "site/index.html links app.js, which is not in the app.\nstack"))).toEqual(new Error("site/index.html links app.js, which is not in the app."));
