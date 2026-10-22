@@ -253,6 +253,29 @@ it.each(['pointerdown', 'disconnect'])('takes over partial connected copies with
   expect(other.value).toBe(canonical);
 });
 
+it('turns sync to the state whose word is clicked, and leaves it there', async () => {
+  await mount('#sync');
+  const toggle = document.querySelector('[data-sync-toggle]');
+  const editor = document.querySelector('[data-sync-editor="a"]');
+  const click = (side) => document.querySelector(`[data-sync-side="${side}"]`).click();
+  intersections.find(io => io.target.matches('[data-sync-demo]')).callback([{ isIntersecting: true }]);
+  await vi.advanceTimersByTimeAsync(100);
+  const shown = editor.value;
+  // Clicking the current state also stops autoplay, which would go offline within 5 s.
+  click('online');
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(toggle.checked).toBe(true);
+  expect(editor.value).toBe(shown);
+  click('offline');
+  expect(toggle.checked).toBe(false);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(document.querySelector('[data-sync-link-label]').textContent).toBe('no connection');
+  click('offline');
+  expect(toggle.checked).toBe(false);
+  click('online');
+  expect(toggle.checked).toBe(true);
+});
+
 it('preserves both completed offline edits when reconnecting', async () => {
   await mount('#sync');
   const editor = document.querySelector('[data-sync-editor="a"]');

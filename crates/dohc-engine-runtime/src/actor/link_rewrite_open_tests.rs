@@ -2,7 +2,7 @@ use super::*;
 use dohc_engine_collab::{ContentKind, Lease, LocalAppend, Regime, Ydoc};
 
 impl Fixture {
-    async fn open_document(&self, object: &str) -> (Lease, Ydoc) {
+    pub(super) async fn open_document(&self, object: &str) -> (Lease, Ydoc) {
         self.open_document_with_elements(object, true).await
     }
     async fn open_document_with_elements(&self, object: &str, elements: bool) -> (Lease, Ydoc) {
@@ -1130,7 +1130,7 @@ async fn forward_lock_proof(lock_at_commit: bool) {
         None,
         f.root.to_path_buf(),
         f.leases.clone(),
-        f.serial.clone(),
+        [f.capture.clone(), f.serial.clone()],
         Arc::new(NoFaults),
         (open, Arc::new(|_| {})),
         Arc::new(()),

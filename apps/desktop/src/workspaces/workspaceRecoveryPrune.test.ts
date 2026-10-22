@@ -5,7 +5,7 @@ import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { saveRecoveryRecord, scheduleRecoveryPrune } from "./workspaceDeleteRecovery";
+import { saveRecoveryRecord, scheduleRecoveryPrune, waitForRecoveryPrune } from "./workspaceDeleteRecovery";
 
 vi.mock("./workspaceMetadata", async original => {
   const actual = await original<typeof import("./workspaceMetadata")>();
@@ -38,9 +38,8 @@ function scheduledPrune(root: string): () => Promise<void> {
   if (!run) throw new Error("Prune was not scheduled");
   const scheduled = run;
   return async () => {
-    const pruning = scheduled();
-    expect(pruning).toBeInstanceOf(Promise);
-    await pruning;
+    scheduled();
+    await waitForRecoveryPrune(root);
   };
 }
 

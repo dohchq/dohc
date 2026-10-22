@@ -64,11 +64,15 @@ const invalidRecovery = `Cannot undo the delete. Its recovery record is invalid.
 export const missingDeleteRecoveryReason = `Cannot undo the delete. Its recovery record is missing or expired. ${restoreByHand}`;
 
 // Only recovery metadata expires. Fallback trash contents keep their lifetime.
-const pruned = new Set<string>();
+const prunes = new Map<string, Promise<void>>();
 export function scheduleRecoveryPrune(workspace: LocalStateWorkspace): void {
-  if (pruned.has(workspace.rootPath)) return;
-  pruned.add(workspace.rootPath);
-  setImmediate(() => prune(workspace).catch(() => undefined));
+  if (prunes.has(workspace.rootPath)) return;
+  prunes.set(workspace.rootPath, new Promise<void>(resolve => setImmediate(resolve)).then(() => prune(workspace)).catch(() => undefined));
+}
+// Whoever removes a workspace folder, such as a test's cleanup, waits for its prune,
+// which reads the folder on its own schedule.
+export async function waitForRecoveryPrune(root: string): Promise<void> {
+  await prunes.get(root);
 }
 // A removal is a write, so it waits for this open's `.dohc/local` too, but it
 // creates nothing.

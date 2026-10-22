@@ -49,6 +49,7 @@ import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
 // dohc's generated operations in its worker, its commits claim through its
@@ -367,7 +368,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "workspace", rootPath: root });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     compile: compileFixture,
     agentRun: options.agentRun,
     onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
@@ -681,7 +682,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     crashAfterOwnerInvoke: (operationId: string) => { afterOwnerInvoke = { operationId, then: async () => { throw new Error("dohc stopped."); } }; },
     /** Gives a person the data grant on these operations, as the share dialog would. */
     grant: (grantId: string, userId: string, operationIds: string[], reference = rules) => {
-      const store = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"));
+      const store = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"));
       try {
         store.prepare("INSERT OR REPLACE INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", reference.datasetId, datasetPrincipalKey("workspace", grantId, userId),
           JSON.stringify({ operationIds, discover: true, revision: reference.revision, revisionSha256: reference.revisionSha256 }), "token");
@@ -1285,7 +1286,7 @@ describe("Collection automations on a dataset", () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     // Ana may use every operation the run calls, and cannot post in Team.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -1363,7 +1364,7 @@ describe("Collection automations on a dataset", () => {
     const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };
     const f = await world({ roster: withAna });
     // Ana may use the list and the status edit, which show every field but ID.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -1390,7 +1391,7 @@ describe("Collection automations on a dataset", () => {
   it("keeps a held field held when a schema change removes a field before it", async () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -3120,7 +3121,7 @@ describe("code steps on a dataset", () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     // Ana may read the table and set Status. The code can pick any edit or create on the table, and she cannot use those.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
