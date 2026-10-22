@@ -41,6 +41,7 @@ import {
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import {
+  assertHeldSpellingsUnchanged,
   assertShareChangesJournalable,
   recordedShareSelector,
   SharePinInvalidError,
@@ -734,6 +735,7 @@ export function createShareViewFiles(
         );
       }
       assertShareChangesJournalable(captured.unjournalablePaths);
+      assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
     const before = await canonicalSnapshot(
       store,

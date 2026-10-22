@@ -111,6 +111,18 @@ export function assertShareChangesJournalable(
   );
 }
 
+// A held spelling's file is the file of the spelling that owns it, so saving,
+// moving or deleting the held one would write over the owner's (#2416).
+export function assertHeldSpellingsUnchanged(
+  unjournalable: readonly UnjournalablePath[],
+): void {
+  const held = unjournalable.filter((path) => path.reason === "spelling-collision");
+  if (held.length === 0) return;
+  throw new Error(
+    `dohc did not change ${namedPaths(held)}. ${unjournalablePathMessages(held).join(" ")}`,
+  );
+}
+
 export class SharePinInvalidError extends Error {
   constructor(readonly shareId: string) {
     super(
