@@ -1,4 +1,6 @@
+import { digest } from 'lib0/hash/sha256'
 import { Marked } from 'marked'
+import type * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 
 const reader = new Marked()
@@ -39,4 +41,43 @@ export function isLossyMarkdown(markdown: string): boolean {
   }
   if (canonical === markdown.replace(/\r?\n$/u, '')) return false
   return !sameMarkdownMeaning(markdown, canonical)
+}
+
+const VERDICT_LIMIT = 256
+const verdicts = new Map<string, boolean>()
+
+/**
+ * isLossyMarkdown, remembered in this thread by the caller's digest of the
+ * same bytes, so checking unchanged text again is free.
+ */
+export function isLossyMarkdownCached(digest: string, markdown: string): boolean {
+  let lossy = verdicts.get(digest)
+  if (lossy === undefined) {
+    lossy = isLossyMarkdown(markdown)
+    if (verdicts.size >= VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!)
+    verdicts.set(digest, lossy)
+  }
+  return lossy
+}
+
+/** What an agent, the CLI or an automation is told when it changes a lossy note. */
+export function lossyNoteRefusal(path: string): string {
+  return `dohc can't change ${path} without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.`
+}
+
+const utf8 = new TextEncoder()
+const sha256 = (text: string) => Array.from(digest(utf8.encode(text)), byte => byte.toString(16).padStart(2, '0')).join('')
+
+/**
+ * Whether a live note's file is a lossy note. Its file holds the source a
+ * current witness records, and the next write would change what that source
+ * means. A note with no witness, or one an edit already changed, is not.
+ */
+export function isLossyDocument(doc: Y.Doc): boolean {
+  const meta = doc.getMap('meta')
+  const source = meta.get('dohcMarkdownSource')
+  if (typeof source !== 'string') return false
+  const canonical = yDocToMarkdown(doc)
+  return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical)
+    && !sameMarkdownMeaning(source, canonical)
 }

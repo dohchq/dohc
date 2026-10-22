@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
+import { isLossyDocument } from "@dohc/ydoc-projection/lossy-markdown";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
@@ -224,6 +225,12 @@ export function CollectionRecordFieldWrite({
       onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
       return;
     }
+    // A lossy note (CONTEXT.md): the settle after this field would rewrite
+    // the parts dohc can't show.
+    if (isLossyDocument(doc)) {
+      onFailed(LOSSY_RECORD_MESSAGE);
+      return;
+    }
     try {
       setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
     } catch {
@@ -389,6 +396,8 @@ const SUPERSEDED_MESSAGE =
   "A newer edit replaced this value. Copy your unsaved value before discarding it.";
 const SAVE_UNCONFIRMED_MESSAGE =
   "dohc has not confirmed this save yet. Keep dohc open until saving finishes.";
+const LOSSY_RECORD_MESSAGE =
+  "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
 const CHANGED_SELECTION_MESSAGE =
   "This selection changed since your edit. Copy your unsaved value before discarding it.";
 

@@ -1,7 +1,7 @@
 import { CreationPartialError, type CreationPartial, type CreationStage } from "@dohc/cli/creation";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire, SharedFileUpdate, SharedFileUpdateState } from "@dohc/workspace-engine-client";
@@ -23,6 +23,7 @@ import {
   frontmatterEditsRefused,
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import { isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import type { CollectionRecordWrites } from "./collectionAutomationRun";
 import { recordIdFromBytes } from "./recordIds";
 
@@ -303,7 +304,7 @@ function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Arra
  * update with the author-derived actorOriginId; settle so the writes are
  * durable and the .md is on disk, release. When no field changes, nothing
  * is journaled or settled. Throws on
- * refusal (invalid path, engine off, the record's doc session held live
+ * refusal (invalid path, engine off, a lossy note, the record's doc session held live
  * elsewhere).
  *
  * `recordPath` must already be validated and normalized by the caller
@@ -323,6 +324,15 @@ export async function setCollectionRecordFields(
     );
   }
   throwIfAborted(context.signal);
+  // A lossy note's next write would rewrite the parts dohc can't show, so no
+  // session opens for it. A file that can't be read fails at the open below.
+  const current = await context.readText(input.recordPath).catch(() => null);
+  if (
+    current && !current.truncated &&
+    isLossyMarkdownCached(createHash("sha256").update(current.text).digest("hex"), current.text)
+  ) {
+    throw new Error(lossyNoteRefusal(input.recordPath));
+  }
   input.onStage?.("bind");
   const session = await context.openRecord(input.recordPath);
   let failed = false;

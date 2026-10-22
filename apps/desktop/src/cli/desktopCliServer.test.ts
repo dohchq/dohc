@@ -508,6 +508,32 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("reads a lossy note as its file, and refuses to edit it before any session opens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-lossy-"));
+    const lossy = "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [the docs][docs].\n\n[docs]: https://example.com/docs\n";
+    try {
+      await writeFile(join(root, "readme.md"), lossy);
+      await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      // Even with an editor holding it, the agent reads what is on disk.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "readme.md", state: Y.encodeStateAsUpdate(markdownToYDoc(lossy)) });
+      expect(await context.documents!.read("readme.md")).toEqual({ path: "readme.md", markdown: lossy });
+
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });
+      const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      await expect(input.assertEditable("readme.md")).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+      );
+      await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("hands a document edit to the live sessions as an update against their state", async () => {
     const f = fixture();
     const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);

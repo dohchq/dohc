@@ -7,6 +7,7 @@
 // mounted, and an operation guard pauses new acceptance without dropping a
 // racing edit.
 
+import { createHash } from "node:crypto";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -273,6 +274,27 @@ describe("retained failures", () => {
       expect(collectionWriteFailures()[0]?.message).toContain("without rewriting the others");
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(markdown);
+      host.unmount();
+    } finally { doc.destroy(); }
+  });
+
+  it("refuses a field write to a lossy note before changing the document", () => {
+    const markdown = "---\nid: rec-1\nstatus: draft\n---\n\n<details>\n\nHidden.\n</details>\n";
+    // The record's live document as the desktop seeds it, with a witness of the file.
+    const doc = markdownToYDoc(markdown);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", markdown);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(markdown));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    const before = Y.encodeStateAsUpdate(doc);
+    try {
+      docMock.current = engineDocState({ available: true, doc });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      expect(collectionWriteFailures()[0]?.message).toBe(
+        "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.",
+      );
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       host.unmount();
     } finally { doc.destroy(); }
   });

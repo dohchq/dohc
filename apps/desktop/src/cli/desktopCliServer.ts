@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
@@ -46,6 +47,7 @@ import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
@@ -158,6 +160,15 @@ export function createDesktopCliServer<State>(
     chatDispatchService,
     rememberPendingCliRunMessageLink,
   } = dependencies;
+
+  // A lossy note's file text, or null for any other file. The check runs in
+  // the projection worker, which remembers it by the text's SHA-256.
+  async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
+    const read = await readWorkspaceText(rootPath, path);
+    if (read.truncated) return null;
+    const digest = createHash("sha256").update(read.text).digest("hex");
+    return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
+  }
 
   // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
   // resolves the registry workspace, and chat writes go through the same
@@ -362,6 +373,10 @@ export function createDesktopCliServer<State>(
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          // A lossy note reads as its file, not as the editor's canonical
+          // Markdown, which leaves out the parts dohc can't show.
+          const file = await lossyNoteText(workspace.rootPath, live.path);
+          if (file !== null) return { path: live.path, markdown: file };
           const markdown = live.state
             ? await documentProjection.run({ kind: "read", state: live.state })
             : await documentProjection.run({
@@ -375,6 +390,11 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
+            assertEditable: async (resolved) => {
+              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+                throw new Error(lossyNoteRefusal(resolved));
+              }
+            },
             change: (state, { keepBlocks }) =>
               documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
@@ -407,6 +427,8 @@ export function createDesktopCliServer<State>(
               workspaceId: workspace.workspaceId,
               path,
               origin,
+              // This verb wrote the file empty just above.
+              assertEditable: async () => undefined,
               change: (state, { keepBlocks }) =>
                 documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
             });

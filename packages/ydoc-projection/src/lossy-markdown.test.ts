@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto'
 import { expect, it } from 'vitest'
+import type * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyMarkdown, sameMarkdownMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -51,4 +53,44 @@ it('does not flag spaces after the last words of a note', () => {
 
 it('flags a note the editor cannot import', () => {
   expect(isLossyMarkdown('- a\n - b\n  - c\n   - d\n    - e\n')).toBe(true)
+})
+
+it('remembers a verdict by the digest it was given', () => {
+  expect(isLossyMarkdownCached('digest-a', '<details>\n\nHidden.\n</details>\n')).toBe(true)
+  // The same digest answers from memory, whatever text comes with it.
+  expect(isLossyMarkdownCached('digest-a', 'Plain text.\n')).toBe(true)
+  expect(isLossyMarkdownCached('digest-b', 'Plain text.\n')).toBe(false)
+})
+
+it('names the note and the way forward when it refuses', () => {
+  expect(lossyNoteRefusal('notes/readme.md')).toBe(
+    "dohc can't change notes/readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+  )
+})
+
+// A note's live document as the desktop seeds it: the import, and a witness
+// of the file's bytes when they differ from its canonical Markdown.
+function seeded(source: string): Y.Doc {
+  const doc = markdownToYDoc(source)
+  const canonical = yDocToMarkdown(doc)
+  if (canonical !== source) {
+    const sha = (text: string) => createHash('sha256').update(text).digest('hex')
+    doc.getMap('meta').set('dohcMarkdownSource', source)
+    doc.getMap('meta').set('dohcMarkdownSourceSha256', sha(source))
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha(canonical))
+  }
+  return doc
+}
+
+it('judges a live note by the file its witness records', () => {
+  expect(isLossyDocument(seeded('See [the docs][docs].\n\n[docs]: https://example.com/docs\n'))).toBe(true)
+  expect(isLossyDocument(seeded('Title\n=====\n\n* one\n'))).toBe(false)
+  expect(isLossyDocument(seeded('# Plan\n\nText.'))).toBe(false)
+})
+
+it('does not judge a live note an edit already changed', () => {
+  const doc = seeded('<details>\n\nHidden.\n</details>\n')
+  expect(isLossyDocument(doc)).toBe(true)
+  doc.getMap('frontmatter').set('status', 'done')
+  expect(isLossyDocument(doc)).toBe(false)
 })

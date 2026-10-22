@@ -320,6 +320,23 @@ it("rejects an unkeyed field write when the session declines the decided update"
   expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
 });
 
+it("refuses to set fields on a lossy note before any session opens", async () => {
+  const root = await createTestScratch("dohc-record-lossy-");
+  const text = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "a.md"), text);
+  const { session, log } = fakeSession();
+  const context = contextFor(root, session);
+  await expect(setCollectionRecordFields(context, {
+    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
+  })).rejects.toThrow(
+    "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+  );
+  expect(context.openedPaths).toEqual([]);
+  expect(log.order).toEqual([]);
+  expect(await readFile(join(root, "tasks", "a.md"), "utf8")).toBe(text);
+});
+
 /**
  * The engine side of a create: records it has adopted, keyed by id, and its
  * news of adopted records. A lookup of an id it has not adopted answers the
@@ -1746,7 +1763,8 @@ it("continues an automation replay when the bound file still has the requested i
   await expect(createCollectionRecord(context, {
     collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields: { status: "done" },
   })).resolves.toEqual({ path: "tasks/two.md", recordId });
-  expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
+  // Once for its id, and once to check it is not a lossy note before its fields are set.
+  expect(read.mock.calls).toEqual([["tasks/two.md"], ["tasks/two.md"]]);
   expect(context.createdFiles).toEqual([]);
   expect(context.openedPaths).toEqual(["tasks/two.md"]);
   expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
