@@ -33,7 +33,7 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # Evaluate this condition before allocating any runner. Forks stay local-only.
+  # Evaluate this condition before allocating any runner. Forks start no automatic checks.
   changes:
     name: what changed
     if: >-
