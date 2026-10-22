@@ -198,6 +198,19 @@ const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
   .strict();
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. A delete takes at most 100 listed copies and must
+// accept that a program still using one may lose what it writes next.
+const MAX_RETAINED_COPIES_PER_DELETE = 100;
+const retainedCopySchema = z.object({ id: z.number().int(), revision: z.number().int() }).strict();
+const retainedCopiesArgsSchema = z.object(argsBase).strict();
+const deleteRetainedCopiesArgsSchema = z
+  .object({
+    ...argsBase,
+    copies: z.array(retainedCopySchema).max(MAX_RETAINED_COPIES_PER_DELETE),
+    acceptLateWriteRisk: z.literal(true),
+  })
+  .strict();
 
 const documentEditArgsSchema = z
   .object({
@@ -467,6 +480,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -541,6 +556,8 @@ export const CLI_CAPABILITIES = {
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
+  retainedCopies: ["file.retained.list"],
+  deleteRetainedCopies: ["file.retained.delete"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1128,6 +1145,39 @@ const saveKeptCopyResultSchema = z.union([
   rawFailureSchema,
 ]);
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open: how many, and their logical size in bytes. Deleting
+// them may free less disk space than `bytes`.
+const retainedCopiesSummarySchema = z.object({
+  count: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+}).strict();
+// `copies` names those a delete may remove now, oldest first, each with the
+// revision the delete must match; `more` says there are others past these.
+// `total` counts every one, including copies that changed in the last 30
+// seconds or whose file waits for review.
+const retainedCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copies: z.array(retainedCopySchema),
+    more: z.boolean(),
+    total: retainedCopiesSummarySchema,
+  }).strict(),
+  rawFailureSchema,
+]);
+// A copy that changed since it was listed, whose file waits for review, or
+// that recovery may still need is skipped and stays.
+const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    deleted: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    remaining: retainedCopiesSummarySchema,
+  }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1420,6 +1470,8 @@ export const cliResultSchemas = {
     rawFailureSchema,
   ]),
   saveKeptCopy: saveKeptCopyResultSchema,
+  retainedCopies: retainedCopiesResultSchema,
+  deleteRetainedCopies: deleteRetainedCopiesResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

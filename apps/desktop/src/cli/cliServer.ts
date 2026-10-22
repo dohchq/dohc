@@ -73,6 +73,8 @@ import {
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -242,6 +244,14 @@ export interface CliKeptCopiesPort {
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open, and the step that deletes listed ones. The desktop's
+// Notices row offers the same step after the same warning.
+export interface CliRetainedCopiesPort {
+  list(): Promise<RetainedCopiesListResult>;
+  delete(copies: readonly { id: number; revision: number }[]): Promise<RetainedCopiesDeleteResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -324,6 +334,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
+  retainedCopies?: CliRetainedCopiesPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -737,6 +748,13 @@ function keptCopiesUnavailable() {
   return {
     ok: false as const,
     reason: "kept copies are not available in this workspace",
+  };
+}
+
+function retainedCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
   };
 }
 
@@ -2934,6 +2952,26 @@ async function dispatchWorkspace(
         return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
+      }
+    }
+
+    case "retainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list old file copies");
+      }
+    }
+
+    case "deleteRetainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies || context.readOnly) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.delete(request.args.copies)) };
+      } catch (error) {
+        return mcpFailure(error, "failed to delete old file copies");
       }
     }
 

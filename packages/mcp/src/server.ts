@@ -63,6 +63,8 @@ import {
   readDocument,
   readWorkspaceFile,
   saveKeptCopy,
+  listRetainedCopies,
+  deleteRetainedCopies,
   searchWorkspaceFiles,
   testApp,
   writeWorkspaceFile,
@@ -218,6 +220,31 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_list_retained_copies",
+    {
+      description:
+        "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
+      inputSchema: {},
+    },
+    async () => text(await listRetainedCopies(ctx)),
+  );
+
+  register(
+    "dohc_delete_retained_copies",
+    {
+      description:
+        "Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.",
+      inputSchema: {
+        copies: z
+          .array(z.object({ id: z.number().int(), revision: z.number().int() }))
+          .max(100),
+        acceptLateWriteRisk: z.literal(true),
+      },
+    },
+    async (args) => text(await deleteRetainedCopies(ctx, args)),
   );
 
   register(
