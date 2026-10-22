@@ -7,136 +7,33 @@
   min-height: 0;
 }
 
-:host,
 .demo-window {
-  --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
-  --dohc-bg: #faf9f5;
-  --dohc-panel: #f3f1ea;
-  --dohc-panel-2: #ebe8e0;
-  --dohc-line: #e4e1d8;
-  --dohc-ink: #1c1b18;
-  --dohc-muted: #55524a;
-  --dohc-subtle: #7f7b6e;
-  --dohc-accent: #2d342e;
-  --dohc-agent: #666d2e;
-  --dohc-match: #326fce;
-  --dohc-success: #38684e;
-  --dohc-warning: #8a6420;
-  --dohc-danger: #a43e2a;
-  --dohc-selection: rgba(58, 126, 233, 0.22);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--dohc-bg);
   color: var(--dohc-ink);
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.4;
 }
 
-.demo-window[data-theme="dark"] {
-  --dohc-bg: #131211;
-  --dohc-panel: #181715;
-  --dohc-panel-2: #201f1c;
-  --dohc-line: #2a2925;
-  --dohc-ink: #f6f4ee;
-  --dohc-muted: #a9a599;
-  --dohc-subtle: #7d7a6e;
-  --dohc-accent: #d7d0c0;
-  --dohc-agent: #c0c585;
-  --dohc-match: #377afa;
-  --dohc-success: #82c29b;
-  --dohc-warning: #d9a94e;
-  --dohc-danger: #e08065;
-  --dohc-selection: rgba(102, 148, 245, 0.30);
-}
-
-button,
-input,
-textarea {
-  font: inherit;
-}
-
-button {
-  color: inherit;
-}
-
-.demo-window {
-  display: grid;
-  grid-template-rows: 40px minmax(0, 1fr) 25px;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--dohc-bg);
-}
-
-.demo-titlebar {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--dohc-line);
-  background: var(--dohc-panel-2);
-  padding: 0 12px;
-  user-select: none;
-}
-
-.demo-brand,
-.demo-workspace {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.demo-brand {
-  color: var(--dohc-ink);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-
-.demo-workspace {
-  height: 28px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  padding: 0 7px;
-  color: var(--dohc-muted);
-}
-
-.demo-workspace:hover,
-.demo-icon-button:hover,
-.demo-header-button:hover {
-  background: color-mix(in srgb, var(--dohc-line) 55%, transparent);
-  color: var(--dohc-ink);
-}
-
-.demo-command {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  display: flex;
-  width: min(320px, 38vw);
-  height: 28px;
-  transform: translate(-50%, -50%);
-  align-items: center;
-  gap: 7px;
-  border: 1px solid var(--dohc-line);
-  border-radius: 6px;
-  background: var(--dohc-bg);
-  padding: 0 10px;
-  color: var(--dohc-subtle);
-  font-size: 12px;
-}
-
-.demo-command kbd {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
+/* The desktop leaves this room for the window controls the OS draws. */
 .demo-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
-  gap: 13px;
-  margin-left: auto;
+  width: 140px;
+  height: 40px;
+  align-items: center;
+  justify-content: space-evenly;
   color: var(--dohc-muted);
+  pointer-events: none;
 }
 
 .demo-window-control {
@@ -146,9 +43,7 @@ button {
 }
 
 .demo-window-control:first-child {
-  width: 11px;
-  height: 1px;
-  margin-top: 9px;
+  height: 0;
   border-width: 1px 0 0;
 }
 
@@ -161,7 +56,7 @@ button {
 .demo-window-control:last-child::after {
   position: absolute;
   left: 5px;
-  top: 0;
+  top: -1px;
   width: 1px;
   height: 12px;
   background: currentColor;
@@ -173,149 +68,45 @@ button {
   transform: rotate(-45deg);
 }
 
+/* The desktop's reduced-motion reset is scoped to :root, which nothing in a
+   shadow root matches. */
+@media (prefers-reduced-motion: reduce) {
+  .demo-window,
+  .demo-window *,
+  .demo-window ::before,
+  .demo-window ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Palettes cover the demo window, as they cover the desktop's. Only this
+   layer contains them: menus place themselves by page coordinates. */
+.demo-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  contain: layout paint;
+}
+
 .demo-workbench {
   display: flex;
+  flex: 1;
   min-height: 0;
 }
 
-.demo-workbench > [data-testid="side-panel"] {
-  width: 305px;
-}
-
-.demo-icon-button,
-.demo-header-button,
-.demo-tab-close {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-}
-
-.demo-editor-header,
-.demo-tabs {
-  display: flex;
-  height: 36px;
-  min-height: 36px;
-  align-items: center;
-  border-bottom: 1px solid var(--dohc-line);
-}
-
-.demo-icon-button {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border-radius: 5px;
-  color: var(--dohc-subtle);
-}
-
-.demo-icon-button:focus-visible,
-.demo-header-button:focus-visible {
-  outline: 2px solid var(--dohc-match);
-  outline-offset: -2px;
-}
-
-.demo-editor-column {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  background: var(--dohc-bg);
-}
-
-.demo-tabs {
-  background: var(--dohc-panel-2);
-}
-
-.demo-tab {
-  display: flex;
-  height: 36px;
-  max-width: 230px;
-  align-items: center;
-  gap: 7px;
-  border-right: 1px solid var(--dohc-line);
-  border-bottom: 1px solid transparent;
-  background: var(--dohc-bg);
-  padding: 0 12px;
-  color: var(--dohc-ink);
-}
-
-.demo-tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.demo-tab-close {
-  display: grid;
-  width: 17px;
-  height: 17px;
-  margin-left: 5px;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--dohc-subtle);
-}
-
-.demo-tabs-fill {
-  height: 100%;
-  min-width: 18px;
-  flex: 1;
-  border-bottom: 1px solid var(--dohc-line);
-}
-
-.demo-editor-header {
-  gap: 7px;
-  background: var(--dohc-panel);
-  padding: 0 12px;
-  color: var(--dohc-muted);
-}
-
-.demo-doc-name {
-  color: var(--dohc-ink);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.demo-doc-kind {
-  margin-left: auto;
-  color: var(--dohc-subtle);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.demo-header-button {
-  height: 24px;
-  border: 0;
-  border-radius: 6px;
-  padding: 0 8px;
-  color: var(--dohc-muted);
-  font-size: 11px;
-}
-
-.demo-header-button.is-active {
-  background: var(--dohc-line);
-  color: var(--dohc-ink);
-}
-
-.demo-editor-pane {
-  position: relative;
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  background: var(--dohc-bg);
-  color: var(--dohc-ink);
-}
-
-.demo-editor-pane[hidden] {
+/* The demo has one editor group, so it offers no split. */
+[data-testid="create-editor-group-right"] {
   display: none;
 }
 
 .demo-source {
   box-sizing: border-box;
   width: 100%;
-  height: 100%;
+  min-height: 0;
+  flex: 1;
   resize: none;
   border: 0;
   background: var(--dohc-bg);
@@ -327,33 +118,6 @@ button {
   outline: none;
 }
 
-.demo-statusbar {
-  display: flex;
-  contain: layout;
-  align-items: center;
-  gap: 9px;
-  border-top: 1px solid var(--dohc-line);
-  background: var(--dohc-panel-2);
-  padding: 0 10px;
-  color: var(--dohc-subtle);
-  font-size: 10.5px;
-}
-
-.demo-status-local {
-  color: var(--dohc-success);
-}
-
-.demo-status-right {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  margin-left: auto;
-}
-
-.demo-status-details {
-  display: contents;
-}
-
 @media (max-width: 1050px) {
   .demo-workbench > [data-testid="side-panel"] {
     width: 270px !important;
@@ -361,9 +125,21 @@ button {
 }
 
 @media (max-width: 720px) {
-  .demo-command,
-  .demo-window-controls {
+  .demo-window-controls,
+  [data-testid="titlebar-quick-open"] {
     display: none;
+  }
+
+  /* Without the window controls and Go to, the workspace name takes the
+     room the desktop reserves for them. */
+  [data-testid="titlebar-left-group"] {
+    min-width: 0;
+    max-width: none !important;
+    flex: 1;
+  }
+
+  [data-testid="titlebar"] > [aria-hidden]:last-child {
+    width: 8px !important;
   }
 
   .demo-workbench {
@@ -382,20 +158,9 @@ button {
     box-shadow: 12px 0 24px color-mix(in srgb, var(--dohc-ink) 10%, transparent);
   }
 
-  .demo-editor-header {
-    padding-inline: 9px;
-  }
-
-  .demo-doc-kind {
-    display: none;
-  }
-
-  .demo-status-details {
-    display: none;
-  }
-
   .dohc-page-identity,
-  .dohc-notion-editor {
+  .dohc-notion-editor,
+  [data-dohc-doc-pane] .px-14 {
     padding-left: 24px;
     padding-right: 24px;
   }
