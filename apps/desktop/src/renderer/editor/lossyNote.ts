@@ -14,7 +14,11 @@ const IDLE_MS = 30_000;
 const DEADLINE_MS = 30_000;
 const verdicts = new Map<string, boolean>();
 const checks = new Map<string, Promise<boolean>>();
-const requests = new Map<number, {resolve: (lossy: boolean) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
+type Answer = {lossy: boolean; witnessKeepsMeaning?: boolean};
+const requests = new Map<number, {resolve: (answer: Answer) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
+// Witnesses whose source keeps its meaning in the projection they record. No
+// document that holds one is a lossy note, so it needs no check of its own.
+const keepingWitnesses = new Set<string>();
 let worker: Worker | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
@@ -42,13 +46,13 @@ function idle(): void {
 function startWorker(): Worker {
   const started = new Worker(new URL('./lossyNote.worker.ts', import.meta.url), {type: 'module'});
   started.onerror = () => {if (worker === started) stop(new Error('The note check stopped.'));};
-  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; error?: string}>) => {
+  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; witnessKeepsMeaning?: boolean; error?: string}>) => {
     if (worker !== started) return;
     const request = requests.get(data.id);
     if (!request) return;
     requests.delete(data.id);
     clearTimeout(request.timer);
-    if (typeof data.lossy === 'boolean') request.resolve(data.lossy);
+    if (typeof data.lossy === 'boolean') request.resolve({lossy: data.lossy, witnessKeepsMeaning: data.witnessKeepsMeaning});
     else request.reject(new Error(data.error ?? 'The note check failed.'));
     if (!requests.size) idle();
   };
@@ -69,8 +73,8 @@ export function knownLossyNoteVerdict(contentHash: string): boolean | undefined 
   return verdicts.get(contentHash);
 }
 
-function ask(note: {markdown: string} | {state: Uint8Array}): Promise<boolean> {
-  return new Promise<boolean>((resolve, reject) => {
+function ask(note: {markdown: string} | {state: Uint8Array}): Promise<Answer> {
+  return new Promise<Answer>((resolve, reject) => {
     clearTimeout(idleTimer);
     try {
       worker ??= startWorker();
@@ -91,7 +95,7 @@ export function checkLossyNote(contentHash: string, markdown: string): Promise<b
   if (known !== undefined) return Promise.resolve(known);
   const running = checks.get(contentHash);
   if (running) return running;
-  const check = ask({markdown}).then((lossy) => {
+  const check = ask({markdown}).then(({lossy}) => {
     verdicts.delete(contentHash);
     verdicts.set(contentHash, lossy);
     if (verdicts.size > VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!);
@@ -163,17 +167,29 @@ export function useLossyNote(input: {
  * hold a different note, so the worker checks the session's whole state
  * before anyone edits it: a witness that later edits left behind is not
  * lossy, since saving writes dohc's form of what the session holds. A
- * session with no witness is already in dohc's form.
+ * session with no witness is already in dohc's form. A witness whose source
+ * keeps its meaning settles every session that holds it, so this window
+ * checks each such witness once.
  */
 export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null}): LossyNoteCheck {
-  const sha = input.doc?.getMap('meta').get('dohcMarkdownSourceSha256');
+  const meta = input.doc?.getMap('meta');
+  const sha = meta?.get('dohcMarkdownSourceSha256');
+  const witness = `${String(sha)}:${String(meta?.get('dohcMarkdownSourceProjectionSha256'))}`;
   // Keyed by the document too: sync can replace a session's document with
   // another that records the same source.
   const key = input.doc && typeof sha === 'string' && sha !== input.checkedHash ? `session:${docId(input.doc)}:${sha}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
-  const verdict = useVerdict(input.open, key, undefined, () =>
-    doc.current ? ask({state: Y.encodeStateAsUpdate(doc.current)}) : Promise.resolve(true));
+  const verdict = useVerdict(input.open, key, keepingWitnesses.has(witness) ? false : undefined, () => {
+    if (!doc.current) return Promise.resolve(true);
+    return ask({state: Y.encodeStateAsUpdate(doc.current)}).then((answer) => {
+      if (answer.witnessKeepsMeaning) {
+        keepingWitnesses.add(witness);
+        if (keepingWitnesses.size > VERDICT_LIMIT) keepingWitnesses.delete(keepingWitnesses.values().next().value!);
+      }
+      return answer.lossy;
+    });
+  });
   if (key === null) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
 }
@@ -220,6 +236,7 @@ export function resetLossyNoteCheckForTests(): void {
   stop(new Error('The test ended.'));
   checks.clear();
   verdicts.clear();
+  keepingWitnesses.clear();
 }
 
 /** For tests that need a lossy note in an engine session. */

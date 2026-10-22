@@ -99,6 +99,45 @@ export function isLossyDocumentState(state: Uint8Array): boolean {
   }
 }
 
+/**
+ * Whether a note's witness alone shows it is not a lossy note. Its source
+ * keeps its meaning in the projection the witness records, so no document
+ * holding that witness, edited or not, can be one. False when today's
+ * import no longer gives that projection.
+ */
+export function witnessKeepsMeaning(doc: Y.Doc): boolean {
+  const meta = doc.getMap('meta')
+  const source = meta.get('dohcMarkdownSource')
+  if (typeof source !== 'string') return true
+  let canonical: string
+  try {
+    const imported = markdownToYDoc(source)
+    try {
+      canonical = yDocToMarkdown(imported)
+    } finally {
+      imported.destroy()
+    }
+  } catch {
+    return false
+  }
+  return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical) && sameMarkdownMeaning(source, canonical)
+}
+
+/**
+ * isLossyDocument for a session's encoded state, and whether its witness
+ * alone settled it, so the caller can remember that witness.
+ */
+export function sessionVerdict(state: Uint8Array): { lossy: boolean; witnessKeepsMeaning: boolean } {
+  const doc = new Y.Doc()
+  try {
+    Y.applyUpdate(doc, state)
+    const keeps = witnessKeepsMeaning(doc)
+    return { lossy: !keeps && isLossyDocument(doc), witnessKeepsMeaning: keeps }
+  } finally {
+    doc.destroy()
+  }
+}
+
 /** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */
 export function unreadNoteRefusal(path: string): string {
   return `dohc couldn't read ${path} to check it, so nothing changed. Try again.`

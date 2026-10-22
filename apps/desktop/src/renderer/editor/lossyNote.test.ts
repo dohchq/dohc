@@ -58,6 +58,32 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(result.current).toBe("lossy"));
   });
 
+  it("clears each later session that holds a witness whose source keeps its meaning, with no check", async () => {
+    // Hand-written, not in dohc's form, and not lossy.
+    const source = "Title\n=====\n\n* one\n";
+    const witnessed = () => {
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      return doc;
+    };
+    const first = witnessed();
+    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }), {
+      initialProps: { doc: first },
+    });
+    expect(view.result.current).toBe("checking");
+    await waitFor(() => expect(view.result.current).toBe("clear"));
+
+    // The note reopens after an edit in dohc: a new document, the same witness.
+    const reopened = witnessed();
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText("Typed.")]);
+    reopened.getXmlFragment("body").push([paragraph]);
+    view.rerender({ doc: reopened });
+    expect(view.result.current).toBe("clear");
+  });
+
   it("checks a replacement document that records the same source", async () => {
     const edited = seeded();
     const paragraph = new Y.XmlElement("paragraph");

@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, sessionVerdict, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -100,6 +100,26 @@ it('judges a session state as its live note', () => {
   const plain = seeded('# Plan\n\nText.')
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy))).toBe(true)
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(plain))).toBe(false)
+})
+
+it('settles a session by its witness when the source keeps its meaning, edited or not', () => {
+  const respelled = seeded('Title\n=====\n\n* one\n')
+  expect(witnessKeepsMeaning(respelled)).toBe(true)
+  expect(sessionVerdict(Y.encodeStateAsUpdate(respelled))).toEqual({ lossy: false, witnessKeepsMeaning: true })
+  respelled.getMap('frontmatter').set('status', 'done')
+  expect(witnessKeepsMeaning(respelled)).toBe(true)
+  expect(witnessKeepsMeaning(seeded('# Plan\n\nText.'))).toBe(true)
+})
+
+it('checks the whole session when its witness records a lossy source, or a projection the import no longer gives', () => {
+  const lossy = seeded('<details>\n\nHidden.\n</details>\n')
+  expect(witnessKeepsMeaning(lossy)).toBe(false)
+  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy))).toEqual({ lossy: true, witnessKeepsMeaning: false })
+  lossy.getMap('frontmatter').set('status', 'done')
+  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy))).toEqual({ lossy: false, witnessKeepsMeaning: false })
+  const older = seeded('Title\n=====\n\n* one\n')
+  older.getMap('meta').set('dohcMarkdownSourceProjectionSha256', '0'.repeat(64))
+  expect(witnessKeepsMeaning(older)).toBe(false)
 })
 
 it('names the note when it could not be read to check', () => {
