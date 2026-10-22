@@ -3406,7 +3406,9 @@ async fn apply_bound_run_with_handle(
     let completed = result.completed();
     // A failed observation retains attribution until a later pass can read it.
     deferred_writes.retain(|path, _| {
-        result.deferred_writes.contains(path) || result.failed_applies.contains(path)
+        result.deferred_writes.contains(path)
+            || result.failed_applies.contains(path)
+            || plan.degraded_paths.contains(path)
     });
     if completed && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();

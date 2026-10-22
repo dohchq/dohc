@@ -1999,6 +1999,81 @@ async fn deferred_write_author_follows_the_observed_bytes_not_the_next_run() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_scan_keeps_a_deferred_writes_author_until_release() {
+    for (recorded, unconfirmed_removed) in [(false, false), (true, false), (true, true)] {
+        let mut harness = Harness::new();
+        std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                .await
+                .unwrap(),
+        );
+        if recorded {
+            assert!(harness.capture(&files.handle()).await);
+        }
+        let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+        let lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+        let author = r#"[{"kind":"agent","agentId":"first","onBehalfOf":"local"}]"#;
+        harness.author_json = Some(author.into());
+        std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+        harness.author_json = None;
+
+        files.handle().request_rescan();
+        let mut run =
+            reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+                .await
+                .unwrap();
+        let ReconcileRun::Completed(plan) = &mut run.run else {
+            panic!("the waiting write requires another observation");
+        };
+        // Model a scan read failure without relying on platform permissions.
+        // Unconfirmed removals also appear in degraded_paths.
+        plan.ops.clear();
+        plan.degraded = true;
+        plan.degraded_paths.push(NEW_FILE.into());
+        if unconfirmed_removed {
+            plan.unconfirmed_removed.push(NEW_FILE.into());
+        }
+        assert!(
+            !apply_run(
+                apply_context(
+                    &harness.root,
+                    &harness.actor,
+                    &harness.leases,
+                    &harness.status,
+                    &harness.self_writes,
+                ),
+                &files.handle(),
+                run,
+                &CancellationToken::new(),
+            )
+            .await
+            .clean
+        );
+
+        drop(lease);
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+        let observer = rusqlite::Connection::open(&harness.db).unwrap();
+        let actual: Option<String> = observer.query_row(
+            "SELECT m.author_json FROM snapshots s JOIN moments m ON m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
+            [WORKSPACE_ID, NEW_FILE], |row| row.get(0)).unwrap();
+        assert_eq!(
+            actual.as_deref(),
+            Some(author),
+            "recorded={recorded}, unconfirmed_removed={unconfirmed_removed}"
+        );
+        assert_eq!(head_text(&harness.db, NEW_FILE), OUTSIDE);
+        assert!(harness.status.deferred_writes().is_empty());
+        drop(observer);
+        files.close().await;
+        harness.close();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrecorded_file_an_internal_attempt_holds_fails_and_retries() {
     let harness = Harness::new();
     std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();

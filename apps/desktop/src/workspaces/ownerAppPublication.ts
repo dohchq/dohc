@@ -163,6 +163,7 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
     const { datasetPath, ...reference } = declared.dataset;
+    assertSourcePathsNotDeferred(dependencies.deferredWrites, [datasetPath]);
     const datasetId = await resolveDatasetAddress(adapter, input.workspaceId, datasetPath, signal, versionId);
     assertCurrent(); signal.throwIfAborted();
     const resolved = { ...reference, datasetId };

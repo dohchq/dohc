@@ -191,6 +191,18 @@ describe("owner dataset publication", () => {
   const reference = { ...fields, datasetPath: "private/dataset.json" };
   const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: reference };
 
+  it("refuses a waiting Collection descriptor before reading its stale address", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    h.sources.set("private/dataset.json", JSON.stringify({ ...approved.definition, name: "Waiting Collection" }));
+    h.setDeclaration(declaration);
+    h.hooks.deferredWrites.push("private/dataset.json");
+    await expect(h.prepare()).rejects.toThrow("private/dataset.json");
+    expect(h.capturePaths.flat()).not.toContain("private/dataset.json");
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
     const resolve = vi.fn(async () => approved);
     const h = harness(resolve); h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
