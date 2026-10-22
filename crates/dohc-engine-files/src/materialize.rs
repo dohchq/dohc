@@ -1632,13 +1632,20 @@ fn materialize_ordinary_write(
     // The staging recheck reuses this read while the target's size and time
     // stay the same.
     let mut reads = TargetReads::default();
+    let mut respelled = None;
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
-        && sha == job.content_sha256
-        && !target_has_other_leaf_spelling(target)
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+        if matches!(job.preimage, Preimage::Absent) {
+            respelled = pending_respelled_delete(store, root, target, job, &sha)?;
+        }
+        if sha == job.content_sha256
+            && respelled.is_none()
+            && !target_has_other_leaf_spelling(target)
+        {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
     }
 
     // Step 2: sibling temp file, bounded, with the target's permissions. A
@@ -1673,9 +1680,16 @@ fn materialize_ordinary_write(
         ));
     }
     let outcome = match placement {
-        OrdinaryWritePlacement::Target(staging) => {
-            swap_in_temp(store, staging, target, &tmp, job, &mut reads, options)
-        }
+        OrdinaryWritePlacement::Target(staging) => swap_in_temp(
+            store,
+            staging,
+            target,
+            &tmp,
+            job,
+            respelled.as_ref(),
+            &mut reads,
+            options,
+        ),
         OrdinaryWritePlacement::ConflictSibling => {
             record_write_conflict(store, target, &tmp, job, now_ms)
         }
@@ -1686,12 +1700,17 @@ fn materialize_ordinary_write(
     outcome
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the respelled delete is found with the first read of the target"
+)]
 fn swap_in_temp(
     store: &EngineStore,
     staging: &Staging,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
+    respelled: Option<&MaterializationJob>,
     reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -1705,7 +1724,22 @@ fn swap_in_temp(
     let expected = match &job.preimage {
         Preimage::Absent => {
             if !create_from_temp(target, tmp, options)? {
-                return record_write_conflict(store, target, tmp, job, now_ms);
+                // The old spelling's delete keeps its own preimage check, so
+                // a file changed since the merge stays and this write conflicts.
+                let Some(delete) = respelled else {
+                    return record_write_conflict(store, target, tmp, job, now_ms);
+                };
+                match materialize_one(store, root, delete, options)? {
+                    JobOutcome::Completed | JobOutcome::AlreadyMaterialized
+                        if create_from_temp(target, tmp, options)? => {}
+                    outcome @ (JobOutcome::Parked | JobOutcome::Blocked) => {
+                        // Both jobs stay pending, and replay runs the delete first.
+                        let _ = std::fs::remove_file(tmp);
+                        return Ok(outcome);
+                    }
+                    outcome @ JobOutcome::Crashed(_) => return Ok(outcome),
+                    _ => return record_write_conflict(store, target, tmp, job, now_ms),
+                }
             }
             sync_parent_dir(store, target.parent(), policy)?;
             if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -2530,6 +2564,40 @@ fn create_from_temp(
         }
         place_attempt(options.replacer, tmp, target)
     })
+}
+
+/// A merge that renames a file only by case or normalization deletes the old
+/// path before it creates the new one. On a disk that ignores the difference,
+/// a create that finds its name held by the file that delete must still
+/// remove runs the delete first. This finds that delete when its path
+/// reaches the same file on disk as the target, and the file holds the bytes
+/// the delete expects. Either path can be spelled differently from the name
+/// the disk stores. A delete through a link never matches: it would refuse
+/// to run, and the write would wait for it forever.
+fn pending_respelled_delete(
+    store: &EngineStore,
+    root: &Path,
+    target: &Path,
+    job: &MaterializationJob,
+    current_sha256: &str,
+) -> Result<Option<MaterializationJob>, MaterializeError> {
+    let Some(file) = std::fs::canonicalize(target)
+        .ok()
+        .filter(|file| file.starts_with(root))
+    else {
+        return Ok(None);
+    };
+    Ok(store
+        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
+        .into_iter()
+        .find(|delete| {
+            delete.target_path != job.target_path
+                && resolve_target(root, &delete.target_path)
+                    .ok()
+                    .filter(|path| ensure_target_symlink_free(root, path).is_ok())
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .is_some_and(|path| path == file)
+        }))
 }
 
 /// Rename the temp to the name staging emptied. `false` when a program
@@ -7632,6 +7700,51 @@ mod tests {
             projection_target_stamp(&scratch.root, path),
             ProjectionTargetStamp::Absent
         );
+    }
+
+    /// A merge's pending delete through a link reaches the file a create
+    /// targets, but would refuse to run. The create must not wait for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_delete_through_a_link_never_holds_back_a_create() {
+        let scratch = Scratch::new("respelled-delete-link");
+        std::fs::write(scratch.root.join("notes.md"), b"notes").unwrap();
+        std::os::unix::fs::symlink("notes.md", scratch.root.join("alias.md")).unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"notes").unwrap();
+        let spec = |job_id: &str, target_path: &str, preimage| MaterializationJobSpec {
+            job_id: job_id.into(),
+            workspace_id: "ws".into(),
+            target_path: target_path.into(),
+            content_sha256: sha.clone(),
+            preimage,
+            target_generation: 1,
+            now_ms: 1,
+        };
+        let delete = spec(
+            "merge-mat_alias",
+            "alias.md",
+            Preimage::Present(sha.clone()),
+        );
+        let write = spec("merge-mat_notes", "notes.md", Preimage::Absent);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(tx, &delete)?;
+                enqueue_job(tx, &write)
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("merge-mat_notes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::AlreadyMaterialized
+        );
+        let delete = store.load_materialization_job("merge-mat_alias").unwrap();
+        assert_eq!(delete.unwrap().status, JobStatus::Pending);
+        let link = std::fs::symlink_metadata(scratch.root.join("alias.md")).unwrap();
+        assert!(link.file_type().is_symlink());
     }
 
     #[test]

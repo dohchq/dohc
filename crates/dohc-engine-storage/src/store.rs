@@ -694,6 +694,16 @@ impl EngineStore {
         materialize::has_pending_job_for_path(&self.conn, workspace_id, path)
     }
 
+    /// Pending merge deletes in a workspace that expect these bytes at their
+    /// path, oldest first.
+    pub fn pending_merge_deletes_expecting(
+        &self,
+        workspace_id: &str,
+        preimage_sha256: &str,
+    ) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::pending_merge_deletes_expecting(&self.conn, workspace_id, preimage_sha256)
+    }
+
     /// Load a single materialization job by id.
     pub fn load_materialization_job(
         &self,
