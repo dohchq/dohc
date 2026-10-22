@@ -16,7 +16,7 @@ setupFileInspectorTests();
 // once here keeps a cold transform out of the first test's wait.
 beforeAll(async () => {
   await import("./markdown/IncrementalMarkdownDocument");
-});
+}, 60_000);
 
 afterEach(async () => {
   cleanup();

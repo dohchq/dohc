@@ -104,11 +104,13 @@ export type LossyNoteCheck = 'checking' | 'lossy' | 'clear';
  * that answered after the open began. A clear verdict holds for the rest of
  * the open, a version switch included: the engine owns the note from then on,
  * and its own saves change the file. A lossy note is checked again on each
- * new read, so a change on disk can clear it.
+ * new read, so a change on disk can clear it. A `waiting` note is not
+ * checked, and reads as clear, until it stops waiting or proves lossy.
  */
 export function useLossyNote(input: {
   open: string;
   applies: boolean;
+  waiting: boolean;
   markdown: string | null;
   contentHash: string | null;
   readSeq: number;
@@ -120,7 +122,8 @@ export function useLossyNote(input: {
   const current = opened.current;
   // Once clear, the engine's own saves change the file; checking them again
   // would only spend work while the person types.
-  const hash = input.applies && !current.clear && input.readSeq !== current.readSeq && input.markdown !== null
+  const hash = input.applies && !current.clear && (!input.waiting || current.lossy)
+    && input.readSeq !== current.readSeq && input.markdown !== null
     ? input.contentHash
     : null;
   const [answer, setAnswer] = useState<{open: string; contentHash: string; lossy: boolean} | null>(null);
@@ -149,7 +152,8 @@ export function useLossyNote(input: {
   if (verdict === false) current.clear = true;
   if (current.clear) return 'clear';
   if (verdict === true) current.lossy = true;
-  return current.lossy ? 'lossy' : 'checking';
+  if (current.lossy) return 'lossy';
+  return input.waiting ? 'clear' : 'checking';
 }
 
 /** Tests reuse made-up content hashes for different text. */

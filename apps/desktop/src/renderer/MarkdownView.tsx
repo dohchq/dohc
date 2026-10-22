@@ -106,7 +106,7 @@ const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
-const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
+export const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 
 const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
@@ -863,6 +863,8 @@ export function MarkdownView(props: {
     // bind — and the notice below states the reason and offers the retry.
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
+    // A large note's session binds before its check answers, and waits for it.
+    (props.lossyNote === "checking" && engine.available) ||
     (props.truncated && !engine.available);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -1954,6 +1956,10 @@ export function MarkdownView(props: {
         <ViewActions
           onShare={onShareCurrentPath}
           status={
+            <>
+            {/* A large note's session can bind before its check answers. It
+                reads until then, and says so as any opening document does. */}
+            {opening ? <OpeningState /> : null}
             <StateMark
               testId="markdown-save-state"
               truncate
@@ -1975,6 +1981,7 @@ export function MarkdownView(props: {
               }
               onRetry={engine.retryReplacement ?? undefined}
             />
+            </>
           }
           actions={
             <DocumentControls

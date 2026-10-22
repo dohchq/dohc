@@ -1,7 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
   DocumentControls,
@@ -472,9 +472,15 @@ export const FileInspector = memo(function FileInspector(
     if (checksLossyNote) warmLossyNoteCheck();
   }, [checksLossyNote]);
   const lossyOpen = `${props.workspaceId}\u0000${props.path}`;
+  // A note past read mode's size with no engine record gets no session and
+  // edits as source, which writes what is typed. So its open goes first, and
+  // only a session that binds waits for the check.
+  const large = (text?.length ?? 0) > WYSIWYG_MARKDOWN_THRESHOLD_BYTES;
+  const [bound, setBound] = useState(false);
   const checked = useLossyNote({
     open: lossyOpen,
     applies: checksLossyNote && !truncated && !error,
+    waiting: large && !bound,
     markdown: loadedPath === props.path ? text : null,
     contentHash,
     readSeq,
@@ -482,7 +488,7 @@ export const FileInspector = memo(function FileInspector(
   // "Edit anyway" lasts for this open: the person accepted that saving
   // rewrites the parts dohc can't show.
   const [editAnyway, setEditAnyway] = useState<string | null>(null);
-  const lossyNote = checked === "lossy" && editAnyway === lossyOpen ? "clear" : checked;
+  const allowed = checked === "lossy" && editAnyway === lossyOpen ? "clear" : checked;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -491,13 +497,16 @@ export const FileInspector = memo(function FileInspector(
       (kind === "markdown" || kind === "drawing") &&
       readAnswered &&
       (!truncated || liveDocumentKind === "scene") &&
-      lossyNote === "clear" &&
+      (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
+  useEffect(() => setBound(engine.available), [engine.available]);
+  // The render a large note's session binds in, before its check starts, waits too.
+  const lossyNote = large && engine.available && !bound && allowed === "clear" ? "checking" : allowed;
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,
     authorCapacity: engine.authorCapacity, saveState: engine.saveState,
