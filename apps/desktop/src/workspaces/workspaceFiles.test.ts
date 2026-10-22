@@ -753,7 +753,7 @@ describe("deletePath", () => {
     await chmod(join(root, ".dohc", "local", "trash"), 0o777);
     await writeFile(join(root, "junk.md"), "keep me");
     await expect(deletePath(workspace(), "junk.md", rejectingTrash)).rejects.toThrow(
-      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash, which must be a folder only you can change. Remove or rename it. Then retry.",
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash. Make it a folder only you can change. Then retry.",
     );
     expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
     expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);

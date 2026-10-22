@@ -363,6 +363,32 @@ export const COLLECTIONS_REFUSAL_CODE = "collections-";
 /** The control that keeps Collections no computer keeps yet on this one. */
 export const KEEP_COLLECTIONS_HERE = "Keep the Collections on this computer";
 
+/**
+ * Where another computer keeps a workspace's Collections, and the two ways
+ * on. `others`: this computer lists some of them from its server.
+ */
+export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }, others = false): string {
+  const where = computer.sameName ? `${computer.label}, another installation of dohc with this computer's name` : computer.label;
+  return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
+}
+
+/**
+ * The code of a Collections list this computer's server didn't give, where
+ * another computer keeps the workspace's own Collections.
+ */
+export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
+
+/**
+ * main's words for that list: on the first line, where the workspace's
+ * Collections are. After it, the server's error, which reads as it would alone.
+ */
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; failure: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
+  const [elsewhere = "", ...failure] = message.split("\n");
+  return elsewhere ? { elsewhere, failure: failure.join("\n") } : null;
+}
+
 /** main's refusal to use a workspace's Collections here, with its words. */
 export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {
   const { name, code, message } = parse(error);

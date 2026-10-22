@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitCollectionsStore,
   collectionsHolderRequired,
+  collectionsKeptElsewhere,
   CollectionsRefusalError,
   createHoldingCheck,
   holderWork,
@@ -26,9 +27,12 @@ const recordPath = () => join(root, ".dohc", "collections.json");
 const record = (fields: Record<string, unknown>) => writeFile(recordPath(), JSON.stringify(fields));
 const named = (computer: { installId: string; label: string }, id: string | null = null) =>
   record({ version: 1, workspaceId, installId: computer.installId, label: computer.label, storeId: id });
-const addStore = async (file = "state.sqlite") => {
-  await mkdir(join(root, ".dohc", "datasets"), { recursive: true });
-  await writeFile(join(root, ".dohc", "datasets", file), "");
+// The store's folder in .dohc/local, or where stores were before it, which iCloud Drive syncs.
+const places = { local: [".dohc", "local", "datasets"], old: [".dohc", "datasets"] } as const;
+type Place = keyof typeof places;
+const addStore = async (file = "state.sqlite", place: Place = "local") => {
+  await mkdir(join(root, ...places[place]), { recursive: true });
+  await writeFile(join(root, ...places[place], file), "");
 };
 const refusal = async (work: Promise<unknown>) => {
   const error = await work.then(() => null, (caught: unknown) => caught);
@@ -57,27 +61,28 @@ describe("a workspace's Collections holder", () => {
     expect(JSON.parse(await readFile(recordPath(), "utf8")).installId).toBe("install-here");
   });
 
-  it("opens the store the record names, once it is there", async () => {
+  it.each(["local", "old"] as const)("opens the store the record names, once it is there, in the %s place", async (place) => {
     await named(here, storeId);
-    await addStore();
+    await addStore("state.sqlite", place);
     expect(await admitCollectionsStore(root, workspaceId, required)).toEqual({ kind: "open", storeId });
   });
 
-  it("blocks Collections no record names, with or without a store, and creates nothing", async () => {
+  it.each(["local", "old"] as const)("blocks Collections no record names, with or without a store in the %s place, and creates nothing", async (place) => {
     for (const store of [false, true]) {
-      if (store) await addStore("state.sqlite-wal");
+      if (store) await addStore("state.sqlite-wal", place);
       const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
       expect(refused.refusal).toEqual({ kind: "unclaimed" });
       expect(refused.code).toBe("collections-unclaimed");
       expect(refused.message).toBe("dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.");
     }
-    expect(await readdir(join(root, ".dohc")), "nothing but the store this test made").toEqual(["datasets"]);
-    expect(await readdir(join(root, ".dohc", "datasets"))).toEqual(["state.sqlite-wal"]);
+    expect(await readdir(join(root, ".dohc")), "nothing but the store this test made").toEqual([places[place][1]]);
+    expect(await readdir(join(root, ...places[place]))).toEqual(["state.sqlite-wal"]);
   });
 
-  it("blocks a store the record names no store for, as one a computer made before it", async () => {
+  // A copy in the old place may be another computer's that iCloud Drive has not removed yet.
+  it.each(["local", "old"] as const)("blocks a store in the %s place that the record names no store for, as one a computer made before it", async (place) => {
     await named(here);
-    await addStore();
+    await addStore("state.sqlite-shm", place);
     expect((await refusal(admitCollectionsStore(root, workspaceId, required))).refusal).toEqual({ kind: "unclaimed" });
   });
 
@@ -94,15 +99,34 @@ describe("a workspace's Collections holder", () => {
       .toBe("These Collections are on Studio, another installation of dohc with this computer's name. Open this workspace there to use them, or to move them to a server.");
   });
 
+  it("tells from the record alone that another computer keeps them, and nothing else", async () => {
+    // Nobody keeps them yet.
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({ kind: "elsewhere", computer: laptop, sameName: false });
+    await named({ installId: "install-old", label: "Studio" });
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({ kind: "elsewhere", computer: { installId: "install-old", label: "Studio" }, sameName: true });
+    // This computer keeps them, a share needs no holder, and a record dohc cannot read names nobody.
+    await named(here, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, { here: () => here, required: () => false })).toBeNull();
+    await record({ version: 2, workspaceId, installId: laptop.installId, label: laptop.label, storeId });
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, "w-2", required)).toBeNull();
+    expect(await readdir(join(root, ".dohc"))).toEqual(["collections.json"]);
+  });
+
   it("refuses a store this computer keeps that is not there, without creating one", async () => {
     await named(here, storeId);
     const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
     expect(refused.code).toBe("collections-missing");
-    expect(refused.message).toBe("This computer keeps this workspace's Collections, but .dohc/datasets/state.sqlite is not there. Restore it from a backup, then try again.");
-    // A -wal without its database is not the store.
-    await addStore("state.sqlite-wal");
+    expect(refused.message).toBe("This computer keeps this workspace's Collections, but .dohc/local/datasets/state.sqlite is not there. Restore it from a backup, then try again.");
+    // A -wal without its database is not the store, in either place.
+    for (const place of ["local", "old"] as const) await addStore("state.sqlite-wal", place);
     expect((await refusal(admitCollectionsStore(root, workspaceId, required))).refusal).toEqual({ kind: "missing" });
-    expect(await exists(join(root, ".dohc", "datasets", "state.sqlite"))).toBe(false);
+    for (const place of ["local", "old"] as const) expect(await exists(join(root, ...places[place], "state.sqlite"))).toBe(false);
   });
 
   it("checks an open store against the record before each use, reading it again only after it changed", async () => {
@@ -219,8 +243,8 @@ it("runs claims, adoptions and new stores in one workspace one at a time, whethe
 });
 
 describe("keeping the Collections on this computer", () => {
-  it("adopts a store no record names: the store takes a new id first, then the record names it", async () => {
-    await addStore();
+  it.each(["local", "old"] as const)("adopts a store in the %s place that no record names: the store takes a new id first, then the record names it", async (place) => {
+    await addStore("state.sqlite", place);
     const order: string[] = [];
     let adopted = "";
     expect(await keepCollectionsHere(root, workspaceId, here, steps({ adoptStore: async (id) => {
@@ -337,12 +361,15 @@ describe("keeping the Collections of an earlier installation of dohc on this com
 
   it("keeps a record that names no store yet only where there is no store, since no store here could match it", async () => {
     await named(laptop);
-    await addStore("state.sqlite-shm");
-    const withStore = steps();
-    expect((await refusal(keepCollectionsHere(root, workspaceId, here, withStore))).refusal.kind).toBe("elsewhere");
-    expect(withStore.confirm).not.toHaveBeenCalled();
-    expect((await recordNow()).installId).toBe("install-laptop");
-    await rm(join(root, ".dohc", "datasets"), { recursive: true });
+    // In either place: one in the old place may be the other computer's, which iCloud Drive has not removed yet.
+    for (const place of ["old", "local"] as const) {
+      await addStore("state.sqlite-shm", place);
+      const withStore = steps();
+      expect((await refusal(keepCollectionsHere(root, workspaceId, here, withStore))).refusal.kind).toBe("elsewhere");
+      expect(withStore.confirm).not.toHaveBeenCalled();
+      expect((await recordNow()).installId).toBe("install-laptop");
+      await rm(join(root, ...places[place]), { recursive: true });
+    }
     const declined = steps({ confirm: vi.fn(async () => false) });
     expect(await keepCollectionsHere(root, workspaceId, here, declined)).toBe(false);
     expect(declined.confirm).toHaveBeenCalledWith({ kind: "earlier-installation", computer: laptop });
