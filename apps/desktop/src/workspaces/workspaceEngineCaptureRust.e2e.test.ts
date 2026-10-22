@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -149,14 +149,17 @@ async function waitForDaemonCaptureDeferral(
 ): Promise<void> {
   const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
   while (performance.now() < deadline) {
-    const outcome = await sessions.run(
+    const status = await sessions.run(
       workspace,
-      async ({ client, workspace: handle }) =>
-        await new VersionedLiveAdapter(client, handle, {
+      async ({ client, workspace: handle }) => {
+        const engine = new VersionedLiveAdapter(client, handle, {
           workspaceId: workspace.workspaceId,
-        }).flushCapture(),
+        });
+        expect(await engine.flushCapture()).toMatchObject({ settled: true, degraded: false });
+        return engine.watcherStatus();
+      },
     );
-    if (!outcome.settled) return;
+    if (status.deferredWrites.length > 0) return;
     await delay(25);
   }
   throw new Error("Daemon capture did not report its live-session deferral.");
@@ -757,7 +760,7 @@ it.skipIf(engine.missing)(
 );
 
 // #496 under the live-session capture gate: the daemon observes the outside
-// edit but cannot ingest it while the Y.Doc lease is live. The unsettled flush
+// edit but cannot ingest it while the Y.Doc lease is live. The deferred path
 // is the ordering proof. A clean close releases the lease, after which the
 // queued disk edit becomes a capture moment.
 it.skipIf(engine.missing)(
@@ -1283,8 +1286,8 @@ const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 // to settle and fails as "dohc could not check whether open files changed"
 // while History is still updating. Last, it answers the outcome of the first
 // health poll, which raises History paused unless it is null.
-async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}) {
-  const root = await createTestScratch(`dohc-${workspaceId}-`);
+async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}, existingRoot?: string) {
+  const root = existingRoot ?? await createTestScratch(`dohc-${workspaceId}-`);
   const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
@@ -1310,8 +1313,174 @@ async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEn
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
   };
-  return { root, sessions, capture, health, stop };
+  const withEngine = <T>(run: (engine: VersionedLiveAdapter) => Promise<T>) => sessions.run(workspace,
+    ({ client, workspace: handle }) => run(new VersionedLiveAdapter(client, handle, { workspaceId })));
+  return { root, sessions, capture, health, stop, withEngine, workspaceId, stopEngine: () => lifecycle.stop() };
 }
+
+it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
+  "captures an outside %s write into an open document without pausing History (#2463)",
+  async (style) => {
+    const opened = await openRealCapture(`outside-write-${style}`, { settleDebounceMs: 60_000 });
+    const editor = new Y.Doc();
+    const base = "base\n";
+    const outside = "written outside dohc\n";
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, base, "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const session = await opened.capture.openYDocSession({
+        path: "note.md", contentKind: "plaintext",
+        onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+      });
+      Y.applyUpdate(editor, session.initialUpdate);
+      expect(editor.getText("plainText").toString()).toBe(base);
+
+      if (style === "rename") {
+        const temporary = join(opened.root, "note.md.tmp");
+        await writeFile(temporary, outside, "utf8");
+        await rename(temporary, absolute);
+      } else {
+        const file = await open(absolute, "r+");
+        try {
+          await file.truncate(0);
+          await file.writeFile(outside, "utf8");
+        } finally {
+          await file.close();
+        }
+      }
+
+      // Part (a) keeps this editor unchanged. Part (b) takes in the edit.
+      expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.flushCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.reconcileCapture())).toMatchObject({ degraded: false, deferredWrites: ["note.md"] });
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      await writeFile(join(opened.root, "other.md"), "other file\n");
+      await waitForPathMoments(opened.capture, "other.md", 1);
+      await opened.withEngine(async (engine) => {
+        const operationId = `dohc-operation:other-during-${style}`;
+        const hold = await engine.holdCapture({ operationId });
+        try {
+          await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
+            fromPath: "other.md", toPath: "moved.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+          await rename(join(opened.root, "other.md"), join(opened.root, "moved.md"));
+        } finally { await engine.releaseCapture(hold.holdId); }
+        await engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId, requestId: `undo-other-${style}` });
+        expect(await engine.watcherStatus()).toMatchObject({ deferredWrites: ["note.md"] });
+      });
+      expect.soft(await readFile(absolute, "utf8")).toBe(outside);
+      // A refused pre-close save must still release the session's lease.
+      await session.close().catch(() => undefined);
+      await waitForPathMoments(opened.capture, "note.md", 2);
+      const history = await opened.capture.listMoments({ limit: 100 }).then(async (page) =>
+        Promise.all(page.moments.filter((moment) => moment.path === "note.md").map(async (moment) => {
+          const detail = await opened.capture.readMoment(moment.id);
+          return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+        })),
+      (error: unknown) => isWorkspaceUpdatingRefusal(error) ? "still updating" : Promise.reject(error));
+      expect.soft(history).toEqual([outside, base]);
+      expect.soft(await readFile(absolute, "utf8")).toBe(outside);
+      expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+      editor.destroy();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)("keeps two open files' outside writes independent (#2463)", async () => {
+  const opened = await openRealCapture("two-deferred-writes", { settleDebounceMs: 60_000 });
+  try {
+    const sessions = [];
+    for (const path of ["first.md", "second.md"]) {
+      await writeFile(join(opened.root, path), "base\n");
+      await waitForPathMoments(opened.capture, path, 1);
+      sessions.push(await opened.capture.openYDocSession({ path, contentKind: "plaintext", onRemoteUpdate: () => undefined }));
+      await writeFile(join(opened.root, path), `outside ${path}\n`);
+      expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    }
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["first.md", "second.md"] });
+    await sessions[1]!.close().catch(() => undefined);
+    await waitForPathMoments(opened.capture, "second.md", 2);
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: ["first.md"] });
+    await sessions[0]!.close().catch(() => undefined);
+    await waitForPathMoments(opened.capture, "first.md", 2);
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+  } finally { await opened.stop(); }
+}, 60_000);
+
+it.skipIf(engine.missing)("records a deferred outside write after the daemon restarts (#2463)", async () => {
+  const opened = await openRealCapture("deferred-write-restart", { settleDebounceMs: 60_000 });
+  let restarted: Awaited<ReturnType<typeof openRealCapture>> | undefined;
+  try {
+    await writeFile(join(opened.root, "note.md"), "base\n");
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    await opened.capture.openYDocSession({ path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined });
+    await writeFile(join(opened.root, "note.md"), "outside before restart\n");
+    expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    // Stop the daemon without closing or settling the document session.
+    await opened.stopEngine();
+    restarted = await openRealCapture("deferred-write-restart", {}, opened.root);
+    const moments = await waitForPathMoments(restarted.capture, "note.md", 2);
+    // Startup may also retain the abandoned Y.Doc as a recovery moment.
+    // The outside bytes themselves must be captured exactly once.
+    const texts = await Promise.all(moments.filter((moment) => moment.metadata.origin === "local-file").map(async (moment) => {
+      const detail = await restarted!.capture.readMoment(moment.id);
+      return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+    }));
+    expect(texts).toEqual(["outside before restart\n", "base\n"]);
+    expect(await restarted.health()).toEqual({ newestMoment: "read", health: null });
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe("outside before restart\n");
+  } finally {
+    await restarted?.stop();
+    await opened.stop();
+  }
+}, 60_000);
+
+// Waits on #2478: baseline settlement refuses an outside write before the open note's links can be rewritten.
+it.skip("keeps an outside write when a rename rewrites the open note's links (#2463)", async () => {
+  const opened = await openRealCapture("deferred-write-rename", { settleDebounceMs: 60_000 });
+  const outside = "agent text [[old]]\n";
+  try {
+    await writeFile(join(opened.root, "old.md"), "target\n");
+    await writeFile(join(opened.root, "note.md"), "[[old]]\n");
+    await waitForPathMoments(opened.capture, "old.md", 1);
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    const session = await opened.capture.openYDocSession({ path: "note.md", contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await writeFile(join(opened.root, "note.md"), outside);
+    expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    const operationId = "dohc-operation:deferred-rename";
+    await opened.withEngine(async (engine) => {
+      const hold = await engine.holdCapture({ operationId });
+      try {
+        await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
+          fromPath: "old.md", toPath: "new.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+        await rename(join(opened.root, "old.md"), join(opened.root, "new.md"));
+      } finally { await engine.releaseCapture(hold.holdId); }
+    });
+    const rewritten = await opened.withEngine((engine) => engine.rewriteHistoryLinks({ workspaceId: opened.workspaceId, operationId, requestId: "rewrite-deferred" }));
+    expect(rewritten).toMatchObject({ documents: 1, complete: true });
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
+    await vi.waitFor(async () => expect((await readdir(opened.root)).some((path) => path.includes(".conflict"))).toBe(true));
+    const conflicts = (await readdir(opened.root)).filter((path) => path.includes(".conflict"));
+    expect(await Promise.all(conflicts.map((path) => readFile(join(opened.root, path), "utf8")))).toContain("[[new]]\n");
+    const undone = await opened.withEngine((engine) => engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId: operationId!, requestId: "undo-deferred" }));
+    expect(undone.notRestored).toContain("note.md");
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
+    await session.close().catch(() => undefined);
+    await vi.waitFor(async () => {
+      const moments = await opened.capture.listMoments({ limit: 100 });
+      const note = moments.moments.filter((moment) => moment.path === "note.md");
+      const texts = await Promise.all(note.map(async (moment) => {
+        const detail = await opened.capture.readMoment(moment.id);
+        return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+      }));
+      expect(texts).toContain(outside);
+    }, { timeout: REAL_DAEMON_DEADLINE_MS });
+  } finally { await opened.stop(); }
+}, 60_000);
 
 // dohc#2308. An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until

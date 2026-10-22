@@ -1055,6 +1055,7 @@ const CaptureFileHoldSchema = mutableStruct({
 });
 
 const CaptureFlushResultSchema = mutableStruct({
+  deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
   heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
   settled: Schema.Boolean,
   running: Schema.Boolean,
@@ -1304,6 +1305,8 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
   [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
+    // Outside writes waiting for the open document to release its lease.
+    deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
     heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,

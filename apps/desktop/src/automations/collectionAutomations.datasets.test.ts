@@ -2821,7 +2821,7 @@ describe("dataset agent wakes", () => {
     const sources = new Map(Object.entries(form.files).map(([path, source]) => [`form/${path}`, source]));
     sources.set("Budget/dataset.json", JSON.stringify(f.approved.definition));
     const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
-    const prepared = await prepareLocalAppPublication({ workspaceId: "workspace", appRoot: "form" }, {
+    const prepared = await prepareLocalAppPublication({ workspaceId: "workspace", appRoot: "form" }, { deferredWrites: [],
       adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {},
       async resolveDatasetRevision(binding) { return f.host.approvedArtifacts(binding.datasetId).revision; },
     });

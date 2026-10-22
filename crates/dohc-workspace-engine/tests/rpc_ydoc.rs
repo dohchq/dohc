@@ -2423,24 +2423,41 @@ async fn stage_headless_session_over_an_empty_artifact(
 async fn wait_for_capture_to_defer_under_live_session(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
+    path: &str,
     id_base: u64,
 ) {
     let mut last_flush = Value::Null;
+    let mut last_status = Value::Null;
     for attempt in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         last_flush = call(
             transport,
             handle,
-            id_base + attempt,
+            id_base + attempt * 2,
             "capture.flush",
             json!({}),
         )
         .await;
-        if last_flush["settled"] == json!(false) && last_flush["degraded"] == json!(true) {
+        last_status = call(
+            transport,
+            handle,
+            id_base + attempt * 2 + 1,
+            "watcher.status",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(true)
+            && last_flush["degraded"] == json!(false)
+            && last_status["deferredWrites"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|entry| entry.as_str() == Some(path)))
+        {
             return;
         }
     }
-    panic!("capture did not report its deferred live-session write: {last_flush}");
+    panic!(
+        "capture did not report its healthy deferred live-session write: {last_flush}; {last_status}"
+    );
 }
 
 /// Capture defers an empty new file a live session holds: the file is the
@@ -3811,7 +3828,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // Content the session never saw lands on the path. Capture observes it,
     // but the live lease keeps the head unchanged until the session ends.
     write_file(scratch.path(), &path, b"written by something else\n");
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, &path, 100).await;
     let ingested = call(
         &transport,
         &handle,
@@ -5593,7 +5610,20 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     // The disk gets the doc's exact projection. Capture observes it, but the
     // live lease keeps the head at the session's base.
     write_file(scratch.path(), PATH, TYPED.as_bytes());
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 2_000).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_000).await;
+    for method in ["capture.flush", "capture.reconcile"] {
+        let capture = call(&transport, &handle, 2_050, method, json!({})).await;
+        if method == "capture.flush" {
+            assert_eq!(capture["settled"], json!(true), "{method}");
+        }
+        assert_eq!(capture["degraded"], json!(false), "{method}");
+        assert_eq!(
+            capture["deferredWrites"],
+            json!([PATH]),
+            "{method} must expose waiting source"
+        );
+    }
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_060).await;
     let captured = call(
         &transport,
         &handle,

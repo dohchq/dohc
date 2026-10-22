@@ -457,6 +457,7 @@ impl EngineService {
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
                     "heldFiles": held_files,
+                    "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
                 })
             }
@@ -471,6 +472,7 @@ impl EngineService {
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
                 "heldFiles": held_files,
+                "deferredWrites": [],
                     "recoveryUnavailable": recovery_unavailable,
             }),
         })
@@ -517,6 +519,8 @@ impl EngineService {
             "running": outcome.running,
             "degraded": outcome.degraded,
             "heldFiles": held_files,
+            "deferredWrites": lock(&open.capture).as_ref()
+                .map(|driver| driver.status().deferred_writes()).unwrap_or_default(),
         }))
     }
 

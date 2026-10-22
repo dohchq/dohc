@@ -59,7 +59,7 @@ it("keeps workspace refusal inside the existing dataset handler", async () => {
   const hostForWorkspace = vi.fn(async () => { throw new Error("Unexpected dataset host."); });
   const handler = createDatasetHandler({
     withWorkspaceOperation, hostForWorkspace,
-    flushSourceCapture: async () => [],
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
     withAdapter: async () => { throw new Error("Unexpected source adapter."); },
     createSources: async () => {},
   });
