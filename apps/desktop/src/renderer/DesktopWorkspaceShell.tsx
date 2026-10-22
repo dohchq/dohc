@@ -476,6 +476,7 @@ function shareUnjournalableNotice(
     "non-utf8",
     "non-file-replacement",
     "local-collision",
+    "spelling-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -511,6 +512,14 @@ function shareUnjournalableNotice(
         `dohc could not receive ${names}. ` +
           `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
           `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
+      );
+    } else if (reason === "spelling-collision") {
+      const owner = one ? group[0]!.owner : undefined;
+      lines.push(
+        `dohc could not receive ${names}. ` +
+          (owner === undefined
+            ? "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."
+            : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`),
       );
     } else {
       lines.push(

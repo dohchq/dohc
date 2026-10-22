@@ -1046,7 +1046,8 @@ export function createShareViewFiles(
         return [...new Set([
           ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
           ...(captured.failedPaths ?? []),
-          ...captured.unjournalablePaths.map(entry => entry.path),
+          // A held spelling's file is another spelling's, not unsaved work.
+          ...captured.unjournalablePaths.filter(entry => entry.reason !== "spelling-collision").map(entry => entry.path),
         ])];
       });
     } catch {

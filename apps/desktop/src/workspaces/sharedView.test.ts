@@ -254,6 +254,7 @@ function reconcileStandaloneForTest(
       pinnedSelector: input.pinnedSelector,
       shareId: input.shareId,
       ended,
+      preservedPaths: input.preservedPaths,
     });
     return reconcileStandaloneShareView({ ...refreshInput, captured });
   });
@@ -1881,9 +1882,10 @@ describe("shared view refresh", () => {
     }
   });
 
-  // Both spellings arrive in one refresh, so the disk's one file holds the
-  // later one's bytes. Deleting that one writes the other's head there.
-  it("writes the other spelling's head when a refresh deletes the spelling whose bytes the disk holds", async (context) => {
+  // Both spellings arrive in one refresh, so the first owns the disk's one
+  // file and the later one is held back. Deleting the first writes the later
+  // one's head there, under its spelling, which ends the hold.
+  it("writes the held spelling's head when a refresh deletes the spelling whose file it is", async (context) => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     await writeFile(join(rootDir, "probe.md"), "");
     const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
@@ -1905,12 +1907,14 @@ describe("shared view refresh", () => {
       relay.addWrite("notes.md", "old\n");
       relay.addWrite("Notes.md", "live\n");
       await reconcile();
-      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("live\n");
-      relay.addDelete("Notes.md");
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("old\n");
+      relay.addDelete("notes.md");
       await reconcile();
 
-      expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
-      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("old\n");
+      expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      expect((await reconcile()).unjournalablePaths).toEqual([]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
     } finally {
       await store.close();
     }
@@ -1989,6 +1993,314 @@ describe("shared view refresh", () => {
 
     expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
     expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+  });
+
+  // A view on a disk that ignores case, refreshed the way dohc refreshes it,
+  // capturing first. Skips where the disk keeps case apart.
+  async function caseFoldingView(context: { skip: (note: string) => void }, access: "view" | "edit") {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const pinnedSelector = { ...PINNED_SELECTOR, access };
+    const reconcile = async (preservedPaths?: readonly string[]) => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector, recordRefusals: async () => undefined, ended: false, preservedPaths,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    const capture = (preservedPaths?: readonly string[] | null) => captureStandaloneShareViewDivergence({
+      rootDir, workspaceId: WORKSPACE, store, pinnedSelector, shareId: SHARE_ID, ended: false, preservedPaths,
+    });
+    const head = async (path: string) => {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      return (await store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }))?.text ?? null;
+    };
+    const names = async (folder = rootDir) => (await readdir(folder)).filter((name) => !name.startsWith("."));
+    return { rootDir, relay, store, reconcile, capture, head, names };
+  }
+
+  // Both spellings arrive in one refresh. The first one written owns the
+  // file, and the later one is held back, as one arriving in a later refresh
+  // is. Neither sends anything, and a view that can only read leaves the file
+  // alone (#2416).
+  for (const access of ["view", "edit"] as const) {
+    it(`holds back the later of two spellings from one refresh and sends nothing (${access})`, async (context) => {
+      const view = await caseFoldingView(context, access);
+      try {
+        view.relay.addWrite("notes.md", "old\n");
+        view.relay.addWrite("Notes.md", "live\n");
+        await view.reconcile();
+        const before = await momentIds(view.store);
+        for (let pass = 0; pass < 2; pass += 1) {
+          const settled = await view.reconcile();
+          expect(settled.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }]);
+          expect(() => assertShareChangesJournalable(settled.unjournalablePaths)).not.toThrow();
+        }
+        expect(await momentIds(view.store)).toEqual(before);
+        expect(await view.names()).toEqual(["notes.md"]);
+        expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // The spellings can differ in a folder name too. The folder keeps the first
+  // write's spelling, and the later spelling is still held back.
+  for (const [first, later] of [["docs/a.md", "Docs/a.md"], ["docs/A.md", "Docs/a.md"]] as const) {
+    it(`holds back ${later} after ${first} from one refresh and sends nothing`, async (context) => {
+      const view = await caseFoldingView(context, "edit");
+      try {
+        view.relay.addWrite(first, "first\n");
+        view.relay.addWrite(later, "later\n");
+        await view.reconcile();
+        const before = await momentIds(view.store);
+        expect((await view.reconcile()).unjournalablePaths).toEqual([{ path: later, reason: "spelling-collision", owner: first }]);
+        expect(await momentIds(view.store)).toEqual(before);
+        expect(await view.head(first)).toBe("first\n");
+        expect(await view.head(later)).toBe("later\n");
+        expect(await readFile(join(view.rootDir, ...first.split("/")), "utf8")).toBe("first\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // A capture that keeps unsaved work aside, as one before access narrows
+  // does, still sends nothing for a held spelling, and does not keep it
+  // aside: its file is another spelling's, not unsaved work.
+  it("sends nothing for a held spelling that a capture keeps aside", async (context) => {
+    const view = await caseFoldingView(context, "view");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      for (const preserved of [["Notes.md"], null]) {
+        const captured = await view.capture(preserved);
+        expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }]);
+        expect(captured.remainingPreservedPaths).not.toContain("Notes.md");
+      }
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.head("notes.md")).toBe("old\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // What a capture kept aside protects files in the next refresh. A held
+  // spelling is not among them, so when its owner is deleted, it gets the
+  // file with its own text, and capture never saves the owner's text as its.
+  it("gives a held spelling its own text when its owner is deleted after a capture kept files aside", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      const kept = (await view.capture(null)).remainingPreservedPaths ?? [];
+      view.relay.addDelete("notes.md");
+      await view.reconcile(kept);
+      await view.reconcile(kept);
+
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.names()).toEqual(["Notes.md"]);
+      expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // With three spellings, deleting the owner gives its file to one held
+  // spelling, which then owns it: the other stays held behind it, even when
+  // a capture keeps it aside.
+  it("hands a deleted owner's file to one held spelling and keeps holding the rest", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "n\n");
+      view.relay.addWrite("Notes.md", "N\n");
+      view.relay.addWrite("NOTES.md", "NN\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      await view.reconcile();
+      const before = await momentIds(view.store);
+      const captured = await view.capture(["Notes.md"]);
+
+      expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "NOTES.md" }]);
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head("Notes.md")).toBe("N\n");
+      expect(await view.head("NOTES.md")).toBe("NN\n");
+      expect(await view.names()).toEqual(["NOTES.md"]);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Deleting the visible file deletes only the spelling the person saw, even
+  // when a capture keeps the held spelling aside: the held one gets its own
+  // file and text.
+  for (const preserved of [["Notes.md"], null]) {
+    it(`deletes only the visible spelling when a capture keeps the held one aside (${JSON.stringify(preserved)})`, async (context) => {
+      const view = await caseFoldingView(context, "edit");
+      try {
+        view.relay.addWrite("notes.md", "old\n");
+        view.relay.addWrite("Notes.md", "live\n");
+        await view.reconcile();
+        await rm(join(view.rootDir, "notes.md"));
+        await view.capture(preserved);
+
+        expect(await view.head("notes.md")).toBeNull();
+        expect(await view.head("Notes.md")).toBe("live\n");
+        expect(await view.names()).toEqual(["Notes.md"]);
+        expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // A pull that deleted the owner in the store and stopped before the disk
+  // leaves the owner pending and its file in place. A capture that keeps
+  // every path aside then never saves the owner's text as the held spelling's.
+  it("never saves a crashed pull's deleted owner's text as a held spelling's", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      const main = await view.store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await view.store.deleteTextFile({ workspaceId: WORKSPACE, versionId: main.id, path: "notes.md", metadata: { origin: "sync" } });
+      await writePendingMaterializationPaths(view.rootDir, ["notes.md"]);
+      await view.capture(null);
+
+      expect(await view.head("Notes.md")).toBe("live\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A person's own file at a recorded path, beside a spelling the disk keeps
+  // apart, is still their unsaved work: a capture that keeps it aside saves
+  // it, whatever other spellings of its name exist. NTFS keeps decomposed and
+  // composed accents apart; a disk that folds them skips.
+  it("saves a person's own file at a recorded path beside another spelling with its own file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      const [decomposed, composed] = ["café.md", "café.md"];
+      view.relay.addWrite(decomposed, "decomposed\n");
+      await view.reconcile();
+      if (await stat(join(view.rootDir, composed)).then(() => true, () => false)) context.skip("this disk folds normalization");
+      await writeFile(join(view.rootDir, composed), "mine\n");
+      view.relay.addWrite(composed, "theirs\n");
+      await view.reconcile();
+      const captured = await view.capture([composed]);
+
+      expect(captured.unjournalablePaths).toEqual([]);
+      expect(await view.head(composed)).toBe("mine\n");
+      expect(await view.head(decomposed)).toBe("decomposed\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A refresh that stopped after giving a deleted owner's file to NOTES.md,
+  // before ending its record, leaves both remaining spellings recorded. The
+  // capture after it settles NOTES.md and never saves its text as Notes.md's.
+  it("never saves the new owner's text as a held spelling's after an interrupted handoff", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "n\n");
+      view.relay.addWrite("Notes.md", "N\n");
+      view.relay.addWrite("NOTES.md", "NN\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      await view.reconcile();
+      await recordCollisionPaths(view.rootDir, SHARE_ID, ["NOTES.md"]);
+      const before = await momentIds(view.store);
+      await view.capture(["Notes.md"]);
+      await view.capture(["Notes.md"]);
+
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head("Notes.md")).toBe("N\n");
+      expect(await view.head("NOTES.md")).toBe("NN\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Three spellings where the disk keeps the first apart but not the other
+  // two, as NTFS keeps decomposed and composed accents apart but not case:
+  // the second gets its own file, and the third stays held behind it.
+  it("holds a spelling that reaches the file of another spelling the refresh released", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      const [decomposed, composed, upper] = ["café.md", "café.md", "CAFÉ.md"];
+      view.relay.addWrite(decomposed, "decomposed\n");
+      view.relay.addWrite(composed, "composed\n");
+      view.relay.addWrite(upper, "upper\n");
+      await view.reconcile();
+      const before = await momentIds(view.store);
+      await view.reconcile();
+
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head(decomposed)).toBe("decomposed\n");
+      expect(await view.head(composed)).toBe("composed\n");
+      expect(await view.head(upper)).toBe("upper\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Deleting the file someone sees deletes the spelling they saw, and the
+  // held spelling then gets its own file.
+  it("deletes the spelling the person saw when they delete a held-back pair's file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      await rm(join(view.rootDir, "notes.md"));
+      await view.capture();
+
+      expect(await view.head("notes.md")).toBeNull();
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.names()).toEqual(["Notes.md"]);
+      expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set());
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A spelling held back because another one's file is there says so, and
+  // once the sharer deletes it, the hold ends and the other file stays.
+  it("reports a held-back spelling as one and ends the hold when it is deleted", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      await view.reconcile();
+      view.relay.addWrite("Notes.md", "live\n");
+      const held = [{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }];
+      expect((await view.reconcile()).unjournalablePaths).toEqual(held);
+      expect((await view.reconcile()).unjournalablePaths).toEqual(held);
+      view.relay.addDelete("Notes.md");
+      await view.reconcile();
+
+      expect((await view.reconcile()).unjournalablePaths).toEqual([]);
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set());
+      expect(await view.names()).toEqual(["notes.md"]);
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+    } finally {
+      await view.store.close();
+    }
   });
 
   it("leaves a directory that replaced a tracked file untouched during refresh", async () => {

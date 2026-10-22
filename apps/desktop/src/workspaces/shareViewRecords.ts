@@ -18,7 +18,10 @@ export interface UnjournalablePath {
     | "non-utf8"
     | "non-file-replacement"
     | "local-collision"
+    | "spelling-collision"
     | "unreadable";
+  // For a spelling collision, the shared spelling whose file this one reaches.
+  owner?: string;
 }
 
 function namedPaths(paths: readonly UnjournalablePath[]): string {
@@ -45,6 +48,7 @@ export function unjournalablePathMessages(
     "non-utf8",
     "non-file-replacement",
     "local-collision",
+    "spelling-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -76,6 +80,13 @@ export function unjournalablePathMessages(
         `${names} ${one ? "already has a file" : "already have files"} from this machine. ` +
           `Move or remove ${one ? "this file" : "these files"} to receive the shared ${one ? "file" : "files"}.`,
       );
+    } else if (reason === "spelling-collision") {
+      const owner = one ? group[0]!.owner : undefined;
+      messages.push(
+        owner === undefined
+          ? `This machine treats ${names} each as the same name as another shared file. Ask the person who shared the files to rename them.`
+          : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`,
+      );
     } else {
       messages.push(
         `dohc could not read ${names}. ` +
@@ -86,9 +97,12 @@ export function unjournalablePathMessages(
   return messages;
 }
 
+// A spelling collision holds nothing of this machine's, so it never stops
+// changes from being sent.
 export function assertShareChangesJournalable(
-  paths: readonly UnjournalablePath[],
+  unjournalable: readonly UnjournalablePath[],
 ): void {
+  const paths = unjournalable.filter((path) => path.reason !== "spelling-collision");
   if (paths.length === 0) return;
   const one = paths.length === 1;
   throw new Error(
