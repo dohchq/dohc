@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import type { AddressedDatasetDescription as DatasetDescription } from "@dohc/cli/dataset";
+import type { AddressedDatasetDescription as DatasetDescription, DatasetListElsewhere } from "@dohc/cli/dataset";
 import { readCollectionsRefusal, type CollectionsRefusalKind } from "../../ipc/errorWords";
 
 // Stable empty set: the Explorer is memoized, so the "no collections"
@@ -25,9 +25,12 @@ export function useCollectionFolders(
     ReadonlySet<string>
   >(EMPTY_COLLECTION_FOLDERS);
   const collectionsRequest = useRef(0);
-  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null } | null>(null);
+  // `elsewhere`: another computer keeps the workspace's Collections, and the
+  // list holds the ones on this computer's server.
+  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: DatasetListElsewhere | null } | null>(null);
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
+  const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
@@ -46,13 +49,13 @@ export function useCollectionFolders(
       const refusal = readCollectionsRefusal(error);
       if (refusal === null) throw error;
       if (request !== datasetRequest.current) return;
-      setDataState({ workspaceId, datasets: [], nextCursor: null });
+      setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
       setRefusalState({ workspaceId, ...refusal });
       return;
     }
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
-    setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor });
+    setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: result.elsewhere ?? null });
     setRefusalState(null);
   }, [workspaceId, includeArchived]);
   const loadMoreDatasets = useCallback(async () => {
@@ -61,7 +64,7 @@ export function useCollectionFolders(
     const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, after: nextDataset, ...(includeArchived ? { includeArchived: true } : {}) });
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
-    setDataState(current => ({ workspaceId, datasets: [...(current?.workspaceId === workspaceId ? current.datasets : []), ...result.datasets], nextCursor: result.nextCursor }));
+    setDataState(current => ({ workspaceId, datasets: [...(current?.workspaceId === workspaceId ? current.datasets : []), ...result.datasets], nextCursor: result.nextCursor, elsewhere: result.elsewhere ?? null }));
   }, [workspaceId, nextDataset, includeArchived]);
   const refreshCollections = useCallback(async () => {
     const request = ++collectionsRequest.current;
@@ -93,5 +96,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere };
 }

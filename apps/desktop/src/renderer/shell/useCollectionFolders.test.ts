@@ -59,3 +59,34 @@ it("keeps a refusal to list the Collections here as the list's state, and report
   await expect(act(async () => result.current.refreshDatasets())).rejects.toThrow("Collection storage is full.");
   expect(result.current.collectionsRefusal).toBeNull();
 });
+
+it("keeps where the other Collections are with the server's list, only for its own workspace", async () => {
+  const { result, dataset, rerender } = setup();
+  const elsewhere = { server: "https://relay.example", computer: { label: "Laptop", sameName: false } };
+  dataset.mockResolvedValueOnce({ ...page, elsewhere });
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.datasets).toEqual(page.datasets);
+  expect(result.current.collectionsElsewhere).toEqual(elsewhere);
+  dataset.mockResolvedValueOnce({ ...page, nextCursor: null, elsewhere });
+  await act(async () => result.current.loadMoreDatasets());
+  expect(result.current.collectionsElsewhere).toEqual(elsewhere);
+  rerender({ ended: true });
+  expect(result.current.collectionsElsewhere).toBeNull();
+  rerender({ ended: false });
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.collectionsElsewhere).toBeNull();
+});
+
+it("drops a server's list that answers after the window changed workspaces", async () => {
+  const dataset = vi.fn(async (): Promise<DatasetResult> => page);
+  vi.stubGlobal("dohcDesktop", { dataset, listCollections: vi.fn(async () => ({ collections: [] })) });
+  const { result, rerender } = renderHook(({ workspaceId }) => useCollectionFolders(workspaceId, true, false), { initialProps: { workspaceId: "first" } });
+  const read = deferred<DatasetResult>();
+  dataset.mockReturnValueOnce(read.promise);
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.refreshDatasets(); });
+  rerender({ workspaceId: "second" });
+  await act(async () => { read.resolve({ ...page, elsewhere: { server: "https://relay.example", computer: { label: "Laptop", sameName: false } } }); await pending; });
+  expect(result.current.collectionsElsewhere).toBeNull();
+  expect(result.current.datasets).toEqual([]);
+});

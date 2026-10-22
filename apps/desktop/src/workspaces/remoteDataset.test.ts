@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createRemoteDatasetData, createDatasetAuthorityRouter, resolveRemoteDatasetRevision } from "./remoteDataset";
+import { createRemoteDatasetData, createDatasetAuthorityRouter, createServerCollectionsData, resolveRemoteDatasetRevision } from "./remoteDataset";
 import type { OwnerDatasetData } from "./remoteDataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -219,4 +219,52 @@ it("verifies immutable history source against the requested revision and current
   f.relay.mockResolvedValue({ revision, schemaSql: "SQL", operationSource: "tampered" });
   await expect(f.data.historyRevision!(value)).rejects.toThrow();
   f.switchCredential(); await expect(f.data.historyRevision!(value)).rejects.toThrow();
+});
+
+describe("a workspace's Collections on this computer's server, where another computer keeps its own", () => {
+  function server(credentials: { serverUrl: string; relayUrl?: string; userId: string; token: string; email: string } = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" }) {
+    let generation = 1;
+    const elsewhere = new Error("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
+    const relay = vi.fn(async (_credentials: typeof credentials, path: string, _init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }> => {
+      if (path.endsWith(id(2))) return { kind: "missing" };
+      if (path.endsWith("/invoke")) return { kind: "success", body: { result: [], revision: 3, replayed: false } };
+      if (path.endsWith(id(1))) return { kind: "success", body: description };
+      return { kind: "success", body: { datasets: [description], nextCursor: null } };
+    });
+    const create = () => createServerCollectionsData({ workspaceId: "workspace", credentials, credentialGeneration: generation, signal: new AbortController().signal,
+      currentCredentialGeneration: () => generation, assertCurrent() {}, relayJson: relay, elsewhere });
+    return { create, relay, elsewhere, credentials, switchCredential() { generation++; } };
+  }
+
+  it("lists, describes and works on the server's Collections with the signed-in session, following no redirect", async () => {
+    const f = server(), data = f.create();
+    expect(await data.list({ limit: 50 })).toEqual({ datasets: [description], nextCursor: null });
+    expect(await data.describe(id(1))).toEqual(description);
+    expect(await data.invoke(invocation)).toEqual({ result: [], revision: 3, replayed: false });
+    expect(f.relay.mock.calls.map(([credentials, path, init]) => [credentials, path, init.redirect])).toEqual([
+      [f.credentials, "/sync/workspace/datasets?limit=50", "error"],
+      [f.credentials, `/sync/workspace/datasets/${id(1)}`, "error"],
+      [f.credentials, `/sync/workspace/datasets/${id(1)}/invoke`, "error"],
+    ]);
+  });
+
+  it("refuses as the other computer's Collections do for one the server doesn't have, and never asks without a sharing server", async () => {
+    const f = server();
+    await expect(f.create().describe(id(2))).rejects.toBe(f.elsewhere);
+    f.relay.mockResolvedValueOnce({ kind: "missing" });
+    await expect(f.create().list({})).rejects.toBe(f.elsewhere);
+    const unreachable = server({ ...f.credentials, relayUrl: undefined });
+    expect(() => unreachable.create()).toThrow(unreachable.elsewhere);
+    expect(unreachable.relay).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failure apart from an empty list, and drops an answer after the session changed", async () => {
+    const f = server(), data = f.create();
+    f.relay.mockResolvedValueOnce({ kind: "success", body: { datasets: [], nextCursor: null } });
+    expect(await data.list({})).toEqual({ datasets: [], nextCursor: null });
+    f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
+    await expect(data.list({})).rejects.toThrow("dohc could not reach the server.");
+    f.relay.mockImplementationOnce(async () => { f.switchCredential(); return { kind: "success", body: { datasets: [description], nextCursor: null } }; });
+    await expect(data.list({})).rejects.toThrow();
+  });
 });

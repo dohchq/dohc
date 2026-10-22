@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitCollectionsStore,
   collectionsHolderRequired,
+  collectionsKeptElsewhere,
   CollectionsRefusalError,
   createHoldingCheck,
   holderWork,
@@ -96,6 +97,25 @@ describe("a workspace's Collections holder", () => {
     await named({ installId: "install-old", label: "Studio" });
     expect((await refusal(admitCollectionsStore(root, workspaceId, required))).message)
       .toBe("These Collections are on Studio, another installation of dohc with this computer's name. Open this workspace there to use them, or to move them to a server.");
+  });
+
+  it("tells from the record alone that another computer keeps them, and nothing else", async () => {
+    // Nobody keeps them yet.
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({ kind: "elsewhere", computer: laptop, sameName: false });
+    await named({ installId: "install-old", label: "Studio" });
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({ kind: "elsewhere", computer: { installId: "install-old", label: "Studio" }, sameName: true });
+    // This computer keeps them, a share needs no holder, and a record dohc cannot read names nobody.
+    await named(here, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, workspaceId, { here: () => here, required: () => false })).toBeNull();
+    await record({ version: 2, workspaceId, installId: laptop.installId, label: laptop.label, storeId });
+    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
+    await named(laptop, storeId);
+    expect(await collectionsKeptElsewhere(root, "w-2", required)).toBeNull();
+    expect(await readdir(join(root, ".dohc"))).toEqual(["collections.json"]);
   });
 
   it("refuses a store this computer keeps that is not there, without creating one", async () => {

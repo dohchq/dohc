@@ -152,3 +152,26 @@ describe("Collections this computer cannot use", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
+
+describe("Collections on this computer's server, where another computer keeps the workspace's own", () => {
+  it("lists them as rows and names the computer that keeps the others, without offering recovery here", () => {
+    const onKeepCollections = vi.fn();
+    const rows = [{ datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "registrations/dataset.json", tableId: "00000000-0000-4000-8000-000000000002", name: "Registrations" }];
+    const elsewhere = { computer: { label: "Laptop", sameName: false } };
+    const { rerender } = render(<Explorer {...explorerProps({ dataCollections: rows, collectionsElsewhere: elsewhere, onKeepCollections,
+      onIncludeArchivedCollections: vi.fn(), onRestoreCollection: vi.fn() })} />);
+    const section = screen.getByRole("region", { name: "Collections" });
+    expect(within(section).getByRole("button", { name: "Registrations" })).toBeTruthy();
+    expect(within(section).getByTestId("collections-elsewhere").textContent)
+      .toContain("Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
+    expect(within(section).queryByTestId("collections-refusal")).toBeNull();
+    expect(within(section).getByLabelText("Archived collections")).toBeTruthy();
+    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    // Behind main's question, which names the other computer.
+    fireEvent.click(within(section).getByRole("button", { name: "Keep the Collections on this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledOnce();
+    rerender(<Explorer {...explorerProps({ dataCollections: [], collectionsElsewhere: { computer: { label: "Studio", sameName: true } } })} />);
+    expect(screen.getByTestId("collections-elsewhere").textContent)
+      .toContain("These Collections are on Studio, another installation of dohc with this computer's name. Open this workspace there to use them, or to move them to a server.");
+  });
+});

@@ -3,7 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { DOHC_COLLECTIONS_GUARD, DOHC_METADATA_GUARD, notAFileRefusal, notARealFolderRefusal, type DohcPathGuard } from "@dohc/workspace-core";
-import { COLLECTIONS_REFUSAL_CODE, KEEP_COLLECTIONS_HERE, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { COLLECTIONS_REFUSAL_CODE, KEEP_COLLECTIONS_HERE, collectionsElsewhereWords, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import { computerOf, guardedFileExists, parseObject, readGuardedFile, type Computer } from "./syncHistory";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -18,7 +18,8 @@ import { OLD_STORE_PATH, STORE_PATH } from "./localDatasetFolders";
 // could open an older copy, or write its own, and changes would be lost. So
 // only the installation the record names opens the store, and only it moves
 // a store from .dohc/datasets. Every other one refuses, creates nothing, and
-// says which computer keeps the Collections.
+// says which computer keeps the Collections. It can still use the ones moved
+// to its signed-in server, which it asks without opening a store.
 //
 // The record also names the store by a random id that the store keeps in
 // local_dataset_store. The holder opens only the store with that id, so a
@@ -80,12 +81,8 @@ function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
       return `dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose ${KEEP_COLLECTIONS_HERE}.`;
-    case "elsewhere": {
-      const where = refusal.sameName
-        ? `${refusal.computer.label}, another installation of dohc with this computer's name`
-        : refusal.computer.label;
-      return `These Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
-    }
+    case "elsewhere":
+      return collectionsElsewhereWords({ label: refusal.computer.label, sameName: refusal.sameName });
     case "unreadable":
       return refusal.words;
     case "missing":
@@ -230,11 +227,29 @@ export async function recordNewCollectionsHolder(rootPath: string, workspaceId: 
   if (!(await guardedFileExists(path, DOHC_COLLECTIONS_GUARD))) await atomicWriteFile(path, recordText(workspaceId, { computer: here, storeId: null }));
 }
 
+type Elsewhere = Extract<CollectionsRefusal, { kind: "elsewhere" }>;
+const elsewhereOf = (computer: Computer, here: Computer): Elsewhere => ({ kind: "elsewhere", computer, sameName: computer.label === here.label });
+
 function heldBy(read: RecordRead, here: Computer): CollectionsHolder {
   if (read.kind === "absent") throw refused({ kind: "unclaimed" });
   const { computer } = read.holder;
-  if (computer.installId !== here.installId) throw refused({ kind: "elsewhere", computer, sameName: computer.label === here.label });
+  if (computer.installId !== here.installId) throw refused(elsewhereOf(computer, here));
   return read.holder;
+}
+
+/**
+ * Whether the record names another installation, which keeps the
+ * Collections, read from the record alone. Null for anything else: this
+ * installation keeps them, no computer does yet, the workspace needs no
+ * holder, or dohc cannot read the record. Those still take the store's own
+ * admission, which refuses as before.
+ */
+export async function collectionsKeptElsewhere(rootPath: string, workspaceId: string, check: CollectionsHolderCheck): Promise<Elsewhere | null> {
+  if (!check.required()) return null;
+  const read = await readRecord(rootPath, workspaceId).catch(() => null);
+  if (read?.kind !== "holder") return null;
+  const here = check.here();
+  return read.holder.computer.installId === here.installId ? null : elsewhereOf(read.holder.computer, here);
 }
 
 /**
@@ -348,8 +363,7 @@ export async function keepCollectionsHere(rootPath: string, workspaceId: string,
   const seen = await readRecord(rootPath, workspaceId);
   const elsewhere = seen.kind === "holder" && seen.holder.computer.installId !== here.installId ? seen.holder : null;
   if (seen.kind === "holder" && elsewhere === null && seen.holder.storeId !== null) return true;
-  const refuseElsewhere = (holder: CollectionsHolder) =>
-    refused({ kind: "elsewhere", computer: holder.computer, sameName: holder.computer.label === here.label });
+  const refuseElsewhere = (holder: CollectionsHolder) => refused(elsewhereOf(holder.computer, here));
   let question: KeepQuestion | null = null;
   if (elsewhere !== null) {
     if (elsewhere.storeId === null && await collectionsStorePresent(rootPath)) throw refuseElsewhere(elsewhere);

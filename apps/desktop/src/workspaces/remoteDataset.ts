@@ -236,6 +236,27 @@ export function createRemoteDatasetData(input: {
   };
 }
 
+/**
+ * A workspace's Collections on this computer's signed-in server, for a
+ * computer that doesn't keep the workspace's own. Every request goes to the
+ * server that issued `credentials` and follows no redirect. A workspace or
+ * Collection that server doesn't have may be one the other computer keeps,
+ * so it refuses with `elsewhere`, as those Collections do here.
+ */
+export function createServerCollectionsData(input: Omit<Parameters<typeof createRemoteDatasetData>[0], "shareId" | "relayJson"> & {
+  /** "missing" when the server answers that it has no such workspace or Collection for this account. */
+  relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }>;
+  elsewhere: Error;
+}): OwnerDatasetData {
+  const { elsewhere, relayJson, ...remote } = input;
+  if (!remote.credentials.relayUrl) throw elsewhere;
+  return createRemoteDatasetData({ ...remote, async relayJson(credentials, path, init) {
+    const answer = await relayJson(credentials, path, { ...init, redirect: "error" });
+    if (answer.kind === "missing") throw elsewhere;
+    return answer.body;
+  } });
+}
+
 /** Owner-authenticated streaming target for the durable local-to-shared transfer coordinator. */
 export function createRemoteDatasetTransferTarget(input: {
   workspaceId: string; datasetId: string; origin: string; credentials: CloudCredentials; credentialGeneration: number;
