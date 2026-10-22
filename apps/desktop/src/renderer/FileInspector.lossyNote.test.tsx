@@ -9,6 +9,7 @@ import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
+import { knownLossyNoteVerdict } from "./editor/lossyNote";
 
 setupFileInspectorTests();
 
@@ -161,15 +162,17 @@ describe("a note dohc wrote", () => {
       { text: WRITTEN, contentHash: "c".repeat(64) },
       { text: `${WRITTEN}\nTyped.\n`, contentHash: "e".repeat(64) },
     ]);
-    const posted = vi.spyOn(globalThis.Worker.prototype, "postMessage");
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
-    expect(posted).toHaveBeenCalledTimes(1);
+    expect(knownLossyNoteVerdict("c".repeat(64))).toBe(false);
 
+    // A checked text gets a verdict; the saved text never does.
     view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
     await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(2));
-    expect(posted).toHaveBeenCalledTimes(1);
-    posted.mockRestore();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(knownLossyNoteVerdict("e".repeat(64))).toBeUndefined();
   });
 
   it("opens again with no check once its bytes have a verdict", async () => {
