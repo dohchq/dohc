@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import * as Y from 'yjs';
 
 // A lossy note is one dohc would change in meaning by saving it from the
 // editor (CONTEXT.md). The check parses the whole note, so it runs in a
@@ -68,24 +69,29 @@ export function knownLossyNoteVerdict(contentHash: string): boolean | undefined 
   return verdicts.get(contentHash);
 }
 
-/** Rejects when the worker fails; the caller treats that note as lossy. */
-export function checkLossyNote(contentHash: string, markdown: string): Promise<boolean> {
-  const known = verdicts.get(contentHash);
-  if (known !== undefined) return Promise.resolve(known);
-  const running = checks.get(contentHash);
-  if (running) return running;
-  const check = new Promise<boolean>((resolve, reject) => {
+function ask(note: {markdown: string} | {state: Uint8Array}): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
     clearTimeout(idleTimer);
     try {
       worker ??= startWorker();
       const id = ++nextId;
       const timer = setTimeout(() => stop(new Error('The note check took too long.')), DEADLINE_MS);
       requests.set(id, {resolve, reject, timer});
-      worker.postMessage({id, markdown});
+      if ('state' in note) worker.postMessage({id, state: note.state}, [note.state.buffer]);
+      else worker.postMessage({id, markdown: note.markdown});
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
     }
-  }).then((lossy) => {
+  });
+}
+
+/** Rejects when the worker fails; the caller treats that note as lossy. */
+export function checkLossyNote(contentHash: string, markdown: string): Promise<boolean> {
+  const known = verdicts.get(contentHash);
+  if (known !== undefined) return Promise.resolve(known);
+  const running = checks.get(contentHash);
+  if (running) return running;
+  const check = ask({markdown}).then((lossy) => {
     verdicts.delete(contentHash);
     verdicts.set(contentHash, lossy);
     if (verdicts.size > VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!);
@@ -100,60 +106,100 @@ export function checkLossyNote(contentHash: string, markdown: string): Promise<b
 export type LossyNoteCheck = 'checking' | 'lossy' | 'clear';
 
 /**
- * The check for one open of a note in one workspace. It judges only a read
- * that answered after the open began. A clear verdict holds for the rest of
- * the open, a version switch included: the engine owns the note from then on,
- * and its own saves change the file. A lossy note is checked again on each
- * new read, so a change on disk can clear it. A `waiting` note is not
- * checked, and reads as clear, until it stops waiting or proves lossy.
+ * The check for one open of one version of a note. It judges only a read that
+ * answered after the open began. A version switch of the same `note` keeps the
+ * last version's clear verdict until a read brings the new version's text,
+ * then checks that text; the session it binds meanwhile has its own check.
+ * A clear verdict holds for the rest of the open: the engine owns the note
+ * from then on, and its own saves change the file. A lossy note is checked
+ * again on each new read, so a change on disk can clear it. A `waiting` note
+ * is not checked, and reads as clear, until it stops waiting or proves lossy.
+ * `checkedHash` is the content hash the clear verdict is for.
  */
 export function useLossyNote(input: {
   open: string;
+  note: string;
   applies: boolean;
   waiting: boolean;
   markdown: string | null;
   contentHash: string | null;
   readSeq: number;
-}): LossyNoteCheck {
-  const opened = useRef({open: input.open, readSeq: input.readSeq, clear: false, lossy: false});
+}): {state: LossyNoteCheck; checkedHash: string | null} {
+  const opened = useRef({
+    open: input.open, note: input.note, readSeq: input.readSeq,
+    clear: null as string | null, lossy: false, carried: null as string | null,
+  });
   if (opened.current.open !== input.open) {
-    opened.current = {open: input.open, readSeq: input.readSeq, clear: false, lossy: false};
+    const last = opened.current;
+    const carried = last.note !== input.note ? null
+      : last.clear ?? (last.readSeq === input.readSeq ? last.carried : null);
+    opened.current = {open: input.open, note: input.note, readSeq: input.readSeq, clear: null, lossy: false, carried};
   }
   const current = opened.current;
   // Once clear, the engine's own saves change the file; checking them again
   // would only spend work while the person types.
-  const hash = input.applies && !current.clear && (!input.waiting || current.lossy)
+  const hash = input.applies && current.clear === null && (!input.waiting || current.lossy)
     && input.readSeq !== current.readSeq && input.markdown !== null
     ? input.contentHash
     : null;
-  const [answer, setAnswer] = useState<{open: string; contentHash: string; lossy: boolean} | null>(null);
-  const verdict = hash === null
+  const markdown = input.markdown;
+  const verdict = useVerdict(input.open, hash, hash === null ? undefined : knownLossyNoteVerdict(hash), () =>
+    hash === null || markdown === null ? Promise.resolve(true) : checkLossyNote(hash, markdown));
+  if (!input.applies) return {state: 'clear', checkedHash: null};
+  if (verdict === false && hash !== null) current.clear = hash;
+  if (current.clear !== null) return {state: 'clear', checkedHash: current.clear};
+  if (verdict === true) current.lossy = true;
+  if (current.lossy) return {state: 'lossy', checkedHash: null};
+  if (current.carried !== null && (input.readSeq === current.readSeq || input.markdown === null)) {
+    return {state: 'clear', checkedHash: current.carried};
+  }
+  return {state: input.waiting ? 'clear' : 'checking', checkedHash: null};
+}
+
+/**
+ * The check of a bound session's own document. A session records the bytes
+ * it was seeded from as a witness when they differ from dohc's form. A
+ * witness of other bytes than the ones already checked means the session may
+ * hold a different note, so the worker checks the session's whole state
+ * before anyone edits it: a witness that later edits left behind is not
+ * lossy, since saving writes dohc's form of what the session holds. A
+ * session with no witness is already in dohc's form.
+ */
+export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null}): LossyNoteCheck {
+  const sha = input.doc?.getMap('meta').get('dohcMarkdownSourceSha256');
+  const key = typeof sha === 'string' && sha !== input.checkedHash ? `session:${sha}` : null;
+  const doc = useRef(input.doc);
+  doc.current = input.doc;
+  const verdict = useVerdict(input.open, key, undefined, () =>
+    doc.current ? ask({state: Y.encodeStateAsUpdate(doc.current)}) : Promise.resolve(true));
+  if (key === null) return 'clear';
+  return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
+}
+
+// The worker's verdict under `key`, as one open sees it: `known` when an
+// earlier check answered, else undefined until `check` does. A failed check
+// reads as lossy.
+function useVerdict(open: string, key: string | null, known: boolean | undefined, check: () => Promise<boolean>): boolean | undefined {
+  const [answer, setAnswer] = useState<{open: string; key: string; lossy: boolean} | null>(null);
+  const verdict = key === null
     ? undefined
-    : answer?.open === input.open && answer.contentHash === hash
-      ? answer.lossy
-      : knownLossyNoteVerdict(hash);
-  const markdown = useRef(input.markdown);
-  markdown.current = input.markdown;
-  const unanswered = hash !== null && verdict === undefined;
+    : answer?.open === open && answer.key === key ? answer.lossy : known;
+  const run = useRef(check);
+  run.current = check;
+  const unanswered = key !== null && verdict === undefined;
   useEffect(() => {
-    if (!unanswered || hash === null || markdown.current === null) return;
+    if (!unanswered || key === null) return;
     let live = true;
-    const open = input.open;
-    void checkLossyNote(hash, markdown.current)
+    void run.current()
       .catch(() => true)
       .then((lossy) => {
-        if (live) setAnswer({open, contentHash: hash, lossy});
+        if (live) setAnswer({open, key, lossy});
       });
     return () => {
       live = false;
     };
-  }, [input.open, hash, unanswered]);
-  if (!input.applies) return 'clear';
-  if (verdict === false) current.clear = true;
-  if (current.clear) return 'clear';
-  if (verdict === true) current.lossy = true;
-  if (current.lossy) return 'lossy';
-  return input.waiting ? 'clear' : 'checking';
+  }, [open, key, unanswered]);
+  return verdict;
 }
 
 /** Tests reuse made-up content hashes for different text. */

@@ -34,7 +34,7 @@ import {
 } from "react";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
-import { useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
+import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { Layers, TriangleAlert } from "lucide-react";
@@ -465,13 +465,16 @@ export const FileInspector = memo(function FileInspector(
   }, []);
   // A note opens an engine session only once its bytes are known not to be a
   // lossy note. Until then, and for a lossy note, the view shows the file's
-  // text read-only, and the engine sees the note as closed. A failed read is
-  // not held: the engine's own refusal is what the person needs to see.
+  // text read-only, and the engine sees the note as closed. A failed read
+  // holds too, unless a version switch still carries the last version's
+  // verdict: only a checked note opens for editing.
   const checksLossyNote = kind === "markdown" && liveDocumentKind !== null && !props.readOnly;
   useEffect(() => {
     if (checksLossyNote) warmLossyNoteCheck();
   }, [checksLossyNote]);
-  const lossyOpen = `${props.workspaceId}\u0000${props.path}`;
+  // One open of one version: a switch, or a reload that bumps the version
+  // key, checks its own read, and asks for Edit anyway again.
+  const lossyOpen = key;
   // A note past read mode's size with no engine record gets no session and
   // edits as source, which writes what is typed. So its open goes first, and
   // only a session that binds waits for the check.
@@ -479,7 +482,8 @@ export const FileInspector = memo(function FileInspector(
   const [bound, setBound] = useState(false);
   const checked = useLossyNote({
     open: lossyOpen,
-    applies: checksLossyNote && !truncated && !error,
+    note: `${props.workspaceId}\u0000${props.path}`,
+    applies: checksLossyNote && !truncated,
     waiting: large && !bound,
     markdown: loadedPath === props.path ? text : null,
     contentHash,
@@ -488,7 +492,11 @@ export const FileInspector = memo(function FileInspector(
   // "Edit anyway" lasts for this open: the person accepted that saving
   // rewrites the parts dohc can't show.
   const [editAnyway, setEditAnyway] = useState<string | null>(null);
-  const allowed = checked === "lossy" && editAnyway === lossyOpen ? "clear" : checked;
+  const editingAnyway = editAnyway === lossyOpen;
+  // A session that binds a different note from the one checked, as when the
+  // file changed before the open, closes once its own check says lossy.
+  const [sessionLossy, setSessionLossy] = useState<string | null>(null);
+  const allowed = editingAnyway ? "clear" : sessionLossy === lossyOpen ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -505,8 +513,20 @@ export const FileInspector = memo(function FileInspector(
     accessEnded: props.accessEnded,
   });
   useEffect(() => setBound(engine.available), [engine.available]);
-  // The render a large note's session binds in, before its check starts, waits too.
-  const lossyNote = large && engine.available && !bound && allowed === "clear" ? "checking" : allowed;
+  const session = useBoundNoteCheck({
+    open: lossyOpen,
+    doc: checksLossyNote ? engine.doc : null,
+    checkedHash: checked.checkedHash,
+  });
+  useEffect(() => {
+    if (session === "lossy") setSessionLossy(lossyOpen);
+  }, [session, lossyOpen]);
+  // The render a large note's session binds in, before its check starts,
+  // waits too, as does a bound session while its own check runs.
+  const lossyNote = editingAnyway ? "clear"
+    : session === "lossy" ? "lossy"
+    : session === "checking" || (large && engine.available && !bound && allowed === "clear") ? "checking"
+    : allowed;
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,
     authorCapacity: engine.authorCapacity, saveState: engine.saveState,
@@ -704,7 +724,10 @@ export const FileInspector = memo(function FileInspector(
     );
   }
 
-  if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
+  // A failed read of a note still waiting for its check shows the failure,
+  // even over an earlier text: that note opens only once a read checks it.
+  const readFailedUnchecked = error && lossyNote === "checking";
+  if (isText && !engineDocBound && (text === null || loadedPath !== props.path || readFailedUnchecked)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (
@@ -738,7 +761,12 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file." />
+          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file.">
+            {/* A note opens only once a read checks it, so reading again is its way back. */}
+            {checksLossyNote ? (
+              <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
+            ) : null}
+          </EmptyState>
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:
           // in a pane that keeps its scrollbar's room, as the document's does.

@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it, vi } from "vitest";
-import { checkLossyNote, knownLossyNoteVerdict } from "./lossyNote";
+import { createHash } from "node:crypto";
+import { renderHook, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { checkLossyNote, knownLossyNoteVerdict, useBoundNoteCheck } from "./lossyNote";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -27,4 +31,39 @@ it("gives up on a check past its deadline, and remembers no verdict", async () =
 it("remembers an answered verdict by content hash", async () => {
   await expect(checkLossyNote("f".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(true);
   expect(knownLossyNoteVerdict("f".repeat(64))).toBe(true);
+});
+
+describe("useBoundNoteCheck", () => {
+  const LOSSY = "# Note\n\n<details>\n\nHidden.\n</details>\n";
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  // A session seeded from LOSSY, with the witness the desktop records.
+  function seeded(): Y.Doc {
+    const doc = markdownToYDoc(LOSSY);
+    doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    return doc;
+  }
+
+  it("needs no check for a session with no witness, or a witness of the bytes checked", () => {
+    const plain = markdownToYDoc("# Note\n");
+    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: plain, checkedHash: "c".repeat(64) })).result.current).toBe("clear");
+    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: seeded(), checkedHash: sha(LOSSY) })).result.current).toBe("clear");
+  });
+
+  it("checks a session holding other bytes than the ones checked", async () => {
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc: seeded(), checkedHash: "c".repeat(64) }));
+    expect(result.current).toBe("checking");
+    await waitFor(() => expect(result.current).toBe("lossy"));
+  });
+
+  it("clears a session whose witness later edits left behind", async () => {
+    const doc = seeded();
+    // An edit after Edit anyway: saving now writes dohc's form of the session.
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText("Typed.")]);
+    doc.getXmlFragment("body").push([paragraph]);
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }));
+    await waitFor(() => expect(result.current).toBe("clear"));
+  });
 });

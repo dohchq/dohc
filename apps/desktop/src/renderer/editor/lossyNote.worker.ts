@@ -1,8 +1,9 @@
-import {isLossyMarkdown} from '@dohc/ydoc-projection/lossy-markdown';
+import {isLossyDocumentState, isLossyMarkdown} from '@dohc/ydoc-projection/lossy-markdown';
 
-self.onmessage = ({data}: MessageEvent<{id: number; markdown: string}>) => {
+self.onmessage = ({data}: MessageEvent<{id: number; markdown?: string; state?: Uint8Array}>) => {
   try {
-    self.postMessage({id: data.id, lossy: isLossyMarkdown(data.markdown)});
+    const lossy = data.state ? isLossyDocumentState(data.state) : isLossyMarkdown(data.markdown ?? '');
+    self.postMessage({id: data.id, lossy});
   } catch (error) {
     self.postMessage({id: data.id, error: String(error)});
   }

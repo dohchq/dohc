@@ -5,7 +5,7 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Lock, Play, Share2 } from "lucide-react";
-import { useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -201,6 +201,24 @@ export function LossyNoteNotice(props: {
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  // History keeps the original only of a file it tracks. A path files.toml
+  // leaves out, or one not captured yet, has none to restore, as About says.
+  // Until History answers, the warning promises nothing.
+  const offersEdit = props.onEditAnyway !== undefined;
+  const file = `${props.workspaceId}\u0000${props.path}`;
+  const [tracked, setTracked] = useState<string | null>(null);
+  useEffect(() => {
+    if (!offersEdit) return;
+    let live = true;
+    void Promise.resolve()
+      .then(() => bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path }))
+      .then((chats) => {
+        if (live && "fileObjectId" in chats && chats.fileObjectId !== null) setTracked(file);
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [offersEdit, file, props.workspaceId, props.path]);
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -253,7 +271,8 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p className="mt-2 text-[13px] text-muted">
-            Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.
+            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.{" "}
+            {tracked === file ? "History keeps the original." : "History does not track this file, so dohc can't restore the original."}
           </p>
         </ConfirmDialog>
       ) : null}

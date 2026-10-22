@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { createHash } from "node:crypto";
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -62,6 +63,7 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
       contentHash: "f".repeat(64),
     })),
     openFileExternally: vi.fn(async () => undefined),
+    listFileChats: vi.fn<DohcDesktopBridge["listFileChats"]>(async () => ({ fileObjectId: "object-1", threads: [] })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
@@ -123,6 +125,78 @@ describe("a lossy note", () => {
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
     expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  });
+
+  it("promises no History in the warning for a file History doesn't track", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: null, threads: [] });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(bridge.listFileChats).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "a.md" }));
+    await user.click(screen.getByTestId("lossy-note-edit-anyway"));
+    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original.");
+    expect(dialog.textContent).not.toContain("History keeps the original.");
+  });
+
+  it("checks a switched version's own read, and closes the session when that version is lossy", async () => {
+    const bridge = bridgeFor([
+      { text: WRITTEN, contentHash: "c".repeat(64) },
+      { text: LOSSY, contentHash: "a".repeat(64) },
+    ]);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+
+    // The switch reopens on the last version's verdict, and its read decides.
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />);
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."));
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalledTimes(bridge.openEngineYDocSession.mock.calls.length));
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("closes a session that holds a lossy note its read didn't see", async () => {
+    const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
+    // The file changed between the read and the open: the engine seeded the
+    // session from the lossy bytes, with the witness it records.
+    const seeded = markdownToYDoc(LOSSY);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    seeded.getMap("meta").set("dohcMarkdownSource", LOSSY);
+    seeded.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
+    seeded.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(seeded)));
+    bridge.openEngineYDocSession.mockResolvedValue({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(seeded),
+      lineageGeneration: 1,
+    });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed read with Try again, and opens no session until a read checks the note", async () => {
+    const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
+    bridge.readWorkspaceText.mockRejectedValueOnce(new Error("EBUSY: resource busy or locked"));
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByText("Couldn't read this file.");
+    expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("file-read-retry"));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
   });
 
   it("shows new text from disk, and opens for editing once the text is no longer lossy", async () => {
