@@ -714,6 +714,8 @@ impl ActorHandle {
                             Ok(_) => Ok(true),
                             Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
                                 ..
+                            }) | RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput {
+                                reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE,
                             })) => Ok(false),
                             Err(error) => Err(error),
                         }
