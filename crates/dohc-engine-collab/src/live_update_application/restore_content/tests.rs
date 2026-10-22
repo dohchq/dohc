@@ -5040,18 +5040,253 @@ fn preparation_refuses_a_substituted_selected_point() {
 }
 #[test]
 fn old_fence_receipts_without_the_selection_are_refused() {
-    let f = Fixture::new("original\n");
+    let mut f = Fixture::new("original\n");
+    let prep = f.freeze(f.baseline_point.clone());
+    damage(&f, "UPDATE live_restore_fences SET input_json=json_remove(input_json,'$.point'),receipt_json=json_remove(receipt_json,'$.operation.point')");
     let before = binding_state(&f);
-    let mut json = serde_json::to_value(NativeRestoreFenceReceipt {
-        operation: f.fence_input(),
-        local_head_sequence: 0,
-        recorded_at_ms: 50,
-    })
-    .unwrap();
-    json["operation"].as_object_mut().unwrap().remove("point");
-    assert!(serde_json::from_value::<NativeRestoreFenceReceipt>(json).is_err());
+    let head = f
+        .store
+        .read_with(|conn| {
+            durable::load_doc_in(conn, &DocKey::new("workspace", "main", "object").unwrap())
+        })
+        .unwrap()
+        .encode_full_state();
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            prep.fence.operation.clone(),
+            f.host.clone(),
+            51,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert!(matches!(f.prepare(prep), Err(ApplicationError::Corrupt)));
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+    assert_eq!(
+        f.store
+            .read_with(|conn| durable::load_doc_in(
+                conn,
+                &DocKey::new("workspace", "main", "object").unwrap()
+            ))
+            .unwrap()
+            .encode_full_state(),
+        head
+    );
+}
+
+#[test]
+fn fence_rechecks_selected_terminal_after_preflight() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    let before = binding_state(&f);
+    let other = Connection::open(f.dir.join("engine.db")).unwrap();
+    let replacement = f.terminal.as_ref().unwrap().update_digest.clone();
+    let begins = Arc::new(AtomicUsize::new(0));
+    let seen = begins.clone();
+    f.store.read_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if matches!(context.action, AuthAction::Transaction { operation: TransactionOperation::Begin })
+            && seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            assert_eq!(other.execute("UPDATE live_accepted_updates SET update_sha256=?1 WHERE journal_cursor=3", [&replacement]).unwrap(), 1);
+        }
+        Authorization::Allow
+    }))).unwrap();
+    let result =
+        f.owner
+            .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults);
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(begins.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(result, Err(ApplicationError::Conflict)),
+        "{result:?}"
+    );
     assert_eq!(binding_state(&f), before);
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+}
+
+#[test]
+fn native_fence_does_not_rebuild_the_selected_point() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    let reads = Arc::new(AtomicUsize::new(0));
+    let seen = reads.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "live_accepted_checkpoints",
+                        column_name: "state_sha256",
+                        ..
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn fence_rechecks_reader_history_signal_before_writing() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    let mut f = Fixture::new("original\n");
+    let operation = f.fence_input();
+    let before = binding_state(&f);
+    let other = Connection::open(f.dir.join("engine.db")).unwrap();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Transaction {
+                        operation: TransactionOperation::Begin
+                    }
+                ) {
+                    other
+                        .execute(
+                            "UPDATE live_accepted_reader_history SET may_have_reader=1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        None,
+        operation.clone(),
+        f.host.clone(),
+        50,
+        &NoFaults,
+    );
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(
+        matches!(result, Err(ApplicationError::Interrupted)),
+        "{result:?}"
+    );
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    // A conservative signal only adds preflight work; an honest retry still succeeds.
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 51, &NoFaults)
+        .unwrap();
+}
+
+#[test]
+fn accepted_reader_signal_is_monotonic_and_unknown_history_stays_conservative() {
+    let mut f = Fixture::new("original\n");
+    let signal = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert!(!signal(&f));
+    damage(&f, "CREATE TABLE reader_signal_writes(value INTEGER); CREATE TRIGGER reader_signal_write AFTER UPDATE ON live_accepted_reader_history BEGIN INSERT INTO reader_signal_writes VALUES(NEW.may_have_reader); END;");
+    let writes = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM reader_signal_writes", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+    let baseline = f.doc.encode_full_state();
+    damage(&f, "DELETE FROM live_accepted_checkpoints");
+    {
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                accepted_history::initialize(tx, &held, &baseline)
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        writes(&f),
+        0,
+        "a repeated checkpoint must not rewrite its signal"
+    );
+    f.edit("ordinary edit\n", 3);
+    assert!(!signal(&f));
+    assert_eq!(writes(&f), 0, "an unchanged signal must not write its page");
+    f.edit("dohcMarkdownSourceReader\n", 4);
+    assert!(signal(&f));
+    assert_eq!(writes(&f), 1);
+    f.edit("dohcMarkdownSourceReader repeated\n", 5);
+    assert_eq!(
+        writes(&f),
+        1,
+        "a repeated marker must not rewrite its signal"
+    );
+    f.edit("native again\n", 6);
+    assert!(signal(&f));
+    assert_eq!(writes(&f), 1, "a retained signal must not rewrite its page");
+    damage(&f, "DELETE FROM live_accepted_reader_history");
+    let held = f.handle.registration.lock().unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+        .unwrap());
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_history_signal_keeps_expired_points_on_preflight() {
+    let (mut f, _) = reader_fixture();
+    let signal = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert!(signal(&f));
+    f.accept(f.doc.richdoc_append_paragraph("expired"), 3);
+    assert!(signal(&f));
 }
 
 #[test]
@@ -5148,4 +5383,158 @@ fn fence_authenticates_the_selected_history_receipt() {
         assert_eq!(binding_state(&f), before);
         assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
     }
+}
+
+#[test]
+fn native_accepted_append_avoids_reader_signal_sql() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let mut f = Fixture::new("native\n");
+    let signal: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT may_have_reader FROM live_accepted_reader_history",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        !signal,
+        "a new native bootstrap must establish the shortcut"
+    );
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "live_accepted_reader_history",
+                    ..
+                }
+                | AuthAction::Insert {
+                    table_name: "live_accepted_reader_history",
+                }
+                | AuthAction::Update {
+                    table_name: "live_accepted_reader_history",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+        })
+        .unwrap();
+    f.edit("native edit\n", 3);
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    let signal: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT may_have_reader FROM live_accepted_reader_history",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(!signal);
+}
+#[test]
+fn prior_accepted_rows_cannot_establish_a_native_reader_shortcut() {
+    for prior in ["checkpoint", "update"] {
+        let mut f = Fixture::new("original\n");
+        let baseline = f.doc.encode_full_state();
+        if prior == "update" {
+            f.edit("accepted native\n", 3);
+            damage(&f, "DELETE FROM live_accepted_checkpoints");
+        } else {
+            damage(
+                &f,
+                "UPDATE live_accepted_checkpoints SET event_count=1,journal_cursor=1",
+            );
+        }
+        damage(&f, "DELETE FROM live_accepted_reader_history");
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                accepted_history::initialize(tx, &held, &baseline)
+            })
+            .unwrap();
+        assert!(
+            f.store
+                .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+                .unwrap(),
+            "{prior}"
+        );
+    }
+}
+
+#[test]
+fn accepted_reader_metadata_update_sets_the_history_signal() {
+    let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let reader = Ydoc::wire();
+    reader.apply(&bytes).unwrap();
+    let mut f = Fixture::new("native original\n");
+    let delta = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(&source, &reader, 2_000_000, Some(2123456))
+        .unwrap();
+    f.accept(delta, 3);
+    let held = f.handle.registration.lock().unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+        .unwrap());
+}
+
+#[test]
+fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    damage(&f, "DROP TABLE live_accepted_reader_history");
+    f.store
+        .read_with(|conn| {
+            conn.execute_batch(include_str!(
+                "../../../../dohc-engine-storage/src/accepted_reader_history.sql"
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        f.store
+            .table_row_count("live_accepted_reader_history")
+            .unwrap(),
+        0
+    );
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    let reads = Arc::new(AtomicUsize::new(0));
+    let seen = reads.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "live_accepted_checkpoints",
+                        column_name: "state_sha256",
+                        ..
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(reads.load(Ordering::SeqCst) > 0);
 }

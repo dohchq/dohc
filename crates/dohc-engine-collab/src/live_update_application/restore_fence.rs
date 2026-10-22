@@ -7,7 +7,7 @@ pub enum RestoreDeliveryOrigin {
     Owner { id: String },
 }
 
-/// Supplied by an authenticated operation adapter after relay old-cut ACK.
+/// Journal point authenticated before committing the restore fence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreSelection {
@@ -15,6 +15,7 @@ pub struct NativeRestoreSelection {
     pub receipt_digest: String,
 }
 
+/// Supplied by an authenticated operation adapter after relay old-cut ACK.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreFence {
@@ -36,6 +37,8 @@ pub struct NativeRestoreFenceReceipt {
     pub local_head_sequence: i64,
     pub recorded_at_ms: i64,
 }
+
+const SELECTED_POINT_REPLAY_BYTES: usize = crate::limits::MAX_YDOC_UPDATE_BYTES * 5;
 
 // This document lineage's settlements whose moments have not reached the relay:
 // local moments above the origin's pushed cursor, then settlements a retained
@@ -288,6 +291,27 @@ impl ApplicationOwner {
             binding: b.clone(),
             live: true,
         };
+        let selected = store.read_with(|conn| {
+            if !accepted_history::may_have_reader(conn, &held)? {
+                return Ok(None);
+            }
+            let read = conn.unchecked_transaction().map_err(read_sql)?;
+            accepted_history::read_selected_point(
+                &read,
+                &held,
+                &input.point,
+                &mut restore_content::Budget {
+                    remaining: SELECTED_POINT_REPLAY_BYTES,
+                },
+                accepted_history::CHECKPOINT_EVENTS as usize,
+            )
+            .map(|history| Some(history.doc))
+        });
+        // Saved fences replay independently of history; preserve transaction error precedence.
+        let (selected, mut selection_error) = match selected {
+            Ok(doc) => (doc, None),
+            Err(error) => (None, Some(error)),
+        };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
@@ -343,15 +367,15 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             let current = durable::load_doc_in(tx, &key)?;
-            let selected = accepted_history::read(
-                tx, &held, input.point.journal_cursor,
-                &mut restore_content::Budget { remaining: crate::limits::MAX_YDOC_UPDATE_BYTES * 5 },
-                100_000,
-            )?;
-            if selected.proof.terminal.as_ref().map_or(b.lineage_claim_id.as_str(), |r| r.update_digest.as_str()) != input.point.receipt_digest {
-                return Err(ApplicationError::Conflict);
+            if let Some(error) = selection_error.take() {
+                return Err(error);
             }
-            let needed = if selected.doc.has_reader_source() { Some(&selected.doc) }
+            accepted_history::require_selected_terminal(tx, &held, &input.point)?;
+            // A new reader-bearing append after the preflight needs a fresh attempt.
+            if selected.is_none() && accepted_history::may_have_reader(tx, &held)? {
+                return Err(ApplicationError::Interrupted);
+            }
+            let needed = if selected.as_ref().is_some_and(|doc| doc.has_reader_source()) { selected.as_ref() }
                 else if current.has_reader_source() { Some(&current) } else { None };
             if let Some(doc) = needed {
                 let reference = doc.markdown_source_reference().ok_or(CollabError::MarkdownReaderUnavailable)?;

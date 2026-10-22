@@ -366,22 +366,13 @@ fn prepare_in(
     if accepted_history.proof.terminal != operation.terminal {
         return Err(ApplicationError::Conflict);
     }
-    let selected_history = accepted_history::read(
+    let selected_history = accepted_history::read_selected_point(
         tx,
         held,
-        input.point.journal_cursor,
+        &operation.point,
         &mut budget,
         max_events.saturating_sub(accepted_history.proof.suffix.len()),
     )?;
-    if selected_history
-        .proof
-        .terminal
-        .as_ref()
-        .map_or(b.lineage_claim_id.as_str(), |r| r.update_digest.as_str())
-        != input.point.receipt_digest
-    {
-        return Err(ApplicationError::Conflict);
-    }
     let accepted = accepted_history.doc;
     let point = selected_history.doc;
     let event_count = accepted_history.proof.suffix.len() + selected_history.proof.suffix.len();
@@ -788,10 +779,12 @@ fn prefix_source(
         conn,
         &key,
         doc,
-        &b.current_path,
-        &b.lineage_claim_id,
-        &authority,
-        input.fence.operation.new_fence,
+        &crate::reader_snapshot::HistoryIdentity {
+            path: &b.current_path,
+            lineage: &b.lineage_claim_id,
+            authority: &authority,
+            restore_fence: Some(input.fence.operation.new_fence),
+        },
         resolver,
         budget.remaining,
     )?;
@@ -818,10 +811,8 @@ pub(super) fn point_source(
         &key,
         doc,
         canonical,
-        &crate::reader_snapshot::SnapshotIdentity {
-            moment: "",
+        &crate::reader_snapshot::HistoryIdentity {
             path: &b.current_path,
-            digest: &input.point.markdown_digest,
             lineage: &b.lineage_claim_id,
             authority: &authority,
             restore_fence: Some(input.fence.operation.new_fence),

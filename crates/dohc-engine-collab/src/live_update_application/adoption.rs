@@ -659,6 +659,23 @@ mod tests {
     }
 
     #[test]
+    fn new_native_adoption_establishes_the_reader_history_shortcut() {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let signal: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(!signal);
+    }
+
+    #[test]
     fn first_adoption_seeds_only_pending_local_state_and_preserves_history() {
         let mut f = Fixture::new();
         f.local_edit_before_adoption();
