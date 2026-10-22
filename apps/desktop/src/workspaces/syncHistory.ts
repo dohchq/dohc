@@ -1,8 +1,8 @@
 import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, AUTOMATION_INSTALL_ID_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
 import { DOHC_SYNC_HISTORY_GUARD, notAFileRefusal, notARealFolderRefusal } from "@dohc/workspace-core";
-import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { atomicWriteFile } from "../atomicReplaceFile";
+import { atomicCreateFile, atomicWriteFile } from "../atomicReplaceFile";
 import type { RegistryEntry } from "./registryStore";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -128,10 +128,7 @@ async function fileExists(path: string, relativePath: string): Promise<boolean> 
 
 async function createOnce(path: string, relativePath: string, text: string): Promise<void> {
   if (await fileExists(path, relativePath)) return;
-  try {
-    await writeFile(path, text, { flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  if (!await atomicCreateFile(path, text, 0o666)) {
     await fileExists(path, relativePath);
   }
 }
@@ -254,13 +251,16 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   if (read.kind !== "absent") return scheduleComputerOf(read);
   if (record.host !== null) return { kind: "computer", computer: record.host };
   try {
-    await writeFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), { flag: "wx" });
-    return { kind: "computer", computer: here };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { kind: "unreadable", error };
+    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666)) {
+      return { kind: "computer", computer: here };
+    }
     // Another reader recorded one first: read it, once.
     const again = await readAt(path, ".dohc/sync-history/schedules.json");
-    return again.kind === "absent" ? { kind: "unreadable", error } : scheduleComputerOf(again);
+    return again.kind === "absent"
+      ? { kind: "unreadable", error: new Error("The schedules record disappeared after creation.") }
+      : scheduleComputerOf(again);
+  } catch (error) {
+    return { kind: "unreadable", error };
   }
 }
 

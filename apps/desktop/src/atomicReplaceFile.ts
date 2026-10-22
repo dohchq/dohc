@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { open, rename, rm } from "node:fs/promises";
+import { link, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
@@ -147,6 +147,51 @@ export async function atomicReplaceFile(
     if (syncDirectory && platform !== "win32") {
       await syncAndClose(await openDirectory(dirname(destination), "r"));
     }
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Publish complete, flushed bytes without replacing an existing entry.
+ * True means this creator won. Hard-link support is required.
+ * Node cannot open directories for fsync on Windows.
+ */
+export async function atomicCreateFile(
+  destination: string,
+  data: string,
+  mode: number,
+  {
+    open: openFile = open,
+    link: publish = link,
+    platform = process.platform,
+  }: Pick<DurableFileOperations, "open" | "platform"> & {
+    link?: (source: string, destination: string) => Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    const handle = await openFile(temporary, "wx", mode);
+    try {
+      await handle.writeFile(data);
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+    await syncAndClose(handle);
+    let created = true;
+    try {
+      await publish(temporary, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      created = false;
+    }
+    await rm(temporary);
+    if (platform !== "win32") {
+      await syncAndClose(await openFile(dirname(destination), "r"));
+    }
+    return created;
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;

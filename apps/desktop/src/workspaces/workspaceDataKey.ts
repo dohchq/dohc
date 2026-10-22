@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, realpath, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, realpath, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
 export const SECRET_FILE_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
@@ -121,12 +122,11 @@ export async function loadSecretDataKey(
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   try {
-    await writeFile(path, payload, { flag: "wx", mode: 0o600 });
-    return key;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+    if (!await atomicCreateFile(path, payload, 0o600)) {
       return loadSecretDataKey(rootDir, { createIfMissing: false });
     }
+    return key;
+  } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be created; refusing to store protected files.",
@@ -164,11 +164,10 @@ export async function installWorkspaceDataKey(
   // As above, the engine has already created `.dohc/engine`.
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   try {
-    await writeFile(path, payload, { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+    if (!await atomicCreateFile(path, payload, 0o600)) {
       return installWorkspaceDataKey(rootDir, key);
     }
+  } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",
