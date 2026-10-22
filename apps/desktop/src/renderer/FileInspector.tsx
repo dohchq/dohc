@@ -494,9 +494,12 @@ export const FileInspector = memo(function FileInspector(
   const [editAnyway, setEditAnyway] = useState<string | null>(null);
   const editingAnyway = editAnyway === lossyOpen;
   // A session that binds a different note from the one checked, as when the
-  // file changed before the open, closes once its own check says lossy.
-  const [sessionLossy, setSessionLossy] = useState<string | null>(null);
-  const allowed = editingAnyway ? "clear" : sessionLossy === lossyOpen ? "lossy" : checked.state;
+  // file changed before the open, closes once its own check says lossy. It
+  // stays closed until a read brings other bytes; the session that then
+  // opens is checked in turn.
+  const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
+  const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
+  const allowed = editingAnyway ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -515,12 +518,13 @@ export const FileInspector = memo(function FileInspector(
   useEffect(() => setBound(engine.available), [engine.available]);
   const session = useBoundNoteCheck({
     open: lossyOpen,
-    doc: checksLossyNote ? engine.doc : null,
+    // Edit anyway already accepted what saving does.
+    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
     checkedHash: checked.checkedHash,
   });
   useEffect(() => {
-    if (session === "lossy") setSessionLossy(lossyOpen);
-  }, [session, lossyOpen]);
+    if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
+  }, [session, lossyOpen, contentHash]);
   // The render a large note's session binds in, before its check starts,
   // waits too, as does a bound session while its own check runs.
   const lossyNote = editingAnyway ? "clear"

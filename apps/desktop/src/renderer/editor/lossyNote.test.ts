@@ -52,9 +52,26 @@ describe("useBoundNoteCheck", () => {
   });
 
   it("checks a session holding other bytes than the ones checked", async () => {
-    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc: seeded(), checkedHash: "c".repeat(64) }));
+    const doc = seeded();
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }));
     expect(result.current).toBe("checking");
     await waitFor(() => expect(result.current).toBe("lossy"));
+  });
+
+  it("checks a replacement document that records the same source", async () => {
+    const edited = seeded();
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText("Typed.")]);
+    edited.getXmlFragment("body").push([paragraph]);
+    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }), {
+      initialProps: { doc: edited },
+    });
+    await waitFor(() => expect(view.result.current).toBe("clear"));
+
+    // Sync swaps in another device's unedited import of the same bytes.
+    view.rerender({ doc: seeded() });
+    expect(view.result.current).toBe("checking");
+    await waitFor(() => expect(view.result.current).toBe("lossy"));
   });
 
   it("clears a session whose witness later edits left behind", async () => {

@@ -49,6 +49,16 @@ const LOSSY = [
 ].join("\n");
 const WRITTEN = `${yDocToMarkdown(markdownToYDoc("# Plan\n\n- [ ] Book flights\n\n**Budget:** $1,200\n"))}\n`;
 
+// An engine session seeded from LOSSY, with the witness the engine records.
+function lossySession() {
+  const doc = markdownToYDoc(LOSSY);
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
+  doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
+  doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+  return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
+}
+
 function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
   let read = 0;
   const bridgeMock = {
@@ -64,6 +74,8 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     })),
     openFileExternally: vi.fn(async () => undefined),
     listFileChats: vi.fn<DohcDesktopBridge["listFileChats"]>(async () => ({ fileObjectId: "object-1", threads: [] })),
+    // History's page for the file: one moment holds the original.
+    listEngineMoments: vi.fn(async (): Promise<unknown> => ({ moments: [{ id: "moment-1" }] })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
@@ -115,7 +127,8 @@ describe("a lossy note", () => {
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
     const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
-    expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.");
+    await waitFor(() => expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original."));
+    expect(bridge.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "ws-1", objectId: "object-1", limit: 1 });
     await user.click(screen.getByTestId("lossy-note-edit-anyway-cancel"));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
@@ -137,8 +150,31 @@ describe("a lossy note", () => {
     await waitFor(() => expect(bridge.listFileChats).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "a.md" }));
     await user.click(screen.getByTestId("lossy-note-edit-anyway"));
     const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
-    expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original.");
+    await waitFor(() => expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
+  });
+
+  it("promises no History in the warning when History's list for the file is empty", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.listEngineMoments.mockResolvedValue({ moments: [] });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    await waitFor(() => expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original."));
+  });
+
+  it("says nothing about History in the warning until History answers", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.listFileChats.mockImplementation(() => new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links.");
+    expect(dialog.textContent).not.toContain("History");
   });
 
   it("checks a switched version's own read, and closes the session when that version is lossy", async () => {
@@ -179,23 +215,56 @@ describe("a lossy note", () => {
 
   it("closes a session that holds a lossy note its read didn't see", async () => {
     const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
-    // The file changed between the read and the open: the engine seeded the
-    // session from the lossy bytes, with the witness it records.
-    const seeded = markdownToYDoc(LOSSY);
-    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-    seeded.getMap("meta").set("dohcMarkdownSource", LOSSY);
-    seeded.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
-    seeded.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(seeded)));
-    bridge.openEngineYDocSession.mockResolvedValue({
-      available: true,
-      initialUpdate: Y.encodeStateAsUpdate(seeded),
-      lineageGeneration: 1,
-    });
+    // The file changed between the read and the open.
+    bridge.openEngineYDocSession.mockResolvedValue(lossySession());
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("lossy-note-notice");
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
     expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("opens a note whose session was lossy once a read brings other bytes", async () => {
+    const fixed = `${yDocToMarkdown(markdownToYDoc("# Plan\n\nFixed outside dohc.\n"))}\n`;
+    const bridge = bridgeFor([
+      { text: WRITTEN, contentHash: "c".repeat(64) },
+      { text: fixed, contentHash: "9".repeat(64) },
+    ]);
+    bridge.openEngineYDocSession
+      .mockResolvedValueOnce(lossySession())
+      .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(fixed)), lineageGeneration: 1 });
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
+
+    // The person fixes the file outside dohc, and the note reads it again.
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a switched version read-only when its read never answers and its session holds a lossy note", async () => {
+    const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
+    bridge.readWorkspaceText.mockImplementation(async () => {
+      if (bridge.readWorkspaceText.mock.calls.length === 1) {
+        return { text: WRITTEN, contentHash: "c".repeat(64), truncated: false };
+      }
+      return await new Promise<never>(() => undefined);
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+
+    // The new version's note is lossy. Its read never answers, so only its
+    // session's own check sees it.
+    bridge.openEngineYDocSession.mockResolvedValue(lossySession());
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />);
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalledTimes(2));
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();

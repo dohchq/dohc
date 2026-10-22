@@ -201,24 +201,34 @@ export function LossyNoteNotice(props: {
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  // History keeps the original only of a file it tracks. A path files.toml
-  // leaves out, or one not captured yet, has none to restore, as About says.
-  // Until History answers, the warning promises nothing.
+  // History keeps the original only of a file it shows. A path files.toml
+  // leaves out, or one not captured yet, has none to restore. History's own
+  // list for the file answers, as About's does, with its rules applied. Until
+  // it answers, the warning says nothing about History.
   const offersEdit = props.onEditAnyway !== undefined;
   const file = `${props.workspaceId}\u0000${props.path}`;
-  const [tracked, setTracked] = useState<string | null>(null);
+  const [history, setHistory] = useState<{ file: string; keeps: boolean } | null>(null);
   useEffect(() => {
     if (!offersEdit) return;
     let live = true;
     void Promise.resolve()
-      .then(() => bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path }))
-      .then((chats) => {
-        if (live && "fileObjectId" in chats && chats.fileObjectId !== null) setTracked(file);
+      .then(async () => {
+        const chats = await bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path });
+        if (!("fileObjectId" in chats)) return null;
+        if (chats.fileObjectId === null) return false;
+        const moments = await bridge().listEngineMoments({ workspaceId: props.workspaceId, objectId: chats.fileObjectId, limit: 1 });
+        return "moments" in moments ? moments.moments.length > 0 : null;
+      })
+      .then((keeps) => {
+        if (live && keeps !== null) setHistory({ file, keeps });
       }, () => undefined);
     return () => {
       live = false;
     };
   }, [offersEdit, file, props.workspaceId, props.path]);
+  const historyLine = history?.file !== file ? null
+    : history.keeps ? "History keeps the original."
+    : "History does not track this file, so dohc can't restore the original.";
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -271,8 +281,8 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p className="mt-2 text-[13px] text-muted">
-            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.{" "}
-            {tracked === file ? "History keeps the original." : "History does not track this file, so dohc can't restore the original."}
+            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
+            {historyLine ? ` ${historyLine}` : null}
           </p>
         </ConfirmDialog>
       ) : null}

@@ -167,13 +167,23 @@ export function useLossyNote(input: {
  */
 export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null}): LossyNoteCheck {
   const sha = input.doc?.getMap('meta').get('dohcMarkdownSourceSha256');
-  const key = typeof sha === 'string' && sha !== input.checkedHash ? `session:${sha}` : null;
+  // Keyed by the document too: sync can replace a session's document with
+  // another that records the same source.
+  const key = input.doc && typeof sha === 'string' && sha !== input.checkedHash ? `session:${docId(input.doc)}:${sha}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
   const verdict = useVerdict(input.open, key, undefined, () =>
     doc.current ? ask({state: Y.encodeStateAsUpdate(doc.current)}) : Promise.resolve(true));
   if (key === null) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
+}
+
+const docIds = new WeakMap<Y.Doc, number>();
+let nextDocId = 0;
+function docId(doc: Y.Doc): number {
+  let id = docIds.get(doc);
+  if (id === undefined) docIds.set(doc, id = ++nextDocId);
+  return id;
 }
 
 // The worker's verdict under `key`, as one open sees it: `known` when an
