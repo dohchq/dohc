@@ -4071,6 +4071,17 @@ mod tests {
         (scratch, store, key)
     }
 
+    /// Drain the workspace's queued updates of archived lineages, deciding
+    /// released protection on fresh tails of `store`.
+    fn drain_inactive(
+        store: &mut EngineStore,
+        faults: &dyn dohc_engine_storage::FaultInjector,
+    ) -> Result<Vec<crate::ReplicationRefusal>, SyncError> {
+        let tails =
+            dohc_engine_collab::live_update_application::ReleasedTails::default().bound_to(store);
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, "ws", &tails, faults)
+    }
+
     fn sync_as_domain(error: SyncError) -> dohc_engine_domain::DomainError {
         match error {
             SyncError::Storage(storage) => dohc_engine_domain::DomainError::Storage(storage),
@@ -5874,7 +5885,7 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults),
+            drain_inactive(&mut store, &NoFaults),
             Err(SyncError::BlobInvalid)
         ));
         let queued: i64 = store
@@ -5944,7 +5955,7 @@ mod tests {
         }
         let fault = StopSecondCommit(AtomicUsize::new(0));
         assert!(matches!(
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &fault),
+            drain_inactive(&mut store, &fault),
             Err(SyncError::FaultCrash)
         ));
         let queued: i64 = store
@@ -5958,8 +5969,7 @@ mod tests {
             queued, 1,
             "two 9 MiB updates commit; the next transaction rolls back"
         );
-        let refusals =
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        let refusals = drain_inactive(&mut store, &NoFaults).unwrap();
         assert_eq!(refusals.len(), 1);
         let bytes: Vec<u8> = store.read_with(|conn| conn.query_row("SELECT b.bytes FROM ydoc_inactive_lineages l JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 WHERE l.lineage_claim_id=?1", [&claim], |row| row.get(0))).unwrap();
         let archived = dohc_engine_collab::Ydoc::wire();
@@ -6014,11 +6024,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(drain_inactive(&mut store, &NoFaults).unwrap().is_empty());
         let text: String = store.read_with(|conn| conn.query_row(
             "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",
             [], |row| row.get(0))).unwrap();
@@ -6112,11 +6118,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(queued, 257);
-            assert!(
-                crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(drain_inactive(&mut store, &NoFaults).unwrap().is_empty());
             let (queued, recovery_moments, text): (i64,i64,String) = store.read_with(|conn| Ok::<_,rusqlite::Error>((
                 conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| row.get(0))?,
                 conn.query_row("SELECT COUNT(*) FROM moments WHERE object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
@@ -6183,17 +6185,12 @@ mod tests {
             )
             .unwrap();
         }
-        let refusals =
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        let refusals = drain_inactive(&mut store, &NoFaults).unwrap();
         assert_eq!(refusals.len(), 2);
         assert_eq!(refusals[0].origin_seq, 0);
         assert_eq!(refusals[1].origin_seq, 1);
         assert!(refusals[1].reason.message().contains("replay validation"));
-        assert!(
-            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(drain_inactive(&mut store, &NoFaults).unwrap().is_empty());
     }
 
     #[test]

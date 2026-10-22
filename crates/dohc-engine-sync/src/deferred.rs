@@ -257,8 +257,8 @@ pub(crate) fn check_redelivery(
 /// fails and retains nothing. A hosted replica never fails: a document whose
 /// next op would pass it retains no more, and is answered so its read can
 /// stop at that op instead. Each hosted op records the feed it arrived on,
-/// `relay_namespace` as the pull's trusted configuration names it, so a
-/// document whose feed it names none for retains nothing either.
+/// `relay_namespace` as the pull's trusted configuration names it; a hosted
+/// pull it names none for retains nothing and fails.
 pub(crate) fn retain(
     store: &mut EngineStore,
     identity: &SyncIdentity,
@@ -325,8 +325,14 @@ pub(crate) fn retain(
                 }
             }
             let cost = json.len() as i64 + charged.iter().map(|(_, _, bytes)| bytes).sum::<i64>();
-            let unnamed = hosted && relay_namespace.is_none();
-            if unnamed || count >= MAX_PENDING_OPS || bytes + cost > MAX_PENDING_BYTES {
+            // A hosted pull no configured host names a feed for fails
+            // rather than stop at the same op on every pass.
+            if hosted && relay_namespace.is_none() {
+                return Err(SyncError::RetryableState {
+                    reason: crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED,
+                });
+            }
+            if count >= MAX_PENDING_OPS || bytes + cost > MAX_PENDING_BYTES {
                 match placed {
                     Some((object_id, _)) => {
                         unretained.insert(object_id.to_owned());

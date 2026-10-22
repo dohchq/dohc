@@ -254,6 +254,25 @@ pub struct YdocDrainResult {
     /// work a released chain's tail retains. The update stays queued,
     /// neither applied nor refused.
     pub released_hold: Option<crate::HostedHold>,
+    /// The drain stopped at a row whose decision waits for released-tail
+    /// validation. Everything above is the committed prefix before it; that
+    /// row and every later one stay queued. Once validation completes, the
+    /// caller drains again and adds what that drain reports.
+    pub waiting: Option<Box<dohc_engine_collab::live_update_application::PendingValidation>>,
+}
+
+impl YdocDrainResult {
+    /// Add what a later drain of the same document reported.
+    pub fn absorb(&mut self, later: Self) {
+        self.drained += later.drained;
+        self.conflicts_opened += later.conflicts_opened;
+        self.refusals.extend(later.refusals);
+        self.sharing_declined.extend(later.sharing_declined);
+        self.lineage_replacements.extend(later.lineage_replacements);
+        self.record_facts.extend(later.record_facts);
+        self.released_hold = later.released_hold;
+        self.waiting = later.waiting;
+    }
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -675,19 +694,28 @@ pub fn drain_deferred_ydoc_for_key(
     complete_drain(store, drained, cleanup, faults)
 }
 
+/// What [`drain_released_holds`] did: the hold each drained document is left
+/// with, by object id, what its drains committed, and the heads they wrote.
+#[derive(Default)]
+pub(crate) struct ReleasedDrains {
+    pub(crate) holds: std::collections::BTreeMap<String, crate::HostedHold>,
+    pub(crate) drained: YdocDrainResult,
+    pub(crate) changes: Vec<crate::MomentMaterializationChange>,
+}
+
 /// Drain again each hosted document of the scope a drain held for released
-/// retained work, unless a live session holds its queued work, so a fresh
-/// decision admits what no longer needs holding. Answers the hold each
-/// drain leaves, by object id. Everything a drain applies is refused or
-/// materialized as any drain's is; a held document writes its files once
-/// it is free.
+/// retained work, so a fresh decision admits what no longer needs holding.
+/// A document a live session holds keeps the hold its row records, and its
+/// queued work waits for the session. Everything a drain applies is refused
+/// or materialized as any drain's is, and reported once. A drain that waits
+/// for validation stops the rest, and the answer carries that wait.
 pub(crate) fn drain_released_holds(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     workspace_id: &str,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
-) -> Result<std::collections::BTreeMap<String, crate::HostedHold>, SyncError> {
+) -> Result<ReleasedDrains, SyncError> {
     let keys = store.read_with(|conn| {
         conn.prepare(
             "SELECT DISTINCT u.version_id,u.object_id FROM hosted_documents d \
@@ -712,19 +740,75 @@ pub(crate) fn drain_released_holds(
         })
         .map_err(SyncError::corrupt)
     })?;
-    let mut holds = std::collections::BTreeMap::new();
+    let mut result = ReleasedDrains::default();
     for key in keys {
         if leases.is_live(&key) {
+            let recorded = store.read_with(|conn| {
+                crate::hosted::recorded_hold(conn, workspace_id, &key.object_id)
+            })?;
+            if let Some(hold) = recorded {
+                result.holds.insert(key.object_id, hold);
+            }
             continue;
         }
-        let drained = drain_deferred_ydoc_in_batch(store, cache, &key, faults, true)?;
-        if let Some(hold) = drained.released_hold {
-            holds.insert(key.object_id, hold);
+        // The head's path and moment, which a drain that projects changes.
+        let head = |store: &EngineStore| {
+            store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT path,latest_moment_id FROM snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![workspace_id, key.version_id, key.object_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)
+            })
+        };
+        let before = head(store)?;
+        let (drained, cleanup) =
+            drain_deferred_ydoc(store, cache, &key, DeferredDrainMode::Batch, faults, None)?;
+        let mut drained = complete_drain(store, drained, cleanup, faults)?;
+        if drained.waiting.is_some() {
+            result.drained.waiting = drained.waiting;
+            break;
         }
+        // A lineage the drain replaced left its side at a recovered path.
+        for replacement in &drained.lineage_replacements {
+            for path in &replacement.recovered_paths {
+                result.changes.push(crate::MomentMaterializationChange {
+                    version_id: key.version_id.clone(),
+                    path: path.clone(),
+                    operation: "write",
+                    content_kind: "text",
+                });
+            }
+        }
+        if let Some((path, moment)) = head(store)?
+            && before.as_ref().is_none_or(|(_, before)| *before != moment)
+        {
+            result.changes.push(crate::MomentMaterializationChange {
+                version_id: key.version_id.clone(),
+                path,
+                operation: "write",
+                content_kind: "text",
+            });
+        }
+        match drained.released_hold.take() {
+            Some(hold) => {
+                result.holds.insert(key.object_id, hold);
+            }
+            None => {
+                result.holds.remove(&key.object_id);
+            }
+        }
+        result.drained.absorb(drained);
     }
-    Ok(holds)
+    Ok(result)
 }
 
+/// The drain before an envelope of `key` applies. One that waits for
+/// validation answers [`SyncError::ValidationPending`]; the envelope's retry
+/// drains again and reports what this one committed.
 fn drain_deferred_ydoc_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -738,7 +822,11 @@ fn drain_deferred_ydoc_in_batch(
         DeferredDrainMode::All
     };
     let (drained, cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults, None)?;
-    complete_drain(store, drained, cleanup, faults)
+    let mut drained = complete_drain(store, drained, cleanup, faults)?;
+    match drained.waiting.take() {
+        Some(pending) => Err(SyncError::ValidationPending(pending)),
+        None => Ok(drained),
+    }
 }
 
 fn inactive_lineage_exists(
@@ -772,13 +860,21 @@ pub fn drain_deferred_ydoc_for_key_holding_cleanup(
 }
 
 /// Run the cleanup an immediate drain owes and surface its projection refusal
-/// with the drain's own refusals.
+/// with the drain's own refusals. A drain that waits for validation leaves
+/// its committed prefix queued and answers only the wait: the next drain
+/// dedupes those rows, reads their record facts back, and reports them once.
 fn complete_drain(
     store: &mut EngineStore,
     mut drained: YdocDrainResult,
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
+    if drained.waiting.is_some() {
+        return Ok(YdocDrainResult {
+            waiting: drained.waiting,
+            ..YdocDrainResult::default()
+        });
+    }
     let projection_refusal = complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
     drained.refusals.extend(projection_refusal);
     Ok(drained)
@@ -820,12 +916,13 @@ fn complete_drain_cleanup(
             )
             .map_err(SyncError::persist)?;
         }
+        // Recovery a released hold stopped did not fail.
         if let Some((key, _)) = recovery {
             let (waiting, path): (bool, Option<String>) = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL,path FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(SyncError::corrupt)?;
             if !waiting {
                 crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx,key)?;
                 crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key)?;
-                let pending_artifact: bool = tx.query_row(
+                let pending_artifact: bool = !cleanup.released_hold && tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM ydoc_pending_artifacts WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                     params![key.workspace_id,key.version_id,key.object_id], |row|row.get(0),
                 ).map_err(SyncError::corrupt)?;
@@ -904,6 +1001,10 @@ pub(crate) fn drain_deferred_ydoc_for_ended_session(
         faults,
         Some(leases),
     )?;
+    // Recovery that waits remembers no attempt, so it runs again.
+    if drained.waiting.is_some() {
+        return complete_drain(store, drained, cleanup, faults);
+    }
     let refusal = complete_drain_cleanup(store, cleanup, faults, Some((key, leases)))?;
     drained.refusals.extend(refusal);
     Ok(drained)
@@ -992,6 +1093,8 @@ pub struct YdocDrainCleanup {
     workspace_id: String,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
+    /// The drain kept a row queued for released retained work.
+    released_hold: bool,
 }
 
 /// The gate a drain runs in the transaction that would apply `row` to the
@@ -1058,14 +1161,18 @@ fn hold_drained_row(
     } else {
         crate::ReleasedHoldContinuation::Frozen
     };
+    // Only a stored hold names the document's hold, so only one queues what
+    // arrives behind it. A row no hosted document records stays queued for
+    // the next drain to decide again.
     if held_rows.is_empty() {
         let hold = crate::HostedHold::ReleasedLineageUnsettled {
             binding,
             continuation,
             binding_stale: false,
         };
-        persist_released_hold(store, &hold, faults)?;
-        *released_hold = Some(hold);
+        if persist_released_hold(store, &hold, faults)? {
+            *released_hold = Some(hold);
+        }
     }
     held_rows.push(row);
     Ok(continuation == crate::ReleasedHoldContinuation::Frozen)
@@ -1093,8 +1200,30 @@ fn drain_deferred_ydoc(
     faults: &dyn FaultInjector,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
+    let tails = cache.released_tails(store);
+    let idle = |refusals, waiting: Option<Box<_>>| {
+        (
+            YdocDrainResult {
+                refusals,
+                waiting,
+                ..YdocDrainResult::default()
+            },
+            YdocDrainCleanup {
+                workspace_id: key.workspace_id.clone(),
+                coordinates: Vec::new(),
+                projection_refusal: None,
+                released_hold: false,
+            },
+        )
+    };
     let inactive_refusals = if matches!(mode, DeferredDrainMode::All) {
-        drain_inactive_ydoc_updates(store, &key.workspace_id, faults)?
+        match drain_inactive_ydoc_updates(store, &key.workspace_id, &tails, faults) {
+            Ok(refusals) => refusals,
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(idle(Vec::new(), Some(pending)));
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         Vec::new()
     };
@@ -1171,17 +1300,7 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        return Ok((
-            YdocDrainResult {
-                refusals: inactive_refusals,
-                ..YdocDrainResult::default()
-            },
-            YdocDrainCleanup {
-                workspace_id: key.workspace_id.clone(),
-                coordinates: Vec::new(),
-                projection_refusal: None,
-            },
-        ));
+        return Ok(idle(inactive_refusals, None));
     }
     let unresolved: bool = store.read_with(|conn| {
         conn.query_row(
@@ -1210,17 +1329,7 @@ fn drain_deferred_ydoc(
     if materialization_pending {
         // Return to the caller so settlement can replay the pending job.
         // Keep every queued coordinate until its projection can commit.
-        return Ok((
-            YdocDrainResult {
-                refusals: inactive_refusals,
-                ..YdocDrainResult::default()
-            },
-            YdocDrainCleanup {
-                workspace_id: key.workspace_id.clone(),
-                coordinates: Vec::new(),
-                projection_refusal: None,
-            },
-        ));
+        return Ok(idle(inactive_refusals, None));
     }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
@@ -1236,12 +1345,12 @@ fn drain_deferred_ydoc(
     let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
-    let tails = cache.released_tails(store);
     // Rows held for released retained work while the head waits for
     // dependencies, earliest first. Each stays queued, and each row applied
     // past them brings them back to be decided against the new head.
     let mut held_rows: Vec<DeferredRow> = Vec::new();
     let mut released_hold = None;
+    let mut waiting = None;
     let mut queue: std::collections::VecDeque<DeferredRow> = pending.into();
     while let Some(row) = queue.pop_front() {
         let (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload, _) =
@@ -1254,11 +1363,18 @@ fn drain_deferred_ydoc(
             && store.read_with(|conn| inactive_lineage_exists(conn, key, &lineage_claim_id))?
         {
             if matches!(mode, DeferredDrainMode::All) {
-                refusals.extend(drain_inactive_ydoc_updates(
-                    store,
-                    &key.workspace_id,
-                    faults,
-                )?);
+                match drain_inactive_ydoc_updates(store, &key.workspace_id, &tails, faults) {
+                    Ok(drained) => refusals.extend(drained),
+                    Err(SyncError::ValidationPending(pending)) => {
+                        waiting = Some(pending);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+                // A row its lineage's protection keeps queued is not drained.
+                if store.read_with(|conn| deferred_row_queued(conn, key, &origin_id, origin_seq))? {
+                    continue;
+                }
                 drained_coordinates.push((origin_id, origin_seq));
             }
             continue;
@@ -1349,6 +1465,10 @@ fn drain_deferred_ydoc(
                     continue;
                 }
                 Ok(replacement) => lineage_replacements.extend(replacement),
+                Err(SyncError::ValidationPending(pending)) => {
+                    waiting = Some(pending);
+                    break;
+                }
                 Err(error) => return Err(error),
             }
             requeue_held(&mut queue, &mut held_rows, &mut released_hold);
@@ -1381,10 +1501,20 @@ fn drain_deferred_ydoc(
                     &bytes,
                     recorded_at_ms,
                     search_policy.as_ref(),
+                    &tails,
                 )
             });
             let retained = match retained {
                 Ok(retained) => retained,
+                // Its archived lineage's protection keeps it queued; later
+                // rows of the active lineage go on.
+                Err(SyncError::RetryableState {
+                    reason: INACTIVE_LINEAGE_PROTECTED,
+                }) => continue,
+                Err(SyncError::ValidationPending(pending)) => {
+                    waiting = Some(pending);
+                    break;
+                }
                 Err(error) => {
                     if let Some(reason) = crate::apply::refusal_reason(&error) {
                         refusals.push(refuse_deferred_ydoc(
@@ -1513,7 +1643,14 @@ fn drain_deferred_ydoc(
             },
         );
         if let Some(decided) = gated.take() {
-            let (binding, head_pending) = decided?
+            let decided = match decided {
+                Err(SyncError::ValidationPending(pending)) => {
+                    waiting = Some(pending);
+                    break;
+                }
+                decided => decided?,
+            };
+            let (binding, head_pending) = decided
                 .ok_or_else(|| local_corruption("a drain's gate kept out a row it admitted"))?;
             if hold_drained_row(
                 store,
@@ -1683,13 +1820,31 @@ fn drain_deferred_ydoc(
             lineage_replacements,
             record_facts,
             released_hold,
+            waiting,
         },
         YdocDrainCleanup {
             workspace_id: key.workspace_id.clone(),
             coordinates: drained_coordinates,
             projection_refusal,
+            released_hold: !held_rows.is_empty(),
         },
     ))
+}
+
+/// Whether the queued update at this coordinate is still queued.
+fn deferred_row_queued(
+    conn: &Connection,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+        params![key.workspace_id, origin_id, origin_seq],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// The record-event decision an earlier drain committed with this parked
@@ -2169,13 +2324,21 @@ fn hold_released_lineage(
         .optional()
         .map_err(SyncError::corrupt)?;
     let (replication_epoch, stream_identity) = identity.clone().unwrap_or_default();
+    // Retained work whose feed was never recorded holds a protected lineage
+    // whatever it does, as a queued Y.Doc row with none does.
+    let unrecorded = retained_unrecorded(tx, op)?;
     let coordinate = IncomingCoordinate {
-        relay_namespace: relay_namespace.map(str::to_owned),
+        relay_namespace: relay_namespace.filter(|_| !unrecorded).map(str::to_owned),
         replication_epoch,
         stream_identity,
         origin_id: op.origin_id.clone(),
         origin_seq: op.origin_seq,
         relay_seq: relay_seq.unwrap_or_default(),
+    };
+    let incoming = if unrecorded {
+        Incoming::Replacement
+    } else {
+        incoming
     };
     let decision = released_decision(tx, key, lineage, &coordinate, tails, incoming)?;
     if matches!(decision, ReleasedDecision::Unprotected) {
@@ -2345,30 +2508,31 @@ fn drain_decision(
 
 /// Persist `hold` for the document its binding names, unless its row
 /// already records exactly that hold: a hold persisted again would count a
-/// commit, and no pass could ever commit.
+/// commit, and no pass could ever commit. Answers whether the row records
+/// the hold now.
 fn persist_released_hold(
     store: &mut EngineStore,
     hold: &crate::HostedHold,
     faults: &dyn FaultInjector,
-) -> Result<(), SyncError> {
+) -> Result<bool, SyncError> {
     let crate::HostedHold::ReleasedLineageUnsettled {
         binding,
         continuation,
         binding_stale,
     } = hold
     else {
-        return Ok(());
+        return Ok(false);
     };
     let persisted = store.write_with(faults, |tx| {
         if crate::hosted::recorded_hold(tx, &binding.workspace_id, &binding.object_id)?.as_ref()
-            != Some(hold)
+            == Some(hold)
         {
-            crate::hosted::hold_released_in_tx(tx, binding, *continuation, *binding_stale)?;
+            return Ok(true);
         }
-        Ok::<_, SyncError>(())
+        crate::hosted::hold_released_in_tx(tx, binding, *continuation, *binding_stale)
     })?;
     match persisted {
-        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Committed(stored) => Ok(stored),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
 }
@@ -2391,7 +2555,10 @@ pub(crate) fn defer_ydoc_update_in_tx(
     relay_seq: i64,
     relay_namespace: Option<&str>,
 ) -> Result<(), SyncError> {
-    let feed = if crate::hosted::is_hosted(tx, &key.workspace_id)? {
+    // Retained work whose feed was never recorded moves queues as it is.
+    let feed = if retained_unrecorded(tx, op)? {
+        ("legacy-unknown", None, None, None)
+    } else if crate::hosted::is_hosted(tx, &key.workspace_id)? {
         let identity: Option<(String, String)> = tx
             .query_row(
                 "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
@@ -2438,6 +2605,18 @@ pub(crate) fn defer_ydoc_update_in_tx(
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+/// Whether `op` is retained relay work that recorded no feed: a row from
+/// before feeds were recorded. New ingress never writes one.
+fn retained_unrecorded(conn: &Connection, op: &ReplicationEnvelope) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops WHERE workspace_id=?1 \
+         AND origin_id=?2 AND origin_seq=?3 AND ingress_kind='legacy-unknown')",
+        params![op.workspace_id, op.origin_id, op.origin_seq],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 fn protection_failure(
@@ -3977,9 +4156,14 @@ struct InactiveDeltaOutcome {
     rejected: Vec<(usize, String)>,
 }
 
+/// Apply queued updates of archived lineages, in batches. A lineage a
+/// released tail protects keeps its rows queued, and later batches of the
+/// call pass over it. [`SyncError::ValidationPending`] while its tails wait
+/// for validation, with that batch rolled back.
 pub(crate) fn drain_inactive_ydoc_updates(
     store: &mut EngineStore,
     workspace_id: &str,
+    tails: &ReleasedTails,
     faults: &dyn FaultInjector,
 ) -> Result<Vec<crate::ReplicationRefusal>, SyncError> {
     let pending = store.read_with(|conn| conn.query_row(
@@ -3993,7 +4177,10 @@ pub(crate) fn drain_inactive_ydoc_updates(
     }
     let search_policy = search_policy_for_store(store);
     let mut all_refusals = Vec::new();
+    // Each protected lineage as `[version, object, lineage]`.
+    let mut blocked: Vec<[String; 3]> = Vec::new();
     loop {
+        let excluded = serde_json::to_string(&blocked).map_err(SyncError::corrupt)?;
         let result = store.write_with(faults, |tx| {
         let mut statement = tx.prepare(
             "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length \
@@ -4003,9 +4190,12 @@ pub(crate) fn drain_inactive_ydoc_updates(
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
              LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
-             WHERE d.workspace_id=?1 ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
+             WHERE d.workspace_id=?1 AND NOT EXISTS(SELECT 1 FROM json_each(?2) x \
+               WHERE json_extract(x.value,'$[0]')=d.version_id AND json_extract(x.value,'$[1]')=d.object_id \
+               AND json_extract(x.value,'$[2]')=d.lineage_claim_id) \
+             ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
         ).map_err(SyncError::corrupt)?;
-        let rows = statement.query_map([workspace_id], |row| Ok((
+        let rows = statement.query_map(params![workspace_id, excluded], |row| Ok((
             row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
@@ -4027,11 +4217,19 @@ pub(crate) fn drain_inactive_ydoc_updates(
                 .or_default().push((origin,seq,at,payload,bytes));
         }
         let mut refusals = Vec::new();
-        for ((version,object,_), rows) in groups {
-            let key = DocKey::new(workspace_id, version, object).map_err(map_collab_hard_error)?;
+        let mut protected = Vec::new();
+        for ((version,object,lineage), rows) in groups {
+            let key = DocKey::new(workspace_id, version.clone(), object.clone()).map_err(map_collab_hard_error)?;
             let last = rows.last().unwrap();
             let updates = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
-            let outcome = apply_inactive_batch_in_tx(tx, &key, &last.3, &updates, last.2, search_policy.as_ref())?;
+            let outcome = match apply_inactive_batch_in_tx(tx, &key, &last.3, &updates, last.2, search_policy.as_ref(), tails) {
+                Err(SyncError::RetryableState { reason: INACTIVE_LINEAGE_PROTECTED }) => {
+                    processed -= rows.len();
+                    protected.push([version, object, lineage]);
+                    continue;
+                }
+                outcome => outcome?,
+            };
             let last_accepted = (0..rows.len()).rev().find(|index| !outcome.rejected.iter().any(|(rejected,_)| rejected == index));
             for (index, (origin,seq,_,_,_)) in rows.iter().enumerate() {
                 let reason = outcome.rejected.iter().find(|(rejected,_)| *rejected == index).map(|(_,reason)| reason)
@@ -4045,14 +4243,15 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>((processed,refusals))
+        Ok::<_,SyncError>((processed,refusals,protected))
     })?;
         match result {
-            TxnOutcome::Committed((processed, refusals)) => {
+            TxnOutcome::Committed((processed, refusals, protected)) => {
                 all_refusals.extend(refusals);
-                if processed == 0 {
+                if processed == 0 && protected.is_empty() {
                     return Ok(all_refusals);
                 }
+                blocked.extend(protected);
             }
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
@@ -4066,15 +4265,31 @@ fn apply_inactive_delta_in_tx(
     bytes: &[u8],
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    tails: &ReleasedTails,
 ) -> Result<InactiveDeltaOutcome, SyncError> {
-    let mut outcome =
-        apply_inactive_batch_in_tx(tx, key, payload, &[bytes.to_vec()], now_ms, search_policy)?;
+    let mut outcome = apply_inactive_batch_in_tx(
+        tx,
+        key,
+        payload,
+        &[bytes.to_vec()],
+        now_ms,
+        search_policy,
+        tails,
+    )?;
     if let Some((_, reason)) = outcome.rejected.pop() {
         outcome.refusal = Some(reason);
     }
     Ok(outcome)
 }
 
+/// Why an update of an archived lineage a released tail protects stays
+/// where it is: queued, or before the cursor at ingress.
+const INACTIVE_LINEAGE_PROTECTED: &str = "ydoc-inactive-lineage-protected";
+
+/// Apply `updates` to the archived lineage `payload` names, if it has one.
+/// One a released tail protects changes nothing:
+/// [`INACTIVE_LINEAGE_PROTECTED`]. Nothing inspects it against the active
+/// head, which is another lineage.
 fn apply_inactive_batch_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -4082,6 +4297,7 @@ fn apply_inactive_batch_in_tx(
     updates: &[Vec<u8>],
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    tails: &ReleasedTails,
 ) -> Result<InactiveDeltaOutcome, SyncError> {
     let archived: Option<InactiveLineage> = tx.query_row(
         "SELECT b.bytes,l.content_kind,l.last_surfaced_projection_sha256,l.path,l.full_state_blob_sha256,l.state_vector_blob_sha256,l.pending_authors_json FROM ydoc_inactive_lineages l \
@@ -4102,6 +4318,35 @@ fn apply_inactive_batch_in_tx(
     else {
         return Ok(InactiveDeltaOutcome::default());
     };
+    {
+        use dohc_engine_collab::live_update_application::{
+            IncomingCoordinate, Protection, ProtectionKey, protection,
+        };
+        // Only whether a tail protects the archived lineage counts here, so
+        // the coordinate names nothing.
+        let incoming = IncomingCoordinate {
+            relay_namespace: None,
+            replication_epoch: String::new(),
+            stream_identity: String::new(),
+            origin_id: String::new(),
+            origin_seq: 0,
+            relay_seq: 0,
+        };
+        let key = ProtectionKey {
+            doc: key,
+            lineage_claim_id: &payload.lineage_claim_id,
+            incoming: &incoming,
+        };
+        match protection(tx, &key, tails).map_err(protection_failure)? {
+            Protection::Unprotected => {}
+            Protection::Protected { .. } => {
+                return Err(SyncError::RetryableState {
+                    reason: INACTIVE_LINEAGE_PROTECTED,
+                });
+            }
+            Protection::Pending(pending) => return Err(SyncError::ValidationPending(pending)),
+        }
+    }
     let path = path.as_deref().unwrap_or(&payload.path);
     let kind = ContentKind::parse(&kind).map_err(map_collab_hard_error)?;
     let dohc_engine_collab::ReplayBatch { doc, outcomes } =
@@ -5155,7 +5400,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             Ok(YdocApplyResult { deferred: true, reason: Some("ydoc-inactive-lineage"), conflicts_opened: 0, lineage_replacement: None, record_facts: Vec::new() })
         })?;
         if !batch_inactive && !leases.is_live(&key) {
-            let refusals = drain_inactive_ydoc_updates(store, &key.workspace_id, faults)?;
+            let refusals = drain_inactive_ydoc_updates(store, &key.workspace_id, tails, faults)?;
             if let Some(refusal) = refusals.iter().find(|refusal| refusal.origin_id == envelope.origin_id && refusal.origin_seq == envelope.origin_seq) {
                 outcome.primary = ApplyDisposition::Refused(refusal.clone());
             }
@@ -5747,6 +5992,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         &bytes,
                         op.recorded_at_ms,
                         search_policy.as_ref(),
+                        tails,
                     )?;
                     if let Some(reason) = inactive.refusal {
                         return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
@@ -5841,6 +6087,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         &bytes,
                         op.recorded_at_ms,
                         search_policy.as_ref(),
+                        tails,
                     )?;
                     if let Some(reason) = inactive.refusal {
                         return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {

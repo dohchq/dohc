@@ -1218,22 +1218,28 @@ fn completed_hold(
     if let Some(hold) = park::parked_hold(occupancy, object_id)? {
         return Ok(Some(hold));
     }
+    // A released hold stands only while the queued row its binding names
+    // does. Once that row is gone the reason is obsolete, and the queued
+    // work the drain held behind it only waits.
+    if let Some(hold) = queued_released_hold(conn, workspace_id, object_id)? {
+        return Ok(Some(hold));
+    }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
-    // Queued Y.Doc work a drain held keeps its hold until a drain frees it.
-    if let Some(hold @ HostedHold::ReleasedLineageUnsettled { .. }) =
-        recorded_hold(conn, workspace_id, object_id)?
-        && conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
-                 WHERE workspace_id=?1 AND object_id=?2)",
-                params![workspace_id, object_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(SyncError::corrupt)?
+    if matches!(
+        recorded_hold(conn, workspace_id, object_id)?,
+        Some(HostedHold::ReleasedLineageUnsettled { .. })
+    ) && conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND object_id=?2)",
+            params![workspace_id, object_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(SyncError::corrupt)?
     {
-        return Ok(Some(hold));
+        return Ok(Some(HostedHold::WorkWaiting));
     }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
@@ -1367,13 +1373,14 @@ pub(crate) fn hold_unadmitted_in_tx(
 /// cursor commit. A pass pending now read it in another state, so the same
 /// transaction counts a commit and that pass's commit no longer stands. A
 /// ready document's own read starts where the main feed is, as for
-/// [`hold_unadmitted_in_tx`]. A parked document is no longer hosted.
+/// [`hold_unadmitted_in_tx`]. A parked document is no longer hosted. Answers
+/// whether a hosted document stores the hold.
 pub(crate) fn hold_released_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &ReleasedLineageBinding,
     continuation: ReleasedHoldContinuation,
     binding_stale: bool,
-) -> Result<(), SyncError> {
+) -> Result<bool, SyncError> {
     let held = tx
         .execute(
             "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
@@ -1393,14 +1400,46 @@ pub(crate) fn hold_released_in_tx(
         )
         .map_err(SyncError::persist)?;
     if held == 0 {
-        return Ok(());
+        return Ok(false);
     }
     tx.execute(
         "UPDATE hosted_replicas SET cursor_commits=cursor_commits+1 WHERE workspace_id=?1",
         [&binding.workspace_id],
     )
     .map_err(SyncError::persist)?;
-    Ok(())
+    Ok(true)
+}
+
+/// The released-lineage hold `object_id`'s row records, while the queued
+/// Y.Doc update its binding names is still queued: a drain's hold, which
+/// only a drain that decides that row again changes.
+pub(crate) fn queued_released_hold(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<HostedHold>, SyncError> {
+    let Some(hold @ HostedHold::ReleasedLineageUnsettled { .. }) =
+        recorded_hold(conn, workspace_id, object_id)?
+    else {
+        return Ok(None);
+    };
+    let HostedHold::ReleasedLineageUnsettled { binding, .. } = &hold else {
+        return Ok(None);
+    };
+    let queued: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND object_id=?2 AND origin_id=?3 AND origin_seq=?4)",
+            params![
+                workspace_id,
+                object_id,
+                binding.incoming.origin_id,
+                binding.incoming.origin_seq
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(queued.then_some(hold))
 }
 
 /// What holds `object_id` as its row records it now, or `None` when its row

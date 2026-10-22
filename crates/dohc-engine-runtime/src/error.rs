@@ -117,6 +117,12 @@ pub enum RuntimeError {
     /// A fault-injected domain transaction crashed before acknowledgement.
     #[error("operation crashed before acknowledgement")]
     OperationCrashed,
+
+    /// A deferred drain ended its transaction to wait for released-tail
+    /// validation. The actor operation that ran it awaits the validation
+    /// and drains again; it never reaches that operation's caller.
+    #[error("a deferred drain waits for released-tail validation")]
+    DrainWaiting(Box<dohc_engine_collab::live_update_application::PendingValidation>),
 }
 
 impl RuntimeError {
@@ -174,6 +180,7 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
+            RuntimeError::DrainWaiting(_) => "retryable-state",
         }
     }
 }

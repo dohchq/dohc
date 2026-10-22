@@ -60,29 +60,25 @@ impl ActorHandle {
         // validates; the recovery then runs again.
         loop {
             let (workspace_id, leases) = (workspace_id.clone(), leases.clone());
-            let recovered = self
+            let waiting = self
                 .run(move |store, cache| {
-                    dohc_engine_sync::drain_open_document_artifacts(
+                    Ok(dohc_engine_sync::drain_open_document_artifacts(
                         store,
                         cache,
                         &workspace_id,
                         &leases,
                         &NoFaults,
-                    )?;
-                    Ok(())
+                    )?
+                    .waiting)
                 })
-                .await;
-            match recovered {
-                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::ValidationPending(
-                    pending,
-                ))) => {
-                    pending
-                        .validate()
-                        .await
-                        .map_err(super::relay::validation_failed)?;
-                }
-                recovered => return recovered,
-            }
+                .await?;
+            let Some(pending) = waiting else {
+                return Ok(());
+            };
+            pending
+                .validate()
+                .await
+                .map_err(super::relay::validation_failed)?;
         }
     }
 

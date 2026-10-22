@@ -7393,16 +7393,16 @@ fn live_hosted_pass(
 fn settled_drain(store: &mut EngineStore) -> dohc_engine_sync::YdocDrainResult {
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     loop {
-        match dohc_engine_sync::drain_deferred_ydoc_for_key(
+        let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(
             store,
             &mut cache,
             &window_key(),
             &NoFaults,
-        ) {
-            Err(dohc_engine_sync::SyncError::ValidationPending(pending)) => {
-                pending.validate().wait().unwrap();
-            }
-            drained => return drained.unwrap(),
+        )
+        .unwrap();
+        match &drained.waiting {
+            Some(pending) => pending.validate().wait().unwrap(),
+            None => return drained,
         }
     }
 }
@@ -7536,6 +7536,148 @@ async fn a_deferred_destructive_update_stays_queued_with_its_hold_through_a_drai
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
     w.close().await;
+}
+
+/// A document whose queued update a drain held, and that a live session
+/// holds again, keeps that hold through each pass: the pass reports it with
+/// its binding, and its commit stores it unchanged.
+#[tokio::test]
+async fn a_leased_document_keeps_its_drain_hold_through_a_pass() {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let fold = feed.serve(fold, fold_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let live = live_hosted_pass(&mut w.store, &client);
+    assert!(pass_commit(&mut w.store, &client, &live).committed);
+    let hold = settled_drain(&mut w.store)
+        .released_hold
+        .expect("the drain holds the fold");
+    let queued = queued_updates(&w.store);
+    for _ in 0..2 {
+        let pass = live_hosted_pass(&mut w.store, &client);
+        assert_eq!(pass.held.get("object"), Some(&hold), "{pass:?}");
+        assert!(pass_commit(&mut w.store, &client, &pass).committed);
+        assert_eq!(
+            dohc_engine_sync::read_hosted_replica(&w.store, "workspace")
+                .unwrap()
+                .unwrap()
+                .documents["object"]
+                .status,
+            dohc_engine_sync::HostedDocumentStatus::Held(hold.clone())
+        );
+        assert_eq!(queued_updates(&w.store), queued);
+    }
+    assert!(journaled(&w.store, &fold));
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Where an actor operation drains queued updates of a protected lineage.
+#[derive(Debug, Clone, Copy)]
+enum DrainingOperation {
+    Open,
+    Resync,
+    Settle,
+    Close,
+}
+
+/// Two queued updates that only add content, on a protected lineage, with
+/// the actor's tails never validated: each decision waits for validation,
+/// and the second waits again after the first applied, since the head it
+/// changed moves the tails' generation. The actor waits each time outside
+/// its transaction and drains again, so every operation finishes with both
+/// updates applied and nothing queued.
+#[tokio::test]
+async fn actor_drains_wait_for_validation_after_a_committed_prefix_and_finish() {
+    for operation in [
+        DrainingOperation::Open,
+        DrainingOperation::Resync,
+        DrainingOperation::Settle,
+        DrainingOperation::Close,
+    ] {
+        let mut w = retained_window(Retained::Carried).await;
+        let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+        let (first, first_bytes) = desktop.append(&w.lineage, "A first paragraph.").await;
+        let (second, second_bytes) = desktop.append(&w.lineage, "A second paragraph.").await;
+        let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+        feed.serve(first, first_bytes);
+        feed.serve(second, second_bytes);
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let live = live_hosted_pass(&mut w.store, &client);
+        assert!(pass_commit(&mut w.store, &client, &live).committed);
+        assert_eq!(queued_updates(&w.store).len(), 2, "{operation:?}");
+        let token = CancellationToken::new;
+        match operation {
+            DrainingOperation::Open => {
+                w.actor
+                    .ydoc_open_state(
+                        "workspace".into(),
+                        1_000_000,
+                        true,
+                        Some(window_key()),
+                        "main".into(),
+                        WINDOW_PATH.into(),
+                        None,
+                        token(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            DrainingOperation::Resync => {
+                w.actor
+                    .ydoc_resync(window_key(), Some(w.lineage.clone()), token(), None)
+                    .await
+                    .unwrap();
+            }
+            DrainingOperation::Settle => {
+                let settled = w
+                    .actor
+                    .ydoc_settle(
+                        w.root.path().to_owned(),
+                        window_key(),
+                        WINDOW_PATH.into(),
+                        ContentKind::Richdoc,
+                        Some(w.lineage.clone()),
+                        None,
+                        "session".into(),
+                        Arc::new(()),
+                        1_000_000,
+                        Arc::new(NoFaults),
+                        token(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        settled,
+                        dohc_engine_runtime::actor::YdocSettleOutcome::RemoteUpdatesPending { .. }
+                    ),
+                    "the drained updates are news to the editor"
+                );
+            }
+            DrainingOperation::Close => {
+                let closed = w
+                    .actor
+                    .ydoc_close_session(window_key(), 1_000_000, Arc::new(NoFaults), token())
+                    .await
+                    .unwrap();
+                assert!(closed.outcome.is_some());
+            }
+        }
+        assert_eq!(queued_updates(&w.store), Vec::new(), "{operation:?}");
+        let text = w.text();
+        assert!(
+            text.contains("A first paragraph.") && text.contains("A second paragraph."),
+            "{operation:?}: {text}"
+        );
+        desktop.close().await;
+        w.close().await;
+    }
 }
 
 /// An update queued before deferrals recorded their feed, of the protected

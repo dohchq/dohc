@@ -13,6 +13,13 @@ pub struct OpenArtifactDrain {
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub conflicts_opened: i64,
+    /// Each recovered document a drain left held for released retained
+    /// work, by object id. Its queued work stays queued.
+    pub holds: std::collections::BTreeMap<String, crate::HostedHold>,
+    /// Recovery stopped at a document whose drain waits for released-tail
+    /// validation; the documents before it recovered. Once it completes,
+    /// recovery runs again for the rest.
+    pub waiting: Option<Box<dohc_engine_collab::live_update_application::PendingValidation>>,
 }
 
 pub(super) fn enqueue(
@@ -197,6 +204,14 @@ pub fn drain_open_document_artifacts(
                 result.refusals.extend(drained.refusals);
                 result.sharing_declined.extend(drained.sharing_declined);
                 result.conflicts_opened += drained.conflicts_opened;
+                if let Some(hold) = drained.released_hold {
+                    result.holds.insert(key.object_id.clone(), hold);
+                }
+                if drained.waiting.is_some() {
+                    result.waiting = drained.waiting;
+                    cache.remove(&key);
+                    break;
+                }
             }
             Ok(None) => continue,
             Err(error) => {
