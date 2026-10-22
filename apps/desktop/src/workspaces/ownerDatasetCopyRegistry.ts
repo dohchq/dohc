@@ -82,7 +82,7 @@ async function removeFolder(path: string): Promise<"done" | "missing"> {
   return "done";
 }
 
-const Saved = z.object({ folders: z.array(z.string()) });
+const Saved = z.object({ folders: z.array(z.string()), sweepPending: z.literal(true).optional() });
 const rejected = (result: PromiseSettledResult<unknown> | undefined): result is PromiseRejectedResult => result?.status === "rejected";
 const settled = (work: Promise<unknown>) => work.then((): undefined => undefined, (reason: unknown): PromiseRejectedResult => ({ status: "rejected", reason }));
 
@@ -109,6 +109,10 @@ export function createOwnerDatasetCopyRegistry(options: {
   // The record as last read or written. Until dohc reads it, nothing writes
   // it, and every try reads it again.
   let loaded = false, recorded: string | null = null, unreadable: { reason: unknown } | null = null;
+  // Leaving an account owes a look in every registered workspace. When dohc
+  // cannot list them, the look stays owed, in the record too, until one
+  // lists them.
+  let owed = false;
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
   let ownerKey: string | null = null, stopped = false;
@@ -117,19 +121,22 @@ export function createOwnerDatasetCopyRegistry(options: {
     return entry.closing ??= entry.opening.then(copy => copy.close(), () => undefined);
   }
   function leftover() {
-    return { workspaces: [...new Set([...left].flatMap(([path, failure]) => failure ? [placeOf(path)!.root] : []))], recordUnreadable: unreadable !== null };
+    return { workspaces: [...new Set([...left].flatMap(([path, failure]) => failure ? [placeOf(path)!.root] : []))],
+      recordUnreadable: unreadable !== null, sweepPending: owed };
   }
   async function load() {
     try { recorded = await orMissing(readFile(options.record, "utf8")); } catch (reason) { unreadable = { reason }; return; }
     loaded = true; unreadable = null;
-    let folders: string[] = [];
+    let saved: z.infer<typeof Saved> = { folders: [] };
     // A record dohc can read but not parse names nothing. The next change replaces it.
-    try { folders = recorded === null ? [] : Saved.parse(JSON.parse(recorded)).folders; } catch { /* names nothing */ }
-    for (const path of folders) if (placeOf(path) && !left.has(path)) left.set(path, false);
+    try { if (recorded !== null) saved = Saved.parse(JSON.parse(recorded)); } catch { /* names nothing */ }
+    for (const path of saved.folders) if (placeOf(path) && !left.has(path)) left.set(path, false);
+    owed ||= saved.sweepPending === true;
   }
   async function save() {
     if (!loaded) return;
-    const folders = [...left.keys()].sort(), text = folders.length ? JSON.stringify({ folders }) : null;
+    const folders = [...left.keys()].sort();
+    const text = folders.length || owed ? JSON.stringify({ folders, ...(owed ? { sweepPending: true } : {}) }) : null;
     if (text === recorded) return;
     if (text === null) await rm(options.record, { force: true });
     else { await mkdir(dirname(options.record), { recursive: true }); await atomicWriteFile(options.record, text); }
@@ -146,7 +153,10 @@ export function createOwnerDatasetCopyRegistry(options: {
     // Leaving an account removes its copies in every registered workspace,
     // including ones from earlier runs.
     let listing: PromiseRejectedResult | undefined;
-    try { if (leaving) roots = [...new Set([...roots, ...options.workspaces()])]; } catch (reason) { listing = { status: "rejected", reason }; }
+    if (leaving || owed) {
+      try { roots = [...new Set([...roots, ...options.workspaces()])]; owed = false; }
+      catch (reason) { owed = true; listing = { status: "rejected", reason }; }
+    }
     for (const root of roots) for (const path of [join(resolve(root), ...COPIES), join(resolve(root), ...OLD_COPIES)]) if (!left.has(path)) left.set(path, false);
     const intent = await settled(save());
     const closed = await Promise.allSettled(prior.map(close));

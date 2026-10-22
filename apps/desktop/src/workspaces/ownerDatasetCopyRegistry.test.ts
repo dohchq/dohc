@@ -36,12 +36,12 @@ function restart(record: string, workspaces: string[] = [], onLeftover = vi.fn()
   cleanups.push(() => registry.closeAll());
   return registry;
 }
-async function fixture({ opened = true } = {}) {
+async function fixture({ opened = true, workspaces = (rootPath: string) => [rootPath] } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-copy-registry-")), lifetime = new AbortController();
   if (opened) await openedLocalState({ workspaceId: "w", rootPath });
   const state = await mkdtemp(join(tmpdir(), "dohc-copy-registry-state-")), record = join(state, "dataset-copy-removals.json"), onLeftover = vi.fn();
   const ownerKey = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "owner" });
-  const registry = createOwnerDatasetCopyRegistry({ record, workspaces: () => [rootPath], onLeftover });
+  const registry = createOwnerDatasetCopyRegistry({ record, workspaces: () => workspaces(rootPath), onLeftover });
   cleanups.push(async () => { await registry.closeAll(); await rm(rootPath, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); });
   await registry.credentialsChanged(ownerKey);
   mocks.open.mockImplementation(async options => {
@@ -211,10 +211,10 @@ async function failedSignOut() {
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("EBUSY");
   return {...f,directory,root:await realpath(f.input.rootPath)};
 }
-const nothing={workspaces:[],recordUnreadable:false};
+const nothing={workspaces:[],recordUnreadable:false,sweepPending:false};
 it("names the workspace that still holds a copy it could not remove, and removes it on Try again",async()=>{
   const f=await failedSignOut();
-  expect(f.registry.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(f.onLeftover).toHaveBeenCalledOnce();
+  expect(f.registry.leftover()).toEqual({...nothing,workspaces:[f.root]});expect(f.onLeftover).toHaveBeenCalledOnce();
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
   files.busy.clear();
   await f.registry.removeLeftover();
@@ -241,7 +241,7 @@ it("tells the windows once the start has tried its record, though a read before 
   expect(next.leftover()).toEqual(nothing);
   // An unchanged owner answers with the start's own removal.
   await expect(next.credentialsChanged(null)).rejects.toThrow("EBUSY");
-  expect(next.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(onLeftover).toHaveBeenCalledOnce();
+  expect(next.leftover()).toEqual({...nothing,workspaces:[f.root]});expect(onLeftover).toHaveBeenCalledOnce();
 });
 it.skipIf(process.platform==="win32"||process.getuid?.()===0)("says when it cannot read its record, writes nothing over it, and reads it again on Try again",async()=>{
   const f=await failedSignOut();files.busy.clear();
@@ -250,7 +250,7 @@ it.skipIf(process.platform==="win32"||process.getuid?.()===0)("says when it cann
   await chmod(f.record,0o000);cleanups.push(()=>chmod(f.record,0o600).catch(()=>undefined));
   const onLeftover=vi.fn(),next=restart(f.record,[elsewhere],onLeftover);
   await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
-  expect(next.leftover()).toEqual({workspaces:[],recordUnreadable:true});expect(onLeftover).toHaveBeenCalledOnce();
+  expect(next.leftover()).toEqual({...nothing,recordUnreadable:true});expect(onLeftover).toHaveBeenCalledOnce();
   // Leaving an account meanwhile names folders of its own, and still writes nothing over the record.
   await next.credentialsChanged(f.input.ownerKey).catch(()=>undefined);
   await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
@@ -328,5 +328,23 @@ it.skipIf(process.platform==="win32")("follows no link swapped in for a recorded
   await expect(next.credentialsChanged(null)).rejects.toThrow("Collection copy storage changed. Its files were not removed.");
   expect(await readFile(join(outside,"keep.txt"),"utf8")).toBe("not dohc's");expect((await lstat(f.directory)).isSymbolicLink()).toBe(true);
   expect(await readFile(join(stray,"keep.txt"),"utf8")).toBe("not dohc's");
-  expect(next.leftover()).toEqual({workspaces:[f.root],recordUnreadable:false});expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
+  expect(next.leftover()).toEqual({...nothing,workspaces:[f.root]});expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[f.directory]});
+});
+it.each(["Try again","the next start"])("keeps the look in every workspace owed when it cannot list them, says so, and finishes it at %s",async when=>{
+  // A copy an earlier run left in a workspace this run never asked for.
+  const earlier=await mkdtemp(join(tmpdir(),"dohc-copy-registry-earlier-")),copy=join(earlier,".dohc","local","dataset-copies","0".repeat(64));
+  cleanups.push(()=>rm(earlier,{recursive:true,force:true}));
+  await mkdir(copy,{recursive:true});await writeFile(join(copy,"replica.sqlite"),"account data");
+  let listing=false;
+  const f=await fixture({workspaces:rootPath=>{if(!listing)throw new Error("dohc could not read its workspace list.");return [rootPath,earlier];}});
+  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("dohc could not read its workspace list.");
+  expect(f.registry.leftover()).toEqual({...nothing,sweepPending:true});expect(f.onLeftover).toHaveBeenCalledOnce();
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],sweepPending:true});
+  expect(await readdir(copy)).toEqual(["replica.sqlite"]);
+  listing=true;
+  const registry=when==="Try again"?f.registry:restart(f.record,[f.input.rootPath,earlier]);
+  // An unchanged owner answers with the start's own cleanup.
+  await (when==="Try again"?registry.removeLeftover():registry.credentialsChanged(null));
+  await expect(lstat(copy)).rejects.toThrow("ENOENT");
+  expect(registry.leftover()).toEqual(nothing);await expect(lstat(f.record)).rejects.toThrow("ENOENT");
 });

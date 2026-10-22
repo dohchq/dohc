@@ -734,8 +734,8 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
-    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false })),
-    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false })),
+    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
     emitCollectionCopiesLeftChanged: () => {
       for (const callback of [...collectionCopiesLeftCallbacks]) callback();
     },

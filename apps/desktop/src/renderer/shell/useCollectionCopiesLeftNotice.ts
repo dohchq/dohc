@@ -11,10 +11,14 @@ export function collectionCopiesLeftMessage(left: CollectionCopiesLeft): string 
   const removed = left.workspaces.length
     ? `dohc could not remove offline copies of Collections from a previous account. They are still in ${names}.`
     : null;
-  const unread = !left.recordUnreadable ? null : removed
-    ? "dohc also could not read its list of other copies to remove."
-    : "dohc could not read its list of offline copies of Collections to remove. Some may still be on this computer.";
-  return removed && unread ? `${removed} ${unread}` : removed ?? unread;
+  // What dohc could not find out, as the end of a sentence that starts "dohc could not".
+  const unknown = left.recordUnreadable && left.sweepPending
+    ? "read its list of offline copies of Collections to remove, or check every workspace for them"
+    : left.recordUnreadable ? "read its list of offline copies of Collections to remove"
+    : left.sweepPending ? "check every workspace for offline copies of Collections from a previous account"
+    : null;
+  if (unknown === null) return removed;
+  return removed ? `${removed} dohc also could not ${unknown}.` : `dohc could not ${unknown}. Some may still be on this computer.`;
 }
 
 // What this window filed last. Module state, because the shell remounts on
@@ -24,7 +28,8 @@ let shown: { key: string; dismissed: boolean } | null = null;
 
 /**
  * Tells the person when an account change could not remove the offline
- * copies of its Collections, or dohc could not read its record of them.
+ * copies of its Collections, or dohc could not read its record of them or
+ * check every workspace for them.
  * Reads when the shell mounts and whenever main says what is left changed.
  * Try again asks main to remove them again, and the row goes once none are
  * left.
