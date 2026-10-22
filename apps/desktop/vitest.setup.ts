@@ -120,10 +120,10 @@ if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
   }
   Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: NoteCheckWorker });
 }
-// Tests reuse made-up content hashes for different text, so no verdict
-// outlives its test. A shared worker keeps the stub above across files, so
-// every file forgets its own verdicts.
+// Tests reuse made-up content hashes for different text, and some stub the
+// worker, so no verdict or check outlives its test. A shared test worker keeps
+// the stub above across files, so every file resets after each test.
 if (typeof window !== "undefined") {
-  const { forgetLossyNoteVerdictsForTests } = await import("./src/renderer/editor/lossyNote");
-  afterEach(() => forgetLossyNoteVerdictsForTests());
+  const { resetLossyNoteCheckForTests } = await import("./src/renderer/editor/lossyNote");
+  afterEach(() => resetLossyNoteCheckForTests());
 }

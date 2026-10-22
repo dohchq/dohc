@@ -202,8 +202,13 @@ function useVerdict(open: string, key: string | null, known: boolean | undefined
   return verdict;
 }
 
-/** Tests reuse made-up content hashes for different text. */
-export function forgetLossyNoteVerdictsForTests(): void {
+/**
+ * Tests reuse made-up content hashes for different text, and some stub the
+ * worker, so no verdict, check or worker outlives its test.
+ */
+export function resetLossyNoteCheckForTests(): void {
+  stop(new Error('The test ended.'));
+  checks.clear();
   verdicts.clear();
 }
 
