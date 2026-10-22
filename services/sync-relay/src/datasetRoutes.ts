@@ -7,6 +7,8 @@ import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-back
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import { DATASET_AUTOMATION_CHAIN_DEPTH } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import { CHAIN_STOPPED_PRESS } from "@dohc/automation-executor/automation-failed-notice";
 import type { DatasetServerPress } from "./datasetAutomations";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import type { RelayDatasetHost } from "./datasetHost";
@@ -206,10 +208,10 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         }
         if (route.action === "press") {
           if (!options.pressDataset) throw notFound();
-          const body = record(raw, ["table", "field", "recordId", "pressId", "confirmed"]);
+          const body = record(raw, ["table", "field", "recordId", "pressId", "confirmed"], ["agent"]);
           if (!Array.isArray(body.confirmed) || body.confirmed.length > 128) throw badRequest("Invalid dataset request.");
           return options.pressDataset(auth, {datasetId: scope.datasetId, table: text(body.table), field: text(body.field),
-            recordId: text(body.recordId, 1024), pressId: text(body.pressId, 256), by: { kind: "human" },
+            recordId: text(body.recordId, 1024), pressId: text(body.pressId, 256), by: pressingActor(body.agent),
             confirmed: body.confirmed.map(value => text(value))}, signal);
         }
         if (route.action === "invoke") {
@@ -242,6 +244,17 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
       });
     } finally {release();}
   };
+}
+
+// Who pressed for the verified person: the person, or their agent at its
+// run's chain depth. The agent is provenance only; access is the person's.
+// A press at the chain's limit would start nothing, so it is refused here.
+function pressingActor(value: unknown): DatasetServerPress["by"] {
+  if (value === undefined) return {kind: "human"};
+  const agent = record(value, ["originId", "depth"]);
+  if (!Number.isSafeInteger(agent.depth) || Number(agent.depth) < 0) throw badRequest("Invalid dataset request.");
+  if (Number(agent.depth) >= DATASET_AUTOMATION_CHAIN_DEPTH) throw badRequest(CHAIN_STOPPED_PRESS);
+  return {kind: "agent", originId: text(agent.originId), depth: Number(agent.depth)};
 }
 
 function approvalAgent(value:unknown) {
