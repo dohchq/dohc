@@ -79,7 +79,8 @@ it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old 
   await f.registry.get(f.input);
   const {directory}=mocks.open.mock.calls[0]![0];
   expect(dirname(directory)).toBe(join(f.input.rootPath,".dohc","local","dataset-copies"));
-  for(const folder of [dirname(directory),directory])expect((await lstat(folder)).mode&0o777).toBe(0o700);
+  // Windows keeps no POSIX mode bits, so Node reports 0o666 there.
+  if(process.platform!=="win32")for(const folder of [dirname(directory),directory])expect((await lstat(folder)).mode&0o777).toBe(0o700);
   expect(await readdir(old)).toEqual(["replica.sqlite"]);expect(await readFile(join(old,"replica.sqlite"),"utf8")).toBe("old");
   // Signing out removes the copy at its new path, and the old folder with the account's data.
   await f.registry.credentialsChanged(null);
