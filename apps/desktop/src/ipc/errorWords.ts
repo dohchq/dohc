@@ -365,6 +365,23 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
   return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
 }
 
+/**
+ * The code of a Collections list this computer's server didn't give, where
+ * another computer keeps the workspace's own Collections.
+ */
+export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
+
+/**
+ * main's words for that list: on the first line, where the workspace's
+ * Collections are. After it, the server's error, which reads as it would alone.
+ */
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; failure: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
+  const [elsewhere = "", ...failure] = message.split("\n");
+  return elsewhere ? { elsewhere, failure: failure.join("\n") } : null;
+}
+
 /** main's refusal to use a workspace's Collections here, with its words. */
 export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {
   const { name, code, message } = parse(error);

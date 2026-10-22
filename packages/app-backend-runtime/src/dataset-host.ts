@@ -726,9 +726,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     describe(context: Context, raw: DatasetScope & { includeArchived?: boolean }): DatasetDescription {
       const key = scope(raw);
+      // Before access, so an archived one is hidden too, not refused as archived.
+      if (unclaimed(key)) denied();
       if (raw.includeArchived) owner(context, key);
       const permitted = permissions(context, key, { kind: "data" }, raw.includeArchived === true);
-      if (!permitted.discover || unclaimed(key)) denied();
+      if (!permitted.discover) denied();
       const archived = lifecycle(key).archived;
       return { ...describePermission(permitted), archived, ...(archived ? { operations: [] } : {}) };
     },

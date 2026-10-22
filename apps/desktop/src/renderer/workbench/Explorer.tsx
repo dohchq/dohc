@@ -53,7 +53,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, collectionsElsewhereWords, type CollectionsRefusalKind } from "../../ipc/errorWords";
+import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, type CollectionsRefusalKind } from "../../ipc/errorWords";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -127,8 +127,8 @@ export interface ExplorerProps {
   // place of the list.
   collectionsRefusal?: { kind: CollectionsRefusalKind; words: string } | null;
   // Another computer keeps the workspace's Collections, and the list holds
-  // the ones on this computer's server. The section names that computer.
-  collectionsElsewhere?: { computer: { label: string; sameName: boolean } } | null;
+  // the ones on this computer's server. These words name that computer.
+  collectionsElsewhere?: string | null;
   onKeepCollections?: () => void;
   onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -1658,7 +1658,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
-          {props.collectionsElsewhere && <CollectionsElsewhereRow computer={props.collectionsElsewhere.computer} others={!!props.dataCollections?.length} onKeep={props.onKeepCollections} />}
+          {props.collectionsElsewhere && <CollectionsElsewhereRow words={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
           {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
           </>}
@@ -2043,16 +2043,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
 // Below the Collections on this computer's server: the computer that keeps
 // the workspace's other Collections, where a move to a server starts.
-function CollectionsElsewhereRow({ computer, others, onKeep }: {
-  computer: { label: string; sameName: boolean };
-  others: boolean;
-  onKeep?: () => void;
-}) {
+function CollectionsElsewhereRow({ words, onKeep }: { words: string; onKeep?: () => void }) {
   return (
     <div data-testid="collections-elsewhere" className="flex flex-col items-start gap-1.5 px-2 py-1">
       <p className="m-0 flex gap-1.5 text-[12px] text-muted">
         <Laptop size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
-        <span className="wrap-anywhere">{collectionsElsewhereWords(computer, others)}</span>
+        <span className="wrap-anywhere">{words}</span>
       </p>
       {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
     </div>

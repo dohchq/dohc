@@ -100,6 +100,19 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     expect(refused).toContain("These Collections are on Studio Mac.");
     for (const store of [".dohc/local/datasets/state.sqlite", ".dohc/datasets/state.sqlite"]) expect(existsSync(join(workspace.rootPath, store))).toBe(false);
 
+    // The server doesn't answer: the section still says where the Collections are, and the failure is reported.
+    await relay.stop(); relay = null;
+    await desktop.close(); desktop = null;
+    desktop = await launchDesktopApp({ workspace });
+    await openWorkspaceFromFirstRun(desktop.page, workspace);
+    const offline = desktop.page.getByRole("region", { name: "Collections", exact: true });
+    await expect(offline.getByTestId("collections-elsewhere"))
+      .toHaveText("These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.Keep the Collections on this computer");
+    await expect(offline.getByTestId("collections-refusal")).toHaveCount(0);
+    await expect(offline.getByRole("button", { name: "Registrations", exact: true })).toHaveCount(0);
+    await expect(desktop.page.getByTestId("notice-toasts")).toContainText("Could not read Collections.");
+    await shoot(desktop.page, "collections-server-offline");
+
     // Signed out, this computer has no server to ask, and says where the Collections are as before.
     await desktop.close(); desktop = null;
     await rm(join(workspace.homeDir, "dohc-cloud.json"));

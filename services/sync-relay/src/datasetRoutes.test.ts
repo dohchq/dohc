@@ -621,8 +621,9 @@ it("imports a fenced dataset and its receipt over HTTP with a durable retry rece
 });
 
 
-it("lists and describes a transferred dataset only once its import is claimed", async () => {
+it.each([false, true])("lists and describes a transferred dataset only once its import is claimed (archived: %s)", async archived => {
   const source = await httpFixture(), target = await httpFixture(); await source.activate();
+  if (archived) expect((await source.http(`${source.path}/archive`, {})).status).toBe(200);
   const owner = {kind: "named" as const, workspaceId: "w", userId: "owner"}, scope = {workspaceId: "w", datasetId: id(1)};
   const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)}), cursor = journal.head(scope, () => {}).cursor;
   journal.fence({expected: cursor, authorize() {}});
@@ -637,12 +638,16 @@ it("lists and describes a transferred dataset only once its import is claimed", 
     expect(await (await target.http("w/datasets")).json()).toEqual({datasets: [], nextCursor: null});
     expect(await (await target.http("w/datasets?includeArchived=true")).json()).toEqual({datasets: [], nextCursor: null});
     expect((await target.http(target.path)).status).toBe(404);
+    expect((await target.http(`${target.path}?includeArchived=true`)).status).toBe(404);
     const claimed = await target.handler(new Request(`https://relay/sync/w/datasets/${id(1)}/imports/${transferId}`, {method: "POST", headers: {
       authorization: "Bearer owner", "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": manifestSha256,
       "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body}));
     expect(claimed.status).toBe(200);
-    expect(await (await target.http("w/datasets")).json()).toMatchObject({datasets: [{datasetId: id(1), name: "Requests"}], nextCursor: null});
-    expect(await (await target.http(target.path)).json()).toMatchObject({datasetId: id(1), name: "Requests"});
+    expect(await (await target.http(`w/datasets${archived ? "?includeArchived=true" : ""}`)).json())
+      .toMatchObject({datasets: [{datasetId: id(1), name: "Requests", archived}], nextCursor: null});
+    expect(await (await target.http(`${target.path}${archived ? "?includeArchived=true" : ""}`)).json()).toMatchObject({datasetId: id(1), name: "Requests", archived});
+    // Claimed, an archived one is refused as archived again.
+    if (archived) expect((await target.http(target.path)).status).toBe(409);
   } finally {await archive.dispose();}
 });
 

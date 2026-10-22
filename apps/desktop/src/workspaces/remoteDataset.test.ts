@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createRemoteDatasetData, createDatasetAuthorityRouter, createServerCollectionsData, resolveRemoteDatasetRevision } from "./remoteDataset";
+import { createRemoteDatasetData, createDatasetAuthorityRouter, createServerCollectionsData, resolveRemoteDatasetRevision, ServerCollectionsUnavailableError } from "./remoteDataset";
+import { CollectionsRefusalError } from "./collectionsHolder";
+import { readServerCollectionsUnavailable } from "../ipc/errorWords";
 import type { OwnerDatasetData } from "./remoteDataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -224,7 +226,7 @@ it("verifies immutable history source against the requested revision and current
 describe("a workspace's Collections on this computer's server, where another computer keeps its own", () => {
   function server(credentials: { serverUrl: string; relayUrl?: string; userId: string; token: string; email: string } = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" }) {
     let generation = 1;
-    const elsewhere = new Error("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
     const relay = vi.fn(async (_credentials: typeof credentials, path: string, _init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }> => {
       if (path.endsWith(id(2))) return { kind: "missing" };
       if (path.endsWith("/invoke")) return { kind: "success", body: { result: [], revision: 3, replayed: false } };
@@ -258,13 +260,18 @@ describe("a workspace's Collections on this computer's server, where another com
     expect(unreachable.relay).not.toHaveBeenCalled();
   });
 
-  it("keeps a failure apart from an empty list, and drops an answer after the session changed", async () => {
+  it("keeps a failure apart from an empty list, says where the Collections are with it, and drops an answer after the session changed", async () => {
     const f = server(), data = f.create();
     f.relay.mockResolvedValueOnce({ kind: "success", body: { datasets: [], nextCursor: null } });
     expect(await data.list({})).toEqual({ datasets: [], nextCursor: null });
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
-    await expect(data.list({})).rejects.toThrow("dohc could not reach the server.");
+    const failed = await data.list({}).then(() => null, (error: unknown) => error);
+    expect(failed).toBeInstanceOf(ServerCollectionsUnavailableError);
+    expect(readServerCollectionsUnavailable(failed)).toEqual({ elsewhere: f.elsewhere.message, failure: "dohc could not reach the server." });
     f.relay.mockImplementationOnce(async () => { f.switchCredential(); return { kind: "success", body: { datasets: [description], nextCursor: null } }; });
-    await expect(data.list({})).rejects.toThrow();
+    expect(readServerCollectionsUnavailable(await data.list({}).catch((error: unknown) => error))?.failure).toBe("Your server session changed. Try again.");
+    // Only the list carries where the Collections are.
+    f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
+    await expect(f.create().describe(id(1))).rejects.toThrow(/^dohc could not reach the server\.$/);
   });
 });
