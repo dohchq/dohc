@@ -10,6 +10,7 @@ import {
 } from "react";
 import { IconButton } from "./controls";
 import { isComposingKey } from "./keys";
+import { focusedElementIn } from "./focusedElement";
 import { useDismiss } from "./useDismiss";
 
 export type MenuItem = {
@@ -294,8 +295,11 @@ export function Menu(props: {
     if (props.closeOnPick !== false) close();
     item.onSelect();
   };
-  const typing = () => document.activeElement instanceof HTMLInputElement && !!list.current?.contains(document.activeElement);
-  const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
+  const typing = () => {
+    const focused = focusedElementIn(list.current);
+    return focused instanceof HTMLInputElement && !!list.current?.contains(focused);
+  };
+  const current = () => rowElements.current.findIndex((row) => row === focusedElementIn(row));
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
     if (inField && isComposingKey(event)) return;

@@ -1,6 +1,7 @@
 import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
+import { CopyField } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
@@ -527,11 +528,10 @@ export function SettingsDialog(props: {
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);
+      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
       if (!result.accepted) {
         setUpdateError(
-          result.state.status === "error"
-            ? result.state.message
-            : "Could not restart into the update.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
         );
       } else if (result.state.status === "error") {
         setUpdateError(result.state.message);
@@ -1127,6 +1127,14 @@ export function SettingsDialog(props: {
                   {updateError ?? updateState?.message ?? "Update status unavailable."}
                 </span>
               }
+              aside={updateState?.installCommand ? (
+                <CopyField label="Copy install command" copiedLabel="Install command copied"
+                  copyTestId="desktop-updates-install-command-copy" getText={() => updateState.installCommand ?? null}>
+                  <code data-testid="desktop-updates-install-command" title={updateState.installCommand}>
+                    {updateState.installCommand}
+                  </code>
+                </CopyField>
+              ) : undefined}
               testId="settings-row-desktop-updates"
             >
               <span className="mr-1 shrink-0 font-mono text-[11px] text-subtle">

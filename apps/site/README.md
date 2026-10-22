@@ -1,9 +1,11 @@
 # dohc marketing site
 
 The dohc marketing site is mostly plain HTML and CSS, with one deliberately
-real product surface: the interactive demo mounts the desktop app's actual
-WYSIWYG editor inside an isolated shadow root. The editor, its menus, and its
-document styling therefore stay in sync with `apps/desktop`.
+real product surface: the interactive demo mounts the desktop app's own title
+bar, tabs, panels, palettes, and WYSIWYG editor inside an isolated shadow root.
+They therefore stay in sync with `apps/desktop`. The demo's bridge
+(`src/demoDesktopBridge.ts`) answers the calls those parts make, in the
+browser.
 
 ## Run locally
 
