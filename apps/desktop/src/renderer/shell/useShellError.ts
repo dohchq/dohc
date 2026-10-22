@@ -56,6 +56,7 @@ export type ShellErrorKind =
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
+  | "network-share"
   | "file-recovery-unavailable"
   | "kept-files"
   | "record-history"
@@ -462,6 +463,23 @@ export function useShellError(workspaceId: string) {
       ),
     [push],
   );
+  // A workspace on a network share: one warning row. Nothing failed, so it
+  // offers no Try again.
+  const reportNetworkShare = useCallback(
+    (notice: { title: string; message: string; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [["Detail", "network-share"]],
+          retry: null,
+          kind: "network-share",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -771,6 +789,7 @@ export function useShellError(workspaceId: string) {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
     reportRecoveryUnavailable,
     showTabLimitError,
