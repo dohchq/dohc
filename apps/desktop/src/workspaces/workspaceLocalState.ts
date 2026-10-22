@@ -7,7 +7,9 @@ import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // `.dohc/local` holds what belongs to this computer rather than the
-// workspace, such as its layout. Only the engine creates it: each open that
+// workspace, such as its layout, and the Collections when this computer
+// keeps them. It is not a cache: some of it is the only copy, so nothing
+// removes the folder as a whole. Only the engine creates it: each open that
 // writes makes it private and, on a Mac, marks it so that file-provider
 // services such as iCloud Drive skip it, before anything is written in it.
 // A writer that created the folder itself would leave it unmarked, so

@@ -8,7 +8,7 @@ import { shareHandoffOperations, shareMountOperations, shareProposalOperations, 
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
-import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
+import { createHistoryCollectionRemote, serverHistorySources } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
@@ -35,7 +35,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, readError, withErrorWords } from "./ipc/errorWords";
+import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
@@ -60,10 +60,11 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
-import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, createServerCollectionsData, resolveRemoteDatasetRevision, type OwnerDatasetData } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
@@ -72,7 +73,7 @@ import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecov
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
 import { localStateOpened, LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
-import { createDatasetHandler } from "./ipc/datasetIpc";
+import { createDatasetHandler, type ServerCollections } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
 import { type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -308,7 +309,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { provedNeverShared, readSyncHistory, recordSynced, runSchedulesOn, scheduleComputer, type Computer } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced, runSchedulesOn, scheduleComputer, workspaceMadeBy, type Computer } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
 import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
@@ -1682,7 +1683,10 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   },
   permissions: async (operation, datasetId, after) => {
     const { workspace, signal } = operation;
-    const local = await localDatasetHostFor(workspace, signal);
+    const authority = await collectionsAuthorityFor(workspace, signal);
+    const page = { action: "permissions" as const, workspaceId: workspace.workspaceId, datasetId, after, limit: 100 };
+    if (authority.kind === "server") return authority.server.data(signal, () => operation.assertCurrent()).permissions!(page);
+    const { local } = authority;
     const data = createDatasetAuthorityRouter(local, {
       status: async id => local.transferStatus(id),
       remote: async targetOrigin => {
@@ -1693,7 +1697,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
           currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: () => operation.assertCurrent(), relayJson: relayShareJsonWithCredentials });
       },
     });
-    return data.permissions!({ action: "permissions", workspaceId: workspace.workspaceId, datasetId, after, limit: 100 });
+    return data.permissions!(page);
   },
 });
 
@@ -3701,7 +3705,7 @@ async function openWorkspaceActivityForOperation(
 // restart settle once the engine is back. Only an existing store opens.
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
-    .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
+    .catch(error => { if (!(error instanceof CollectionsRefusalError)) console.warn("[desktop] local Collection app reconciliation:", error); });
 }
 
 function openWorkspaceActivityWith(
@@ -4626,7 +4630,7 @@ function createCollectionAutomationsFor(
       // one only for what a person asked about; otherwise it waits for the
       // Collections list or a dataset action to open it.
       const opened = datasetHost.pending;
-      if (opened) return await work((await opened).automations);
+      if (opened) return await work((await stillHeld(datasetHost, opened)).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
@@ -4680,6 +4684,73 @@ async function closeLocalDatasetHost(slot: DatasetHostSlot): Promise<void> {
     activeDatasetHosts.delete(pending);
   }
 }
+// Whether this installation keeps a workspace's Collections, read from the
+// registry at each use.
+function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
+  return { here: thisComputer, required: () => collectionsHolderRequired(findWorkspace(workspaceId)) };
+}
+// Asks before keeping Collections another computer may have, in the window
+// that asked. Cancel is the default.
+async function confirmKeepCollections(window: BrowserWindow | null, question: KeepQuestion): Promise<boolean> {
+  const { message, detail } = keepQuestionWords(question);
+  const options = { type: "warning" as const, message, detail, buttons: [KEEP_COLLECTIONS_HERE, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  return response === 0;
+}
+// An open host serves new work only while this installation still keeps its
+// store. One that no longer does closes, and the next use reads the record anew.
+async function stillHeld(slot: DatasetHostSlot, pending: Promise<LocalDatasetHost>): Promise<LocalDatasetHost> {
+  const host = await pending;
+  try {
+    host.held();
+  } catch (error) {
+    if (error instanceof CollectionsRefusalError && slot.pending === pending) void closeLocalDatasetHost(slot);
+    throw error;
+  }
+  return host;
+}
+// What a computer that doesn't keep a workspace's Collections can use of
+// them: the ones moved to its signed-in server, through that session alone.
+interface ServerCollectionsSession {
+  credentials: CloudSessionCredentials;
+  credentialGeneration: number;
+  elsewhere: ServerCollections["elsewhere"];
+  /** The server's Collections, for work under `signal` while `assertCurrent` passes. */
+  data(signal: AbortSignal, assertCurrent: () => void): OwnerDatasetData;
+}
+// The workspace does not start syncing, and its server and account stay as
+// they are. Null where this computer keeps the Collections, or where it has
+// no session for the workspace's server and account. The local store then
+// refuses.
+async function serverCollectionsFor(workspace: RegistryEntry & { attachmentId?: symbol }, signal: AbortSignal): Promise<ServerCollectionsSession | null> {
+  // A store open here that this computer still keeps answers without reading the record.
+  const slot = withWorkspaceAttachment(workspace, lease => lease.state.datasetHost);
+  if (slot?.pending && await stillHeld(slot, slot.pending).then(() => true, () => false)) return null;
+  const elsewhere = await collectionsKeptElsewhere(workspace.rootPath, workspace.workspaceId, collectionsHolderCheck(workspace.workspaceId));
+  if (elsewhere === null) return null;
+  await warmCredentialCache().catch(() => undefined);
+  signal.throwIfAborted();
+  const credentials = cachedCredentials, credentialGeneration = credentialCacheGeneration;
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  if (!credentials?.relayUrl || (remote && !workspaceRemoteMatchesCredentials(remote, credentials))) return null;
+  const refusal = new CollectionsRefusalError(elsewhere);
+  return {
+    credentials, credentialGeneration,
+    elsewhere: { server: new URL(credentials.relayUrl).origin, computer: { label: elsewhere.computer.label, sameName: elsewhere.sameName } },
+    data: (signal, assertCurrent) => createServerCollectionsData({ workspaceId: workspace.workspaceId, credentials, credentialGeneration, signal,
+      currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent,
+      relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init, { retainNotFound: true }),
+      elsewhere: refusal }),
+  };
+}
+// Who answers for a workspace's Collections, chosen as a Collection action
+// chooses: the server, without opening a store, on a computer that doesn't
+// keep them; otherwise the local store, which refuses there as before.
+type CollectionsAuthority = { kind: "server"; server: ServerCollectionsSession } | { kind: "local"; local: LocalDatasetHost };
+async function collectionsAuthorityFor(workspace: RegistryEntry & { attachmentId?: symbol }, signal: AbortSignal): Promise<CollectionsAuthority> {
+  const server = await serverCollectionsFor(workspace, signal);
+  return server ? { kind: "server", server } : { kind: "local", local: await localDatasetHostFor(workspace, signal) };
+}
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
@@ -4691,6 +4762,8 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
       pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+        holder: collectionsHolderCheck(workspace.workspaceId),
+        trashItem: path => shell.trashItem(path),
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -4734,7 +4807,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
       void pending.then(() => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(), () => undefined);
       void pending.catch(() => { if (slot.pending === ownedPending) slot.pending = null; activeDatasetHosts.delete(ownedPending); });
     }
-    const host = await pending;
+    const host = await stillHeld(slot, pending);
     signal.throwIfAborted(); operation.assertCurrent();
     return host;
   });
@@ -6275,28 +6348,33 @@ function registerIpcHandlers(): void {
     stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
-      const local = await localDatasetHostFor(workspace, operation.signal);
+      const authority = await collectionsAuthorityFor(workspace, operation.signal);
       operation.assertCurrent();
       const generation = credentialCacheGeneration;
       let remoteReady: ReturnType<typeof remoteForWorkspace> | undefined;
       let scope = historyScopeIds.get(operation.state);
       if (!scope) { scope = randomUUID(); historyScopeIds.set(operation.state, scope); }
+      const remote = (dataFor: (signal: AbortSignal, current: () => void) => OwnerDatasetData) => createHistoryCollectionRemote({
+        expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
+        withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work), dataFor });
+      if (authority.kind === "server") {
+        const { server } = authority, assertCurrent = () => operation.assertCurrent();
+        return { scope: JSON.stringify([scope, generation]), local: serverHistorySources(server.data(operation.signal, assertCurrent), assertCurrent),
+          remote: remote((signal, current) => server.data(signal, current)) };
+      }
+      const { local } = authority;
       return {
         scope: JSON.stringify([scope, generation]),
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
-        remote: createHistoryCollectionRemote({
-          expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
-          withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work),
-          dataFor: (signal, current) => createDatasetAuthorityRouter(local, {
-            status: async id => { current(); return local.transferStatus(id); },
-            remote: async targetOrigin => {
-              const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
-              if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
-              return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
-                currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
-            },
-          }),
-        }),
+        remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
+          status: async id => { current(); return local.transferStatus(id); },
+          remote: async targetOrigin => {
+            const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
+            if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+            return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+              currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+          },
+        })),
       };
     },
     recordHistoryPersonName:(workspaceId, userId, sender) => {
@@ -6467,6 +6545,10 @@ function registerIpcHandlers(): void {
   const datasetForWorkspace = localDatasetHostFor;
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    serverCollectionsFor: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      const server = await serverCollectionsFor(workspace, signal);
+      return server && { data: server.data(signal, () => signal.throwIfAborted()), elsewhere: server.elsewhere };
+    },
     automationName: async (workspace: DesktopRendererWorkspaceOperation["workspace"], automationId: string) =>
       await collectionAutomationsOf(workspace.workspaceId)?.nameForHistory(automationId) ?? null,
     currentCredentialGeneration: () => credentialCacheGeneration,
@@ -6570,17 +6652,26 @@ function registerIpcHandlers(): void {
   };
   const exportDatasetArchive = async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string,
     path: string, overwrite: boolean | undefined, signal: AbortSignal, authorize: () => void) => {
-    const local = await datasetForWorkspace(workspace, signal);
-    const transfer = local.transferStatus(datasetId);
-    if (transfer) {
-      if (transfer.state !== "imported") throw new Error("Finish sharing this Collection before exporting it.");
-      const remote = await remoteForWorkspace(workspace);
+    const fromServer = async (origin: string, remote: { credentials: CloudSessionCredentials; credentialGeneration: number }) => {
       const archive = await openRemoteDatasetRecoveryExport({ workspaceId: workspace.workspaceId, datasetId,
-        origin: transfer.targetOrigin, ...remote, currentCredentialGeneration: () => credentialCacheGeneration,
+        origin, ...remote, currentCredentialGeneration: () => credentialCacheGeneration,
         signal, assertCurrent: authorize, maxBytes: 1024 * 1024 * 1024 + 2 * 1024 * 1024,
         relayResponse: relayShareResponseWithCredentials });
       try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream, maxBytes: archive.maxBytes, signal, authorize, workspaceRoots: listWorkspaces().map(entry => entry.rootPath) })).savedPath; }
       finally { await archive.dispose(); }
+    };
+    const authority = await collectionsAuthorityFor(workspace, signal);
+    if (authority.kind === "server") {
+      const { server } = authority;
+      // The server describes only a Collection whose move finished, as the computer that keeps them exports only those.
+      await server.data(signal, authorize).describe(datasetId, { includeArchived: true });
+      return fromServer(server.elsewhere.server, { credentials: server.credentials, credentialGeneration: server.credentialGeneration });
+    }
+    const { local } = authority;
+    const transfer = local.transferStatus(datasetId);
+    if (transfer) {
+      if (transfer.state !== "imported") throw new Error("Finish sharing this Collection before exporting it.");
+      return fromServer(transfer.targetOrigin, await remoteForWorkspace(workspace));
     }
     const archive = await local.prepareExport(datasetId, { signal });
     try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize, workspaceRoots: listWorkspaces().map(entry => entry.rootPath) })).savedPath; }
@@ -6671,6 +6762,20 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, datasetOperations, {
     dataset: (request, { event }) => datasetHandler(event.sender, request),
+    keepCollectionsHere: async (_input, { event, operation }) => {
+      const { workspace } = operation;
+      const holder = collectionsHolderCheck(workspace.workspaceId);
+      if (!holder.required()) throw new Error("A received share's Collections stay with the person who shared it.");
+      const kept = await keepCollectionsHere(workspace.rootPath, workspace.workspaceId, holder.here(), {
+        adoptStore: storeId => adoptLocalDatasetStore(workspace.rootPath, workspace.workspaceId, storeId),
+        storeIdHere: () => localDatasetStoreId(workspace.rootPath),
+        madeBy: () => workspaceMadeBy(workspace.rootPath),
+        confirm: question => confirmKeepCollections(BrowserWindow.fromWebContents(event.sender), question),
+      });
+      operation.assertCurrent();
+      if (kept) notifyRenderer({ workspaceId: workspace.workspaceId });
+      return { kept };
+    },
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
