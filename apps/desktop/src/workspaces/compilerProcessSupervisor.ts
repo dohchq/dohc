@@ -181,7 +181,6 @@ export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, r
       if (next && STARTUP_STAGES.indexOf(next) > lastStageIndex) {
         lastStageIndex = STARTUP_STAGES.indexOf(next);
         stage(next);
-        appendTail(text);
         return;
       }
       appendTail(safeStderrLine(text));

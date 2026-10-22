@@ -45,6 +45,25 @@ it("keeps stage timings and a bounded, redacted stderr tail on a supervisor time
   expect(spawn.mock.calls.at(-1)?.[1]).toEqual(expect.arrayContaining(["-NoProfile", "-NonInteractive"]));
 });
 
+it("keeps diagnostics before startup records in a stalled compiler's tail", async () => {
+  const { child, outcome } = owner();
+  child.stderr.write("private file contents and SECRET=value\nENOMEM: private source excerpt\n");
+  child.stderr.write("[dohc-compiler] PowerShell running\n[dohc-compiler] Add-Type done\n[dohc-compiler] job assigned\n[dohc-compiler] admitted\n[dohc-compiler] worker spawned\n[dohc-compiler] worker ready\n");
+  await vi.advanceTimersByTimeAsync(bounds.timeoutMs);
+  const error = await outcome;
+  expect(error.details).toContain("Last stage: worker ready");
+  expect(error.details.split("stderr tail: ")[1]).toBe("[redacted stderr]; ENOMEM");
+});
+
+it("keeps repeated and out-of-order startup records in the tail", async () => {
+  const { child, outcome } = owner();
+  child.stderr.write("[dohc-compiler] Add-Type done\n[dohc-compiler] Add-Type done\n[dohc-compiler] PowerShell running\n");
+  await vi.advanceTimersByTimeAsync(bounds.timeoutMs);
+  const error = await outcome;
+  expect(error.details).toContain("Last stage: Add-Type done");
+  expect(error.details.split("stderr tail: ")[1]).toBe("[dohc-compiler] Add-Type done; [dohc-compiler] PowerShell running");
+});
+
 it("reports an owner deadline, including startup that never reached PowerShell", async () => {
   const { child, outcome } = owner();
   child.emit("close", 124, null);
