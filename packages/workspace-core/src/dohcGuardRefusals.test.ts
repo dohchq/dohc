@@ -57,7 +57,7 @@ describe("dohc guard refusals", () => {
 
   it("names a folder another user can change, and the way out", () => {
     expect(notOnlyYoursRefusal(DOHC_TRASH_GUARD)).toBe(
-      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash, which must be a folder only you can change. Remove or rename it. Then retry.",
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash. Make it a folder only you can change. Then retry.",
     );
   });
 

@@ -42,7 +42,7 @@ async function tripWorkspace(name: string) {
     const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
     await lifecycle.start();
     const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-    // The real engine's open prepares `.dohc/local`, where the host keeps its workers.
+    // The real engine's open prepares `.dohc/local`, where the host keeps its store and workers.
     readLocalStateFrom(sessions);
     const capture = createWorkspaceEngineCapture({ ...attached, rustEngineSessions: sessions, onError: () => undefined });
     const adapter = () => sessions.run(attached, async ({ client, workspace: handle }) => new VersionedLiveAdapter(client, handle, { workspaceId }));
@@ -74,7 +74,12 @@ async function tripWorkspace(name: string) {
       const prepared = await prepareLocalAppPublication({ workspaceId, appRoot: "trip" }, { deferredWrites: [], adapter: await running.adapter(), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
       return { host, published: await host.apps.activate(prepared, signal()) };
     },
-    async restartEngine() { await running.stop(); running = await startEngine(); },
+    async restartEngine() {
+      await running.stop();
+      running = await startEngine();
+      // The desktop reconciles once the engine has opened the workspace again, as its store in `.dohc/local` needs.
+      await running.adapter();
+    },
     async close() {
       for (const host of hosts) await host.close();
       await running.stop();

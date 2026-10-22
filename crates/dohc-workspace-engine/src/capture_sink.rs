@@ -514,7 +514,8 @@ impl StoreCaptureSink {
             // a renamed-and-recreated workspace cannot supply or receive this
             // workspace's encryption key.
             self.require_captured_root()?;
-            let loaded = load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            let loaded =
+                load_key_file(self.actor.store_folder()).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
             self.require_captured_root()?;
             let key = match loaded {
                 Some(key) => key,
@@ -533,8 +534,8 @@ impl StoreCaptureSink {
                         return Err(SECRET_KEY_UNAVAILABLE);
                     }
                     self.require_captured_root()?;
-                    let key =
-                        create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+                    let key = create_key_file(self.actor.store_folder())
+                        .map_err(|_| SECRET_KEY_UNAVAILABLE)?;
                     self.require_captured_root()?;
                     key
                 }

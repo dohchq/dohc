@@ -1,4 +1,5 @@
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
+import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
 import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
@@ -22,6 +23,7 @@ import {
   PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
   readCollectionsRefusal,
+  readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
   VOLUME_SHARES_NEW_FILES_WORDS,
@@ -209,6 +211,7 @@ describe("error words", () => {
     ["other-owner .dohc", `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
     ["other-owner .dohc/engine", `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
     ["other-owner .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`],
+    ["unchecked-volume .dohc/engine", "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again."],
     ["link .dohc/engine/engine.db-shm", `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`],
     ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
     ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
@@ -394,6 +397,24 @@ describe("error words", () => {
     // Another error with the same words is not a refusal.
     expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
     expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
+  });
+
+  it("carries where the Collections are with a server list that failed, across IPC, apart from why", () => {
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
+    const read = readServerCollectionsUnavailable(acrossIpc(failed, "desktop:dataset"));
+    expect(read).toEqual({ elsewhere: elsewhere.message, failure: "TypeError: fetch failed" });
+    // The server's error reads as it would have alone.
+    for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
+      const failure = readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, cause), "desktop:dataset"))!.failure;
+      expect(readError(new Error(failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
+    }
+    expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
+      .toEqual({ elsewhere: elsewhere.message, failure: "" });
+    expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
+    // The same words from another error are not that list.
+    expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();
+    expect(readServerCollectionsUnavailable(acrossIpc(elsewhere, "desktop:dataset"))).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {

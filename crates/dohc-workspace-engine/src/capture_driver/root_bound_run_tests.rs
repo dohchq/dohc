@@ -40,6 +40,9 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
 
     let bounds = ScanBounds::builder().max_file_bytes(64).build();
     std::fs::write(root.join("big.md"), [b'x'; 65]).expect("grow beyond scan cap");
+    // The store, and the key beside it, live in another folder, so nothing
+    // has made this root's `.dohc` yet.
+    std::fs::create_dir_all(root.join(".dohc")).expect("policy folder");
     let policy_path = root.join(".dohc/files.toml");
     let policy = b"[[rule]]\npath = \"**\"\ntracked = false\n";
     std::fs::write(&policy_path, policy).expect("narrow all ordinary files");

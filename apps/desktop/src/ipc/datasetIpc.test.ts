@@ -4,10 +4,11 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { createDatasetSources, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
-import { createDatasetHandler } from "./datasetIpc";
+import { createDatasetHandler, type ServerCollections } from "./datasetIpc";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -18,7 +19,8 @@ const datasetId = "00000000-0000-4000-8000-000000000001";
 function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
   automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
   // Main's own host, which export opens first as main's does.
-  localHost?: () => Promise<LocalDatasetHost>) {
+  localHost?: () => Promise<LocalDatasetHost>,
+  serverCollectionsFor?: () => Promise<ServerCollections | null>) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -56,6 +58,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     ...(localHost ? { exportArchive: async () => { await localHost(); return null; } } : {}),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
+    ...(serverCollectionsFor ? { serverCollectionsFor } : {}),
     withAdapter, createSources, ...(automationName ? { automationName } : {}),
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetPath: "data/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
@@ -464,13 +467,16 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
   expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
 });
 
+const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
 it.each([
   ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
     (root: string) => writeFile(join(root, ".dohc", "collections.json"),
-      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"]],
-  ["no record names a computer for a store already here", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.",
-    async (root: string) => { await mkdir(join(root, ".dohc", "datasets")); await writeFile(join(root, ".dohc", "datasets", "state.sqlite"), ""); }, ["datasets"]],
-] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left) => {
+      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"], null],
+  ["no record names a computer for a store already here", unclaimed, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
+  // A copy iCloud Drive has not removed from where stores were before .dohc/local.
+  ["no record names a computer for an old copy of a store", unclaimed, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
+] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left, folder) => {
   const root = await createTestScratch("dohc-dataset-ipc-holder-");
   await mkdir(join(root, ".dohc"));
   await arrange(root);
@@ -497,7 +503,7 @@ it.each([
     for (const caller of ["window", "cli"]) await expect(f.handler(caller, request), request.action).rejects.toThrow(words);
   }
   expect(await readdir(join(root, ".dohc"))).toEqual(left);
-  if ((left as readonly string[]).includes("datasets")) expect(await readdir(join(root, ".dohc", "datasets")), "not opened").toEqual(["state.sqlite"]);
+  if (folder) expect(await readdir(join(root, ...folder)), "not opened").toEqual(["state.sqlite"]);
 });
 
 it("reads a received share's Collections through its server, never the local store, whoever keeps the local one", async () => {
@@ -507,4 +513,55 @@ it("reads a received share's Collections through its server, never the local sto
   f.workspace.shareView = { shareId: "s" };
   expect(await f.handler("window", { workspaceId: "workspace", action: "list" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
   expect(localHost).not.toHaveBeenCalled();
+});
+
+describe("a computer that doesn't keep the workspace's Collections", () => {
+  const elsewhere = { server: "https://relay.example", computer: { label: "Laptop", sameName: false } };
+  const refusal = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+  function serverFixture(server: ServerCollections | null) {
+    // Main's local store, which refuses on this computer.
+    const localHost = vi.fn(async (): Promise<LocalDatasetHost> => { throw refusal; });
+    const serverCollectionsFor = vi.fn(async () => server);
+    return { ...fixture(undefined, undefined, undefined, localHost, serverCollectionsFor), localHost, serverCollectionsFor };
+  }
+
+  it("lists and works on the Collections on this computer's server, says where the others are, and opens no local store", async () => {
+    const description = { datasetId, name: "Responses", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [] };
+    const data = { list: vi.fn(async () => ({ datasets: [description], nextCursor: null })), describe: vi.fn(async () => description),
+      invoke: vi.fn(async () => ({ result: [], revision: 2, replayed: false })) } as unknown as OwnerDatasetData;
+    const f = serverFixture({ data, elsewhere });
+    expect(await f.handler("window", { workspaceId: "workspace", action: "list" }))
+      .toEqual({ kind: "list", datasets: [{ ...description, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null, elsewhere });
+    expect(await f.handler("cli", { workspaceId: "workspace", datasetPath: "data/dataset.json", action: "describe" }))
+      .toEqual({ kind: "description", dataset: { ...description, datasetPath: "data/dataset.json" } });
+    expect(await f.handler("cli", { workspaceId: "workspace", datasetPath: "data/dataset.json", action: "invoke", operationId: datasetId,
+      revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "k" })).toEqual({ kind: "invoked", result: [], revision: 2, replayed: false });
+    expect(data.invoke).toHaveBeenCalledWith(expect.objectContaining({ datasetId, idempotencyKey: "k" }));
+    expect(f.localHost).not.toHaveBeenCalled();
+  });
+
+  it("leaves creating, approving and recovering to the computer that keeps them", async () => {
+    const data = { list: vi.fn() } as unknown as OwnerDatasetData;
+    const f = serverFixture({ data, elsewhere });
+    for (const request of [
+      { workspaceId: "workspace", action: "create", definition: JSON.parse(f.sources.get("data/dataset.json")!) },
+      { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" },
+      { workspaceId: "workspace", action: "approve", preparationId: datasetId, revisionSha256: f.revision.revisionSha256 },
+      { workspaceId: "workspace", action: "discard", preparationId: datasetId },
+      { workspaceId: "workspace", action: "prepareRecovery", sourcePath: "/recovery/in.dohc-recovery" },
+      { workspaceId: "workspace", action: "discardRecovery", transferId: datasetId },
+    ]) await expect(f.handler("cli", request), request.action).rejects.toBe(refusal);
+    expect(f.createSources).not.toHaveBeenCalled();
+    expect(f.serverCollectionsFor).not.toHaveBeenCalled();
+    expect(data.list).not.toHaveBeenCalled();
+  });
+
+  it("refuses as before without a server to ask, and never asks one for a received share", async () => {
+    const f = serverFixture(null);
+    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toBe(refusal);
+    expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
+    f.workspace.shareView = { shareId: "s" };
+    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toThrow("Open the original workspace to manage this Collection.");
+    expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
+  });
 });

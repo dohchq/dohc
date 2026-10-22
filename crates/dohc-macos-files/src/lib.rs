@@ -1,14 +1,14 @@
 //! Create a file without the ACL entries its folder gives new files, keep a
-//! folder private to its owner, copy a file's macOS ACL and extended
-//! attributes between open descriptors, flush a descriptor behind a drive
-//! write barrier, keep a folder out of iCloud Drive, and unlink a file only
-//! when no process has it open.
+//! folder private to its owner, name a folder by its ID, copy a file's macOS
+//! ACL and extended attributes between open descriptors, flush a descriptor
+//! behind a drive write barrier, keep a folder out of iCloud Drive, and
+//! unlink a file only when no process has it open.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 
 /// The attribute that tells macOS file providers, iCloud Drive among them,
 /// not to sync an item or anything inside it.
@@ -133,6 +133,9 @@ pub enum NotPrivateReason {
     NotFile,
     /// A folder on a local volume that another user owns.
     OtherOwner,
+    /// A folder on a volume that keeps owners but can't be reached by its
+    /// ID, so dohc can't be sure it opens the folder it checked.
+    UncheckedVolume,
 }
 
 impl NotPrivateReason {
@@ -143,6 +146,7 @@ impl NotPrivateReason {
             NotPrivateReason::NotFolder => "not-folder",
             NotPrivateReason::NotFile => "not-file",
             NotPrivateReason::OtherOwner => "other-owner",
+            NotPrivateReason::UncheckedVolume => "unchecked-volume",
         }
     }
 }
@@ -163,6 +167,7 @@ impl std::fmt::Display for NotPrivate {
             NotPrivateReason::NotFolder => "is not a folder",
             NotPrivateReason::NotFile => "is not a file",
             NotPrivateReason::OtherOwner => "belongs to another user",
+            NotPrivateReason::UncheckedVolume => "is on a volume dohc can't check",
         };
         let path = self.path.display();
         write!(f, "{path} {what}, so dohc can't keep it private")
@@ -486,18 +491,111 @@ fn protect(dir: BorrowedFd<'_>, name: &OsStr, system: &System) -> io::Result<Own
     Ok(folder)
 }
 
+/// `MNT_IGNORE_OWNERSHIP` in `<sys/mount.h>`.
+const MNT_IGNORE_OWNERSHIP: u32 = 0x0020_0000;
+
+/// The path `/.vol/<device>/<file ID>` of the folder `dir`. It names the
+/// folder itself, not whatever has the folder's name. A concurrent probe on
+/// APFS found no open through it that reached a folder put in its place.
+/// Keep `dir` open while the path is in use, so its ID cannot pass to
+/// another folder.
+///
+/// `Ok(None)` where a mode keeps no other user out, so the folder's plain
+/// path serves: a network volume, whose server keeps its own owners, and a
+/// volume that ignores owners, such as FAT, exFAT and most external disks.
+/// Any other volume must resolve the path to `dir`, or this refuses with
+/// [`NotPrivate`] naming `shown`.
+pub fn path_by_id(dir: impl AsFd, shown: &Path) -> io::Result<Option<PathBuf>> {
+    let dir = dir.as_fd();
+    let named = |path: &Path| Ok(rustix::fs::stat(path)?);
+    path_by_id_with(dir, shown, keeps_owners(dir)?, named)
+}
+
+/// [`path_by_id`], with seams for whether the volume keeps owners and for
+/// what the path names.
+fn path_by_id_with(
+    dir: BorrowedFd<'_>,
+    shown: &Path,
+    keeps_owners: bool,
+    named: impl FnOnce(&Path) -> io::Result<rustix::fs::Stat>,
+) -> io::Result<Option<PathBuf>> {
+    if !keeps_owners {
+        return Ok(None);
+    }
+    let open = rustix::fs::fstat(dir)?;
+    let path = PathBuf::from(format!("/.vol/{}/{}", open.st_dev, open.st_ino));
+    match named(&path) {
+        Ok(named) if (named.st_dev, named.st_ino) == (open.st_dev, open.st_ino) => Ok(Some(path)),
+        _ => Err(io::Error::other(NotPrivate {
+            path: shown.to_owned(),
+            reason: NotPrivateReason::UncheckedVolume,
+        })),
+    }
+}
+
+/// Whether `dir`'s volume keeps owners, so a mode keeps other users out.
+fn keeps_owners(dir: BorrowedFd<'_>) -> io::Result<bool> {
+    let volume = rustix::fs::fstatfs(dir)?;
+    Ok(owned_volume(volume.f_flags, &volume.f_fstypename))
+}
+
+/// Whether a volume with the mount flags `flags`, of the kind
+/// `f_fstypename` names, keeps owners: it is local, does not ignore owners,
+/// and is not FAT or exFAT, which have none.
+fn owned_volume(flags: u32, kind: &[c_char]) -> bool {
+    let local = flags & libc::MNT_LOCAL as u32 != 0;
+    local
+        && flags & MNT_IGNORE_OWNERSHIP == 0
+        && !matches!(type_name(kind).as_slice(), b"msdos" | b"exfat")
+}
+
+/// Whether `path` names a folder by ID, as [`path_by_id`] does, or lies
+/// below one.
+pub fn is_path_by_id(path: &Path) -> bool {
+    path.starts_with("/.vol")
+}
+
+/// The folder's current path when `path` names it by ID, as [`path_by_id`]
+/// does, which has no names to climb. Any other path is returned as it is.
+pub fn path_by_name(path: &Path) -> io::Result<PathBuf> {
+    use rustix::fs::{Mode, OFlags};
+    if !is_path_by_id(path) {
+        return Ok(path.to_owned());
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let dir = rustix::fs::open(path, flags, Mode::empty())?;
+    let current = rustix::fs::getpath(&dir)?.into_bytes();
+    Ok(OsStr::from_bytes(&current).into())
+}
+
 /// Remove the ACL entries of the file `name` in the folder `dir`, without
 /// following a link at the name or opening the file. macOS has no ACL call
 /// relative to a folder, and closing a descriptor on the file would drop any
-/// lock this process holds on it, so this goes by the folder's current path.
-/// The caller checks that the volume is local. A file whose entries the
-/// volume keeps fails with [`VolumeSharesNewFiles`]. A file that is gone, or
-/// on a file system without ACLs, has none.
-pub fn remove_acl_entries_in(dir: impl AsFd, name: &OsStr) -> io::Result<()> {
-    let mut path = rustix::fs::getpath(dir.as_fd())?.into_bytes();
+/// lock this process holds on it, so this goes by the folder's
+/// [`path_by_id`], or where that keeps the plain path, its current path. A
+/// refusal names the folder `shown`. The caller checks that the volume is
+/// local. A file whose entries the volume keeps fails with
+/// [`VolumeSharesNewFiles`]. A file that is gone, or on a file system without
+/// ACLs, has none.
+pub fn remove_acl_entries_in(dir: impl AsFd, shown: &Path, name: &OsStr) -> io::Result<()> {
+    remove_acl_entries_in_with(dir.as_fd(), shown, name, || {})
+}
+
+/// [`remove_acl_entries_in`], with a test seam just after the path is read.
+fn remove_acl_entries_in_with(
+    dir: BorrowedFd<'_>,
+    shown: &Path,
+    name: &OsStr,
+    before_change: impl FnOnce(),
+) -> io::Result<()> {
+    let mut path = match path_by_id(dir, shown)? {
+        Some(folder) => folder.into_os_string().into_vec(),
+        None => rustix::fs::getpath(dir)?.into_bytes(),
+    };
     path.push(b'/');
     path.extend_from_slice(name.as_bytes());
     let path = CString::new(path)?;
+    before_change();
     // SAFETY: The path ends with a NUL and outlives each call, which retains
     // nothing. Each ACL is checked for null and freed once.
     #[allow(unsafe_code)]
@@ -686,12 +784,15 @@ pub fn refuses_busy_unlink(file: impl AsFd) -> io::Result<bool> {
 
 /// Whether the file system named by `f_fstypename` is in [`BUSY_CHECKED`].
 fn checks_busy(kind: &[c_char]) -> bool {
-    let kind: Vec<u8> = kind
-        .iter()
+    BUSY_CHECKED.contains(&type_name(kind).as_slice())
+}
+
+/// The file system's name in `f_fstypename`, up to its NUL.
+fn type_name(kind: &[c_char]) -> Vec<u8> {
+    kind.iter()
         .take_while(|&&byte| byte != 0)
         .map(|&byte| byte as u8)
-        .collect();
-    BUSY_CHECKED.contains(&kind.as_slice())
+        .collect()
 }
 
 /// Read a value whose size `read` reports for an empty buffer, unless it is
@@ -1023,11 +1124,114 @@ mod tests {
         add_entry(&path, "group:everyone allow read");
         let folder = std::fs::File::open(scratch.path()).unwrap();
         let name = std::ffi::OsStr::new("engine.db");
-        super::remove_acl_entries_in(&folder, name).unwrap();
+        super::remove_acl_entries_in(&folder, relative(), name).unwrap();
         assert!(!has_entries(&path));
-        super::remove_acl_entries_in(&folder, name).unwrap();
+        super::remove_acl_entries_in(&folder, relative(), name).unwrap();
         // A file that is gone has none.
-        super::remove_acl_entries_in(&folder, std::ffi::OsStr::new("gone")).unwrap();
+        super::remove_acl_entries_in(&folder, relative(), std::ffi::OsStr::new("gone")).unwrap();
+    }
+
+    /// A folder renamed after its path is read, with another put at its
+    /// name, keeps its own file's entries from being removed only if the path
+    /// names it by ID (#2375).
+    #[test]
+    fn removing_a_files_entries_reaches_its_folder_after_a_swap() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("private-file-swap").unwrap();
+        let dir = scratch.path().join("engine");
+        let moved = scratch.path().join("moved");
+        let store = |dir: &std::path::Path, text: &[u8]| {
+            std::fs::write(dir.join("engine.db"), text).unwrap();
+            add_entry(&dir.join("engine.db"), "group:everyone allow read");
+        };
+        std::fs::create_dir(&dir).unwrap();
+        store(&dir, b"store");
+        let folder = std::fs::File::open(&dir).unwrap();
+        let swap = || {
+            std::fs::rename(&dir, &moved).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            store(&dir, b"theirs");
+        };
+        let name = std::ffi::OsStr::new("engine.db");
+        super::remove_acl_entries_in_with(folder.as_fd(), relative(), name, swap).unwrap();
+        assert!(!has_entries(&moved.join("engine.db")));
+        assert!(has_entries(&dir.join("engine.db")));
+    }
+
+    /// On a volume that keeps owners, a path by ID that names another folder,
+    /// or that the volume can't look up, is refused rather than traded for
+    /// the plain path. The seam stands in for both.
+    #[test]
+    fn a_path_by_id_that_misses_the_folder_is_refused() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("path-by-id-missed").unwrap();
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        let other = scratch.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let elsewhere = |_: &std::path::Path| Ok(rustix::fs::stat(&other)?);
+        let missing = |_: &std::path::Path| Err(std::io::ErrorKind::NotFound.into());
+        for err in [
+            super::path_by_id_with(folder.as_fd(), relative(), true, elsewhere).unwrap_err(),
+            super::path_by_id_with(folder.as_fd(), relative(), true, missing).unwrap_err(),
+        ] {
+            assert_eq!(
+                refusal(&err),
+                (".dohc/engine", super::NotPrivateReason::UncheckedVolume)
+            );
+        }
+    }
+
+    /// A volume that ignores owners, such as FAT, exFAT or an external disk,
+    /// keeps the plain path without looking up the path by ID.
+    #[test]
+    fn a_volume_without_owners_keeps_the_plain_path() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("path-by-id-owners").unwrap();
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        let looked_up = |_: &std::path::Path| panic!("looked up a path by ID");
+        let plain = super::path_by_id_with(folder.as_fd(), relative(), false, looked_up);
+        assert_eq!(plain.unwrap(), None);
+    }
+
+    #[test]
+    fn only_local_volumes_that_keep_owners_go_by_id() {
+        let kind = |name: &str| {
+            let mut field = [0; 16];
+            for (slot, byte) in field.iter_mut().zip(name.bytes()) {
+                *slot = byte as std::ffi::c_char;
+            }
+            field
+        };
+        let local = libc::MNT_LOCAL as u32;
+        assert!(super::owned_volume(local, &kind("apfs")));
+        assert!(super::owned_volume(local, &kind("hfs")));
+        let ignored = local | super::MNT_IGNORE_OWNERSHIP;
+        assert!(!super::owned_volume(ignored, &kind("apfs")));
+        assert!(!super::owned_volume(local, &kind("msdos")));
+        assert!(!super::owned_volume(local, &kind("exfat")));
+        assert!(!super::owned_volume(0, &kind("smbfs")));
+    }
+
+    /// A file written through the path by ID lands in the folder after its
+    /// name moves, and none lands in a folder put at the name.
+    #[test]
+    fn a_path_by_id_names_the_folder_and_never_one_in_its_place() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("path-by-id").unwrap();
+        let dir = scratch.path().join("engine");
+        std::fs::create_dir(&dir).unwrap();
+        let folder = std::fs::File::open(&dir).unwrap();
+        let by_id = super::path_by_id(&folder, relative())
+            .unwrap()
+            .expect("APFS resolves a path by ID");
+        let moved = scratch.path().join("moved");
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(by_id.join("engine.db"), b"store").unwrap();
+        assert_eq!(std::fs::read(moved.join("engine.db")).unwrap(), b"store");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let current = std::fs::canonicalize(&moved).unwrap();
+        assert_eq!(super::path_by_name(&by_id).unwrap(), current);
+        assert_eq!(super::path_by_name(&dir).unwrap(), dir);
     }
 
     /// A local volume can keep a folder's entries too. The seam keeps them
