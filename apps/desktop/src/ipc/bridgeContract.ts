@@ -1302,6 +1302,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // made at the same moment. Optional, unlike its neighbours: an omitted
   // warning reads as "no warning", which is the safe reading.
   atomicPlacementUnavailable: z.boolean().optional(),
+  // True when the workspace is on a network share, whose server, not dohc,
+  // decides who can read its History (#2379). Omitted otherwise.
+  onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
@@ -5462,8 +5465,10 @@ const RefreshSharedViewSuccessResult = z.object({
         "non-utf8",
         "non-file-replacement",
         "local-collision",
+        "spelling-collision",
         "unreadable",
       ]),
+      owner: z.string().optional(),
     }),
   ),
   collisionRecordQuarantined: z.boolean().optional(),
@@ -6062,6 +6067,32 @@ export const workspaceSearchOperations = {
     handlerCheck: {"check":"workspaceSearchHandlers.authorizeCancel + owner.cancel","reason":"Cancellation is bound to the sender and its search id."},
     channel: "desktop:cancel-workspace-search",
     payload: CancelWorkspaceSearchPayload, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
+// Offline copies of Collections that an account change could not remove, by
+// the workspaces that hold them; whether dohc could not read its record of
+// them; and whether it still owes a look in every workspace for them. Remove
+// tries again and answers what is still left.
+export const CollectionCopiesLeft = z.object({
+  workspaces: z.array(z.string().min(1).max(4096)).max(1000),
+  recordUnreadable: z.boolean(),
+  sweepPending: z.boolean(),
+});
+export type CollectionCopiesLeft = z.infer<typeof CollectionCopiesLeft>;
+export const CollectionCopiesLeftChangedEvent = z.undefined();
+export const collectionCopiesLeftOperations = {
+  readCollectionCopiesLeft: {
+    capabilityId: "collection.copies.left.read",
+    scope: "device",
+    channel: "desktop:read-collection-copies-left",
+    payload: z.object({}), result: CollectionCopiesLeft, guard: "trusted-sender",
+  },
+  removeCollectionCopiesLeft: {
+    capabilityId: "collection.copies.left.remove",
+    scope: "device",
+    channel: "desktop:remove-collection-copies-left",
+    payload: z.object({}), result: CollectionCopiesLeft, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6998,6 +7029,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
+    OperationBridge<typeof collectionCopiesLeftOperations>,
     OperationBridge<typeof workspaceTrustOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
@@ -7216,6 +7248,9 @@ export interface DohcDesktopBridge
   // Live push: the crash report changed. A poke, not the report; the
   // subscriber reads it again. Returns an unsubscribe function.
   onCrashReportChanged(listener: () => void): () => void;
+  // Live push: the offline copies an account change left changed. A poke;
+  // the subscriber reads them again.
+  onCollectionCopiesLeftChanged(listener: () => void): () => void;
   onWorkspaceTrustChanged(
     listener: (event: WorkspaceTrustAnswer) => void,
   ): () => void;

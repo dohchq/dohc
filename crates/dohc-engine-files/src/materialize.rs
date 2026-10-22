@@ -1632,13 +1632,20 @@ fn materialize_ordinary_write(
     // The staging recheck reuses this read while the target's size and time
     // stay the same.
     let mut reads = TargetReads::default();
+    let mut respelled = None;
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
-        && sha == job.content_sha256
-        && !target_has_other_leaf_spelling(target)
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+        if matches!(job.preimage, Preimage::Absent) {
+            respelled = pending_respelled_delete(store, root, target, job, &sha)?;
+        }
+        if sha == job.content_sha256
+            && respelled.is_none()
+            && !target_has_other_leaf_spelling(target)
+        {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
     }
 
     // Step 2: sibling temp file, bounded, with the target's permissions. A
@@ -1673,9 +1680,16 @@ fn materialize_ordinary_write(
         ));
     }
     let outcome = match placement {
-        OrdinaryWritePlacement::Target(staging) => {
-            swap_in_temp(store, staging, target, &tmp, job, &mut reads, options)
-        }
+        OrdinaryWritePlacement::Target(staging) => swap_in_temp(
+            store,
+            staging,
+            target,
+            &tmp,
+            job,
+            respelled.as_ref(),
+            &mut reads,
+            options,
+        ),
         OrdinaryWritePlacement::ConflictSibling => {
             record_write_conflict(store, target, &tmp, job, now_ms)
         }
@@ -1686,12 +1700,17 @@ fn materialize_ordinary_write(
     outcome
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the respelled delete is found with the first read of the target"
+)]
 fn swap_in_temp(
     store: &EngineStore,
     staging: &Staging,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
+    respelled: Option<&MaterializationJob>,
     reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -1705,7 +1724,22 @@ fn swap_in_temp(
     let expected = match &job.preimage {
         Preimage::Absent => {
             if !create_from_temp(target, tmp, options)? {
-                return record_write_conflict(store, target, tmp, job, now_ms);
+                // The old spelling's delete keeps its own preimage check, so
+                // a file changed since the merge stays and this write conflicts.
+                let Some(delete) = respelled else {
+                    return record_write_conflict(store, target, tmp, job, now_ms);
+                };
+                match materialize_one(store, root, delete, options)? {
+                    JobOutcome::Completed | JobOutcome::AlreadyMaterialized
+                        if create_from_temp(target, tmp, options)? => {}
+                    outcome @ (JobOutcome::Parked | JobOutcome::Blocked) => {
+                        // Both jobs stay pending, and replay runs the delete first.
+                        let _ = std::fs::remove_file(tmp);
+                        return Ok(outcome);
+                    }
+                    outcome @ JobOutcome::Crashed(_) => return Ok(outcome),
+                    _ => return record_write_conflict(store, target, tmp, job, now_ms),
+                }
             }
             sync_parent_dir(store, target.parent(), policy)?;
             if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -2238,7 +2272,7 @@ fn job_staging_dir(
     create: bool,
 ) -> Result<PathBuf, MaterializeError> {
     let Some(rel) = store.staging_location(job_id)? else {
-        return checked_staging_dir(root, create);
+        return checked_staging_dir(store.database_path(), root, create);
     };
     let path = Path::new(&rel);
     if path.is_absolute()
@@ -2271,7 +2305,7 @@ fn all_staging_dirs(
             eprintln!("materialization recovery directory: {error}");
         }
     };
-    add(staging_dir(root, false));
+    add(staging_dir(store.database_path(), root, false));
     for rel in store.staging_locations()? {
         add((|| {
             let path = Path::new(&rel);
@@ -2530,6 +2564,40 @@ fn create_from_temp(
         }
         place_attempt(options.replacer, tmp, target)
     })
+}
+
+/// A merge that renames a file only by case or normalization deletes the old
+/// path before it creates the new one. On a disk that ignores the difference,
+/// a create that finds its name held by the file that delete must still
+/// remove runs the delete first. This finds that delete when its path
+/// reaches the same file on disk as the target, and the file holds the bytes
+/// the delete expects. Either path can be spelled differently from the name
+/// the disk stores. A delete through a link never matches: it would refuse
+/// to run, and the write would wait for it forever.
+fn pending_respelled_delete(
+    store: &EngineStore,
+    root: &Path,
+    target: &Path,
+    job: &MaterializationJob,
+    current_sha256: &str,
+) -> Result<Option<MaterializationJob>, MaterializeError> {
+    let Some(file) = std::fs::canonicalize(target)
+        .ok()
+        .filter(|file| file.starts_with(root))
+    else {
+        return Ok(None);
+    };
+    Ok(store
+        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
+        .into_iter()
+        .find(|delete| {
+            delete.target_path != job.target_path
+                && resolve_target(root, &delete.target_path)
+                    .ok()
+                    .filter(|path| ensure_target_symlink_free(root, path).is_ok())
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .is_some_and(|path| path == file)
+        }))
 }
 
 /// Rename the temp to the name staging emptied. `false` when a program
@@ -2963,6 +3031,62 @@ pub(super) fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
 /// the workspace's volume, so staging is one plain rename.
 const STAGING_DIR: &str = ".dohc/engine/displaced";
 
+/// The folder staging is checked from, and the staging folder below it. A
+/// store at `database` that opened through its folder's ID, as the engine
+/// opens a workspace's store on a Mac, sits in the engine folder the engine
+/// checked. Staging then goes through that folder, and only `displaced` is
+/// checked below it. Otherwise the check starts at `root`.
+fn staging_base(database: &Path, root: &Path) -> (PathBuf, PathBuf) {
+    if let Some(engine) = database.parent().filter(|engine| by_id(engine)) {
+        let name = Path::new(STAGING_DIR).file_name().unwrap_or_default();
+        return (engine.to_owned(), engine.join(name));
+    }
+    (root.to_owned(), root.join(STAGING_DIR))
+}
+
+/// Whether `path` names its folder by ID rather than by name.
+fn by_id(path: &Path) -> bool {
+    #[cfg(target_vendor = "apple")]
+    return dohc_macos_files::is_path_by_id(path);
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// The path that reaches `rel`, a workspace-relative name a row stores, and
+/// the folder to check that path from. A name below `.dohc/engine/displaced`
+/// goes through the staging folder of [`staging_base`].
+pub fn stored_path(database: &Path, root: &Path, rel: &Path) -> (PathBuf, PathBuf) {
+    let (base, staging) = staging_base(database, root);
+    match rel.strip_prefix(STAGING_DIR) {
+        Ok(name) if by_id(&base) => (base, staging.join(name)),
+        _ => (root.to_owned(), root.join(rel)),
+    }
+}
+
+/// The workspace-relative name a row stores for `path`, a staged file. A file
+/// in the staging folder of [`staging_base`] is named below
+/// `.dohc/engine/displaced`, whichever path reached it.
+pub(super) fn stored_name(
+    database: &Path,
+    root: &Path,
+    path: &Path,
+) -> Result<String, MaterializeError> {
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel.to_owned(),
+        Err(_) => {
+            let (_, staging) = staging_base(database, root);
+            let name = path
+                .strip_prefix(&staging)
+                .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+            Path::new(STAGING_DIR).join(name)
+        }
+    };
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
 fn sync_staged(
     store: &EngineStore,
     staging: &Path,
@@ -2970,25 +3094,32 @@ fn sync_staged(
 ) -> Result<(), MaterializeError> {
     sync_parent_dir(store, Some(staging), policy)?;
     // Include newly created staging ancestors before source removal is synced.
+    // A staging folder reached by the engine folder's ID was the only one made.
     sync_parent_dir(store, staging.parent(), policy)?;
-    sync_parent_dir(store, staging.parent().and_then(Path::parent), policy)
+    let engine = staging.parent().filter(|engine| !by_id(engine));
+    sync_parent_dir(store, engine.and_then(Path::parent), policy)
 }
 
-/// The staging directory under an already-canonicalized root. Every
-/// component must be a real directory; `create` makes the missing ones.
-fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
-    let dir = checked_staging_dir(root, create)?;
+/// The staging directory under an already-canonicalized root, or through the
+/// engine folder of [`staging_base`]. Every component must be a real
+/// directory; `create` makes the missing ones.
+fn staging_dir(database: &Path, root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = checked_staging_dir(database, root, create)?;
     #[cfg(windows)]
     readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
     Ok(dir)
 }
 
-fn checked_staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
-    let dir = root.join(STAGING_DIR);
+fn checked_staging_dir(
+    database: &Path,
+    root: &Path,
+    create: bool,
+) -> Result<PathBuf, MaterializeError> {
+    let (base, dir) = staging_base(database, root);
     if create {
-        walk_target_components(root, &dir, ensure_real_directory)?;
+        walk_target_components(&base, &dir, ensure_real_directory)?;
     } else {
-        ensure_target_symlink_free(root, &dir)?;
+        ensure_target_symlink_free(&base, &dir)?;
     }
     // Check access without walking other jobs' entries.
     #[cfg(windows)]
@@ -3117,14 +3248,11 @@ fn rowless_staged(
             continue;
         };
         if names.contains(&name)
-            || store.is_retained_source(
-                &staging
-                    .join(&name)
-                    .strip_prefix(root)
-                    .map_err(|_| MaterializeError::UnsafeTargetPath)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )?
+            || store.is_retained_source(&stored_name(
+                store.database_path(),
+                root,
+                &staging.join(&name),
+            )?)?
         {
             continue;
         }
@@ -3615,7 +3743,7 @@ pub fn recover_path_displacements(
     }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let staging = staging_dir(&canonical_root, false)?;
+    let staging = staging_dir(store.database_path(), &canonical_root, false)?;
     let rowless = rowless_all(store, &canonical_root)?
         .into_iter()
         .filter(|staged| {
@@ -3958,7 +4086,7 @@ fn recover_job_displacements(
         return Ok((
             Staging {
                 root: root.to_owned(),
-                dir: root.join(STAGING_DIR),
+                dir: staging_base(store.database_path(), root).1,
                 taken: Vec::new(),
             },
             false,
@@ -6559,7 +6687,7 @@ mod tests {
                 let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
                 enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
                 let expected = store.put_binary_blob(b"preimage").unwrap();
-                let staging = staging_dir(&root, true).unwrap();
+                let staging = staging_dir(&scratch.db(), &root, true).unwrap();
                 let name = staged_name("kept-link", 0);
                 let kept = staging.join(&name);
                 let bytes: &[u8] = if known_bytes {
@@ -6781,7 +6909,9 @@ mod tests {
         for fail in [true, false] {
             let scratch = Scratch::new("readonly-unlink");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             std::fs::write(&incoming, b"outside").unwrap();
             let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
@@ -6972,7 +7102,9 @@ mod tests {
         for unlink in [false, true] {
             let scratch = Scratch::new("readonly-fallback-crash");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             let store = EngineStore::open(&scratch.db(), 1).unwrap();
             drop(store);
@@ -7065,7 +7197,7 @@ mod tests {
             .load_materialization_job("folder-case")
             .unwrap()
             .unwrap();
-        let incoming = staging_dir(&root, true)
+        let incoming = staging_dir(&scratch.db(), &root, true)
             .unwrap()
             .join(staged_name(&job.job_id, 0));
         std::fs::write(&incoming, b"outside").unwrap();
@@ -7457,7 +7589,7 @@ mod tests {
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
-        let staging = staging_dir(&root, true).unwrap();
+        let staging = staging_dir(&scratch.db(), &root, true).unwrap();
         let name = staged_name("held-recovery", 0);
         std::fs::write(staging.join(&name), previous).unwrap();
         if journaled {
@@ -7632,6 +7764,51 @@ mod tests {
             projection_target_stamp(&scratch.root, path),
             ProjectionTargetStamp::Absent
         );
+    }
+
+    /// A merge's pending delete through a link reaches the file a create
+    /// targets, but would refuse to run. The create must not wait for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_delete_through_a_link_never_holds_back_a_create() {
+        let scratch = Scratch::new("respelled-delete-link");
+        std::fs::write(scratch.root.join("notes.md"), b"notes").unwrap();
+        std::os::unix::fs::symlink("notes.md", scratch.root.join("alias.md")).unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"notes").unwrap();
+        let spec = |job_id: &str, target_path: &str, preimage| MaterializationJobSpec {
+            job_id: job_id.into(),
+            workspace_id: "ws".into(),
+            target_path: target_path.into(),
+            content_sha256: sha.clone(),
+            preimage,
+            target_generation: 1,
+            now_ms: 1,
+        };
+        let delete = spec(
+            "merge-mat_alias",
+            "alias.md",
+            Preimage::Present(sha.clone()),
+        );
+        let write = spec("merge-mat_notes", "notes.md", Preimage::Absent);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(tx, &delete)?;
+                enqueue_job(tx, &write)
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("merge-mat_notes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::AlreadyMaterialized
+        );
+        let delete = store.load_materialization_job("merge-mat_alias").unwrap();
+        assert_eq!(delete.unwrap().status, JobStatus::Pending);
+        let link = std::fs::symlink_metadata(scratch.root.join("alias.md")).unwrap();
+        assert!(link.file_type().is_symlink());
     }
 
     #[test]

@@ -207,6 +207,56 @@ fn production_worker_imports_changed_bytes_and_promotes_oversized_sources() {
     actor.close().unwrap();
 }
 
+/// On a Mac the actor's store opens through its engine folder's ID. After the
+/// folder moves and another takes its name, the worker still reads a
+/// retained file, recorded under the name main stores, in the folder the
+/// store opened through (#2468).
+#[cfg(target_vendor = "apple")]
+#[test]
+fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
+    let scratch = ScratchDir::new().unwrap();
+    let engine = scratch.path().join(".dohc/engine");
+    std::fs::create_dir_all(&engine).unwrap();
+    let folder = std::fs::File::open(&engine).unwrap();
+    let shown = std::path::Path::new(".dohc/engine");
+    let by_id = dohc_macos_files::path_by_id(&folder, shown).unwrap();
+    let db = by_id
+        .expect("APFS reaches a folder by ID")
+        .join("engine.db");
+    drop(EngineStore::open(&db, 0).unwrap());
+    let identity = EngineDbIdentity::of_existing(&db).unwrap();
+    let mut actor = WorkspaceActor::spawn(db, identity, 1, 0, None).unwrap();
+    add_sources(&actor, &scratch, 1);
+    std::fs::write(engine.join("displaced/worker-0"), b"outside").unwrap();
+    std::fs::rename(&engine, scratch.path().join(".dohc/moved")).unwrap();
+    std::fs::create_dir_all(engine.join("displaced")).unwrap();
+    bind(&actor, &scratch);
+    wait_for(&actor.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    actor
+        .handle()
+        .run_blocking(|s, _| {
+            let bytes: Vec<u8> = s
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT bytes FROM materialization_displacement_reads",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(bytes, b"outside");
+            assert_eq!(s.retained_displacements_after(0)?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_dir(engine.join("displaced")).unwrap().count(),
+        0
+    );
+    actor.close().unwrap();
+    drop(folder);
+}
+
 #[test]
 fn close_finishes_an_inflight_changed_read_before_closing_the_writer() {
     let scratch = ScratchDir::new().unwrap();

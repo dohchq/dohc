@@ -27,7 +27,7 @@
 mod automations;
 mod capture;
 mod recovery_import;
-use crate::supervisor::ActorOpenMode;
+use crate::supervisor::{ActorOpenMode, PreparedStore};
 pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
@@ -189,6 +189,9 @@ enum Command {
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
     identity: EngineDbIdentity,
+    /// The path the store opened by. On a Mac it goes through the store's
+    /// folder by ID.
+    store_path: Arc<std::path::Path>,
     generation: u64,
     mode: ActorOpenMode,
     /// Authoritative open disposition reported by [`EngineStore`]. This is
@@ -213,9 +216,19 @@ pub struct WorkspaceActor {
     link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
+    /// The store's folder, open until the worker and its connection are gone.
+    /// On a Mac the store opens through the folder's ID, which this keeps from
+    /// passing to another folder.
+    _prepared: Option<PreparedStore>,
 }
 
 impl WorkspaceActor {
+    /// This actor, keeping `prepared`, the store's folder, open.
+    pub(crate) fn holding(mut self, prepared: Option<PreparedStore>) -> Self {
+        self._prepared = prepared;
+        self
+    }
+
     /// Spawn the actor's worker thread and open the store. Blocks until the
     /// open completes so open errors (including the fingerprint fence)
     /// propagate synchronously. `spawn` is intentionally synchronous — a
@@ -335,6 +348,7 @@ impl WorkspaceActor {
         let worker_metrics = Arc::clone(&link_metrics);
         let link_drain_holds = Arc::new(AtomicU64::new(0));
         let worker_link_drain_holds = Arc::clone(&link_drain_holds);
+        let store_path = Arc::from(db_path.as_path());
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -360,6 +374,7 @@ impl WorkspaceActor {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
                     identity,
+                    store_path,
                     generation,
                     mode,
                     store_freshly_created,
@@ -377,6 +392,7 @@ impl WorkspaceActor {
                     link_rewrites: Arc::default(),
                     current_views: Arc::default(),
                     link_resolvers: Arc::default(),
+                    _prepared: None,
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -402,6 +418,7 @@ impl WorkspaceActor {
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
             identity: self.identity.clone(),
+            store_path: Arc::clone(&self.store_path),
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
@@ -499,6 +516,7 @@ pub struct ActorHandle {
     #[cfg(unix)]
     retained_root: retained::Root,
     identity: EngineDbIdentity,
+    store_path: Arc<std::path::Path>,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
@@ -745,6 +763,18 @@ impl ActorHandle {
         &self.identity
     }
 
+    /// The path the store opened by. Reopening the store by it reaches the
+    /// folder the engine checked, as the actor's own connection does.
+    pub fn database_path(&self) -> &std::path::Path {
+        &self.store_path
+    }
+
+    /// The folder that holds the store, by the same path, where the
+    /// workspace's data key lives.
+    pub fn store_folder(&self) -> &std::path::Path {
+        store_folder(&self.store_path)
+    }
+
     /// The actor's current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
@@ -763,7 +793,12 @@ impl ActorHandle {
                     .staging_location(&row.job_id)?
                     .unwrap_or_else(|| ".dohc/engine/displaced".into());
                 let path = format!("{dir}/{}", row.displaced_name);
-                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                let (_, reached) = dohc_engine_files::materialize::stored_path(
+                    store.database_path(),
+                    &root,
+                    std::path::Path::new(&path),
+                );
+                if std::fs::symlink_metadata(reached).is_ok() {
                     files.push((row.target_path, path));
                 }
             }
@@ -1113,6 +1148,12 @@ fn require_single_database_link(file: &std::fs::File) -> Result<(), RuntimeError
     Ok(())
 }
 
+/// The folder that holds the store at `database_path`, by the path the store
+/// opened by, where the workspace's data key lives.
+pub(crate) fn store_folder(database_path: &std::path::Path) -> &std::path::Path {
+    database_path.parent().unwrap_or(std::path::Path::new(""))
+}
+
 fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeError> {
     // Lock the physical database: hard links can have different canonical paths.
     let file = std::fs::OpenOptions::new()
@@ -1184,6 +1225,7 @@ mod saturation_tests {
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
             identity,
+            store_path: Arc::from(db),
             generation: 1,
             mode: ActorOpenMode::ReadWrite,
             store_freshly_created: false,
@@ -1201,6 +1243,7 @@ mod saturation_tests {
             current_views: Arc::default(),
             link_resolvers: Arc::default(),
             link_rewrites: Arc::default(),
+            _prepared: None,
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);

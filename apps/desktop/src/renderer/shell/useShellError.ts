@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -48,6 +48,7 @@ export type ShellErrorKind =
   | "workspace-search"
   | "cloud-sync"
   | "collections-waiting"
+  | "collection-copies-left"
   | "sync-refusal"
   | "import-files"
   | "share-refresh"
@@ -55,6 +56,7 @@ export type ShellErrorKind =
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
+  | "network-share"
   | "file-recovery-unavailable"
   | "kept-files"
   | "record-history"
@@ -195,6 +197,28 @@ export function useShellError(workspaceId: string) {
     };
     return { label: "Open System Settings", run };
   }, [push]);
+  // Keeps the workspace's Collections on this computer, then runs `then`,
+  // such as the step that was refused. Main asks first when another
+  // computer may have them, and nothing runs when the person cancels. A
+  // failure files its own row.
+  const keepCollectionsHere = useCallback((then: (() => void) | null) => {
+    const owner = currentWorkspace.current;
+    const run = (): void => {
+      bridge().keepCollectionsHere({ workspaceId: owner }).then(({ kept }) => {
+        if (kept && currentWorkspace.current === owner) then?.();
+      }, (error: unknown) => {
+        if (currentWorkspace.current !== owner) return;
+        const { cause } = readError(error);
+        push({
+          message: withErrorWords("dohc could not keep the Collections on this computer.", error),
+          ...(cause ? { details: [["Cause", cause]] } : {}),
+          retry: run,
+          identity: "keep-collections",
+        });
+      });
+    };
+    run();
+  }, [push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
@@ -304,11 +328,13 @@ export function useShellError(workspaceId: string) {
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
-        ...(isPrivacyDenied(error) ? { action: privacySettingsAction } : {}),
+        ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
+          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: KEEP_COLLECTIONS_HERE, run: () => keepCollectionsHere(retry), ends: true } }
+          : {}),
         ...(kind ? { kind } : {}),
       });
     },
-    [push, privacySettingsAction],
+    [push, privacySettingsAction, keepCollectionsHere],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -432,6 +458,23 @@ export function useShellError(workspaceId: string) {
           details: [["Detail", "no-atomic-placement"]],
           retry: null,
           kind: "drive-no-atomic-placement",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
+  // A workspace on a network share: one warning row. Nothing failed, so it
+  // offers no Try again.
+  const reportNetworkShare = useCallback(
+    (notice: { title: string; message: string; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [["Detail", "network-share"]],
+          retry: null,
+          kind: "network-share",
         },
         !notice.toast,
       ),
@@ -746,6 +789,7 @@ export function useShellError(workspaceId: string) {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
     reportRecoveryUnavailable,
     showTabLimitError,
@@ -767,5 +811,6 @@ export function useShellError(workspaceId: string) {
     retryShellError,
     runShellErrorAction,
     privacySettingsAction,
+    keepCollectionsHere,
   };
 }

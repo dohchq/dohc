@@ -189,6 +189,8 @@ export const CHANNELS = {
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
+  // The offline copies an account change left changed; the renderer reads them again.
+  collectionCopiesLeftChanged: "desktop:collection-copies-left-changed",
   workspaceTrustChanged: "desktop:workspace-trust-changed",
   // A timed save stopped counting, because the usage record changed outside dohc.
   usageRecordStopped: "desktop:usage-record-stopped",

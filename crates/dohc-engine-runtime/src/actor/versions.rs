@@ -906,8 +906,8 @@ fn secret_ciphertext_sha(
     Ok(hex_sha256(&ciphertext))
 }
 
-fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
-    load_key_file(root_dir)
+fn load_projection_secret_key(store: &EngineStore) -> Result<SecretDataKey, RuntimeError> {
+    load_key_file(super::store_folder(store.database_path()))
         .map_err(DomainError::from)?
         .ok_or_else(|| {
             RuntimeError::from(DomainError::StateCorrupt {
@@ -965,7 +965,7 @@ fn plan_secret_switch(
             continue;
         };
         if secret_key.is_none() {
-            *secret_key = Some(load_projection_secret_key(root_dir)?);
+            *secret_key = Some(load_projection_secret_key(store)?);
         }
         let plaintext =
             SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
@@ -1492,14 +1492,7 @@ pub(super) fn materialize_relay_page_on_store(
                 },
             )
         };
-        let head = relay_head(
-            store,
-            workspace_id,
-            &active,
-            root_dir,
-            &change,
-            &mut secret_key,
-        )?;
+        let head = relay_head(store, workspace_id, &active, &change, &mut secret_key)?;
         // A path with no head needs no file there, and a folder is none.
         if head.is_none() && is_folder(root_dir, &change.path) {
             continue;
@@ -1557,14 +1550,8 @@ pub(super) fn materialize_relay_page_on_store(
                         operation: "write",
                         content_kind: kind,
                     };
-                    let Some(owner_head) = relay_head(
-                        store,
-                        workspace_id,
-                        &active,
-                        root_dir,
-                        &owner,
-                        &mut secret_key,
-                    )?
+                    let Some(owner_head) =
+                        relay_head(store, workspace_id, &active, &owner, &mut secret_key)?
                     else {
                         continue;
                     };
@@ -1714,7 +1701,6 @@ fn relay_head(
     store: &mut EngineStore,
     workspace_id: &str,
     active: &str,
-    root_dir: &std::path::Path,
     change: &dohc_engine_sync::MomentMaterializationChange,
     secret_key: &mut Option<SecretDataKey>,
 ) -> Result<Option<RelayHead>, RuntimeError> {
@@ -1722,7 +1708,7 @@ fn relay_head(
     Ok(match change.content_kind {
         "secret" => {
             if secret_key.is_none() {
-                *secret_key = Some(load_projection_secret_key(root_dir)?);
+                *secret_key = Some(load_projection_secret_key(store)?);
             }
             let key = secret_key.as_ref().expect("secret key loaded");
             let Some(plaintext) = SecretFileStore::new(store, key).materialize_secret_file(

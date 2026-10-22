@@ -63,6 +63,7 @@ import {
 
 import { createUsageStore } from "../usage/usageStore";
 import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -1981,7 +1982,7 @@ describe("Collection automations", () => {
       await mkdir(dirname(join(w.root, path)), { recursive: true });
       await writeFile(join(w.root, path), text);
     }
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
     const executor = w.makeExecutor({ withDatasetHost: async (work) => await work(host.automations) });
     try {
       const prepared = await host.prepare({ descriptorPath: "Donations/dataset.json", adapter: sourceCaptureAdapter(new Map(Object.entries(files)), { workspaceId: "workspace" }) });

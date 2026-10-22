@@ -450,6 +450,35 @@ pub fn pending_switch_jobs_in(
         .map_err(StorageError::corrupt_public)
 }
 
+/// Without statistics SQLite picks the status index and reads every pending
+/// job, so the query names its index.
+fn pending_merge_deletes_sql() -> String {
+    format!(
+        "SELECT {JOB_COLUMNS} FROM materialization_jobs \
+         INDEXED BY idx_materialization_jobs_pending_delete_preimage \
+         WHERE status = 'pending' AND operation = 'delete' AND job_id GLOB 'merge-mat_*' \
+           AND workspace_id IN (?1, '') AND preimage_present = 1 AND preimage_sha256 = ?2 \
+         ORDER BY created_at_ms ASC, job_id ASC"
+    )
+}
+
+/// Pending merge deletes in a workspace, including legacy unscoped rows, that
+/// expect `preimage_sha256` at their path.
+pub(crate) fn pending_merge_deletes_expecting(
+    conn: &Connection,
+    workspace_id: &str,
+    preimage_sha256: &str,
+) -> Result<Vec<MaterializationJob>, StorageError> {
+    let mut stmt = conn
+        .prepare_cached(&pending_merge_deletes_sql())
+        .map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id, preimage_sha256], row_to_job)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
 pub(crate) fn has_pending_job_for_path(
     conn: &Connection,
     workspace_id: &str,
@@ -1012,4 +1041,39 @@ pub(crate) fn record_retained_read(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write that finds its target occupied runs this lookup, so it must
+    /// read its index instead of scanning the pending jobs.
+    #[test]
+    fn pending_merge_delete_lookup_reads_its_index() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("pending-merge-deletes").unwrap();
+        let store = crate::EngineStore::open(&dir.join("engine.db"), 1).unwrap();
+        let details = store
+            .read_with(|conn| {
+                let mut plan = conn.prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    pending_merge_deletes_sql()
+                ))?;
+                plan.query_map(["ws", "sha"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_materialization_jobs_pending_delete_preimage")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.starts_with("SCAN materialization_jobs")),
+            "{details:?}"
+        );
+    }
 }

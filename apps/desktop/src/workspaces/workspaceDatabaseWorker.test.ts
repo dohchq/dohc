@@ -1,5 +1,5 @@
 import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync } from "node:fs";
 import {
   appendFile,
   copyFile,
@@ -217,13 +217,15 @@ function operation(
   };
 }
 
-// The desktop makes the counter's folder in `.dohc/local` before an edit; the
-// worker makes only the log's.
+// The desktop prepares both storage folders before dispatching an edit.
 function editPaths(root: string) {
+  const logPath = join(root, databaseOpLogPath("data.sqlite"));
+  mkdirSync(dirname(logPath), { recursive: true });
   const counterFolder = join(root, ".dohc", "local", "databases", databaseFolderName("data.sqlite"));
   mkdirSync(counterFolder, { recursive: true });
   return {
-    logPath: join(root, databaseOpLogPath("data.sqlite")),
+    logPath,
+    storageIdentity: lstatSync(dirname(logPath), { bigint: true }),
     statePath: join(counterFolder, "state.sqlite"),
   };
 }
