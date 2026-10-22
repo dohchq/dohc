@@ -1181,19 +1181,25 @@ test("the Mac release preflight refuses another host, a release it cannot read, 
 });
 
 test("the Mac release preflight accepts a nightly that a re-run of its failed jobs published", async () => {
-  const rerun = preflightStart => ({
-    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines([
-      { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, started_at: PREFLIGHT_START },
-      { name: "Publish", conclusion: "skipped", run_attempt: 1, head_sha: RELEASE_COMMIT },
-      { name: "Preflight", conclusion: "success", run_attempt: 2, head_sha: RELEASE_COMMIT, started_at: preflightStart },
-      { name: "Publish", conclusion: "success", run_attempt: 2, head_sha: RELEASE_COMMIT },
-    ]) },
+  // Each attempt gives its Preflight's start time and its Publish job's conclusion.
+  const attempts = (...list) => ({
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines(list.flatMap(([startedAt, publish], index) => [
+      { name: "Preflight", conclusion: "success", run_attempt: index + 1, head_sha: RELEASE_COMMIT, started_at: startedAt },
+      { name: "Publish", conclusion: publish, run_attempt: index + 1, head_sha: RELEASE_COMMIT },
+    ])) },
   });
-  const preflight = answers => preflightMacRelease(parseMacReleaseArgs(nightlyArgs), { run: fakeMac(answers).run, ...macHost() });
-  // Attempt 2 kept attempt 1's Preflight, so it published the version attempt 1 stamped.
-  assert.equal((await preflight(rerun(PREFLIGHT_START))).commit, RELEASE_COMMIT);
+  const preflight = (answers, tag = NIGHTLY_TAG) =>
+    preflightMacRelease(parseMacReleaseArgs(["--version", tag, "--channel", "nightly", "--keychain", KEYCHAIN]), { run: fakeMac(answers).run, ...macHost() });
+  const unpublished = attempt => new RegExp(`no dispatched Desktop Release run 42, attempt ${attempt}, published that commit from main`);
+  // Later attempts kept attempt 1's Preflight, so they published the version attempt 1 stamped.
+  assert.equal((await preflight(attempts([PREFLIGHT_START, "skipped"], [PREFLIGHT_START, "success"]))).commit, RELEASE_COMMIT);
+  assert.equal((await preflight(attempts([PREFLIGHT_START, "skipped"], [PREFLIGHT_START, "failure"], [PREFLIGHT_START, "success"]))).commit, RELEASE_COMMIT);
   // Attempt 2 ran its own Preflight, so it published its own version.
-  await assert.rejects(preflight(rerun("2026-10-19T05:00:00Z")), /no dispatched Desktop Release run 42, attempt 1, published that commit from main/);
+  await assert.rejects(preflight(attempts([PREFLIGHT_START, "skipped"], ["2026-10-19T05:00:00Z", "success"])), unpublished(1));
+  // Without start times, nothing shows that attempt 2 kept attempt 1's Preflight.
+  await assert.rejects(preflight(attempts([null, "skipped"], [null, "success"])), unpublished(1));
+  // Attempt 2 kept attempt 1's Preflight and stamped no version of its own, so nothing published a tag that names it.
+  await assert.rejects(preflight(attempts([PREFLIGHT_START, "success"], [PREFLIGHT_START, "failure"]), "v0.1.1-nightly.20261019.42.2"), unpublished(2));
 });
 
 test("a real Mac release runs only from a clean checkout on main, and a dry run says where it runs from", async () => {

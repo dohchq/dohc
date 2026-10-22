@@ -257,9 +257,12 @@ export async function preflightMacRelease(options, {
     // attempt's Preflight, start time included, and so publishes the version
     // that attempt stamped.
     const preflightStart = attempt => jobs.find(job => job.name === PREFLIGHT_JOB && job.run_attempt === attempt)?.started_at;
-    const stamped = nightly ? preflightStart(Number(nightly[2])) : undefined;
+    const attempt = nightly ? Number(nightly[2]) : 0;
+    const stamped = preflightStart(attempt);
+    // The tag's attempt must have run that Preflight, not kept it from an earlier one.
+    const ranPreflight = Boolean(stamped) && !jobs.some(job => job.name === PREFLIGHT_JOB && job.run_attempt < attempt && job.started_at === stamped);
     return jobs.some(job => job.name === PUBLISH_JOB && job.conclusion === "success" && job.head_sha === plan.commit
-      && (!nightly || (Boolean(stamped) && preflightStart(job.run_attempt) === stamped)));
+      && (!nightly || (ranPreflight && preflightStart(job.run_attempt) === stamped)));
   });
   if (!published) {
     refuse(`Tag ${tag} points to ${plan.commit}, but no dispatched Desktop Release run${nightly ? ` ${nightly[1]}, attempt ${nightly[2]},` : ""} published that commit from main.`);
