@@ -140,7 +140,8 @@ impl Worker {
                                 .min(i64::MAX as u128) as i64;
                             let id = row.displacement_id;
                             let retry_at = backoff.get(&id).map_or(0, |&(_, at)| at);
-                            let inspection = inspect(&path, &row, now, held, retry_at);
+                            let database = handle.database_path();
+                            let inspection = inspect(&path, database, &row, now, held, retry_at);
                             if !matches!(inspection, Ok(Inspection::Release(_) | Inspection::Keep))
                             {
                                 backoff.remove(&id);
