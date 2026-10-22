@@ -1437,7 +1437,7 @@ it.skipIf(engine.missing).each([
   ["person", "reload", "rename"], ["person", "reload", "in-place"], ["person", "close", "rename"], ["person", "close", "in-place"],
   ["agent", "reload", "rename"], ["agent", "close", "in-place"],
 ] as const)(
-  "keeps a %s's unsaved edit in a copy on %s after a %s write outside dohc (#2463)",
+  "keeps the %s's unsaved edit in a copy on %s after a %s write outside dohc (#2463)",
   async (author, action, style) => {
     const opened = await openRealCapture(`reload-unsaved-${author}-${action}-${style}`, { settleDebounceMs: 60_000 });
     try {
