@@ -159,6 +159,24 @@ describe("a lossy note", () => {
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("reopens a switched version on the last verdict while its read is still out, with no hang", async () => {
+    const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
+    bridge.readWorkspaceText.mockImplementation(async () => {
+      if (bridge.readWorkspaceText.mock.calls.length === 1) {
+        return { text: WRITTEN, contentHash: "c".repeat(64), truncated: false };
+      }
+      return await new Promise<never>(() => undefined);
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />);
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    expect(screen.getByTestId("markdown-editor")).toBeTruthy();
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  });
+
   it("closes a session that holds a lossy note its read didn't see", async () => {
     const bridge = bridgeFor([{ text: WRITTEN, contentHash: "c".repeat(64) }]);
     // The file changed between the read and the open: the engine seeded the
