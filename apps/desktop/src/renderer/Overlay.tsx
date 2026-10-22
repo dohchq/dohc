@@ -7,6 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { useFocusReturn } from "./ui/focusReturn";
+import { focusedElementIn } from "./ui/focusedElement";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 
@@ -83,7 +84,7 @@ export function Overlay(props: {
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    if (panel && (props.appearance === "warning" || !panel.contains(document.activeElement))) panel.focus();
+    if (panel && (props.appearance === "warning" || !panel.contains(focusedElementIn(panel)))) panel.focus();
   }, []);
 
   useEffect(() => {

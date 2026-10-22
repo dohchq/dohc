@@ -23,7 +23,15 @@ function workspaceSource(specifier: string, file: string): string {
   const require = createRequire(file);
   const [scope, name, ...subpath] = specifier.split("/");
   const packageName = `${scope}/${name}`;
-  const manifest = require.resolve.paths(packageName)?.map(path => resolve(path, packageName, "package.json")).find(existsSync);
+  const directories: string[] = [];
+  for (let directory = dirname(file); ; directory = dirname(directory)) {
+    directories.push(directory);
+    if (dirname(directory) === directory) break;
+  }
+  const nearest = directories.map(path => resolve(path, "package.json")).find(existsSync);
+  const manifest = nearest && JSON.parse(readFileSync(nearest, "utf8")).name === packageName
+    ? nearest
+    : directories.map(path => resolve(path, "node_modules", packageName, "package.json")).find(existsSync);
   if (!manifest) throw new Error(`Unresolved import ${specifier} in ${file}`);
   const packageRoot = dirname(realpathSync(manifest));
   const exported = JSON.parse(readFileSync(manifest, "utf8")).exports[subpath.length ? `./${subpath.join("/")}` : "."];
@@ -126,6 +134,24 @@ it.each(["types", "runtime"])("rejects declaration files reached through a packa
     const resolved = resolve(packageRoot, target === "types" ? "dist/index.js" : "dist/index.d.ts");
     expect(() => imports(entry, 'import { authorize } from "@dohc/sdk";'))
       .toThrow(`Non-TypeScript import @dohc/sdk in ${entry} resolved to ${resolved}`);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+it("follows a package self-import into source without a node_modules link", () => {
+  const fixture = realpathSync.native(mkdtempSync(resolve(tmpdir(), "dohc-authorization-self-import-")));
+  const entry = resolve(fixture, "src/nested/entry.ts");
+  const dependency = resolve(fixture, "src/authority.ts");
+  try {
+    mkdirSync(dirname(entry), { recursive: true });
+    writeFileSync(resolve(fixture, "package.json"), JSON.stringify({
+      name: "@dohc/authorization-self-fixture",
+      exports: { "./authority": { types: "./src/authority.ts", default: "./dist/authority.js" } },
+    }));
+    writeFileSync(dependency, 'export const authorize = () => true;');
+    expect(imports(entry, 'import { authorize } from "@dohc/authorization-self-fixture/authority";'))
+      .toEqual([dependency]);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

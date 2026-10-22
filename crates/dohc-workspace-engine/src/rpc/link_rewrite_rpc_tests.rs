@@ -144,6 +144,15 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         )
         .await
         .unwrap();
+    // Queue Undo ahead of the publisher to exercise the unpublished-debt branch.
+    let capture = open.capture_apply_gate.clone().lock_owned().await;
+    let undo = rpc(&transport, &handle, "history.undo", "undo");
+    tokio::pin!(undo);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     let started = Instant::now();
     let forward = rpc(&transport, &handle, "history.rewriteLinks", "forward").await;
     let forward_ns = started.elapsed().as_nanos();
@@ -199,7 +208,8 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
     );
     probe.pause_next_undo_placement();
     let started = Instant::now();
-    let undone = rpc(&transport, &handle, "history.undo", "undo").await;
+    drop(capture);
+    let undone = undo.await;
     let undo_ns = started.elapsed().as_nanos();
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -269,7 +279,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         )
         .unwrap();
     }
-    service.workspace_close(Some(handle)).await.unwrap();
+    service.workspace_close(Some(handle.clone())).await.unwrap();
 }
 
 #[path = "link_rewrite_open_rpc_tests.rs"]

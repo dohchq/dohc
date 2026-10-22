@@ -8,6 +8,8 @@ import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCa
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
+import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
+import { unguardedCollections } from "../../../apps/desktop/src/testing/collectionsHolder";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -58,7 +60,8 @@ test("local app works without an account, survives restart, and stops at shared 
   const root = await mkdtemp(join(tmpdir(), "dohc-local-app-e2e-")), lifetime = new AbortController();
   const backends: LocalDatasetHost[] = [], launchers: LocalAppLaunchHost[] = [];
   try {
-    let backend = await createLocalDatasetHost({ localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
+    await openedLocalState({ workspaceId: "w", rootPath: root });
+    let backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
     const publication = await backend.apps.activate(await prepare(backend), lifetime.signal);
     let launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
     const context = await browser.newContext({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce" });
@@ -81,7 +84,7 @@ test("local app works without an account, survives restart, and stops at shared 
     expect(await page.evaluate(async () => (await fetch("/backend", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status)).toBe(404);
     await page.screenshot({ path: testInfo.outputPath("local-app.png"), fullPage: true });
     await launcher.close(); await backend.close();
-    backend = await createLocalDatasetHost({ localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
+    backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
     launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
     await page.goto(await launcher.launch(publication.publicationId, lifetime.signal));
     await expect(status).toHaveText("Ready");

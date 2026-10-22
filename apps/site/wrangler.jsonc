@@ -1,0 +1,7 @@
+// The marketing site: a Cloudflare Worker that serves the Vite build as
+// static files. .github/workflows/site-deploy.yml deploys it from main.
+{
+  "name": "dohc-site",
+  "compatibility_date": "2026-10-22",
+  "assets": { "directory": "./dist" }
+}

@@ -34,7 +34,7 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import type { AutomationFailure } from "@dohc/automation-executor/automation-failed-notice";
 import { createAutomationRunStore, type AutomationRunStore, type StoredRun } from "@dohc/automation-executor/automation-run-store";
-import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { preparedAutomationStoreFolder, openedLocalState } from "../testing/preparedLocalState";
 import {
   CollectionAutomations,
   type AutomationFailureReport,
@@ -49,6 +49,7 @@ import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
 // dohc's generated operations in its worker, its commits claim through its
@@ -365,7 +366,9 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     check();
   });
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "workspace", rootPath: root });
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     compile: compileFixture,
     agentRun: options.agentRun,
     onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },

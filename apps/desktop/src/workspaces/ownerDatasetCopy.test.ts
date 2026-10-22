@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it, vi } from "vitest";
@@ -22,6 +22,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   const schemaSql="CREATE TABLE entries(id INTEGER PRIMARY KEY,name TEXT NOT NULL);", operationSource="globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},read(ctx){return ctx.db.query('SELECT * FROM entries ORDER BY id');}};";
   const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource});
   const options={directory:join(directory,"copy"),scope,ownerKey:"owner",origin:"https://relay",assertOwner(){}};
+  await mkdir(options.directory);
   let copy=await createOwnerDatasetCopy(options), offline=false, denied=false, archived=false;
   const blob=vi.fn(async(input:Parameters<DatasetReplicaSource["blob"]>[0])=>host.replicaBlob(actor,{...scope,...input}));
   const source:DatasetReplicaSource={async capture(){if(denied){copy.accessLost();throw Error("revoked");}if(offline)throw new DatasetCopyOfflineError("offline");return host.replicaCapture(actor,scope);},async page(input){return host.replicaPage(actor,{...scope,...input});},blob};
@@ -34,6 +35,13 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await invoke({...pinned,operationId:id(5),input:{name:"Mom"},idempotencyKey:"first"});
     expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries"); expect(blob).not.toHaveBeenCalled();
     archived=true; expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true}}); expect(blob).not.toHaveBeenCalled();
+    if (process.platform !== "win32") {
+      // A saved status another user can change reads as none, so this copy has nothing offline.
+      const marker = join(options.directory,"archived.json");
+      await copy.close(); await chmod(marker,0o666); copy=await createOwnerDatasetCopy(options); offline=true;
+      await expect(copy.data(remote,source,signal).inspect!(id(1))).rejects.toThrow("Download this Collection before opening it offline.");
+      await chmod(marker,0o600); offline=false;
+    }
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
     expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true},copy:{offline:true}});
     await expect(copy.data(remote,source,signal).invoke({...pinned,operationId:id(6),input:{},idempotencyKey:"archived"})).rejects.toThrow(/archived/);
@@ -71,6 +79,7 @@ it.each(["delete", "status", "closing"])("erases a cached Collection after confi
   const schemaSql="CREATE TABLE entries(id INTEGER PRIMARY KEY);",operationSource="globalThis.operations={seed(ctx){ctx.db.execute('INSERT INTO entries VALUES(1)');return null;},read(ctx){return ctx.db.query('SELECT id FROM entries');}};";
   const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource});
   const options={directory:join(directory,"copy"),scope,ownerKey:"owner",origin:"https://relay",assertOwner(){}};
+  await mkdir(options.directory);
   let copy=await createOwnerDatasetCopy(options),offline=false,holdMutation=false;
   let mutationStarted!:()=>void,releaseMutation!:()=>void;
   const started=new Promise<void>(resolve=>{mutationStarted=resolve;}),release=new Promise<void>(resolve=>{releaseMutation=resolve;});

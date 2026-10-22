@@ -35,7 +35,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, readError, withErrorWords } from "./ipc/errorWords";
+import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { type WorkspaceLocation, workspaceLocation } from "./workspaces/workspaceLocation";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
@@ -61,7 +61,8 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { collectionsHolderRequired, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
@@ -71,6 +72,7 @@ import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
+import { localStateOpened, LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
@@ -171,6 +173,7 @@ import {
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
+  collectionCopiesLeftOperations,
   workspaceTrustOperations,
   reportingOperations,
   usageRecordOperations,
@@ -307,7 +310,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { provedNeverShared, readSyncHistory, recordSynced, runSchedulesOn, scheduleComputer, type Computer } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced, runSchedulesOn, scheduleComputer, workspaceMadeBy, type Computer } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
 import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
@@ -1025,7 +1028,18 @@ type CloudSessionCredentials = NonNullable<
 let cachedCredentials: CloudSessionCredentials | null = null;
 let clearButtonInspections: (() => void) | undefined;
 let retryStopAndRestoreReleases: (() => void) | undefined;
-const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
+// The folders an account change has not removed yet, and the accounts that
+// left, stay in this record. The next start removes those folders before any
+// copy opens. Every window shows what is left.
+const ownerDatasetCopies = createOwnerDatasetCopyRegistry({
+  record: join(stateDir(), "dataset-copy-removals.json"),
+  workspaces: () => listWorkspaces().map(workspace => workspace.rootPath),
+  onLeftover: () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.collectionCopiesLeftChanged);
+    }
+  },
+});
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
 let receivedShareCredentialsChanged: ((current: CloudSessionCredentials | null, settled: boolean) => void) | undefined;
@@ -3693,7 +3707,7 @@ async function openWorkspaceActivityForOperation(
 // restart settle once the engine is back. Only an existing store opens.
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
-    .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
+    .catch(error => { if (!(error instanceof CollectionsRefusalError)) console.warn("[desktop] local Collection app reconciliation:", error); });
 }
 
 function openWorkspaceActivityWith(
@@ -4618,7 +4632,7 @@ function createCollectionAutomationsFor(
       // one only for what a person asked about; otherwise it waits for the
       // Collections list or a dataset action to open it.
       const opened = datasetHost.pending;
-      if (opened) return await work((await opened).automations);
+      if (opened) return await work((await stillHeld(datasetHost, opened)).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
@@ -4672,6 +4686,31 @@ async function closeLocalDatasetHost(slot: DatasetHostSlot): Promise<void> {
     activeDatasetHosts.delete(pending);
   }
 }
+// Whether this installation keeps a workspace's Collections, read from the
+// registry at each use.
+function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
+  return { here: thisComputer, required: () => collectionsHolderRequired(findWorkspace(workspaceId)) };
+}
+// Asks before keeping Collections another computer may have, in the window
+// that asked. Cancel is the default.
+async function confirmKeepCollections(window: BrowserWindow | null, question: KeepQuestion): Promise<boolean> {
+  const { message, detail } = keepQuestionWords(question);
+  const options = { type: "warning" as const, message, detail, buttons: [KEEP_COLLECTIONS_HERE, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  return response === 0;
+}
+// An open host serves new work only while this installation still keeps its
+// store. One that no longer does closes, and the next use reads the record anew.
+async function stillHeld(slot: DatasetHostSlot, pending: Promise<LocalDatasetHost>): Promise<LocalDatasetHost> {
+  const host = await pending;
+  try {
+    host.held();
+  } catch (error) {
+    if (error instanceof CollectionsRefusalError && slot.pending === pending) void closeLocalDatasetHost(slot);
+    throw error;
+  }
+  return host;
+}
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
@@ -4682,7 +4721,8 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, localPersonId: localUserId,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+        holder: collectionsHolderCheck(workspace.workspaceId),
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
@@ -4726,7 +4766,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
       void pending.then(() => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(), () => undefined);
       void pending.catch(() => { if (slot.pending === ownedPending) slot.pending = null; activeDatasetHosts.delete(ownedPending); });
     }
-    const host = await pending;
+    const host = await stillHeld(slot, pending);
     signal.throwIfAborted(); operation.assertCurrent();
     return host;
   });
@@ -6492,10 +6532,11 @@ function registerIpcHandlers(): void {
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-            signal.throwIfAborted(); operation.assertCurrent();
+          let attachmentId: symbol | undefined;
+          const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+            signal.throwIfAborted(); operation.assertCurrent(); attachmentId = operation.workspace.attachmentId;
             if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
-            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
+            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
@@ -6503,6 +6544,16 @@ function registerIpcHandlers(): void {
               runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath(), "persistent-child.mjs") },
             });
           });
+          // Right after launch the engine's open may still be preparing
+          // `.dohc/local`, so a copy waits once for an open already under
+          // way. If the folder still isn't ready, the server holds the
+          // Collection, so it works online without an offline copy.
+          const copy = await openCopy().catch(async (error: unknown) => {
+            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+            await localStateOpened({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId });
+            return openCopy();
+          }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
+          if (copy === null) return data;
           const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
             ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayResponse: relayShareResponseWithCredentials,
@@ -6652,6 +6703,20 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, datasetOperations, {
     dataset: (request, { event }) => datasetHandler(event.sender, request),
+    keepCollectionsHere: async (_input, { event, operation }) => {
+      const { workspace } = operation;
+      const holder = collectionsHolderCheck(workspace.workspaceId);
+      if (!holder.required()) throw new Error("A received share's Collections stay with the person who shared it.");
+      const kept = await keepCollectionsHere(workspace.rootPath, workspace.workspaceId, holder.here(), {
+        adoptStore: storeId => adoptLocalDatasetStore(workspace.rootPath, workspace.workspaceId, storeId),
+        storeIdHere: () => localDatasetStoreId(workspace.rootPath),
+        madeBy: () => workspaceMadeBy(workspace.rootPath),
+        confirm: question => confirmKeepCollections(BrowserWindow.fromWebContents(event.sender), question),
+      });
+      operation.assertCurrent();
+      if (kept) notifyRenderer({ workspaceId: workspace.workspaceId });
+      return { kept };
+    },
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
@@ -7134,6 +7199,14 @@ function registerIpcHandlers(): void {
   settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
+
+  registerOperations(operationBoundary, collectionCopiesLeftOperations, {
+    readCollectionCopiesLeft: () => ownerDatasetCopies.leftover(),
+    removeCollectionCopiesLeft: async () => {
+      await ownerDatasetCopies.removeLeftover().catch(error => console.error("Collection copy cleanup failed", error));
+      return ownerDatasetCopies.leftover();
+    },
+  });
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),

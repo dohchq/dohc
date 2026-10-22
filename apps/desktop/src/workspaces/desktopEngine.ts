@@ -122,6 +122,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // ends when its open closes, rebinds or fails.
   readLocalStateFrom({
     currentBinding: workspace => rustEngineWorkspaceSessions?.currentBinding(workspace) ?? null,
+    openInProgress: workspace => rustEngineWorkspaceSessions?.openInProgress(workspace) ?? null,
   });
   let rustEngineRelayClient: EngineRelayClient | null = null;
   let rustEngineSessionSource: RelayConfiguredDaemonClientSource | null = null;

@@ -7,7 +7,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
 
 // Identity is seeded into an isolated profile. Owners create, preview, share, and publish
 // through visible controls. Only the OS browser dispatcher is replaced for local preview.
@@ -32,6 +32,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await keepCollectionsHere(page, workspaceId);
     await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
@@ -111,7 +112,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await expect(approval).toContainText("Owner actions: None");
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
-    await expect(publication.getByRole("status")).toHaveText("App published on the selected link.");
+    // The publication list reloads behind the notice, so its loading status can show beside it.
+    await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
     await publication.getByRole("button", { name: "Close publication", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);

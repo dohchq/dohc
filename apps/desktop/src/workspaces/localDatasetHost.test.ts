@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { createReadStream, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
+import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
+import { CollectionsRefusalError, keepCollectionsHere, recordNewCollectionsHolder, type KeepSteps } from "./collectionsHolder";
 import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { compileDatasetOperations as relayCompileDatasetOperations } from "../../../../services/sync-relay/src/datasetCompiler";
 import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
@@ -22,6 +24,7 @@ import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -63,7 +66,9 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture, ...extra});
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: extra.workspaceId ?? "w", rootPath: workspaceRoot });
+  const host = await createLocalDatasetHost({workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture, ...extra, holder: extra.holder ?? unguardedCollections});
   hosts.push(host); return {host, workspaceRoot};
 }
 async function activate(host: LocalDatasetHost, fixture = sources()) {
@@ -112,7 +117,7 @@ it("reopens the same recovery archive after installation was interrupted before 
     // This is the normal UI action after restart, with no saved transfer id.
     const rebound = await restarted.host.prepareRecovery({ sourcePath });
     expect(rebound.transferId).toBe(prepared.transferId);
-    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "datasets", "exports");
+    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "local", "datasets", "exports");
     const stagedBefore = await readdir(stagingDirectory);
     expect(await restarted.host.prepareRecovery({ sourcePath })).toEqual(rebound);
     expect(await readdir(stagingDirectory)).toEqual(stagedBefore);
@@ -286,14 +291,14 @@ describe("local dataset owner adapter", () => {
     const target = await open(), prepared = await target.host.prepareRecovery({sourcePath});
     await target.host.discardRecovery(prepared.transferId);
     expect(target.host.list().datasets).toEqual([]);
-    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
     await expect(target.host.claimRecovery({...prepared,oldHostStopped:true})).rejects.toThrow(/not installed/);
     const foreign = await open({workspaceId:"other"});
     await expect(foreign.host.prepareRecovery({sourcePath})).rejects.toThrow(/another workspace/);
     const bytes = await readFile(sourcePath); await writeFile(sourcePath,bytes.subarray(0,bytes.length-5));
     await expect(target.host.prepareRecovery({sourcePath})).rejects.toThrow(/truncated/);
     expect(target.host.list().datasets).toEqual([]);
-    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
   });
 
   it("exports an actual committed dataset and receipt to a streamed recovery file", async () => {
@@ -390,6 +395,7 @@ describe("local dataset owner adapter", () => {
       const cancelled=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/export`,{headers:{authorization:"Bearer token"}}));
       const cancelledReader=cancelled.body!.getReader();await cancelledReader.read();await cancelledReader.cancel();
       expect(await readdir(join(remoteDirectory,"recovery"))).toEqual([]);
+      await mkdir(join(local.workspaceRoot,"replica"));
       const replica=await createDatasetReplica({directory:join(local.workspaceRoot,"replica"),scope:{workspaceId:"w",datasetId:id(1)},ownerKey:"owner",origin:"https://relay",assertOwner(){}});
       const replicaRequest=async(action:string,body?:unknown)=>{
         if(offline)throw Error("offline");
@@ -443,7 +449,7 @@ describe("local dataset owner adapter", () => {
     expect(completed.state).toBe("imported");expect(completed.receipt).toEqual(saved);
     expect(restarted.approvedArtifacts(id(1)).active).toBe(false);
     await expect(restarted.action(call(approved,id(6),"after-import",{name:"Forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
-    expect(await readdir(join(workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    expect(await readdir(join(workspaceRoot,".dohc","local","datasets","exports"))).toEqual([]);
     await expect(restarted.transferToShared({datasetId:id(1),targetOrigin:"https://other.example",target:resumedTarget})).rejects.toThrow("another server");
   },30_000);
 
@@ -478,7 +484,7 @@ describe("local dataset owner adapter", () => {
     expect(await readdir(workspaceRoot)).toEqual([".dohc"]);
     await restarted.close();
     // Persistent coordination files keep later supervisor sessions on the same lock inode.
-    expect((await readdir(join(workspaceRoot,".dohc","datasets","workers"))).sort()).toEqual([
+    expect((await readdir(join(workspaceRoot,".dohc","local","datasets","workers"))).sort()).toEqual([
       ".dohc-worker-lock.sqlite", ".dohc-worker-session.json",
     ]);
   });
@@ -757,4 +763,318 @@ it("reports a worker startup failure for one page and succeeds on the next reque
     db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("w");
     await expect(host.historyHeads()).resolves.toMatchObject({ sourceCount: 1, pages: [{ datasetId: id(1) }] });
   } finally { db.close(); }
+});
+
+describe("this computer's Collection folders", () => {
+  it("keeps workers and exports in .dohc/local, ignores the old folders, and leaves the Collections in .dohc/datasets", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(workspaceRoot);
+    // What an earlier build left: a worker folder its startup would refuse to remove, and a staged export.
+    const old = join(workspaceRoot, ".dohc", "datasets"), oldWorker = join(old, "workers", `worker-${id(9)}`);
+    await mkdir(oldWorker, { recursive: true }); await writeFile(join(oldWorker, ".dohc-worker.json"), "{}");
+    await mkdir(join(old, "exports", "export-old"), { recursive: true });
+    const { host } = await open({ workspaceRoot }), approved = await activate(host);
+    await host.action(call(approved, id(6), "add", { name: "Camera" }));
+    const archive = await host.prepareExport(id(1));
+    const local = join(workspaceRoot, ".dohc", "local", "datasets");
+    expect(await readdir(local)).toEqual(["exports", "workers"]);
+    expect(await readdir(join(local, "workers"))).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite", ".dohc-worker-session.json"]));
+    expect((await readdir(join(local, "exports"))).filter(name => name.startsWith("export-"))).toHaveLength(1);
+    if (process.platform !== "win32") for (const folder of [local, join(local, "workers"), join(local, "exports")]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
+    await archive.dispose(); await host.close();
+    expect((await lstat(join(old, "state.sqlite"))).isFile()).toBe(true);
+    expect(await readdir(join(old, "workers"))).toEqual([`worker-${id(9)}`]);
+    expect(await readFile(join(oldWorker, ".dohc-worker.json"), "utf8")).toBe("{}");
+    expect(await readdir(join(old, "exports"))).toEqual(["export-old"]);
+  });
+
+  it.each([["not opened", false, "the workspace has not finished opening. Try again when it opens."],
+    ["not kept out of iCloud Drive", true, "it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."]] as const)(
+    "reads Collections while .dohc/local is %s, but starts no worker or export and creates nothing", async (_state, made, why) => {
+    const first = await open(), approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
+    if (made) await opens.open(workspace, false);
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    hosts.push(host);
+    expect(host.list().datasets).toHaveLength(1);
+    expect(host.describe(id(1))).toMatchObject({ name: "Items", revision: 1 });
+    await expect(host.query(call(approved, id(5)))).rejects.toThrow(`dohc did not open this Collection's records because ${why}`);
+    await expect(host.prepareExport(id(1))).rejects.toThrow(`dohc did not prepare this Collection's recovery file because ${why}`);
+    expect(await readdir(join(first.workspaceRoot, ".dohc"))).not.toContain("local");
+    await opens.open(workspace);
+    expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+  });
+
+  it("waits for an engine open under way before a worker it was asked for, but not while the host opens", async () => {
+    const first = await open(), approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot }, opens = fakeLocalStateOpens();
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const opening = opens.start(workspace);
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    hosts.push(host);
+    expect(host.list().datasets).toHaveLength(1);
+    expect(opens.waits()).toBe(0);
+    const query = host.query(call(approved, id(5)));
+    await vi.waitFor(() => expect(opens.waits()).toBe(1));
+    await opening.finish();
+    expect((await query).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+    await (await host.prepareExport(id(1))).dispose();
+    expect(opens.waits()).toBe(1);
+  });
+
+  it("refuses at once when no engine open is under way", async () => {
+    const first = await open(), approved = await activate(first.host);
+    await first.host.close();
+    const opens = fakeLocalStateOpens();
+    await rm(join(first.workspaceRoot, ".dohc", "local"), { recursive: true });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: first.workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture });
+    hosts.push(host);
+    await expect(host.query(call(approved, id(5)))).rejects.toThrow("dohc did not open this Collection's records because the workspace has not finished opening.");
+    expect(opens.waits()).toBe(0);
+  });
+});
+
+describe("the computer that keeps a workspace's Collections", () => {
+  const here = { installId: "install-here", label: "Studio" };
+  const laptop = { installId: "install-laptop", label: "Laptop" };
+  const guarded = { here: () => here, required: () => true };
+  const recordFile = (root: string) => join(root, ".dohc", "collections.json");
+  const readRecord = async (root: string) => JSON.parse(await readFile(recordFile(root), "utf8")) as { installId: string; storeId: string | null };
+  const writeRecord = (root: string, computer: { installId: string; label: string }, storeId: string | null) =>
+    writeFile(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: computer.installId, label: computer.label, storeId }));
+  const storeIdIn = (root: string) => {
+    const db = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+    try { return db.prepare("SELECT store_id FROM local_dataset_store").get()?.store_id ?? null; }
+    catch { return "no table"; }
+    finally { db.close(); }
+  };
+  const present = (path: string) => lstat(path).then(() => true, () => false);
+  const datasetFiles = (root: string) => readdir(join(root, ".dohc", "datasets")).catch(() => null);
+  // A store made before the holder record, as every workspace from before it has.
+  async function storeWithoutRecord() {
+    const first = await open();
+    const approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    hosts.splice(hosts.indexOf(first.host), 1);
+    return { root: first.workspaceRoot, approved };
+  }
+  // Keep's steps as main gives them, with the person's answer.
+  const keepSteps = (root: string, confirm = true): KeepSteps => ({ adoptStore: storeId => adoptLocalDatasetStore(root, "w", storeId),
+    storeIdHere: () => localDatasetStoreId(root), madeBy: async () => null, confirm: async () => confirm });
+  async function refusedOpen(root: string) {
+    const error = await open({ workspaceRoot: root, holder: guarded }).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CollectionsRefusalError);
+    return error as CollectionsRefusalError;
+  }
+
+  it("creates a new workspace's store here, with the id the record then names, and opens it again", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    const first = await open({ workspaceRoot: root, holder: guarded });
+    const approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    const { storeId, installId } = await readRecord(root);
+    expect(installId).toBe("install-here");
+    expect(storeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(storeIdIn(root)).toBe(storeId);
+    await first.host.close();
+    const again = await open({ workspaceRoot: root, holder: guarded });
+    expect((await again.host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+  });
+
+  it("blocks a store no record names until a person keeps it here, and changes nothing before that", async () => {
+    const { root, approved } = await storeWithoutRecord();
+    expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
+    expect((await refusedOpen(root)).refusal).toEqual({ kind: "unclaimed" });
+    // Not opened: no -wal or -shm, and no id written into it.
+    expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
+    expect(storeIdIn(root)).toBe("no table");
+    expect(await present(recordFile(root))).toBe(false);
+    await keepCollectionsHere(root, "w", here, keepSteps(root));
+    expect(storeIdIn(root)).toBe((await readRecord(root)).storeId);
+    const kept = await open({ workspaceRoot: root, holder: guarded });
+    expect((await kept.host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+  });
+
+  it("refuses Collections another computer keeps without opening or creating a store", async () => {
+    const empty = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(empty);
+    await mkdir(join(empty, ".dohc"));
+    await writeRecord(empty, laptop, null);
+    expect((await refusedOpen(empty)).message).toBe("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
+    expect(await datasetFiles(empty), "no .dohc/datasets").toBeNull();
+    const { root } = await storeWithoutRecord();
+    await writeRecord(root, laptop, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
+    expect((await refusedOpen(root)).refusal.kind).toBe("elsewhere");
+    expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
+    await expect(adoptLocalDatasetStore(empty, "w", "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f")).rejects.toThrow("dohc could not find .dohc/datasets/state.sqlite.");
+    expect(await datasetFiles(empty), "adopting creates no store either").toBeNull();
+  });
+
+  it("refuses this computer's store when it is not there or another took its place, and creates none", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    const first = await open({ workspaceRoot: root, holder: guarded });
+    await first.host.close();
+    const storeId = (await readRecord(root)).storeId;
+    await rm(join(root, ".dohc", "datasets"), { recursive: true });
+    expect((await refusedOpen(root)).refusal).toEqual({ kind: "missing" });
+    expect(await datasetFiles(root)).toBeNull();
+    // Another computer's copy, or an old one, in its place.
+    const other = await storeWithoutRecord();
+    await mkdir(join(root, ".dohc", "datasets"));
+    await copyFile(join(other.root, ".dohc", "datasets", "state.sqlite"), join(root, ".dohc", "datasets", "state.sqlite"));
+    expect((await refusedOpen(root)).message).toBe("This computer keeps this workspace's Collections, but another copy replaced .dohc/datasets/state.sqlite. Restore this computer's copy from a backup, then try again.");
+    expect(storeIdIn(root), "the copy gains no id").toBe("no table");
+    expect((await readRecord(root)).storeId).toBe(storeId);
+  });
+
+  it("blocks a record that is a link, without following it or creating a store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await symlink(join(root, "record.json"), recordFile(root));
+    expect((await refusedOpen(root)).refusal.kind).toBe("unreadable");
+    expect(await datasetFiles(root)).toBeNull();
+    expect(await present(join(root, "record.json"))).toBe(false);
+  });
+
+  it("refuses the next piece of work, a write too, as soon as the record names another computer or store", async () => {
+    for (const change of [
+      (root: string) => writeRecord(root, laptop, null),
+      (root: string) => writeRecord(root, here, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f"),
+      (root: string) => rm(recordFile(root)),
+    ]) {
+      const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+      await mkdir(join(root, ".dohc"));
+      await recordNewCollectionsHolder(root, "w", here);
+      const { host } = await open({ workspaceRoot: root, holder: guarded });
+      const approved = await activate(host);
+      await host.action(call(approved, id(6), "add", { name: "Camera" }));
+      await change(root);
+      // Nothing checks in between: the write itself reads the changed record.
+      const refused = await host.action(call(approved, id(6), "add-after", { name: "Lens" })).then(() => null, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(CollectionsRefusalError);
+      // Every later use refuses the same way, including one that reads nothing from disk.
+      expect(() => host.list()).toThrow(refused as Error);
+      expect(() => host.automations.next()).toThrow(refused as Error);
+      expect(() => host.held()).toThrow(refused as Error);
+    }
+  });
+
+  it.each(["a transaction", "a savepoint inside one"])("rolls back %s whose record changes while its work runs, and stops", async (shape) => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    // The host's own transaction, which file associations write through.
+    let storage!: { db: { prepare(sql: string): { run(...values: unknown[]): unknown } }; transaction<T>(run: () => T): T };
+    const { host } = await open({ workspaceRoot: root, holder: guarded, resources: (given) => { storage = given; return {}; } });
+    const dump = () => {
+      const db = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+      try {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => String(row.name));
+        return JSON.stringify(tables.map(table => [table, db.prepare(`SELECT * FROM "${table}"`).all()]));
+      } finally { db.close(); }
+    };
+    const before = dump();
+    // An outside sync process replaces the record after the write, before the commit.
+    const work = () => {
+      storage.db.prepare("INSERT INTO local_dataset_usage VALUES(?,?)").run("probe", 1);
+      writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId: null }));
+    };
+    const refused = (() => {
+      try { storage.transaction(() => (shape === "a transaction" ? work() : storage.transaction(work))); }
+      catch (error) { return error; }
+      return null;
+    })();
+    expect((refused as CollectionsRefusalError).refusal).toMatchObject({ kind: "elsewhere" });
+    expect(dump(), "nothing committed").toBe(before);
+    expect(() => host.list()).toThrow(refused as Error);
+  });
+
+  it("names the store a creation made, whichever runs first when the person keeps the Collections meanwhile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    const [opened, kept] = await Promise.allSettled([open({ workspaceRoot: root, holder: guarded }), keepCollectionsHere(root, "w", here, keepSteps(root))]);
+    expect(opened.status).toBe("fulfilled");
+    if (kept.status === "rejected") expect((kept.reason as CollectionsRefusalError).refusal).toEqual({ kind: "changed" });
+    const { storeId } = await readRecord(root);
+    expect(storeId).not.toBeNull();
+    expect(storeIdIn(root)).toBe(storeId);
+  });
+
+  it("refuses a new store when the record changes before it names it, and keeps the newer record", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    await recordNewCollectionsHolder(root, "w", here);
+    let asked = 0;
+    // The second ask comes after the store is made, just before the record names it: another computer's record arrives then.
+    const holder = { required: () => true, here: () => { if (++asked === 2) writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId: null })); return here; } };
+    const error = await open({ workspaceRoot: root, holder }).then(() => null, (caught: unknown) => caught);
+    expect((error as CollectionsRefusalError).refusal).toEqual({ kind: "changed" });
+    expect(await readRecord(root)).toMatchObject({ installId: "install-laptop", storeId: null });
+  });
+
+  it("never keeps a store with nothing in it, and never opens one for a record that names a store", async () => {
+    for (const empty of [async (path: string) => writeFile(path, ""), async (path: string) => { new DatabaseSync(path).close(); }]) {
+      const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+      await mkdir(join(root, ".dohc", "datasets"), { recursive: true });
+      const store = join(root, ".dohc", "datasets", "state.sqlite");
+      await empty(store);
+      const before = await readFile(store);
+      await expect(keepCollectionsHere(root, "w", here, keepSteps(root)))
+        .rejects.toThrow(".dohc/datasets/state.sqlite is empty here, and may still be syncing from another computer. Try again once it has synced.");
+      expect(await readFile(store)).toEqual(before);
+      expect(await present(recordFile(root))).toBe(false);
+      await writeRecord(root, here, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
+      expect((await refusedOpen(root)).refusal).toEqual({ kind: "replaced" });
+      expect(await readFile(store)).toEqual(before);
+    }
+  });
+
+  it("keeps an earlier installation's Collections on this computer only from the store the record names, keeping its id", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    await mkdir(join(root, ".dohc"));
+    const before = { installId: "install-before", label: "Studio" };
+    await recordNewCollectionsHolder(root, "w", before);
+    const first = await open({ workspaceRoot: root, holder: { here: () => before, required: () => true } });
+    const approved = await activate(first.host);
+    await first.host.action(call(approved, id(6), "add", { name: "Camera" }));
+    await first.host.close();
+    const { storeId } = await readRecord(root);
+    expect((await refusedOpen(root)).refusal.kind).toBe("elsewhere");
+    expect(await keepCollectionsHere(root, "w", here, keepSteps(root, false)), "not confirmed").toBe(false);
+    expect(await readRecord(root)).toMatchObject({ installId: "install-before", storeId });
+    expect(await keepCollectionsHere(root, "w", here, keepSteps(root))).toBe(true);
+    expect(await readRecord(root)).toMatchObject({ installId: "install-here", storeId });
+    const kept = await open({ workspaceRoot: root, holder: guarded });
+    expect((await kept.host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
+    await kept.host.close();
+    // Another computer's copy of the store is not the one the record names.
+    await writeRecord(root, before, "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f");
+    await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow("This computer doesn't have Studio's copy of the Collections.");
+    expect(await readRecord(root)).toMatchObject({ installId: "install-before", storeId: "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f" });
+  });
+
+  it("does not reconcile local app responses in a store another computer keeps", async () => {
+    const { root } = await storeWithoutRecord();
+    await writeRecord(root, laptop, null);
+    await expect(reconcileExistingLocalCollectionApps(root, () => createLocalDatasetHost({ holder: guarded, workspaceId: "w", workspaceRoot: root,
+      capacityBytes: 1024 * 1024, localPersonId: () => "person-local", compile: compileFixture }))).rejects.toBeInstanceOf(CollectionsRefusalError);
+    expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
+  });
+
+  it("opens as before, with no record, where no holder is required, as in a received share", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(root);
+    const { host } = await open({ workspaceRoot: root, holder: { here: () => here, required: () => false } });
+    await activate(host);
+    host.held();
+    expect(await present(recordFile(root))).toBe(false);
+  });
 });
