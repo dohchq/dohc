@@ -484,7 +484,7 @@ impl EngineService {
         }
         if let Some(adoption) = &discovery.adoption {
             let opened = self.open(Some(handle))?;
-            let db_path = opened.db_path.clone();
+            let db_path = opened.actor.database_path().to_path_buf();
             let workspace_id = workspace.workspace_id.clone();
             let limits = adoption.owner_outbox.clone();
             let mismatch = tokio::task::spawn_blocking(move || {
