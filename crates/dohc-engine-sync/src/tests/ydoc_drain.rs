@@ -1249,6 +1249,236 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
     assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
 }
 
+/// Which route consumes a queued row once its lineage is no longer the
+/// head's.
+#[derive(Clone, Copy, Debug)]
+enum OldLineageRoute {
+    /// The document's drain applies it to the archive that keeps its lineage.
+    Archive,
+    /// The document's drain finds no lineage keeps it.
+    Lost,
+    /// The pass's workspace-wide inactive drain applies it to the archive.
+    Inactive,
+}
+
+/// Sol's second finding: a row a drain applied and kept queued reported its
+/// facts only when a retry reached the head's lineage. Once its lineage was
+/// archived, or lost, the route that consumed it deleted the row and its
+/// facts with it. Each route now carries them, the field-history change
+/// counts once, and the next drain reports nothing. An applied-then-refused
+/// row too.
+#[test]
+fn a_lineage_change_before_retry_still_reports_parked_facts_once() {
+    for route in [
+        OldLineageRoute::Archive,
+        OldLineageRoute::Lost,
+        OldLineageRoute::Inactive,
+    ] {
+        for refused in [false, true] {
+            parked_facts_after_a_lineage_change(route, refused);
+        }
+    }
+}
+
+fn parked_facts_after_a_lineage_change(route: OldLineageRoute, refused: bool) {
+    const RECORD_ID: &str = "rec_ffffffffffffffffffffffffff";
+    const OBJECT_ID: &str = "lineage-record-object";
+    const PATH: &str = "tasks/lineage.md";
+
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "lineage-record-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let based = |engine: &mut EngineStore| {
+        let local = dohc_engine_collab::Ydoc::wire();
+        local
+            .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+            .expect("seed rich document");
+        let base = local.encode_full_state();
+        let TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+            base_snapshot_sha: claim_id,
+        }) = dohc_engine_collab::claim_base(
+            engine,
+            &key,
+            dohc_engine_collab::ContentKind::Richdoc,
+            &base,
+            &NoFaults,
+            1_500,
+        )
+        .expect("claim replicated base")
+        else {
+            panic!("{route:?}: the base is claimed");
+        };
+        (base, claim_id)
+    };
+    let (base, claim_id) = based(&mut engine);
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let update_sha = engine
+        .put_binary_blob(&remote.frontmatter_set("title", "Remote").unwrap())
+        .expect("store remote update");
+    let mut operation = envelope(
+        "lineage-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id, "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    operation.relay_seq = Some(20);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue the update");
+    if refused {
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','tasks/elsewhere.md') \
+                     WHERE origin_id='lineage-peer'",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("name another path");
+    }
+    let history = |engine: &EngineStore| -> (i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("history")
+    };
+
+    // The drain applies the update and stops before its cleanup, as one
+    // that then waits does.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    assert_eq!(stopped.record_facts.len(), 1, "{route:?}: {stopped:?}");
+    assert_eq!(
+        history(&engine),
+        (1, 1),
+        "{route:?}: the row keeps its facts"
+    );
+
+    // The lineage it applied to is archived and another takes the head. The
+    // archive refuses while the row is queued, so the row is set aside
+    // around the change and comes back as it was.
+    let head = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load head")
+        .expect("head");
+    let vector_sha = dohc_engine_storage::hex_sha256(&head.doc.encode_state_vector());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TEMP TABLE set_aside AS SELECT * FROM ydoc_deferred_updates; \
+                 DELETE FROM ydoc_deferred_updates;",
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_collab::archive_active_lineage_in_tx(
+                tx,
+                &key,
+                &claim_id,
+                &vector_sha,
+                None,
+                1_600,
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("archive the lineage");
+    let (_, successor) = based(&mut engine);
+    assert_ne!(successor, claim_id, "{route:?}");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO ydoc_deferred_updates SELECT * FROM set_aside; DROP TABLE set_aside;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("the row comes back");
+
+    let reported = match route {
+        OldLineageRoute::Archive | OldLineageRoute::Lost => {
+            if matches!(route, OldLineageRoute::Lost) {
+                engine
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute("DELETE FROM ydoc_inactive_lineages", [])
+                            .map_err(SyncError::persist)
+                    })
+                    .expect("no lineage keeps it");
+            }
+            drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .expect("drain the old coordinate")
+            .record_facts
+        }
+        OldLineageRoute::Inactive => {
+            let tails = dohc_engine_collab::live_update_application::ReleasedTails::default()
+                .bound_to(&engine);
+            crate::ydoc_apply::drain_inactive_ydoc_updates(
+                &mut engine,
+                crate::ydoc_apply::InactiveScope::Workspace("ws"),
+                &tails,
+                &mut Vec::new(),
+                &NoFaults,
+            )
+            .expect("inactive drain")
+            .record_facts
+        }
+    };
+    assert_eq!(
+        reported, stopped.record_facts,
+        "{route:?} refused={refused}"
+    );
+    assert_eq!(history(&engine), (1, 0), "{route:?} refused={refused}");
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.record_facts.is_empty(), "{route:?}: {idle:?}");
+}
+
 #[test]
 fn resolution_fold_refuses_while_deferred_updates_are_parked() {
     // Acked-but-parked remote updates were never part of
@@ -2747,7 +2977,7 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
         // A drain that waits for its projection decides nothing, its
         // archived lineage's update included. That update stays queued, and
         // the drain that applies it to the archive reports its refusal once.
-        let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+        let (drained, _cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
             &mut engine,
             &mut Default::default(),
             &key,
@@ -2770,7 +3000,7 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             dohc_engine_collab::live_update_application::ReleasedTails::default().bound_to(&engine);
         let inactive = crate::ydoc_apply::drain_inactive_ydoc_updates(
             &mut engine,
-            crate::ydoc_apply::InactiveScope::Document(&key),
+            crate::ydoc_apply::InactiveScope::Document(&key, &[]),
             &tails,
             &mut Vec::new(),
             &NoFaults,

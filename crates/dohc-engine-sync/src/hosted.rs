@@ -1249,13 +1249,16 @@ fn completed_hold(
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
-    // Queued Y.Doc work it still owes keeps it waiting, whatever held it
-    // before; the end-of-pass drain takes that work up again.
+    // Queued Y.Doc work a held document still owes keeps it waiting; the
+    // end-of-pass drain takes that work up again. A ready document's live
+    // session settles what it queues behind its lease.
     if conn
         .query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
-                 WHERE u.workspace_id=?1 AND u.object_id=?2 AND {OUTSTANDING_YDOC_UPDATE})"
+                "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN ydoc_deferred_updates u \
+                 ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
+                 WHERE d.workspace_id=?1 AND d.object_id=?2 AND {HELD_FOR_DRAIN} \
+                   AND {OUTSTANDING_YDOC_UPDATE})"
             ),
             params![workspace_id, object_id],
             |row| row.get::<_, bool>(0),
@@ -1433,6 +1436,11 @@ pub(crate) fn hold_released_in_tx(
     Ok(true)
 }
 
+/// Whether the hosted document `d` is held for queued work a drain takes up
+/// again: released retained work, or work still waiting.
+pub(crate) const HELD_FOR_DRAIN: &str = "(d.state='held' AND d.held_reason IN \
+     ('released-lineage-unsettled','hosted-backfill-work-waiting'))";
+
 /// Whether the queued Y.Doc update `u` is application work this replica
 /// still owes: a base, or an update of a document whose lineage a base
 /// established. An update of a document with no base yet waits for that
@@ -1452,6 +1460,17 @@ pub(crate) fn queued_released_hold(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<HostedHold>, SyncError> {
+    queued_released_hold_besides(conn, workspace_id, object_id, &[])
+}
+
+/// [`queued_released_hold`], where a drain whose cleanup has not run yet
+/// consumed the queued rows at `consumed`.
+pub(crate) fn queued_released_hold_besides(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    consumed: &[(String, i64)],
+) -> Result<Option<HostedHold>, SyncError> {
     let Some(hold @ HostedHold::ReleasedLineageUnsettled { .. }) =
         recorded_hold(conn, workspace_id, object_id)?
     else {
@@ -1460,6 +1479,13 @@ pub(crate) fn queued_released_hold(
     let HostedHold::ReleasedLineageUnsettled { binding, .. } = &hold else {
         return Ok(None);
     };
+    let named = (
+        binding.incoming.origin_id.clone(),
+        binding.incoming.origin_seq,
+    );
+    if consumed.contains(&named) {
+        return Ok(None);
+    }
     let queued: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \

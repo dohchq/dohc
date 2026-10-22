@@ -1770,27 +1770,30 @@ pub(super) fn ydoc_open_state_on_store(
     // Refuse an existing conflict before changing the lineage or draining.
     // If the drain opens a conflict, return its record facts with the refusal.
     // A conflict a queued row opened before its drain waited is that drain's
-    // own, so this open drains first and reports it the same way.
-    if expected_key_matches
-        && store.read_with(|conn| {
-            Ok::<_, RuntimeError>(
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )?
-                .is_some()
-                    && !(drain_deferred
-                        && restore_generation.is_none()
-                        && dohc_engine_sync::deferred_ydoc_opened_conflict(conn, &key)?),
+    // own, so this open checks it after the drain and reports it the same way.
+    let conflict_open = |store: &EngineStore| {
+        store.read_with(|conn| {
+            dohc_engine_sync::open_sync_conflict_for_object(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
             )
-        })?
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-conflict-open",
+            .map(|conflict| conflict.is_some())
+        })
+    };
+    let mut conflict_after_drain = false;
+    if expected_key_matches && conflict_open(store)? {
+        conflict_after_drain = drain_deferred
+            && restore_generation.is_none()
+            && store
+                .read_with(|conn| dohc_engine_sync::deferred_ydoc_opened_conflict(conn, &key))?;
+        if !conflict_after_drain {
+            return Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-conflict-open",
+            }
+            .into());
         }
-        .into());
     }
     // Retired artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
@@ -1854,7 +1857,7 @@ pub(super) fn ydoc_open_state_on_store(
     // behind its active editor with no event or resync signal. The RPC layer
     // rejects the mismatched open right after; skipping the drain keeps this
     // read side-effect-free for the foreign key.
-    let mut record_facts = Vec::new();
+    let mut drained = None;
     if drain_deferred
         && restore_generation.is_none()
         && expected_key_matches
@@ -1864,35 +1867,35 @@ pub(super) fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+        let (result, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
             store, doc_cache, &key, &NoFaults,
         )?;
         // Its rows stay queued; once validation completes, the open runs
         // its checks again and this drain reports them.
-        if let Some(pending) = drained.waiting {
+        if let Some(pending) = result.waiting {
             return Err(RuntimeError::DrainWaiting(pending));
         }
         dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
-        if store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-        {
-            return Err(RuntimeError::YdocOpenConflict {
-                record_facts: drained.record_facts,
-            });
-        }
-        for declined in &drained.sharing_declined {
-            eprintln!("engine: {declined}");
-        }
-        record_facts = drained.record_facts;
+        drained = Some(result);
     }
+    // A conflict the earlier check left to the drain is refused here even
+    // when nothing drained.
+    if (drained.is_some() || conflict_after_drain) && conflict_open(store)? {
+        return Err(RuntimeError::YdocOpenConflict {
+            record_facts: drained
+                .map(|drained| drained.record_facts)
+                .unwrap_or_default(),
+        });
+    }
+    let record_facts = match drained {
+        Some(drained) => {
+            for declined in &drained.sharing_declined {
+                eprintln!("engine: {declined}");
+            }
+            drained.record_facts
+        }
+        None => Vec::new(),
+    };
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
     // correctness).
