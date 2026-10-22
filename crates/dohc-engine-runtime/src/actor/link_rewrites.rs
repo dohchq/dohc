@@ -715,7 +715,7 @@ impl ActorHandle {
                             Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
                                 ..
                             }) | RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput {
-                                reason: "ydoc-resolution-not-representable",
+                                reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE,
                             })) => Ok(false),
                             Err(error) => Err(error),
                         }

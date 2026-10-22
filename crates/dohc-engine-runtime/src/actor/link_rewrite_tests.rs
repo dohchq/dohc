@@ -524,14 +524,16 @@ async fn middle_source_state(f: &Fixture) -> (Vec<u8>, i64, i64, i64) {
             store.read_with(|conn| {
                 let key = DocKey::new(&ws, "main", "source-0001")?;
                 let state = dohc_engine_collab::load_doc_in(conn, &key)?.encode_full_state();
-                let (moments, jobs, files) = conn.query_row(
+                let (moments, jobs, files, holds): (i64, i64, i64, i64) = conn.query_row(
                     "SELECT \
                      (SELECT count(*) FROM moments WHERE workspace_id=?1 AND object_id='source-0001'), \
                      (SELECT count(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path='source-0001.md'), \
-                     (SELECT count(*) FROM snapshots WHERE workspace_id=?1)",
+                     (SELECT count(*) FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND object_id='source-0001'), \
+                     (SELECT count(*) FROM capture_file_holds WHERE workspace_id=?1 AND path='source-0001.md')",
                     [&ws],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 ).map_err(StorageError::corrupt_public)?;
+                assert_eq!(holds, 0);
                 Ok::<_, RuntimeError>((state, moments, jobs, files))
             })
         })
@@ -562,6 +564,13 @@ async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
         f.pass("unrepresentable", Arc::new(NoFaults)).await.unwrap(),
         result
     );
+    assert_eq!(
+        f.pass("unrepresentable-retry", Arc::new(NoFaults))
+            .await
+            .unwrap(),
+        json!({"documents":0,"links":0,"unchecked":["source-0001.md"],"uncheckedCount":1,"complete":false})
+    );
+    assert_eq!(middle_source_state(&f).await, before);
     let operation = f
         .actor
         .history_operation(f.ws.clone(), OP.into())
