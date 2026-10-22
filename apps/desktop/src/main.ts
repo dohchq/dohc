@@ -1,4 +1,5 @@
 import { createChatLinksReader } from "./workspaces/chatLinks";
+import { workspaceRootsMatch } from "./workspaces/workspaceRootsMatch";
 import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
@@ -2997,7 +2998,7 @@ async function withEngineAdapter<T>(
   if (!registered) return await read(workspace);
   if (
     workspace.attachmentId === undefined &&
-    registered.rootPath !== workspace.rootPath
+    !workspaceRootsMatch(registered.rootPath, workspace.rootPath)
   ) {
     throw new Error(
       "This workspace changed while this ran. Try again.",
@@ -4668,7 +4669,7 @@ const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : j
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
+    if (!workspaceRootsMatch(operation.workspace.rootPath, workspace.rootPath)) throw new Error("This workspace changed while this ran. Try again.");
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
@@ -5040,7 +5041,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -6486,7 +6487,7 @@ function registerIpcHandlers(): void {
           let attachmentId: symbol | undefined;
           const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent(); attachmentId = operation.workspace.attachmentId;
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
+            if (!workspaceRootsMatch(operation.workspace.rootPath, workspace.rootPath)) throw new Error("This workspace changed while this ran. Try again.");
             return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {

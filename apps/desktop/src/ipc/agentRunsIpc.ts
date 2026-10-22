@@ -104,10 +104,10 @@ export function createAgentRunsIpc<
       return withRendererWorkspaceOperation(event.sender, input.workspaceId,
         "Agent detection stopped because this window changed workspaces.",
         async (operation) => {
-          const workingDirectory = operation.workspace.rootPath;
+          const workingDirectory = normalizeRootPath(operation.workspace.rootPath, process.platform);
           // Leaving the workspace in this window cancels detection even while another window keeps it open.
           const signal = AbortSignal.any([operation.signal, operation.session.signal]);
-          const tools = await dependencies.detectAgentTools(workingDirectory, signal)
+          const tools = await dependencies.detectAgentTools(operation.workspace.rootPath, signal)
             .catch((error: unknown) => {
               if (operation.session.signal.aborted) operation.assertCurrent();
               throw error;

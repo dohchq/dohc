@@ -1,0 +1,19 @@
+import { realpathSync } from "node:fs";
+import { expect, it } from "vitest";
+import { createTestScratch } from "./testTemp";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
+import { workspaceRootsMatch } from "./workspaceRootsMatch";
+
+it("compares real registry and native roots without admitting another folder", async () => {
+  const folder = await createTestScratch("matching-root-");
+  const other = await createTestScratch("other-root-");
+  const native = realpathSync.native(folder), registry = canonicalWorkspaceRoot(folder);
+  expect(workspaceRootsMatch(native, registry)).toBe(true);
+  expect(workspaceRootsMatch(registry, native)).toBe(true);
+  expect(workspaceRootsMatch(native, realpathSync.native(other))).toBe(false);
+  expect(workspaceRootsMatch(registry, canonicalWorkspaceRoot(other))).toBe(false);
+});
+
+it.skipIf(process.platform === "win32")("keeps literal backslashes in POSIX folder names distinct", () => {
+  expect(workspaceRootsMatch("/work/trip\\2026", "/work/trip/2026")).toBe(false);
+});

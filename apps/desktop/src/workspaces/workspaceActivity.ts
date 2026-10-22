@@ -1,4 +1,5 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
+import { workspaceRootsMatch } from "./workspaceRootsMatch";
 import {
   deriveSyncStatus,
   type WatcherEvent,
@@ -355,7 +356,7 @@ export function createWorkspaceActivity(
   ): Promise<SyncStatusResult> {
     const current = state.entry;
     const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
-    if (rootPath !== undefined && rootPath !== workspace.rootPath) {
+    if (rootPath !== undefined && !workspaceRootsMatch(rootPath, workspace.rootPath)) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
@@ -647,14 +648,14 @@ export function createWorkspaceActivity(
     const entry = state.entry;
     if (!entry) {
       if (!closeOptions.preserveAgentRun && state.agentRun &&
-        (closeOptions.expectedRootPath === undefined || state.agentRun.workspace.rootPath === closeOptions.expectedRootPath)) {
+        (closeOptions.expectedRootPath === undefined || workspaceRootsMatch(state.agentRun.workspace.rootPath, closeOptions.expectedRootPath))) {
         assignAgentRun(state, workspace, null);
       }
       return false;
     }
     if (
       closeOptions.expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== closeOptions.expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, closeOptions.expectedRootPath)
     ) {
       return false;
     }
@@ -837,7 +838,7 @@ export function createWorkspaceActivity(
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     if (
       expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath)
     ) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
@@ -863,7 +864,7 @@ export function createWorkspaceActivity(
     if (!slot) return;
     if (
       expectedRootPath !== undefined &&
-      slot.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath)
     ) {
       return;
     }
@@ -879,7 +880,7 @@ export function createWorkspaceActivity(
     return (
       slot !== null &&
       (expectedRootPath === undefined ||
-        slot.workspace.rootPath === expectedRootPath)
+        workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath))
     );
   }
 
@@ -928,7 +929,7 @@ export function createWorkspaceActivity(
     if (
       !entry ||
       (expectedRootPath !== undefined &&
-        entry.workspace.rootPath !== expectedRootPath)
+        !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath))
     ) {
       return null;
     }
