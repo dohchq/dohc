@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -449,7 +449,11 @@ describe("desktop CLI workspace context", () => {
   });
 
   it("runs collection fields through physical admission and the existing Y.Doc edit", async () => {
-    const f = fixture();
+    // A field write first reads its record to check it is not a lossy note.
+    const root = await createTestScratch("dohc-cli-fields-");
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "one.md"), "# One\n");
+    const f = fixture(root);
     const doc = new Y.Doc();
     const events: string[] = [];
     const session = {
@@ -532,6 +536,21 @@ describe("desktop CLI workspace context", () => {
         "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
       );
       await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
+      // A read that fails, other than for a missing file, refuses too.
+      await mkdir(join(root, "folder.md"));
+      await expect(input.assertEditable("folder.md")).rejects.toThrow(
+        "dohc couldn't read folder.md to check it, so nothing changed. Try again.",
+      );
+      // At the turn that changes it, the session's own document is judged: a
+      // file replaced after the read can't slip through.
+      const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+      const session = markdownToYDoc(lossy);
+      session.getMap("meta").set("dohcMarkdownSource", lossy);
+      session.getMap("meta").set("dohcMarkdownSourceSha256", sha(lossy));
+      session.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(session)));
+      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true })).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show",
+      );
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
     } finally {
       await rm(root, { recursive: true, force: true });

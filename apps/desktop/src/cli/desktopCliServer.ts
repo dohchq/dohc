@@ -47,7 +47,7 @@ import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
-import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
+import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
@@ -163,10 +163,17 @@ export function createDesktopCliServer<State>(
 
   // A lossy note's file text, or null for any other file. The check runs in
   // the projection worker, which remembers it by the text's SHA-256. A file
-  // that can't be read is left to the read or edit that follows.
+  // that isn't there has nothing on disk to rewrite; the edit's own check
+  // covers its session. Any other failed or partial read refuses.
   async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
-    const read = await readWorkspaceText(rootPath, path).catch(() => null);
-    if (!read || read.truncated) return null;
+    let read: Awaited<ReturnType<typeof readWorkspaceText>>;
+    try {
+      read = await readWorkspaceText(rootPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+      throw new Error(unreadNoteRefusal(path), { cause: error });
+    }
+    if (read.truncated) throw new Error(unreadNoteRefusal(path));
     const digest = createHash("sha256").update(read.text).digest("hex");
     return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
   }
@@ -397,7 +404,7 @@ export function createDesktopCliServer<State>(
               }
             },
             change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before

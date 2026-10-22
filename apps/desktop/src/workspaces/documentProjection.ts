@@ -6,7 +6,7 @@ import {
   settledDocumentMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
-import { isLossyMarkdownCached } from "@dohc/ydoc-projection/lossy-markdown";
+import { isLossyDocumentState, isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 
 // Reading a live document as Markdown and computing an edit to it take time
 // in proportion to the document: about 250 ms for 700 KB. Main runs them in a
@@ -15,7 +15,9 @@ import { isLossyMarkdownCached } from "@dohc/ydoc-projection/lossy-markdown";
 export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
-  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean }
+  // `refuseLossy` names the note, which refuses here if it is a lossy note
+  // (CONTEXT.md): this is the turn that would change it.
+  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean; refuseLossy?: string }
   | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
   // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
   // the verdict by `digest`, the SHA-256 of the text.
@@ -56,6 +58,9 @@ export function runDocumentProjection(
     case "read-settled":
       return settledDocumentMarkdown(request.markdown);
     case "edit":
+      if (request.refuseLossy !== undefined && isLossyDocumentState(request.state)) {
+        throw new Error(lossyNoteRefusal(request.refuseLossy));
+      }
       return documentEditUpdate(request.state, request.edit, {
         keepBlocks: request.keepBlocks,
       });

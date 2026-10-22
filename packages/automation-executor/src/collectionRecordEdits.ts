@@ -23,7 +23,7 @@ import {
   frontmatterEditsRefused,
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
-import { isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
+import { isLossyDocument, isLossyMarkdownCached, lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import type { CollectionRecordWrites } from "./collectionAutomationRun";
 import { recordIdFromBytes } from "./recordIds";
 
@@ -304,7 +304,7 @@ function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Arra
  * update with the author-derived actorOriginId; settle so the writes are
  * durable and the .md is on disk, release. When no field changes, nothing
  * is journaled or settled. Throws on
- * refusal (invalid path, engine off, a lossy note, the record's doc session held live
+ * refusal (invalid path, engine off, a lossy note or one it could not read to check, the record's doc session held live
  * elsewhere).
  *
  * `recordPath` must already be validated and normalized by the caller
@@ -325,18 +325,26 @@ export async function setCollectionRecordFields(
   }
   throwIfAborted(context.signal);
   // A lossy note's next write would rewrite the parts dohc can't show, so no
-  // session opens for it. A file that can't be read fails at the open below.
-  const current = await context.readText(input.recordPath).catch(() => null);
-  if (
-    current && !current.truncated &&
-    isLossyMarkdownCached(createHash("sha256").update(current.text).digest("hex"), current.text)
-  ) {
+  // session opens for it. A read that fails or comes back partial refuses too:
+  // only a checked note may change. A missing file has no bytes to check; the
+  // session's own document is checked before any change.
+  let current: Awaited<ReturnType<CollectionRecordEditContext["readText"]>> | null = null;
+  try {
+    current = await context.readText(input.recordPath);
+  } catch (error) {
+    if (!isFileNotFound(error)) throw new Error(unreadNoteRefusal(input.recordPath), { cause: error });
+  }
+  if (current?.truncated) throw new Error(unreadNoteRefusal(input.recordPath));
+  if (current && isLossyMarkdownCached(createHash("sha256").update(current.text).digest("hex"), current.text)) {
     throw new Error(lossyNoteRefusal(input.recordPath));
   }
   input.onStage?.("bind");
   const session = await context.openRecord(input.recordPath);
   let failed = false;
   let sharedSettlementPending = false;
+  // The session's own document, judged at the first turn that would change
+  // it: the file can change between the read above and this open.
+  let sessionLossy: boolean | undefined;
   let sharedFileUpdates: Record<string, SharedFileUpdate> | undefined;
   const appendPrefix = input.idempotencyKeyPrefix ?? (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
   try {
@@ -373,6 +381,8 @@ export async function setCollectionRecordFields(
             kept[field] = currentValue;
             return null;
           }
+          sessionLossy ??= isLossyDocument(doc);
+          if (sessionLossy) throw new Error(lossyNoteRefusal(input.recordPath));
           if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;
           fieldDecided = true;
@@ -454,7 +464,7 @@ export async function setCollectionRecordFields(
     failed = true;
     throw error;
   } finally {
-    try { await session.close(sharedSettlementPending ? { settle: false } : undefined); }
+    try { await session.close(sharedSettlementPending || sessionLossy ? { settle: false } : undefined); }
     catch (error) {
       if (!failed) { input.onStage?.("close"); throw error; }
     }

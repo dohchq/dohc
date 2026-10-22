@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { expect, it } from 'vitest'
-import type * as Y from 'yjs'
+import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -93,4 +93,15 @@ it('does not judge a live note an edit already changed', () => {
   expect(isLossyDocument(doc)).toBe(true)
   doc.getMap('frontmatter').set('status', 'done')
   expect(isLossyDocument(doc)).toBe(false)
+})
+
+it('judges a session state as its live note', () => {
+  const lossy = seeded('<details>\n\nHidden.\n</details>\n')
+  const plain = seeded('# Plan\n\nText.')
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy))).toBe(true)
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(plain))).toBe(false)
+})
+
+it('names the note when it could not be read to check', () => {
+  expect(unreadNoteRefusal('notes/readme.md')).toBe("dohc couldn't read notes/readme.md to check it, so nothing changed. Try again.")
 })

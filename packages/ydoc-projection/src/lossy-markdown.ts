@@ -1,6 +1,6 @@
 import { digest } from 'lib0/hash/sha256'
 import { Marked } from 'marked'
-import type * as Y from 'yjs'
+import * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 
 const reader = new Marked()
@@ -86,4 +86,20 @@ export function isLossyDocument(doc: Y.Doc): boolean {
   }
   return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical)
     && !sameMarkdownMeaning(source, canonical)
+}
+
+/** isLossyDocument for a document's encoded state, as a session holds it. */
+export function isLossyDocumentState(state: Uint8Array): boolean {
+  const doc = new Y.Doc()
+  try {
+    Y.applyUpdate(doc, state)
+    return isLossyDocument(doc)
+  } finally {
+    doc.destroy()
+  }
+}
+
+/** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */
+export function unreadNoteRefusal(path: string): string {
+  return `dohc couldn't read ${path} to check it, so nothing changed. Try again.`
 }
