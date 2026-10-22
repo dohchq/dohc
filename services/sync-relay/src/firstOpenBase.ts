@@ -45,8 +45,10 @@ export type FirstOpenBaseResult =
       /**
        * `source-mismatch`: the input is not the verified head. `unsupported-source`:
        * the head is current, but the validator does not read its base back as it.
+       * `seed-worker-capacity`: building it ran the first-open worker out of
+       * memory; the worker pool answers this, never the build itself.
        */
-      reason: "source-mismatch" | "unsupported-source" | FirstOpenBaseBound;
+      reason: "source-mismatch" | "unsupported-source" | "seed-worker-capacity" | FirstOpenBaseBound;
     }
   | { kind: "refused"; reason: "invalid-base"; fault: FirstOpenBaseFault };
 

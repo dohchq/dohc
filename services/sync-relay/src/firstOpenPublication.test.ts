@@ -645,7 +645,6 @@ it("refuses a valid base the validation policy cannot afford as too large, a fil
 
 // Yjs spreads a new element's children as call arguments, which overflowed a
 // main thread's stack past about 124,000 of them (a worker's, past 498,000).
-// Breaks written as `\` read in linear time; two trailing spaces do not.
 it("builds a seed for a paragraph with more hard breaks than Yjs can spread, and refuses it only by size", async () => {
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   const f = await fixture({markdown: `a${"\\\n".repeat(200_000)}a\n`});
@@ -654,6 +653,28 @@ it("builds a seed for a paragraph with more hard breaks than Yjs can spread, and
   expect(f.checks).not.toHaveBeenCalled();
   nothingAppended(f);
 });
+
+it("refuses for good a note whose seed runs the first-open worker out of memory, and frees its slot first", async () => {
+  const f = await fixture({markdown: `a${"\\\n".repeat(520_000)}a\n`}), pool = createLiveValidationExecutor();
+  pools.push(pool);
+  const validate = pool.validator(selfHostLiveProfile().service.activation.validation);
+  const live = {document: {workspaceId: WS, mainVersionId: "main" as const, objectId: OBJECT, lineageClaimId: "lineage"}, currentPath: PATH,
+    checkpoint: richdocSeed.encodeRichdocSeed(MARKDOWN, 1), suffix: [], candidate: Uint8Array.of(0, 0)};
+  // Both slots take live validation at once, as soon as the build answers.
+  let following: Promise<string[]> | undefined;
+  f.buildWith(async (policy, input, signal) => {
+    const built = await pool.buildFirstOpenBase(policy, input, signal);
+    following = Promise.all([validate(live), validate(live)]).then(results => results.map(result => result.kind));
+    return built;
+  });
+  expect(await f.open()).toMatchObject({kind: "refused", reason: "too-large", code: "seed-worker-capacity", recovery: "none"});
+  expect(await following).toEqual(["accepted", "accepted"]);
+  expect(f.checks).not.toHaveBeenCalled();
+  nothingAppended(f);
+  const g = await fixture();
+  g.buildWith((policy, input, signal) => pool.buildFirstOpenBase(policy, input, signal));
+  expect((await g.open()).kind).toBe("published");
+}, 60_000);
 
 it("publishes nothing when the validation policy changes while the engine checks, and builds under the new policy next time", async () => {
   const f = await fixture(), validation = selfHostLiveProfile().service.activation.validation;

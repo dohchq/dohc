@@ -14,10 +14,71 @@ function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null 
   return match?.index === 0 ? match : null
 }
 
-function firstUnescapedIndex(src: string, pattern: RegExp): number {
-  const match = pattern.exec(src)
-  if (!match || match.index < 0) return -1
-  return match.index + (match[1]?.length ?? 0)
+// marked asks each inline extension where it may start in the rest of a text
+// before each run of plain text it reads, so a search to the end each time
+// reads a paragraph of short runs, such as lines that end in hard breaks,
+// quadratically. While a lexer reads a text through `lexInlineText`, each
+// search answers from the match it last found in that text until the rest
+// passes it.
+type InlineText = { text: string; found: Map<InlineStart, { from: number; match: number; at: number }> }
+const inlineTexts = new WeakMap<object, InlineText[]>()
+
+export function lexInlineText<T>(lexer: object, text: string, lex: () => T): T {
+  const texts = inlineTexts.get(lexer) ?? []
+  inlineTexts.set(lexer, texts)
+  texts.push({ text, found: new Map() })
+  try {
+    return lex()
+  } finally {
+    texts.pop()
+  }
+}
+
+// A start pattern may capture the character before the start as its first
+// group. Past the first character of a rest, `^` cannot match, and whether
+// the pattern matches depends only on the text from that character on.
+export type InlineStart = { first: RegExp; rest: RegExp }
+
+export function inlineStart(pattern: RegExp): InlineStart {
+  return { first: new RegExp(pattern.source, 'y'), rest: new RegExp(pattern.source, 'g') }
+}
+
+const ESCAPE_START = inlineStart(/\\/)
+// Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose label
+// contains an escaped delimiter is still detected mid-line; the authoritative
+// bounds come from findClosingWikilink in tokenize.
+const WIKILINK_START = inlineStart(/(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/)
+const INLINE_ATOM_START = inlineStart(/\{\{atom:/)
+const HIGHLIGHT_START = inlineStart(/(^|[^\\=])==(?!\s)(?!=)/)
+// Opening `$` must not be preceded by `\` (escaped) or another `$` (that is
+// block/display `$$`), and must be followed by a non-space, non-`$`.
+const MATH_INLINE_START = inlineStart(/(^|[^\\$])\$(?=[^\s$])/)
+
+// Where `start` first matches `src`, the rest of the text `lexer` reads, as
+// the pattern's own search would find it.
+export function findInlineStart(lexer: object | undefined, src: string, start: InlineStart): number {
+  const at = (match: RegExpExecArray) => match.index + (match[1]?.length ?? 0)
+  start.first.lastIndex = 0
+  const first = start.first.exec(src)
+  if (first) return at(first)
+  const read = lexer && inlineTexts.get(lexer)?.at(-1)
+  if (!read || read.text.length < src.length) {
+    start.rest.lastIndex = 1
+    const match = start.rest.exec(src)
+    return match ? at(match) : -1
+  }
+  // The first match from `from` on is still the first from here on if this
+  // search starts no earlier than that one and the match does not start
+  // before it.
+  const from = read.text.length - src.length + 1
+  let found = read.found.get(start)
+  if (!found || found.from > from || (found.match >= 0 && found.match < from)) {
+    start.rest.lastIndex = from
+    const match = start.rest.exec(read.text)
+    found = { from, match: match?.index ?? -1, at: match ? at(match) : -1 }
+    read.found.set(start, found)
+  }
+  return found.match < 0 ? -1 : found.at - from + 1
 }
 
 // marked asks where a block may start only to cut the paragraph it is about
@@ -265,7 +326,9 @@ const DohcEscapedPunctuation = Node.create({
   markdownTokenizer: {
     name: 'dohcEscape',
     level: 'inline',
-    start: '\\',
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, ESCAPE_START)
+    },
     tokenize(src) {
       const match = /^\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/.exec(src)
       if (!match) return undefined
@@ -317,11 +380,8 @@ const DohcWikilink = Node.create({
   markdownTokenizer: {
     name: 'wikilink',
     level: 'inline',
-    start(src) {
-      // Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose
-      // label contains an escaped delimiter is still detected mid-line; the
-      // authoritative bounds come from findClosingWikilink in tokenize.
-      return firstUnescapedIndex(src, /(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/)
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, WIKILINK_START)
     },
     tokenize(src) {
       if (!src.startsWith('[[')) return undefined
@@ -381,7 +441,9 @@ const DohcInlineAtom = Node.create({
   markdownTokenizer: {
     name: 'inlineAtom',
     level: 'inline',
-    start: '{{atom:',
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, INLINE_ATOM_START)
+    },
     tokenize(src) {
       const match = firstTokenMatch(src, /^\{\{atom:([^}\s]+)([^}]*)\}\}/)
       if (!match) return undefined
@@ -758,8 +820,8 @@ const DohcHighlight = Mark.create({
   markdownTokenizer: {
     name: 'highlight',
     level: 'inline',
-    start(src) {
-      return firstUnescapedIndex(src, /(^|[^\\=])==(?!\s)(?!=)/)
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, HIGHLIGHT_START)
     },
     tokenize(src, _tokens, helpers) {
       if (!src.startsWith('==')) return undefined
@@ -840,10 +902,8 @@ export const DohcMathInline = Node.create({
   markdownTokenizer: {
     name: 'mathInline',
     level: 'inline',
-    start(src) {
-      // Opening `$` must not be preceded by `\` (escaped) or another `$` (that
-      // is block/display `$$`), and must be followed by a non-space, non-`$`.
-      return firstUnescapedIndex(src, /(^|[^\\$])\$(?=[^\s$])/)
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, MATH_INLINE_START)
     },
     tokenize(src) {
       if (!src.startsWith('$')) return undefined

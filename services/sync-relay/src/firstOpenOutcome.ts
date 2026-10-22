@@ -51,16 +51,18 @@ export type FirstOpenRecovery = "pull" | "pull-current-source" | "retry-later" |
  *   whatever was restored since. `unsupported-source` names its `cause`.
  *   `too-large` names the bound in `code`; `source-limit`: the file is longer
  *   than a live document can be; `host-capacity`: the service host's
- *   configuration can never fit this check until its operator raises it. The
- *   service host reports `ordinary-activation-refused` after capture; the
- *   route never does.
+ *   configuration can never fit this check until its operator raises it;
+ *   `seed-worker-capacity`: building the base ran the relay's first-open
+ *   worker out of memory, as it would on every try. The service host reports
+ *   `ordinary-activation-refused` after capture; the route never does.
  * - `unavailable`: the document's history says nothing yet. `contention`: the
  *   workspace kept moving through every attempt. `busy`: no worker slot or
  *   engine capacity was free. `reconfigured`: the validation policy changed
  *   after the base was built under it. `history-unavailable`: its history could not be
- *   read. `worker-failed`: the worker building the base failed. The host
- *   failures say why the engine gave no verdict. Nothing was appended or
- *   retained for any of these. `storage-failed`: the relay database failed in
+ *   read. `worker-failed`: the worker building the base failed, other than by
+ *   running out of memory. The host failures say why the engine gave no
+ *   verdict. Nothing was appended or retained for any of these.
+ *   `storage-failed`: the relay database failed in
  *   a way that can pass, possibly while committing the base; asking again
  *   replays any base that was appended. The relay logs the failures.
  * - `integrity`: the relay's own records, or what it told the engine, disagree.
@@ -71,7 +73,7 @@ export type FirstOpenOutcome = {readonly source: FirstOpenSourceIdentity; readon
   | {readonly kind: "existing-history"; readonly reason: "prior-authority"}
   | {readonly kind: "refused"; readonly reason: "deletion" | "stale-source"}
   | {readonly kind: "refused"; readonly reason: "unsupported-source"; readonly cause: FirstOpenUnsupportedCause}
-  | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound | "source-limit" | "host-capacity"}
+  | {readonly kind: "refused"; readonly reason: "too-large"; readonly code: FirstOpenBaseBound | "source-limit" | "host-capacity" | "seed-worker-capacity"}
   | {readonly kind: "refused"; readonly reason: "ordinary-activation-refused"; readonly code?: string}
   | {readonly kind: "unavailable"; readonly reason: "contention" | "busy" | "reconfigured" | FirstOpenFailure | FirstOpenHostFailure}
   | {readonly kind: "integrity"; readonly reason: "reserved-receipt" | "source-evidence" | "candidate" | "check-evidence"}

@@ -215,12 +215,24 @@ export function createLiveValidationExecutor() {
         signal,
       );
     },
-    buildFirstOpenBase(
+    /**
+     * A build that runs its worker out of memory does so on every try, so it
+     * is refused for good. Node emits that worker's exit right after its
+     * error, so its slot is free before the refusal answers.
+     */
+    async buildFirstOpenBase(
       policy: OrderedLiveUpdateCutPolicy,
       input: FirstOpenBaseInput,
       signal?: AbortSignal,
-    ) {
-      return firstOpen<FirstOpenBaseResult>({ kind: "first-open", policy, input }, signal);
+    ): Promise<FirstOpenBaseResult | { kind: "busy" }> {
+      try {
+        return await firstOpen<FirstOpenBaseResult>({ kind: "first-open", policy, input }, signal);
+      } catch (error) {
+        if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ERR_WORKER_OUT_OF_MEMORY") {
+          return { kind: "refused", reason: "seed-worker-capacity" };
+        }
+        throw error;
+      }
     },
     /** Reads first-open history on the worker's own read-only connection, in the first-open slot. */
     readFirstOpenHistory(read: FirstOpenHistoryRead, signal?: AbortSignal) {

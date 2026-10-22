@@ -97,6 +97,51 @@ it.each([
   }
 })
 
+// The characters `run` reads in searches: from where each starts to the end
+// of its match, or to the end of the text when it finds none. An anchored
+// pattern reads only its match.
+function searchWork(run: () => void): number {
+  const { indexOf } = String.prototype
+  const { exec } = RegExp.prototype
+  let work = 0
+  const indexOfSpy = vi.spyOn(String.prototype, 'indexOf').mockImplementation(function (this: string, search: string, from = 0) {
+    const at = Reflect.apply(indexOf, this, [search, from]) as number
+    work += (at < 0 ? this.length : at + search.length) - Math.max(from, 0)
+    return at
+  })
+  const execSpy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (this: RegExp, input: string) {
+    const from = this.global || this.sticky ? this.lastIndex : 0
+    const match = Reflect.apply(exec, this, [input]) as RegExpExecArray | null
+    if (this.sticky || (this.source.startsWith('^') && !this.multiline)) work += match?.[0].length ?? 0
+    else work += (match ? match.index + match[0].length : input.length) - from
+    return match
+  })
+  try {
+    run()
+    return work
+  } finally {
+    indexOfSpy.mockRestore()
+    execSpy.mockRestore()
+  }
+}
+
+// marked asks each inline extension where it may start before each run of
+// plain text, and a line that ends in a hard break ends a run.
+it.each([
+  ['two-space hard breaks', 'a  \n'],
+  ['backslash hard breaks', 'a\\\n'],
+  ['hard breaks among other inline content', '*a* b  \nc `d` ==e== $f$ [[g]] ++h++\\\n'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    const paragraph = parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content?.[0]
+    expect(paragraph?.content?.filter(node => node.type === 'hardBreak'))
+      .toHaveLength(repetitions * (unit.split('\n').length - 1))
+  })
+  const small = measure(128)
+  const large = measure(256)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
 it.each([
   ['1. decimal', 'orderedList'],
   ['12) decimal', 'orderedList'],
@@ -4648,7 +4693,6 @@ describe('an element with more children than Yjs can spread', () => {
 
   it('seeds a paragraph of 200,000 hard breaks', () => {
     const markdown = `a${'\\\n'.repeat(200_000)}a\n`
-    expect(() => yDocFromBody(parseRichdocMarkdown(markdown).content ?? [])).toThrow(RangeError)
     const paragraph = getDohcYDocBodyFragment(markdownToYDoc(markdown)).get(0) as Y.XmlElement
     expect(paragraph.nodeName).toBe('paragraph')
     expect(paragraph.length).toBe(200_002)

@@ -1,5 +1,5 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
-import { Extension, getSchema } from '@tiptap/core'
+import { Extension, flattenExtensions, getSchema, type Mark } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Token, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
@@ -16,7 +16,10 @@ import {
   DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
+  findInlineStart,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
+  inlineStart,
+  lexInlineText,
   MarkdownListItem,
   MarkdownOrderedList,
   DohcProjectedMarkdownLists,
@@ -326,11 +329,28 @@ function htmlRunSource(token: Token): string {
   return generic.dohcHtmlRun === true ? String(generic.text) : token.raw
 }
 
+const UNDERLINE_START = inlineStart(/\+\+/)
+const EMPTY_LINK_START = inlineStart(/\[\]\(/)
+
+// StarterKit's own underline, whose start search reads the rest of the text
+// once, like each of ours. It is StarterKit's last mark, so marks keep their
+// order.
+const starterUnderline = flattenExtensions([StarterKit]).find((extension): extension is Mark => extension.name === 'underline')!
+const MarkdownUnderline = starterUnderline.extend({
+  markdownTokenizer: {
+    ...starterUnderline.config.markdownTokenizer!,
+    start(this: { lexer?: object }, src: string) {
+      return findInlineStart(this.lexer, src, UNDERLINE_START)
+    },
+  },
+})
+
 const extensions: AnyExtension[] = [
   MarkdownHtml,
   MarkdownDefinition,
   ...dohcMarkdownExtensions,
-  StarterKit.configure({ listItem: false, orderedList: false, paragraph: false }),
+  StarterKit.configure({ listItem: false, orderedList: false, paragraph: false, underline: false }),
+  MarkdownUnderline,
   MarkdownParagraph,
   MarkdownListItem,
   MarkdownOrderedList,
@@ -359,9 +379,8 @@ const markdownParser = new Marked({
   extensions: [{
     name: 'dohcEmptyLink',
     level: 'inline',
-    start: (src) => {
-      const at = src.indexOf('[](')
-      return at < 0 ? undefined : at
+    start(src) {
+      return findInlineStart(this.lexer, src, EMPTY_LINK_START)
     },
     tokenizer: (src) => {
       if (!src.startsWith('[](')) return undefined
@@ -437,7 +456,8 @@ const markdownParser = new Marked({
 // inline lexing must see whitespace when it decides emphasis boundaries.
 class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Lexer<ParserOutput, RendererOutput> {
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
-    return super.inlineTokens(parseTabs.size ? restoreParseSentinels(src, parseTabs) : src, tokens)
+    const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
+    return lexInlineText(this, text, () => super.inlineTokens(text, tokens))
   }
 }
 markdownParser.Lexer = ContentTabLexer
