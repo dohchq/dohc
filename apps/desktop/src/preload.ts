@@ -11,6 +11,7 @@ import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
+import { releaseChannelFromArgv } from "./updates/updateMachine";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -156,6 +157,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  releaseChannel: releaseChannelFromArgv(process.argv),
   insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"

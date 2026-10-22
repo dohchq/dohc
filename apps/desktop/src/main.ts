@@ -223,7 +223,7 @@ import {
   type AutoUpdateController,
   type PublicUpdateState,
 } from "./updates/electronUpdater";
-import { initialUpdateState } from "./updates/updateMachine";
+import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
 import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
@@ -990,13 +990,18 @@ function workspaceSummaries(): WorkspaceSummary[] {
 // every renderer's preload, so a packaged app with the env var set shows
 // nothing.
 const devToolsGranted = devToolsEnabled(process.env, app);
+// Every window's preload gets that decision and this build's release channel.
+const preloadArguments = [
+  ...devToolsPreloadArguments(devToolsGranted),
+  ...releaseChannelPreloadArguments(resolveUpdateChannel(app.getVersion())),
+];
 
 const desktopWindows = createDesktopWindows({
   app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, createMainWindow,
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
-  preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
@@ -5644,7 +5649,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
         afterRendererCrashLoop,
-        preloadArguments: devToolsPreloadArguments(devToolsGranted),
+        preloadArguments,
       }),
     ),
     whenLoaded: (window) => new Promise<boolean>((resolve) => {
