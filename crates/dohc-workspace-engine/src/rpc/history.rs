@@ -532,7 +532,7 @@ impl EngineService {
                 author,
                 open.root.clone(),
                 self.leases.scoped(&open.root),
-                std::sync::Arc::clone(&open.session_ops),
+                [open.capture_apply_gate.clone(), open.session_ops.clone()],
                 std::sync::Arc::new(dohc_engine_runtime::NoFaults),
                 (
                     self.version_fence()
@@ -1265,3 +1265,7 @@ mod snapshot_confirmation_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "link_publication_tests.rs"]
+mod link_publication_tests;

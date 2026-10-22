@@ -103,6 +103,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
+import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
@@ -865,6 +866,11 @@ export function DesktopWorkspaceShell(props: {
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
+  const reportCollectionCopiesLeft = useCallback((notice: { message: string; toast: boolean; retry: () => void }) =>
+    reportShellFailure({ message: notice.message, retry: notice.retry, quiet: !notice.toast, kind: "collection-copies-left" }),
+  [reportShellFailure]);
+  const clearCollectionCopiesLeft = useCallback(() => clearKind("collection-copies-left"), [clearKind]);
+  const collectionCopiesLeftNotice = useCollectionCopiesLeftNotice({ report: reportCollectionCopiesLeft, clear: clearCollectionCopiesLeft });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
@@ -5045,6 +5051,7 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
+      if (kind === "collection-copies-left") collectionCopiesLeftNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
         const askedFor = workspaceId;
         const state = shareCaptureNoticeState(shareView.unsavedPaths, shareView.unconfirmedChanges, shareView.ended === true);
@@ -5063,7 +5070,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>

@@ -32,7 +32,11 @@ fn enabled() -> bool {
 }
 pub fn count(label: &'static str, count: u64) {
     // Keep this invariant counter available to harness tests without timing logs.
-    if label == "link_pending_row_writes" || enabled() {
+    if matches!(
+        label,
+        "link_pending_row_writes" | "publication_staging_entries"
+    ) || enabled()
+    {
         TOTALS.with(|totals| {
             let mut totals = totals.borrow_mut();
             let total = totals.entry(label).or_default();

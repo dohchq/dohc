@@ -158,6 +158,8 @@ pub(super) fn recover_all(root: &Path, staging: &Path) -> io::Result<()> {
         Err(err) => return Err(err),
     };
     for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
         let path = entry?.path();
         if path
             .extension()
