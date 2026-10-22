@@ -793,7 +793,12 @@ impl ActorHandle {
                     .staging_location(&row.job_id)?
                     .unwrap_or_else(|| ".dohc/engine/displaced".into());
                 let path = format!("{dir}/{}", row.displaced_name);
-                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                let (_, reached) = dohc_engine_files::materialize::stored_path(
+                    store.database_path(),
+                    &root,
+                    std::path::Path::new(&path),
+                );
+                if std::fs::symlink_metadata(reached).is_ok() {
                     files.push((row.target_path, path));
                 }
             }
