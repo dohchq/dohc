@@ -1,7 +1,8 @@
-use dohc_engine_collab::{ContentKind, Regime, Ydoc};
-use dohc_engine_domain::{VersionedTextStore, WriteText};
+use dohc_engine_collab::{CloseOutcome, CompactOutcome, ContentKind, LeaseRegistry, Regime, Ydoc};
+use dohc_engine_domain::{CreateNamedVersion, VersionedTextStore, WriteText};
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, NoFaults, WorkspaceSupervisor, YdocOpenState, YdocSettlement,
+    ActorHandle, CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor, YdocOpenState,
+    YdocSettlement,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -118,7 +119,7 @@ fn setup(sync: bool) -> ScratchDir {
     scratch
 }
 
-async fn pristine_cycles(sync: bool, edit: bool) {
+async fn pristine_cycles(sync: bool, edit: bool) -> ScratchDir {
     let scratch = setup(sync);
     let db = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
@@ -211,7 +212,7 @@ async fn pristine_cycles(sync: bool, edit: bool) {
                 None
             );
         }
-        actor
+        let closed = actor
             .ydoc_close_session_materialized(
                 scratch.path().to_path_buf(),
                 state.key,
@@ -222,8 +223,15 @@ async fn pristine_cycles(sync: bool, edit: bool) {
             )
             .await
             .expect("close session");
+        if sync && edit && cycle == 1 {
+            assert!(matches!(
+                closed.outcome,
+                Some(CloseOutcome::Compacted(CompactOutcome::Compacted { .. }))
+            ));
+        }
     }
     supervisor.close(&db).expect("close actor");
+    scratch
 }
 
 #[tokio::test]
@@ -236,4 +244,116 @@ async fn pristine_seed_keeps_bytes_across_repeated_settles_and_closes() {
 async fn pristine_seed_edits_still_settle_after_repeated_opens() {
     pristine_cycles(false, true).await;
     pristine_cycles(true, true).await;
+}
+
+#[tokio::test]
+async fn closed_pristine_synced_seed_allows_a_named_version() {
+    let scratch = pristine_cycles(true, false).await;
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 50).expect("actor").actor;
+    assert_eq!(
+        actor
+            .ydoc_version_unsettled_content_kind(
+                WS.to_owned(),
+                "main".to_owned(),
+                Vec::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("fork guard"),
+        None,
+        "a closed pristine synced note has no unsaved edits to block a fork"
+    );
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "copy".to_owned(),
+                name: "Copy".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 51,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("create named version");
+    supervisor.close(&db).expect("close actor");
+    let mut store = EngineStore::open(&db, 52).expect("store");
+    let copied = VersionedTextStore::new(&mut store)
+        .read_text(WS, "copy", PATH)
+        .expect("read copied head")
+        .expect("copied head");
+    assert_eq!(copied.text, SOURCE);
+}
+
+#[tokio::test]
+async fn capture_after_a_closed_pristine_synced_seed_creates_no_recovery_sibling() {
+    let scratch = pristine_cycles(true, false).await;
+    let db = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 50).expect("actor").actor;
+    let outside = "Written outside dohc.\n";
+    std::fs::write(scratch.path().join(PATH), outside).expect("outside edit");
+    actor
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                text: outside.to_owned(),
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 51,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture outside edit");
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WS.to_owned(), 52)
+        .await
+        .expect("materialize pending writes");
+    supervisor.close(&db).expect("close actor");
+    let mut store = EngineStore::open(&db, 53).expect("store");
+    let paths = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id='main' ORDER BY path",
+            )?;
+            query
+                .query_map([WS], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("recorded files");
+    assert_eq!(paths, [PATH], "capture must not recover an unedited seed");
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WS, "main", PATH)
+        .expect("read head")
+        .expect("head");
+    assert_eq!(head.text, outside);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).unwrap(),
+        outside
+    );
+    let extra_files = std::fs::read_dir(scratch.path())
+        .expect("workspace files")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name != PATH && name != ".dohc")
+        .collect::<Vec<_>>();
+    assert!(extra_files.is_empty(), "unexpected files: {extra_files:?}");
 }

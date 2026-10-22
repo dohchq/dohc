@@ -2356,7 +2356,7 @@ fn projection_held_in_tx(
     key: &DocKey,
     content: &str,
 ) -> Result<bool, SyncError> {
-    if dohc_engine_collab::seed_only_lineage_source(tx, key)
+    if dohc_engine_collab::pristine_seed_lineage_source(tx, key)
         .map_err(map_collab_hard_error)?
         .is_some()
     {

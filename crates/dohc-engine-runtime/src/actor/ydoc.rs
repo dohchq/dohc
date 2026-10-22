@@ -1273,7 +1273,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
             .map_err(StorageError::corrupt_public)
             .map(Option::flatten)
         })?;
-        let seed_source = dohc_engine_collab::read_seed_only_lineage_source(store, &key)?;
+        let seed_source = dohc_engine_collab::read_pristine_seed_lineage_source(store, &key)?;
         let covered_by_seed = seed_source
             .as_deref()
             .is_some_and(|source| materialized_sha.as_deref() == Some(source));
@@ -3416,7 +3416,8 @@ fn close_projection(
     // belong to this object and are on disk before allowing its prune.
     let materialized_seed_source_sha256 = if let Some(root_dir) = root_dir
         && let Some(path) = marker.path.as_deref()
-        && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+        && let Some(seed_source) =
+            dohc_engine_collab::read_pristine_seed_lineage_source(store, key)?
         && store.read_with(|conn| -> Result<bool, StorageError> {
             conn.query_row(
                 "SELECT EXISTS (SELECT 1 FROM snapshots \
