@@ -52,7 +52,7 @@ async function prepare(host: LocalDatasetHost) {
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   const dataset = { kind: "dataset", datasetId: definition.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
   sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
-  return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
+  return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, deferredWrites: [], compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
 }
 
 // Real compiled frontend, loopback bootstrap, opaque browser broker, isolated runtime, and durable SQLite store.

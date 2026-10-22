@@ -974,7 +974,17 @@ it("recovery replies only authorize retirement after a committed decision", () =
 
 it("decodes whether a recovery keeps typing for a deleted file",()=>{
  const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
- expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,deferredWrites:[],keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+});
+
+it("decodes outside writes waiting for an open document", () => {
+  const status = { running: true, degraded: false, terminal: false, phase: "ready",
+    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+    heldFiles: [], deferredWrites: ["notes/open.md"] };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
+  for (const deferredWrites of [null, [""], [1]]) {
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, deferredWrites })).toThrow(ProtocolShapeError);
+  }
 });
 
 const heldFile = {
@@ -990,9 +1000,9 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
-  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
-  [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
-  [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
+  ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
+  [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.watcherStatus, {
     running: true,
     degraded: false,
@@ -1000,12 +1010,20 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
     phase: "ready",
     noAtomicPlacement: false,
     recoveryUnavailable: false,
+    deferredWrites: [],
     keptFiles: [],
     captureRecoveries: [],
   }],
 ];
 
 for (const [method, base] of holdReplies) {
+  it(`decodes ${method} waiting paths and rejects malformed lists`, () => {
+    const result = { ...base, heldFiles: [], deferredWrites: ["notes/open.md"] };
+    expect(decodeWorkspaceResult(method, result)).toEqual(result);
+    for (const deferredWrites of [null, [""], [1]]) {
+      expect(() => decodeWorkspaceResult(method, { ...result, deferredWrites })).toThrow(ProtocolShapeError);
+    }
+  });
   it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
     `decodes ${method} held files (%j)`,
     ({ heldFiles }) => {

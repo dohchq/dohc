@@ -37,6 +37,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
+import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
@@ -2210,6 +2211,12 @@ function testSyncTimingOverrides(): {
   };
 }
 
+// Test-only network-share seam: every workspace reads as on a network
+// share, so its notice can be seen on any computer.
+function testNetworkShare(): boolean {
+  return process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && process.env.DOHC_TEST_NETWORK_SHARE === "1";
+}
+
 // Test-only settle seams for the crash spec. The debounce holds an edit
 // unsettled until the spec kills the app, instead of racing the kill. The
 // gate holds a reopened document's recovery settle while its file exists,
@@ -2451,6 +2458,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     if (waiting === null) throw new Error("The workspace engine is not running.");
     return waiting;
   },
+  onNetworkShare: rootPath => (testNetworkShare() ? Promise.resolve(true) : onNetworkShare(rootPath)),
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -6520,6 +6528,9 @@ function registerIpcHandlers(): void {
         throw new Error("dohc could not capture this app. Restart dohc and try again.");
       }
       await capture.flush();
+      const result = await withEngineAdapter(workspace, adapter => adapter.flushCapture());
+      if (!result) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      return result;
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {

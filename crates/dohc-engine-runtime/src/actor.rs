@@ -52,9 +52,9 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CapturePassSettlement,
-    CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
-    WorkspaceRootGuard,
+    CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CAPTURE_WRITE_WAITS_FOR_SESSION,
+    CapturePassSettlement, CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
@@ -793,7 +793,12 @@ impl ActorHandle {
                     .staging_location(&row.job_id)?
                     .unwrap_or_else(|| ".dohc/engine/displaced".into());
                 let path = format!("{dir}/{}", row.displaced_name);
-                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                let (_, reached) = dohc_engine_files::materialize::stored_path(
+                    store.database_path(),
+                    &root,
+                    std::path::Path::new(&path),
+                );
+                if std::fs::symlink_metadata(reached).is_ok() {
                     files.push((row.target_path, path));
                 }
             }

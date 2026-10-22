@@ -118,6 +118,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
+import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { errorDetails } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
@@ -850,6 +851,7 @@ export function DesktopWorkspaceShell(props: {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
     reportRecoveryUnavailable,
     showTabLimitError,
@@ -5027,6 +5029,12 @@ export function DesktopWorkspaceShell(props: {
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
     report: reportDriveLimit,
   });
+  const networkShareNotice = useNetworkShareNotice({
+    workspaceId,
+    onNetworkShare: syncStatus?.onNetworkShare === true,
+    platform: bridge().platform,
+    report: reportNetworkShare,
+  });
   const revealRecoveryWorkspace = useCallback(() => {
     const askedFor = workspaceId;
     void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
@@ -5074,6 +5082,7 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "network-share") networkShareNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
       if (kind === "collection-copies-left") collectionCopiesLeftNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
@@ -5094,7 +5103,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, networkShareNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>

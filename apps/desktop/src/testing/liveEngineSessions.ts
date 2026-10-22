@@ -23,7 +23,7 @@ const READY_WATCHER_STATUS = {
   running: true,
   degraded: false,
   terminal: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+  noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [],
   phase: "ready",
 } satisfies WatcherStatusResult;
 
@@ -36,7 +36,7 @@ const READY_WATCHER_STATUS = {
  */
 export function daemonCaptureLifecycleAnswer(
   request: Request,
-  captureFlushResult: () => CaptureFlushResult = () => ({
+  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,
@@ -89,7 +89,7 @@ export function daemonCaptureLifecycleAnswer(
 export function mockLiveSessions(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
-  captureFlushResult: () => CaptureFlushResult = () => ({
+  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,

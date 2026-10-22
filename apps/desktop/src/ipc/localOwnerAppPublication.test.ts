@@ -26,7 +26,7 @@ function harness() {
   const datasetForWorkspace = vi.fn(async () => local);
   const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
   const handler = createLocalOwnerAppPublicationHandler({ datasetForWorkspace, launchLocalDataset,
-    flushCapture: vi.fn(async () => {}), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
+    flushCapture: vi.fn(async () => ({ deferredWrites: [] })), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
   const prepare = async () => {
     const result = await handler({ action: "prepareLocal", workspaceId: "w", appRoot: "app" }, "caller", operation);

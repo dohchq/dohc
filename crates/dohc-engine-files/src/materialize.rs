@@ -2272,7 +2272,7 @@ fn job_staging_dir(
     create: bool,
 ) -> Result<PathBuf, MaterializeError> {
     let Some(rel) = store.staging_location(job_id)? else {
-        return checked_staging_dir(root, create);
+        return checked_staging_dir(store.database_path(), root, create);
     };
     let path = Path::new(&rel);
     if path.is_absolute()
@@ -2305,7 +2305,7 @@ fn all_staging_dirs(
             eprintln!("materialization recovery directory: {error}");
         }
     };
-    add(staging_dir(root, false));
+    add(staging_dir(store.database_path(), root, false));
     for rel in store.staging_locations()? {
         add((|| {
             let path = Path::new(&rel);
@@ -3031,6 +3031,62 @@ pub(super) fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
 /// the workspace's volume, so staging is one plain rename.
 const STAGING_DIR: &str = ".dohc/engine/displaced";
 
+/// The folder staging is checked from, and the staging folder below it. A
+/// store at `database` that opened through its folder's ID, as the engine
+/// opens a workspace's store on a Mac, sits in the engine folder the engine
+/// checked. Staging then goes through that folder, and only `displaced` is
+/// checked below it. Otherwise the check starts at `root`.
+fn staging_base(database: &Path, root: &Path) -> (PathBuf, PathBuf) {
+    if let Some(engine) = database.parent().filter(|engine| by_id(engine)) {
+        let name = Path::new(STAGING_DIR).file_name().unwrap_or_default();
+        return (engine.to_owned(), engine.join(name));
+    }
+    (root.to_owned(), root.join(STAGING_DIR))
+}
+
+/// Whether `path` names its folder by ID rather than by name.
+fn by_id(path: &Path) -> bool {
+    #[cfg(target_vendor = "apple")]
+    return dohc_macos_files::is_path_by_id(path);
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// The path that reaches `rel`, a workspace-relative name a row stores, and
+/// the folder to check that path from. A name below `.dohc/engine/displaced`
+/// goes through the staging folder of [`staging_base`].
+pub fn stored_path(database: &Path, root: &Path, rel: &Path) -> (PathBuf, PathBuf) {
+    let (base, staging) = staging_base(database, root);
+    match rel.strip_prefix(STAGING_DIR) {
+        Ok(name) if by_id(&base) => (base, staging.join(name)),
+        _ => (root.to_owned(), root.join(rel)),
+    }
+}
+
+/// The workspace-relative name a row stores for `path`, a staged file. A file
+/// in the staging folder of [`staging_base`] is named below
+/// `.dohc/engine/displaced`, whichever path reached it.
+pub(super) fn stored_name(
+    database: &Path,
+    root: &Path,
+    path: &Path,
+) -> Result<String, MaterializeError> {
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel.to_owned(),
+        Err(_) => {
+            let (_, staging) = staging_base(database, root);
+            let name = path
+                .strip_prefix(&staging)
+                .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+            Path::new(STAGING_DIR).join(name)
+        }
+    };
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
 fn sync_staged(
     store: &EngineStore,
     staging: &Path,
@@ -3038,25 +3094,32 @@ fn sync_staged(
 ) -> Result<(), MaterializeError> {
     sync_parent_dir(store, Some(staging), policy)?;
     // Include newly created staging ancestors before source removal is synced.
+    // A staging folder reached by the engine folder's ID was the only one made.
     sync_parent_dir(store, staging.parent(), policy)?;
-    sync_parent_dir(store, staging.parent().and_then(Path::parent), policy)
+    let engine = staging.parent().filter(|engine| !by_id(engine));
+    sync_parent_dir(store, engine.and_then(Path::parent), policy)
 }
 
-/// The staging directory under an already-canonicalized root. Every
-/// component must be a real directory; `create` makes the missing ones.
-fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
-    let dir = checked_staging_dir(root, create)?;
+/// The staging directory under an already-canonicalized root, or through the
+/// engine folder of [`staging_base`]. Every component must be a real
+/// directory; `create` makes the missing ones.
+fn staging_dir(database: &Path, root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = checked_staging_dir(database, root, create)?;
     #[cfg(windows)]
     readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
     Ok(dir)
 }
 
-fn checked_staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
-    let dir = root.join(STAGING_DIR);
+fn checked_staging_dir(
+    database: &Path,
+    root: &Path,
+    create: bool,
+) -> Result<PathBuf, MaterializeError> {
+    let (base, dir) = staging_base(database, root);
     if create {
-        walk_target_components(root, &dir, ensure_real_directory)?;
+        walk_target_components(&base, &dir, ensure_real_directory)?;
     } else {
-        ensure_target_symlink_free(root, &dir)?;
+        ensure_target_symlink_free(&base, &dir)?;
     }
     // Check access without walking other jobs' entries.
     #[cfg(windows)]
@@ -3185,14 +3248,11 @@ fn rowless_staged(
             continue;
         };
         if names.contains(&name)
-            || store.is_retained_source(
-                &staging
-                    .join(&name)
-                    .strip_prefix(root)
-                    .map_err(|_| MaterializeError::UnsafeTargetPath)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )?
+            || store.is_retained_source(&stored_name(
+                store.database_path(),
+                root,
+                &staging.join(&name),
+            )?)?
         {
             continue;
         }
@@ -3683,7 +3743,7 @@ pub fn recover_path_displacements(
     }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let staging = staging_dir(&canonical_root, false)?;
+    let staging = staging_dir(store.database_path(), &canonical_root, false)?;
     let rowless = rowless_all(store, &canonical_root)?
         .into_iter()
         .filter(|staged| {
@@ -4026,7 +4086,7 @@ fn recover_job_displacements(
         return Ok((
             Staging {
                 root: root.to_owned(),
-                dir: root.join(STAGING_DIR),
+                dir: staging_base(store.database_path(), root).1,
                 taken: Vec::new(),
             },
             false,
@@ -6627,7 +6687,7 @@ mod tests {
                 let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
                 enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
                 let expected = store.put_binary_blob(b"preimage").unwrap();
-                let staging = staging_dir(&root, true).unwrap();
+                let staging = staging_dir(&scratch.db(), &root, true).unwrap();
                 let name = staged_name("kept-link", 0);
                 let kept = staging.join(&name);
                 let bytes: &[u8] = if known_bytes {
@@ -6849,7 +6909,9 @@ mod tests {
         for fail in [true, false] {
             let scratch = Scratch::new("readonly-unlink");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             std::fs::write(&incoming, b"outside").unwrap();
             let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
@@ -7040,7 +7102,9 @@ mod tests {
         for unlink in [false, true] {
             let scratch = Scratch::new("readonly-fallback-crash");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             let store = EngineStore::open(&scratch.db(), 1).unwrap();
             drop(store);
@@ -7133,7 +7197,7 @@ mod tests {
             .load_materialization_job("folder-case")
             .unwrap()
             .unwrap();
-        let incoming = staging_dir(&root, true)
+        let incoming = staging_dir(&scratch.db(), &root, true)
             .unwrap()
             .join(staged_name(&job.job_id, 0));
         std::fs::write(&incoming, b"outside").unwrap();
@@ -7525,7 +7589,7 @@ mod tests {
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
-        let staging = staging_dir(&root, true).unwrap();
+        let staging = staging_dir(&scratch.db(), &root, true).unwrap();
         let name = staged_name("held-recovery", 0);
         std::fs::write(staging.join(&name), previous).unwrap();
         if journaled {

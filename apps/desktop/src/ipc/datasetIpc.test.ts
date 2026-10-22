@@ -37,7 +37,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     for (const [path, source] of Object.entries(files)) sources.set(path, source);
     invalidateDatasetAddresses({ workspaceId: "workspace" });
   });
-  const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal): Promise<readonly { path: string }[]> => []);
+  const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal): Promise<import("../workspaces/datasetSourceCapture").SourceCaptureStatus> => ({ heldFiles: [], deferredWrites: [] }));
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)]]);
   const sourceRequests: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace", onRequest(method, params) { sourceRequests.push({ method, params }); } });
@@ -308,7 +308,7 @@ it("waits for source capture before preparing authored Collection changes", asyn
   for (const action of ["prepare", "prepareMigration"] as const) {
     const f = fixture();
     let finish!: () => void;
-    f.flushSourceCapture.mockImplementation(() => new Promise<readonly { path: string }[]>(resolve => { finish = () => resolve([]); }));
+    f.flushSourceCapture.mockImplementation(() => new Promise<import("../workspaces/datasetSourceCapture").SourceCaptureStatus>(resolve => { finish = () => resolve({ heldFiles: [], deferredWrites: [] }); }));
     f.withAdapter.mockRejectedValue(new Error("source capture reached"));
     const request = action === "prepare" ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
       : { workspaceId: "workspace", action, datasetPath: "data/dataset.json", migrationPath: "data/change.sql" };
@@ -322,20 +322,22 @@ it("waits for source capture before preparing authored Collection changes", asyn
   }
 });
 
-it.each(["data/dataset.json", "data/schema.sql", "data/operations.js"])("refuses source review when its read of %s is held", async path => {
+it.each(["data/dataset.json", "data/schema.sql", "data/operations.js"].flatMap(path => [
+  { path, waiting: false }, { path, waiting: true },
+]))("refuses source review for $path (waiting=$waiting)", async ({ path, waiting }) => {
   const f = fixture();
-  f.flushSourceCapture.mockResolvedValue([{ path }]);
+  f.flushSourceCapture.mockResolvedValue({ heldFiles: waiting ? [] : [{ path }], deferredWrites: waiting ? [path] : [] });
   Object.assign(f.host, { prepare: async ({ adapter }: { adapter: VersionedLiveAdapter }) => {
     await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json", "data/schema.sql", "data/operations.js"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
     throw Error("review read held source");
   } });
-  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(`dohc cannot use "${path}" for this change. dohc cannot represent part of the file`);
+  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(waiting ? `"${path}" has an outside change waiting` : `dohc cannot use "${path}" for this change. dohc cannot represent part of the file`);
   expect(f.sourceRequests.filter(request => request.method === "versionedText.captureSources")).toHaveLength(0);
 });
 
 it("reviews source when the only held file is unrelated", async () => {
   const f = fixture();
-  const result = { settled: true, running: true, degraded: false, heldFiles: [{ workspaceId: "workspace", sourceVersionId: "main", objectId: "object", path: "unrelated.md", observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const, observedAtMs: 1, attemptCount: 1, retryRequested: false }] };
+  const result = { deferredWrites: ["also-unrelated.md"], settled: true, running: true, degraded: false, heldFiles: [{ workspaceId: "workspace", sourceVersionId: "main", objectId: "object", path: "unrelated.md", observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const, observedAtMs: 1, attemptCount: 1, retryRequested: false }] };
   f.flushSourceCapture.mockImplementation((_workspace, signal) => flushDatasetSourceCapture({ reconcileCapture: async () => result, flushCapture: async () => result }, signal));
   const reached = vi.fn(async ({ adapter }: { adapter: VersionedLiveAdapter }) => {
     await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
@@ -353,11 +355,11 @@ it("refuses source review after failed settlement or changed workspace authority
   await expect(failed.handler("window", request)).rejects.toThrow("capture not settled");
   expect(failed.withAdapter).not.toHaveBeenCalled();
   const stale = fixture();
-  stale.flushSourceCapture.mockImplementation(async () => { stale.stale(); return []; });
+  stale.flushSourceCapture.mockImplementation(async () => { stale.stale(); return { heldFiles: [], deferredWrites: [] }; });
   await expect(stale.handler("window", request)).rejects.toThrow("stale workspace");
   expect(stale.withAdapter).not.toHaveBeenCalled();
   const aborted = fixture();
-  aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); return []; });
+  aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); return { heldFiles: [], deferredWrites: [] }; });
   await expect(aborted.handler("window", request)).rejects.toThrow("review cancelled");
   expect(aborted.withAdapter).not.toHaveBeenCalled();
 });
@@ -432,7 +434,7 @@ it("flushes and retries a missing address once after an agent moves its folder",
   f.flushSourceCapture.mockImplementationOnce(async () => {
     f.sources.set("moved/dataset.json", f.sources.get("data/dataset.json")!);
     f.sources.delete("data/dataset.json");
-    return [];
+    return { heldFiles: [], deferredWrites: [] };
   });
   await f.handler("agent", { ...request, datasetPath: "moved/dataset.json" });
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(1);

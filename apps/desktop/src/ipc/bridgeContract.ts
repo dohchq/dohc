@@ -1302,6 +1302,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // made at the same moment. Optional, unlike its neighbours: an omitted
   // warning reads as "no warning", which is the safe reading.
   atomicPlacementUnavailable: z.boolean().optional(),
+  // True when the workspace is on a network share, whose server, not dohc,
+  // decides who can read its History (#2379). Omitted otherwise.
+  onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
@@ -1412,7 +1415,7 @@ export const captureRecoveryOperations = {
     capabilityId: "capture.held.retry",
     channel: "desktop:retry-held-capture",
     payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
-    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    result: z.object({ deferredWrites: z.array(z.string().min(1)), settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },
