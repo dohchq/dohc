@@ -3187,8 +3187,10 @@ async function syncWorkspaceForDispatch(
         return await withEngineStoreRecoveredForAuthority(lease, async () => {
           lease.assertCurrent();
           if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+            const activityRootPath = activity.workspaceRootPath(workspaceId);
             if (
-              activity.workspaceRootPath(workspaceId) !== workspace.rootPath
+              activityRootPath === null ||
+              !workspaceRootsMatch(activityRootPath, workspace.rootPath)
             ) {
               throw new Error(
                 "This workspace was closed. Open it again.",
@@ -5041,7 +5043,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });

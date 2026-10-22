@@ -17,3 +17,9 @@ it("compares real registry and native roots without admitting another folder", a
 it.skipIf(process.platform === "win32")("keeps literal backslashes in POSIX folder names distinct", () => {
   expect(workspaceRootsMatch("/work/trip\\2026", "/work/trip/2026")).toBe(false);
 });
+
+it("keeps roots differing only in letter case distinct on every platform", () => {
+  const prefix = process.platform === "win32" ? "C:/work/" : "/work/";
+  expect(workspaceRootsMatch(`${prefix}Trip`, `${prefix}trip`)).toBe(false);
+  expect(workspaceRootsMatch(`${prefix}trip`, `${prefix}Trip`)).toBe(false);
+});
