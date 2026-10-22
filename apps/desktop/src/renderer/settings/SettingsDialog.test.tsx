@@ -124,7 +124,8 @@ const bridge = {
   }),
   installUpdate: vi.fn(async (): Promise<{
     accepted: boolean;
-    state: SettingsUpdateState;
+    reason?: string;
+    state: SettingsUpdateState | (typeof readyUpdateState & { installCommand: string });
   }> => ({
     accepted: updateReady,
     state: updateReady ? readyUpdateState : idleUpdateState,
@@ -2299,6 +2300,29 @@ describe("SettingsDialog", () => {
         "Could not restart into the update.",
       ),
     );
+  });
+
+  it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
+    updateReady = true;
+    const reason = "dohc did not get permission to install the update. Run this command in a terminal to install it.";
+    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
+    bridge.installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      reason,
+      state: { ...readyUpdateState, message: reason, installCommand },
+    });
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe("ready"),
+    );
+    expect(screen.queryByTestId("desktop-updates-install-command")).toBeNull();
+
+    await user.click(screen.getByTestId("install-update-button"));
+
+    await waitFor(() => expect(screen.getByTestId("desktop-updates-status").textContent).toBe(reason));
+    expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);
+    expect(screen.getByTestId("desktop-updates-install-command-copy").getAttribute("aria-label")).toBe("Copy install command");
   });
 
   it("persists the attachment location and hides the folder name for same-folder", async () => {
