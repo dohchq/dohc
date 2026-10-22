@@ -364,6 +364,8 @@ it.each([
     'Ordinary activation history differs from the captured lineage.'],
   ['a malformed lineage claim',(f,_loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'unknown',updateBlobSha256:hash(Buffer.from('unknown'))})),
     'Ordinary activation history differs from the captured lineage.'],
+  ['a lineage claim with an embedded NUL',(f,_loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'b'.repeat(64)+'\u0000damaged',updateBlobSha256:hash(Buffer.from('unknown'))})),
+    'Ordinary activation history differs from the captured lineage.'],
   ['a second base naming the captured lineage',(f,loser)=>append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:loser.lineageClaimId})),
     'Ordinary activation has a different baseline.'],
   ['a replaced file',(f,_loser)=>append(f,'losing-device',2,'moment.append',{versionId:'main',objectId:'object',momentId:'losing-delete',path:'docs/a.md',operation:'delete'}),

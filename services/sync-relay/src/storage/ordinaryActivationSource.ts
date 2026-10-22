@@ -39,7 +39,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
       AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
       AND NOT (op_kind='ydoc.update' AND json_type(payload_json,'$.lineageClaimId') IS 'text' AND ${claim}<>?
-        AND length(${claim})=64 AND ${claim} NOT GLOB '*[^0-9a-f]*')
+        AND length(${claim})=64 AND length(CAST(${claim} AS BLOB))=64 AND ${claim} NOT GLOB '*[^0-9a-f]*')
     ORDER BY relay_seq LIMIT ?`;
   const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
