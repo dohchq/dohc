@@ -1,20 +1,25 @@
-import { chmod, link, lstat, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
-  existingLocalStateFolder,
   localStateDir,
   localStateFolder,
   LocalStateFolderError,
   LocalStateUnavailableError,
-  ownedLocalStateDir,
   ownedSqliteFiles,
   readLocalStateFrom,
+  readOwnedLocalState,
+  readOwnedLocalStateFolder,
 } from "./workspaceLocalState";
+import { readUiStateFile } from "./workspaceUiState";
 import { createTestScratch } from "./testTemp";
+
+// The folder a reader is given.
+const ownedLocalStateDir = (rootPath: string) => readOwnedLocalState(rootPath, async (dir) => dir);
+const existingLocalStateFolder = (rootPath: string, name: string) => readOwnedLocalStateFolder(rootPath, name, async (dir) => dir);
 
 // A daemon whose opens answer as the engine's do: it prepares the folder,
 // then says whether it is ready.
@@ -225,5 +230,97 @@ describe("this computer's .dohc/local", () => {
     expect(await existingLocalStateDir(workspace.rootPath)).toBeNull();
     await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
     expect(await existingLocalStateDir(workspace.rootPath)).toMatch(/local$/);
+  });
+});
+
+// Node can't see who may change a folder on Windows, so there a reader trusts
+// `.dohc/local` only while the engine's open holds it.
+describe("this computer's .dohc/local for a reader on Windows", () => {
+  const platform = process.platform;
+  const runOn = (system: NodeJS.Platform) => Object.defineProperty(process, "platform", { value: system });
+  afterEach(() => runOn(platform));
+  // The test scratch is made for the system the tests run on.
+  async function windowsEngine() {
+    const made = await engine();
+    runOn("win32");
+    return made;
+  }
+
+  it("refuses a reader until this workspace's engine open holds the folder, and again once it closes", async () => {
+    const { sessions, workspace, open } = await windowsEngine();
+    await mkdir(join(workspace.rootPath, ".dohc", "local", "automations"), { recursive: true });
+    expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
+    expect(await refusal(existingLocalStateFolder(workspace.rootPath, "automations"))).toBe("not-opened");
+
+    await open();
+    expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
+    expect(await existingLocalStateFolder(workspace.rootPath, "automations")).toMatch(/automations$/);
+
+    await sessions.closeWorkspaceBinding(workspace);
+    expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
+  });
+
+  it("refuses a reader when the engine's open did not prepare the folder", async () => {
+    const { daemon, workspace, open } = await windowsEngine();
+    daemon.ready = false;
+    await open();
+    expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
+  });
+
+  it("waits for an open under way, then reads", async () => {
+    const { daemon, sessions, workspace, open } = await windowsEngine();
+    await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
+    const held = Promise.withResolvers<void>();
+    daemon.hold = held.promise;
+    const opening = open();
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    const reading = ownedLocalStateDir(workspace.rootPath);
+    held.resolve();
+    await opening;
+    expect(await reading).toMatch(/local$/);
+  });
+
+  // A read is trusted only while one open holds the folder throughout.
+  it("drops what a reader found when the open closes before the read ends, even if another open follows", async () => {
+    const { sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "settings.local.json"), "{}");
+    const settings = (dir: string | null) => readFile(join(dir!, "settings.local.json"), "utf8");
+    await open();
+    expect(await refusal(readOwnedLocalState(workspace.rootPath, async (dir) => {
+      await sessions.closeWorkspaceBinding(workspace);
+      return settings(dir);
+    }))).toBe("not-opened");
+
+    await open();
+    expect(await refusal(readOwnedLocalState(workspace.rootPath, async (dir) => {
+      await sessions.closeWorkspaceBinding(workspace);
+      await open();
+      return settings(dir);
+    }))).toBe("not-opened");
+    expect(await readOwnedLocalState(workspace.rootPath, settings)).toBe("{}");
+  });
+
+  it("reads no saved layout before an open or once it closes", async () => {
+    const { sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+    await open();
+    expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
+    await sessions.closeWorkspaceBinding(workspace);
+    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+  });
+
+  it("reads as before on other systems, with no open", async () => {
+    const { workspace } = await engine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    runOn("linux");
+    expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
+    expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
   });
 });

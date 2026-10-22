@@ -2080,12 +2080,13 @@ describe("Collection automations", () => {
     // The person hears why, with Try again.
     await w.until(() => w.failureReports.length === 1);
     expect(w.failureReports[0]!.failure).toMatchObject({ claimId: claim.claimId, error: refused });
-    // The step saved before the refusal is still there.
+
+    await w.localState.open();
+    // The step saved before the refusal is still there. On Windows dohc reads
+    // it only while an open holds `.dohc/local`.
     const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
     expect(saved!.steps).toHaveLength(1);
     expect(saved!.applied).toEqual([]);
-
-    await w.localState.open();
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(3);

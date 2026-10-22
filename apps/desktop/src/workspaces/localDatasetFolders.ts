@@ -1,7 +1,7 @@
 import {
-  existingLocalStateFolder,
   localStateFolder,
   LocalStateUnavailableError,
+  readOwnedLocalStateFolder,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 
@@ -51,8 +51,11 @@ export async function localDatasetFolder(workspace: LocalStateWorkspace, folder:
   }
 }
 
-/** The export folder for a reader, or null when it is missing or not one only this user can change. */
-export async function existingLocalDatasetExports(rootPath: string): Promise<string | null> {
-  const dir = await existingLocalStateFolder(rootPath, FOLDERS.exports.path);
-  return dir === "unusable" ? null : dir;
+/**
+ * Reads the export folder with `read`, given the folder, or null when it is
+ * missing or not one only this user can change. Refuses as
+ * readOwnedLocalStateFolder does.
+ */
+export function readLocalDatasetExports<T>(rootPath: string, read: (dir: string | null) => Promise<T>): Promise<T> {
+  return readOwnedLocalStateFolder(rootPath, FOLDERS.exports.path, (dir) => read(dir === "unusable" ? null : dir));
 }

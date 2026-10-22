@@ -41,9 +41,9 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
- * kind of item, another user's, or on a disk dohc can't check. The message
- * names the reason, then the path from the workspace's root: one of the
- * paths below, and nothing else.
+ * kind of item, another user's, on a disk dohc can't check, or, on Windows,
+ * has permissions dohc can't use. The message names the reason, then the
+ * path from the workspace's root: one of the paths below, and nothing else.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
   /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
@@ -55,6 +55,7 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
   ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
+  ["not-changeable", ["has permissions dohc can't use", "Give your account full control of this folder and everything in it, then try again."]],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.

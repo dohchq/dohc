@@ -203,6 +203,7 @@ describe("error words", () => {
   const OTHER_OWNER = "Make it yours again, then try again.";
   const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
   const MOVE_ASIDE = "Rename or move it, then try again.";
+  const NOT_CHANGEABLE = "Give your account full control of this folder and everything in it, then try again.";
   it.each([
     ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
     ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
@@ -216,6 +217,8 @@ describe("error words", () => {
     ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
     ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
     ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
+    ["not-changeable .dohc", `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/local", `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`],
   ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
     const message = `engine-folder-not-private: ${detail}`;
     expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
