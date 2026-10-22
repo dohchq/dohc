@@ -102,13 +102,17 @@ export function isLossyDocumentState(state: Uint8Array): boolean {
 /**
  * Whether a note's witness alone shows it is not a lossy note. Its source
  * keeps its meaning in the projection the witness records, so no document
- * holding that witness, edited or not, can be one. False when today's
- * import no longer gives that projection.
+ * holding that witness, edited or not, can be one. False for a witness
+ * that is partial, whose source doesn't match its recorded digest, or whose
+ * projection today's import no longer gives.
  */
 export function witnessKeepsMeaning(doc: Y.Doc): boolean {
   const meta = doc.getMap('meta')
   const source = meta.get('dohcMarkdownSource')
-  if (typeof source !== 'string') return true
+  const sourceSha = meta.get('dohcMarkdownSourceSha256')
+  const projectionSha = meta.get('dohcMarkdownSourceProjectionSha256')
+  if (source === undefined && sourceSha === undefined && projectionSha === undefined) return true
+  if (typeof source !== 'string' || sourceSha !== sha256(source) || typeof projectionSha !== 'string') return false
   let canonical: string
   try {
     const imported = markdownToYDoc(source)
@@ -120,7 +124,7 @@ export function witnessKeepsMeaning(doc: Y.Doc): boolean {
   } catch {
     return false
   }
-  return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical) && sameMarkdownMeaning(source, canonical)
+  return projectionSha === sha256(canonical) && sameMarkdownMeaning(source, canonical)
 }
 
 /**

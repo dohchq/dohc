@@ -120,6 +120,12 @@ it('checks the whole session when its witness records a lossy source, or a proje
   const older = seeded('Title\n=====\n\n* one\n')
   older.getMap('meta').set('dohcMarkdownSourceProjectionSha256', '0'.repeat(64))
   expect(witnessKeepsMeaning(older)).toBe(false)
+  const partial = seeded('Title\n=====\n\n* one\n')
+  partial.getMap('meta').delete('dohcMarkdownSourceProjectionSha256')
+  expect(witnessKeepsMeaning(partial)).toBe(false)
+  const mismatched = seeded('Title\n=====\n\n* one\n')
+  mismatched.getMap('meta').set('dohcMarkdownSource', 'Title\n=====\n\n* two\n')
+  expect(witnessKeepsMeaning(mismatched)).toBe(false)
 })
 
 it('names the note when it could not be read to check', () => {

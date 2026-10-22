@@ -172,19 +172,21 @@ export function useLossyNote(input: {
  * checks each such witness once.
  */
 export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null}): LossyNoteCheck {
-  const meta = input.doc?.getMap('meta');
-  const sha = meta?.get('dohcMarkdownSourceSha256');
-  const witness = `${String(sha)}:${String(meta?.get('dohcMarkdownSourceProjectionSha256'))}`;
+  const sha = input.doc?.getMap('meta').get('dohcMarkdownSourceSha256');
+  const witness = input.doc ? witnessKey(input.doc) : null;
   // Keyed by the document too: sync can replace a session's document with
   // another that records the same source.
   const key = input.doc && typeof sha === 'string' && sha !== input.checkedHash ? `session:${docId(input.doc)}:${sha}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
-  const verdict = useVerdict(input.open, key, keepingWitnesses.has(witness) ? false : undefined, () => {
+  const verdict = useVerdict(input.open, key, witness !== null && keepingWitnesses.has(witness) ? false : undefined, () => {
     if (!doc.current) return Promise.resolve(true);
+    // The witness in the state the worker checks, which sync may have
+    // changed since this note rendered.
+    const checked = witnessKey(doc.current);
     return ask({state: Y.encodeStateAsUpdate(doc.current)}).then((answer) => {
-      if (answer.witnessKeepsMeaning) {
-        keepingWitnesses.add(witness);
+      if (answer.witnessKeepsMeaning && checked !== null) {
+        keepingWitnesses.add(checked);
         if (keepingWitnesses.size > VERDICT_LIMIT) keepingWitnesses.delete(keepingWitnesses.values().next().value!);
       }
       return answer.lossy;
@@ -192,6 +194,17 @@ export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; check
   });
   if (key === null) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
+}
+
+// A document's witness as a key of keepingWitnesses, or null unless all
+// three of its fields are there.
+function witnessKey(doc: Y.Doc): string | null {
+  const meta = doc.getMap('meta');
+  const sha = meta.get('dohcMarkdownSourceSha256');
+  const projection = meta.get('dohcMarkdownSourceProjectionSha256');
+  return typeof meta.get('dohcMarkdownSource') === 'string' && typeof sha === 'string' && typeof projection === 'string'
+    ? `${sha}:${projection}`
+    : null;
 }
 
 const docIds = new WeakMap<Y.Doc, number>();

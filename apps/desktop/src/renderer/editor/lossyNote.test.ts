@@ -84,6 +84,31 @@ describe("useBoundNoteCheck", () => {
     expect(view.result.current).toBe("clear");
   });
 
+  it("remembers the witness of the state it checked, not the one the note rendered with", async () => {
+    // The note renders with a lossy source; sync then records a source that
+    // keeps its meaning before the check encodes the document.
+    const doc = seeded();
+    const kept = "Title\n=====\n\n* one\n";
+    let swapped = false;
+    const first = renderHook(() => {
+      const check = useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) });
+      if (!swapped) {
+        swapped = true;
+        doc.getMap("meta").set("dohcMarkdownSource", kept);
+        doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(kept));
+        doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(kept))));
+      }
+      return check;
+    });
+    await waitFor(() => expect(first.result.current).toBe("clear"));
+
+    // Another session that records the lossy source still gets its check.
+    const other = seeded();
+    const second = renderHook(() => useBoundNoteCheck({ open: "b", doc: other, checkedHash: "c".repeat(64) }));
+    expect(second.result.current).toBe("checking");
+    await waitFor(() => expect(second.result.current).toBe("lossy"));
+  });
+
   it("checks a replacement document that records the same source", async () => {
     const edited = seeded();
     const paragraph = new Y.XmlElement("paragraph");
