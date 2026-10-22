@@ -155,7 +155,8 @@ export async function atomicReplaceFile(
 
 /**
  * Publish complete, flushed bytes without replacing an existing entry.
- * True means this creator won. Hard-link support is required.
+ * True means this creator won. Opting into direct writes permits a cut-off
+ * destination after a crash on filesystems where hard links fail.
  * Node cannot open directories for fsync on Windows.
  */
 export async function atomicCreateFile(
@@ -165,14 +166,17 @@ export async function atomicCreateFile(
   {
     open: openFile = open,
     link: publish = link,
+    rm: remove = rm,
+    allowDirectWrite = false,
     platform = process.platform,
   }: Pick<DurableFileOperations, "open" | "platform"> & {
     link?: (source: string, destination: string) => Promise<void>;
+    rm?: typeof rm;
+    allowDirectWrite?: boolean;
   } = {},
 ): Promise<boolean> {
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
-  try {
-    const handle = await openFile(temporary, "wx", mode);
+  const writeAndFlush = async (handle: SyncHandle & { writeFile(data: string): Promise<void> }) => {
     try {
       await handle.writeFile(data);
     } catch (error) {
@@ -180,20 +184,34 @@ export async function atomicCreateFile(
       throw error;
     }
     await syncAndClose(handle);
+  };
+  try {
+    await writeAndFlush(await openFile(temporary, "wx", mode));
     let created = true;
     try {
       await publish(temporary, destination);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      created = false;
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        created = false;
+      } else {
+        if (!allowDirectWrite) throw error;
+        let handle;
+        try {
+          handle = await openFile(destination, "wx", mode);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          created = false;
+        }
+        if (handle) await writeAndFlush(handle);
+      }
     }
-    await rm(temporary);
+    await remove(temporary).catch(() => undefined);
     if (platform !== "win32") {
       await syncAndClose(await openFile(dirname(destination), "r"));
     }
     return created;
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined);
+    await remove(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
 }

@@ -121,17 +121,16 @@ export async function loadSecretDataKey(
   // workspace, which callers do first. Writing here never creates it.
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  let created: boolean;
   try {
-    if (!await atomicCreateFile(path, payload, 0o600)) {
-      return loadSecretDataKey(rootDir, { createIfMissing: false });
-    }
-    return key;
+    created = await atomicCreateFile(path, payload, 0o600);
   } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be created; refusing to store protected files.",
     );
   }
+  return created ? key : loadSecretDataKey(rootDir, { createIfMissing: false });
 }
 
 export async function installWorkspaceDataKey(
@@ -163,14 +162,14 @@ export async function installWorkspaceDataKey(
   }
   // As above, the engine has already created `.dohc/engine`.
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  let created: boolean;
   try {
-    if (!await atomicCreateFile(path, payload, 0o600)) {
-      return installWorkspaceDataKey(rootDir, key);
-    }
+    created = await atomicCreateFile(path, payload, 0o600);
   } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",
     );
   }
+  if (!created) return installWorkspaceDataKey(rootDir, key);
 }

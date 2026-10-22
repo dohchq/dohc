@@ -128,7 +128,7 @@ async function fileExists(path: string, relativePath: string): Promise<boolean> 
 
 async function createOnce(path: string, relativePath: string, text: string): Promise<void> {
   if (await fileExists(path, relativePath)) return;
-  if (!await atomicCreateFile(path, text, 0o666)) {
+  if (!await atomicCreateFile(path, text, 0o666, { allowDirectWrite: true })) {
     await fileExists(path, relativePath);
   }
 }
@@ -251,7 +251,7 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   if (read.kind !== "absent") return scheduleComputerOf(read);
   if (record.host !== null) return { kind: "computer", computer: record.host };
   try {
-    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666)) {
+    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666, { allowDirectWrite: true })) {
       return { kind: "computer", computer: here };
     }
     // Another reader recorded one first: read it, once.

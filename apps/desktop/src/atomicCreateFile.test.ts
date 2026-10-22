@@ -96,6 +96,37 @@ describe("durable create-once publication", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
+  it.each(["ENOTSUP", "EACCES", "EIO"])("allows an exclusive-write fallback after %s, preserving a racing winner", async (code) => {
+    const root = await createTestScratch("dohc-create-once-");
+    const path = join(root, "record");
+    expect(await atomicCreateFile(path, "loser", 0o666, {
+      allowDirectWrite: true,
+      link: async () => {
+        await writeFile(path, "winner");
+        throw Object.assign(new Error(code), { code });
+      },
+    })).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("winner");
+    expect(await readdir(root)).toEqual(["record"]);
+  });
+
+  it("still flushes the folder when removing a published key's temporary file fails", async () => {
+    const root = await createTestScratch("dohc-create-once-");
+    const path = join(root, "secret.key");
+    const events: string[] = [];
+    expect(await atomicCreateFile(path, "key", 0o600, {
+      platform: "linux",
+      rm: async () => { events.push("remove"); throw new Error("denied"); },
+      open: async (name, flags, mode) => name === root ? {
+        writeFile: async () => {},
+        sync: async () => { events.push("directory sync"); },
+        close: async () => { events.push("directory close"); },
+      } : open(name, flags, mode),
+    })).toBe(true);
+    expect(events).toEqual(["remove", "directory sync", "directory close"]);
+    expect(await readFile(path, "utf8")).toBe("key");
+  });
+
   it("reports directory sync failure without deleting the published winner", async () => {
     const root = await createTestScratch("dohc-create-once-");
     const path = join(root, "record");

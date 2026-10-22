@@ -1,15 +1,23 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { readSyncHistory, recordNeverSynced, scheduleComputer } from "./syncHistory";
+import { readSyncHistory, recordNeverSynced, recordSynced, recordReceivedShare, scheduleComputer } from "./syncHistory";
 import { installWorkspaceDataKey, loadSecretDataKey, SECRET_KEY_RELATIVE_PATH } from "./workspaceDataKey";
 import { createTestScratch } from "./testTemp";
 
-const fault = vi.hoisted(() => ({ write: false }));
+const fault = vi.hoisted(() => ({ write: false, link: false, remove: false, synced: [] as string[] }));
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
   return {
     ...fs,
+    link: async (...args: Parameters<typeof fs.link>) => {
+      if (fault.link) throw Object.assign(new Error("unsupported link"), { code: "ENOTSUP" });
+      return fs.link(...args);
+    },
+    rm: async (...args: Parameters<typeof fs.rm>) => {
+      if (fault.remove) throw new Error("temporary removal denied");
+      return fs.rm(...args);
+    },
     writeFile: async (...args: Parameters<typeof fs.writeFile>) => {
       if (!fault.write) return fs.writeFile(...args);
       await fs.writeFile(args[0], "{", args[2]);
@@ -17,6 +25,8 @@ vi.mock("node:fs/promises", async (original) => {
     },
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => { await sync(); fault.synced.push(String(args[0])); };
       if (fault.write && args[1] === "wx") {
         handle.writeFile = async () => {
           await handle.write("{");
@@ -27,7 +37,7 @@ vi.mock("node:fs/promises", async (original) => {
     },
   };
 });
-afterEach(() => { fault.write = false; });
+afterEach(() => { fault.write = false; fault.link = false; fault.remove = false; fault.synced = []; });
 
 const here = { installId: "here", label: "Here" };
 const there = { installId: "there", label: "There" };
@@ -38,6 +48,40 @@ async function fixture() {
   await mkdir(join(root, ".dohc", "sync-history"));
   return root;
 }
+
+it.each(["history", "schedules", "synced", "received-share"] as const)("falls back to a flushed exclusive %s write without allowing key fallback", async (kind) => {
+  const root = await fixture();
+  if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
+  fault.link = true;
+  const path = join(root, kind === "history" ? ".dohc/sync-history.json" : `.dohc/sync-history/${kind === "schedules" ? "schedules.json" : kind}`);
+  if (kind === "history") {
+    await recordNeverSynced(root, here);
+    expect(await readSyncHistory(root)).toBe("never-synced");
+  } else if (kind === "schedules") {
+    expect(await scheduleComputer(root, here)).toEqual({ kind: "computer", computer: here });
+  } else {
+    await (kind === "synced" ? recordSynced(root) : recordReceivedShare(root));
+    expect(await readFile(path, "utf8")).toBe("");
+  }
+  expect(fault.synced).toContain(path);
+  const winner = await readFile(path, "utf8");
+  if (kind === "history") await recordNeverSynced(root, there);
+  if (kind === "schedules") expect(await scheduleComputer(root, there)).toEqual({ kind: "computer", computer: here });
+  expect(await readFile(path, "utf8")).toBe(winner);
+  await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({ code: "key-corrupt" });
+  await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({ code: "key-corrupt" });
+  expect(await readdir(join(root, ".dohc", "engine"))).toEqual([]);
+  expect(await readdir(dirname(path))).not.toEqual(expect.arrayContaining([expect.stringContaining(".tmp-")]));
+});
+
+it.each(["load", "install"] as const)("a failed temporary removal still returns the published %s key", async (kind) => {
+  const root = await fixture();
+  fault.remove = true;
+  const key = kind === "load" ? await loadSecretDataKey(root, { createIfMissing: true }) : Buffer.alloc(32, 1);
+  if (kind === "install") await installWorkspaceDataKey(root, key);
+  expect(await loadSecretDataKey(root, { createIfMissing: false })).toEqual(key);
+  expect(await readFile(join(root, SECRET_KEY_RELATIVE_PATH), "utf8")).toBe(`dohc-secret-key-v1:${key.toString("base64")}\n`);
+});
 
 it("keeps cut-off history unknown and runs no schedules", async () => {
   const root = await fixture();
