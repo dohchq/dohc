@@ -29,6 +29,10 @@ struct State {
     #[cfg(test)]
     unlink_gate: Option<(std::sync::mpsc::SyncSender<()>, Arc<std::sync::Barrier>)>,
     #[cfg(test)]
+    unrecorded: usize,
+    #[cfg(test)]
+    unrecorded_peak: usize,
+    #[cfg(test)]
     joining: bool,
 }
 #[derive(Clone, Default)]
@@ -51,6 +55,15 @@ impl Root {
             commit.wait();
         }
     }
+    /// Count `bytes` a delete read and has not recorded yet, until the
+    /// returned guard drops.
+    #[cfg(test)]
+    fn hold_unrecorded(&self, bytes: usize) -> Unrecorded {
+        let mut state = self.0.0.lock().unwrap();
+        state.unrecorded += bytes;
+        state.unrecorded_peak = state.unrecorded_peak.max(state.unrecorded);
+        Unrecorded(self.clone(), bytes)
+    }
     #[cfg(test)]
     fn before_unlink(&self) {
         let gate = self.0.0.lock().unwrap().unlink_gate.take();
@@ -68,6 +81,19 @@ impl Root {
             .passes
             .push((cursor, failed, delay));
         self.0.1.notify_all();
+    }
+}
+#[cfg(test)]
+struct Unrecorded(Root, usize);
+#[cfg(test)]
+impl Drop for Unrecorded {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unrecorded -= self.1;
     }
 }
 pub(super) struct Worker {
@@ -327,9 +353,17 @@ fn eligible(
         && row.busy_check_unsupported
         && row.changed_at_ms == candidate.revision
         && now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS
+        && staged_original(store, &row)?
         && !store.retained_original_needed(&row)?
         && !dohc_engine_files::placement_is_held_in(store, workspace_id, &row.target_path)?;
     Ok(eligible.then_some(row))
+}
+
+/// Whether `row` names a staged original in its job's staging folder. An
+/// explicit delete removes nothing else, whatever a row says.
+fn staged_original(store: &EngineStore, row: &RetainedDisplacement) -> Result<bool, RuntimeError> {
+    dohc_engine_files::materialize::is_staged_original(store, &row.job_id, &row.source_path)
+        .map_err(RuntimeError::Materialize)
 }
 
 fn now_ms() -> i64 {
@@ -376,7 +410,8 @@ impl ActorHandle {
                 };
                 after = last.displacement_id;
                 for row in rows {
-                    if store.retained_original_needed(&row)?
+                    if !staged_original(store, &row)?
+                        || store.retained_original_needed(&row)?
                         || held.iter().any(|path| {
                             dohc_engine_files::materialize::path_is_held(path, &row.target_path)
                         })
@@ -428,17 +463,46 @@ impl ActorHandle {
                 })
                 .await?;
             outcome.skipped += listed - rows.len() as u64;
-            let (checked_root, checked_database) = (root.clone(), database.clone());
-            let checks = tokio::task::spawn_blocking(move || {
-                rows.into_iter()
-                    .map(|row| {
-                        let check = check_for_delete(&checked_root, &checked_database, &row);
-                        (row, check)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
+            // Each source is read off the writer. A changed one is recorded
+            // before the next is read, so a batch holds at most one source's
+            // bytes; a source to delete holds only its descriptor.
+            let mut deletable = Vec::new();
+            for row in rows {
+                let (checked_root, checked_database) = (root.clone(), database.clone());
+                let (row, check) = tokio::task::spawn_blocking(move || {
+                    let check = check_for_delete(&checked_root, &checked_database, &row);
+                    (row, check)
+                })
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+                match check {
+                    Ok(DeleteCheck::Skip) => outcome.skipped += 1,
+                    Ok(DeleteCheck::Changed { current, bytes }) => {
+                        #[cfg(test)]
+                        let _unrecorded = self.retained_root.hold_unrecorded(bytes.len());
+                        let recorded = self
+                            .run(move |store, _| {
+                                Ok(store.record_retained_read(&row, &current, &bytes, now_ms())?)
+                            })
+                            .await;
+                        match recorded {
+                            Ok(()) => outcome.skipped += 1,
+                            Err(RuntimeError::ActorUnavailable) => {
+                                return Err(RuntimeError::ActorUnavailable);
+                            }
+                            Err(error) => {
+                                eprintln!("retained copy delete: {error}");
+                                outcome.failed += 1;
+                            }
+                        }
+                    }
+                    Ok(check) => deletable.push((row, check)),
+                    Err(error) => {
+                        eprintln!("retained copy delete: {error}");
+                        outcome.failed += 1;
+                    }
+                }
+            }
             #[cfg(test)]
             self.retained_root.before_unlink();
             let (batch_root, workspace) = (root.clone(), workspace_id.clone());
@@ -446,36 +510,27 @@ impl ActorHandle {
                 .run(move |store, _| {
                     let now = now_ms();
                     let mut counted = RetainedDeletion::default();
-                    for (row, check) in checks {
+                    for (row, check) in deletable {
                         let result = (|| -> Result<bool, RuntimeError> {
-                            match check.map_err(RuntimeError::Materialize)? {
-                                DeleteCheck::Skip => Ok(false),
-                                DeleteCheck::Changed { current, bytes } => {
-                                    store.record_retained_read(&row, &current, &bytes, now)?;
-                                    Ok(false)
-                                }
-                                check @ (DeleteCheck::Missing | DeleteCheck::Delete(_)) => {
-                                    let candidate = RetainedCandidate {
-                                        id: row.displacement_id,
-                                        revision: row.changed_at_ms,
-                                    };
-                                    if eligible(store, &workspace, candidate, now)?.is_none() {
-                                        return Ok(false);
-                                    }
-                                    if let DeleteCheck::Delete(source) = check
-                                        && !source.remove().map_err(RuntimeError::Materialize)?
-                                    {
-                                        return Ok(false);
-                                    }
-                                    store.release_retained(row.displacement_id)?;
-                                    if let Some(directory) =
-                                        staged_directory(store.database_path(), &batch_root, &row)
-                                    {
-                                        cleanup_staging_directory(store, &batch_root, &directory)?;
-                                    }
-                                    Ok(true)
-                                }
+                            let candidate = RetainedCandidate {
+                                id: row.displacement_id,
+                                revision: row.changed_at_ms,
+                            };
+                            if eligible(store, &workspace, candidate, now)?.is_none() {
+                                return Ok(false);
                             }
+                            if let DeleteCheck::Delete(source) = check
+                                && !source.remove().map_err(RuntimeError::Materialize)?
+                            {
+                                return Ok(false);
+                            }
+                            store.release_retained(row.displacement_id)?;
+                            if let Some(directory) =
+                                staged_directory(store.database_path(), &batch_root, &row)
+                            {
+                                cleanup_staging_directory(store, &batch_root, &directory)?;
+                            }
+                            Ok(true)
                         })();
                         match result {
                             Ok(true) => counted.deleted += 1,

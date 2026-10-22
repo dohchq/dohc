@@ -2515,7 +2515,8 @@ async fn a_retained_copy_on_an_unchecked_volume_is_counted_listed_and_deleted() 
     use std::os::unix::fs::MetadataExt;
     let (scratch, transport, handle, workspace_id) = fixture("retained-copy").await;
     let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
-    let source = ".dohc/engine/displaced/old.0";
+    // The first name job "old" stages its original under.
+    let source = ".dohc/engine/displaced/6f6c64.0";
     write_file(scratch.path(), source, b"old bytes");
     let m = std::fs::metadata(scratch.path().join(source)).expect("source");
     let store =

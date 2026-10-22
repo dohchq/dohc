@@ -236,6 +236,18 @@ fn open_source(
     Ok(Some((root, path, file, meta)))
 }
 
+/// Whether `file`'s volume cannot refuse to unlink an open file, when the
+/// row records otherwise. Reads no content.
+fn busy_check_change(
+    root: &Path,
+    file: &std::fs::File,
+    path: &Path,
+    row: &RetainedDisplacement,
+) -> Result<Option<bool>, MaterializeError> {
+    let unsupported = !checks_busy(root, file).map_err(|e| MaterializeError::io(path, &e))?;
+    Ok((unsupported != row.busy_check_unsupported).then_some(unsupported))
+}
+
 /// `row` as `file` now reads: `stamp`, `digest`, and whether its volume can
 /// refuse to unlink an open file.
 fn current_row(
@@ -303,9 +315,13 @@ fn inspect_with_reader(
     let changed = (*size, mtime.as_str(), ctime.as_str())
         != (row.size, row.mtime.as_str(), row.ctime.as_str());
     // A hold forbids release, so an unchanged stamp needs no content read.
-    // A changed stamp still reaches the durable observation path below.
+    // A changed stamp still reaches the durable observation path below. The
+    // volume's capability is still recorded, so a held row is counted.
     if held && !identity_changed && !changed {
-        return Ok(Inspection::Keep);
+        return Ok(match busy_check_change(&root, &file, &path, row)? {
+            Some(unsupported) => Inspection::BusyCheck { unsupported },
+            None => Inspection::Keep,
+        });
     }
     if !held && !identity_changed && meta.nlink() > 1 && now_ms >= retry_at_ms {
         return Ok(Inspection::Release(Release {
@@ -329,12 +345,10 @@ fn inspect_with_reader(
         }
         // A volume that cannot refuse a busy unlink never releases its source,
         // so only a changed stamp needs a read there.
-        let unsupported =
-            !checks_busy(&root, &file).map_err(|e| MaterializeError::io(&path, &e))?;
-        if unsupported != row.busy_check_unsupported {
+        if let Some(unsupported) = busy_check_change(&root, &file, &path, row)? {
             return Ok(Inspection::BusyCheck { unsupported });
         }
-        if unsupported {
+        if row.busy_check_unsupported {
             return Ok(Inspection::Keep);
         }
     }
@@ -805,4 +819,35 @@ fn a_source_gone_before_its_unlink_counts_as_removed() {
     };
     std::fs::remove_file(&source).unwrap();
     assert!(deletion.remove().unwrap());
+}
+
+/// A held source's volume is still checked, without reading the source, so
+/// a row from before migration 67 that stays held is counted.
+#[cfg(all(test, feature = "fault-injection"))]
+#[test]
+fn a_held_source_records_its_volume_without_a_read() {
+    let scratch = dohc_test_scratch::ScratchDir::new_named("held-volume").unwrap();
+    let root = scratch.path();
+    let db = &root.join("engine.db");
+    let source = root.join("source");
+    std::fs::write(&source, b"before").unwrap();
+    let mut row = row_for(&source, "source", b"before");
+    let unread = |_: &std::fs::File, _: &Path| -> Result<Vec<u8>, MaterializeError> {
+        panic!("an unchanged held source is not read")
+    };
+    let simulated = unchecked::simulate(root);
+    assert!(matches!(
+        inspect_with_reader(root, db, &row, 1_000, true, 0, unread).unwrap(),
+        Inspection::BusyCheck { unsupported: true }
+    ));
+    row.busy_check_unsupported = true;
+    assert!(matches!(
+        inspect_with_reader(root, db, &row, 1_000, true, 0, unread).unwrap(),
+        Inspection::Keep
+    ));
+    drop(simulated);
+    assert!(matches!(
+        inspect_with_reader(root, db, &row, 1_000, true, 0, unread).unwrap(),
+        Inspection::BusyCheck { unsupported: false }
+    ));
 }

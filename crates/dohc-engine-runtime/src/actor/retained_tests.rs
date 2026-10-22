@@ -422,22 +422,46 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// A retained original named `name` for `target`, on an unchecked volume.
-fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, name: &str, target: &str) -> i64 {
-    let directory = scratch.path().join(".dohc/engine/displaced");
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(name);
-    std::fs::write(&path, b"known").unwrap();
+/// The first name job `job` stages its original under.
+fn staged(job: &str) -> String {
+    job.bytes().map(|b| format!("{b:02x}")).collect::<String>() + ".0"
+}
+
+/// A retained original of job `job` for `target`, on an unchecked volume.
+fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, job: &str, target: &str) -> i64 {
+    add_source_at(
+        actor,
+        scratch,
+        job,
+        target,
+        &format!(".dohc/engine/displaced/{}", staged(job)),
+        b"known",
+    )
+}
+
+/// A retained original of job `job` for `target` at `source`, holding `bytes`.
+fn add_source_at(
+    actor: &WorkspaceActor,
+    scratch: &ScratchDir,
+    job: &str,
+    target: &str,
+    source: &str,
+    bytes: &[u8],
+) -> i64 {
+    let path = scratch.path().join(source);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
     let m = std::fs::metadata(&path).unwrap();
+    let blob = bytes.to_vec();
     let row = RetainedDisplacement {
         displacement_id: 0,
-        job_id: name.into(),
+        job_id: job.into(),
         workspace_id: "ws".into(),
         target_path: target.into(),
-        source_path: format!(".dohc/engine/displaced/{name}"),
+        source_path: source.into(),
         device: m.dev().to_string(),
         inode: m.ino().to_string(),
-        digest: hex_sha256(b"known"),
+        digest: hex_sha256(bytes),
         size: m.len() as i64,
         mtime: format!("{}:{}", m.mtime(), m.mtime_nsec()),
         ctime: format!("{}:{}", m.ctime(), m.ctime_nsec()),
@@ -447,7 +471,7 @@ fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, name: &str, target: 
     actor
         .handle()
         .run_blocking(move |s, _| {
-            s.put_binary_blob(b"known")?;
+            s.put_binary_blob(&blob)?;
             Ok(s.retain_displacement(&row)?)
         })
         .unwrap()
@@ -525,13 +549,13 @@ fn an_explicit_delete_removes_only_eligible_originals() {
                 ))
             })
             .unwrap();
-            for (job, name) in [("kept-name", "kept-name"), ("kept-file", "kept-file")] {
+            for (job, name) in [("kept-name", staged("kept-name")), ("kept-file", "kept-file".into())] {
                 s.keep_displacement(
                     &dohc_engine_storage::DisplacementSpec {
                         job_id: job.into(),
                         workspace_id: "ws".into(),
                         target_path: "d.md".into(),
-                        displaced_name: name.into(),
+                        displaced_name: name,
                         expected_sha256: String::new(),
                         content_sha256: None,
                         now_ms: 1,
@@ -551,7 +575,7 @@ fn an_explicit_delete_removes_only_eligible_originals() {
         [eligible, changed, held],
         "unfinished, kept, checked, recent and other-workspace originals are not listed"
     );
-    std::fs::write(displaced.join("changed"), b"outside").unwrap();
+    std::fs::write(displaced.join(staged("changed")), b"outside").unwrap();
     let mut requested = listed.clone();
     for id in [unfinished, kept_name, checked, recent, legacy] {
         requested.push(RetainedCandidate { id, revision: 0 });
@@ -588,19 +612,20 @@ fn an_explicit_delete_removes_only_eligible_originals() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     left.sort();
-    assert_eq!(
-        left,
-        [
-            "changed",
-            "checked",
-            "held",
-            "kept-file",
-            "kept-name",
-            "legacy",
-            "recent",
-            "unfinished"
-        ]
-    );
+    let mut expected: Vec<String> = [
+        "changed",
+        "checked",
+        "held",
+        "kept-name",
+        "legacy",
+        "recent",
+        "unfinished",
+    ]
+    .map(staged)
+    .into();
+    expected.push("kept-file".into());
+    expected.sort();
+    assert_eq!(left, expected);
     let rows = actor
         .handle()
         .run_blocking(|s, _| Ok(s.retained_displacements_after(0)?))
@@ -634,5 +659,97 @@ fn an_explicit_delete_removes_only_eligible_originals() {
             bytes: 27
         }
     );
+    actor.close().unwrap();
+}
+
+/// A delete records each changed source before it reads the next, so a
+/// batch never holds more than one source's bytes.
+#[test]
+fn a_delete_records_each_changed_source_before_reading_the_next() {
+    let scratch = ScratchDir::new().unwrap();
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    let mut actor = actor(&scratch);
+    let displaced = scratch.path().join(".dohc/engine/displaced");
+    let sizes = [3_000, 1_000, 2_000];
+    let mut requested = Vec::new();
+    for (n, size) in sizes.into_iter().enumerate() {
+        let job = format!("changed-{n}");
+        let id = add_source(&actor, &scratch, &job, &format!("{n}.md"));
+        std::fs::write(displaced.join(staged(&job)), vec![b'x' + n as u8; size]).unwrap();
+        requested.push(RetainedCandidate { id, revision: 0 });
+    }
+    let outcome = runtime()
+        .block_on(actor.handle().delete_retained_copies(
+            scratch.path().into(),
+            "ws".into(),
+            requested,
+        ))
+        .unwrap();
+    assert_eq!(
+        (outcome.deleted, outcome.skipped, outcome.failed),
+        (0, 3, 0)
+    );
+    let recorded: i64 = actor
+        .handle()
+        .run_blocking(|s, _| Ok(s.table_row_count("materialization_displacement_reads")?))
+        .unwrap();
+    assert_eq!(recorded, 3);
+    let state = actor.retention_root.0.0.lock().unwrap();
+    assert_eq!(state.unrecorded, 0);
+    assert_eq!(
+        state.unrecorded_peak,
+        3_000,
+        "one source at a time, not {}",
+        sizes.iter().sum::<usize>()
+    );
+    drop(state);
+    actor.close().unwrap();
+}
+
+/// An explicit delete removes only a staged original in its job's staging
+/// folder, whatever a row names.
+#[test]
+fn an_explicit_delete_skips_a_row_naming_anything_but_a_staged_original() {
+    let scratch = ScratchDir::new().unwrap();
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    let mut actor = actor(&scratch);
+    let rows = [
+        ("outside", "notes.md".to_owned()),
+        ("loose", ".dohc/engine/displaced/not-staged".to_owned()),
+        (
+            "mismatch",
+            format!(".dohc/engine/displaced/{}", staged("other")),
+        ),
+        (
+            "elsewhere",
+            format!("folder/.dohc-write-displaced/{}", staged("elsewhere")),
+        ),
+    ];
+    let mut requested = Vec::new();
+    for (job, source) in &rows {
+        let id = add_source_at(&actor, &scratch, job, "a.md", source, b"user bytes");
+        requested.push(RetainedCandidate { id, revision: 0 });
+    }
+    let (listed, _) = runtime()
+        .block_on(actor.handle().list_retained_copies("ws".into()))
+        .unwrap();
+    assert!(listed.is_empty(), "{listed:?}");
+    let outcome = runtime()
+        .block_on(actor.handle().delete_retained_copies(
+            scratch.path().into(),
+            "ws".into(),
+            requested,
+        ))
+        .unwrap();
+    assert_eq!(
+        (outcome.deleted, outcome.skipped, outcome.failed),
+        (0, 4, 0)
+    );
+    for (_, source) in &rows {
+        assert_eq!(
+            std::fs::read(scratch.path().join(source)).unwrap(),
+            b"user bytes"
+        );
+    }
     actor.close().unwrap();
 }
