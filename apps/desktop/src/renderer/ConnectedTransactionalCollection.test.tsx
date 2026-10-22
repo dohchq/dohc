@@ -505,3 +505,43 @@ describe("a dataset table's ⚡ panel", () => {
     expect(await screen.findByText("No automations in this Collection yet.")).toBeTruthy();
   });
 });
+
+describe("a Collection this computer cannot use", () => {
+  const refused = (code: string, words: string) =>
+    new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]: ${words}`);
+  const props = { workspaceId: "workspace-a", datasetPath: "data/dataset.json", tableId: id(2), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn() };
+
+  it("says which computer keeps it in place, without a toast, and reads again on Try again", async () => {
+    const words = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    backend.dataset.mockRejectedValueOnce(refused("collections-elsewhere", words));
+    const onError = vi.fn(), onKeepCollections = vi.fn();
+    render(<ConnectedTransactionalCollection {...props} onError={onError} onKeepCollections={onKeepCollections} />);
+    expect((await screen.findByTestId("collection-refusal")).textContent).toContain(words);
+    expect(screen.getByRole("button", { name: "Keep the Collections on this computer" })).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByTestId("collection-refusal")).toBeNull();
+  });
+
+  it("keeps Collections no computer keeps on this one, then opens the Collection", async () => {
+    backend.dataset.mockRejectedValueOnce(refused("collections-unclaimed", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer."));
+    const onKeepCollections = vi.fn((then: () => void) => then());
+    render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} onKeepCollections={onKeepCollections} />);
+    backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
+    fireEvent.click(await screen.findByRole("button", { name: "Keep the Collections on this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledOnce();
+    await screen.findByLabelText("Collection view state");
+  });
+
+  it("stops showing records once a later read is refused", async () => {
+    backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
+    render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} />);
+    await screen.findByLabelText("Collection view state");
+    backend.dataset.mockRejectedValueOnce(refused("collections-replaced", "This computer keeps this workspace's Collections, but another copy replaced .dohc/local/datasets/state.sqlite."));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    expect((await screen.findByTestId("collection-refusal")).textContent).toContain("another copy replaced");
+    expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  });
+});

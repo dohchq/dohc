@@ -11,6 +11,8 @@ import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
+import type { CollectionsRefusalError } from "./collectionsHolder";
+import { ipcWireError, SERVER_COLLECTIONS_UNAVAILABLE } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 
@@ -234,6 +236,46 @@ export function createRemoteDatasetData(input: {
       return { file: result.file, bytesBase64: result.bytesBase64 };
     },
   };
+}
+
+/**
+ * The server didn't give the list of a workspace's Collections, on a
+ * computer that doesn't keep the workspace's own. Its first line says where
+ * those are. The rest is the server's error as it would cross IPC alone, so
+ * a window shows both as before and the CLI prints both.
+ */
+export class ServerCollectionsUnavailableError extends Error {
+  override name = "ServerCollectionsUnavailableError";
+  readonly code = SERVER_COLLECTIONS_UNAVAILABLE;
+  constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
+    const wire = ipcWireError(cause);
+    super(`${elsewhere.message}\n${wire instanceof Error && wire.name === "Error" ? wire.message : String(wire)}`, { cause });
+  }
+}
+
+/**
+ * A workspace's Collections on this computer's signed-in server, for a
+ * computer that doesn't keep the workspace's own. Every request goes to the
+ * server that issued `credentials` and follows no redirect. A workspace or
+ * Collection that server doesn't have may be one the other computer keeps,
+ * so it refuses with `elsewhere`, as those Collections do here.
+ */
+export function createServerCollectionsData(input: Omit<Parameters<typeof createRemoteDatasetData>[0], "shareId" | "relayJson"> & {
+  /** "missing" when the server answers that it has no such workspace or Collection for this account. */
+  relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }>;
+  elsewhere: CollectionsRefusalError;
+}): OwnerDatasetData {
+  const { elsewhere, relayJson, ...remote } = input;
+  if (!remote.credentials.relayUrl) throw elsewhere;
+  const data = createRemoteDatasetData({ ...remote, async relayJson(credentials, path, init) {
+    const answer = await relayJson(credentials, path, { ...init, redirect: "error" });
+    if (answer.kind === "missing") throw elsewhere;
+    return answer.body;
+  } });
+  return { ...data, async list(page) {
+    try { return await data.list(page); }
+    catch (error) { throw error === elsewhere || remote.signal.aborted ? error : new ServerCollectionsUnavailableError(elsewhere, error); }
+  } };
 }
 
 /** Owner-authenticated streaming target for the durable local-to-shared transfer coordinator. */
