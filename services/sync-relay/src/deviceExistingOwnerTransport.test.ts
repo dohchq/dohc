@@ -216,9 +216,11 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
     await peer!.sendRequest({id: 31,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "provenance-refused"}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "provenance-refused"}});
-    singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
-    await peer!.sendRequest({id: 32,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "capacity-refused"}});
-    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "capacity-refused"}});
+    for (const reason of ["capacity-refused", "invalid-update"]) {
+      singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
+      await peer!.sendRequest({id: 32,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason}});
+      expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason}});
+    }
     const quarantines = singleton.sendRequest.mock.calls.length;
     await expect(peer!.sendRequest({id: 33,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "arbitrary"}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.length).toBe(quarantines);
@@ -236,6 +238,10 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     await expect(peer!.sendRequest({id: 24,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
+    // An unknown registration closes the transport without quarantining anything.
+    const native = singleton.sendRequest.mock.calls.length;
+    await expect(peer!.sendRequest({id: 34,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 99,reason: "invalid-update"}})).rejects.toThrow();
+    expect(singleton.sendRequest.mock.calls.length).toBe(native);
   } finally { await transport.close(); peer?.close(); }
 });
 

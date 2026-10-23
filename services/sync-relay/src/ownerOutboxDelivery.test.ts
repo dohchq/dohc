@@ -60,7 +60,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
   const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
-  return {requests,receipts,storage,state,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
+  return {entries,requests,receipts,storage,state,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
     adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
 
@@ -159,10 +159,12 @@ it("retains configured entry and byte limits without acknowledging unread update
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
-it.each(["provenance-refused", "delivery-conflict", "capacity-refused"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
-  const f = fixture(1), other = fixture(3);
+it.each(["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
+  const f = fixture(3), other = fixture(3);
   // An out-of-memory check answers capacity-refused, and commit refuses the entry the same way.
   if (reason === "capacity-refused") f.validate.mockReturnValue({kind: "refused", reason, source: "final"});
+  // Storage maps a final schema refusal to invalid-update.
+  if (reason === "invalid-update") f.validate.mockReturnValue({kind: "refused", reason: "invalid-schema", source: "final"});
   f.storage.commitLiveUpdateJournal.mockReturnValue({result: {kind: "refused", reason}} as never);
   const original = f.client.sendRequest.getMockImplementation()!;
   f.client.sendRequest.mockImplementation(async request => {
@@ -176,6 +178,10 @@ it.each(["provenance-refused", "delivery-conflict", "capacity-refused"])("quaran
   // A pass visits the stuck document, then another of the owner's documents.
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
   expect(await other.run()).toEqual({admittedEntries: 3, hasMore: false});
+  // The refused head's suffix depends on it, so it waits too.
+  expect(f.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => input.metadata.deliveryId)).toEqual(["delivery-1"]);
+  expect(f.entries.map(entry => entry.deliveryId)).toEqual(["delivery-1", "delivery-3", "delivery-7"]);
+  expect(f.applyThrough).not.toHaveBeenCalled();
   expect(f.state.value).toBe("quarantined");
   expect(f.receipts).toEqual([]);
   expect(f.validate).toHaveBeenCalledTimes(1);
@@ -185,6 +191,17 @@ it.each(["provenance-refused", "delivery-conflict", "capacity-refused"])("quaran
   expect(f.validate).not.toHaveBeenCalled();
   expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
   expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox")).toHaveLength(1);
+  expect(f.entries).toHaveLength(3);
+});
+
+it.each(["admission-unavailable", "host-unavailable"])("retries the same head without quarantine while commit answers %s", async reason => {
+  const f = fixture(1);
+  f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "retry", reason}} as never);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox")).toEqual([]);
+  expect(f.receipts).toEqual([]);
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}]);
 });
 
 it("continues a byte-limited pass only after a real admission and native outbox ACK", async () => {

@@ -235,7 +235,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.receipt = {deliveryId, updateDigest, journalCursor, acceptingHostEpoch};
             await this.finishReceipt(attempt);
           }
-          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused", "capacity-refused"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
+          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused", "capacity-refused", "invalid-update"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
           else this.stop(attempt);
         }
         if (transfer && this.current(attempt)) {

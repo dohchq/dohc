@@ -102,10 +102,20 @@ it("freezes a conflicting delivery for explicit recovery instead of retrying for
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
 });
 
-it.each(["provenance-refused", "capacity-refused"] as const)("freezes a %s refusal for visible recovery", async reason => {
+it.each(["provenance-refused", "capacity-refused", "invalid-update"] as const)("freezes a %s refusal for visible recovery", async reason => {
   const f = fixture({result: {result: "refused", reason}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason});
+});
+
+it.each([
+  {result: "refused", reason: "authority-refused"},
+  {result: "refused", reason: "invalid-update", deliveryId: "another-delivery"},
+  {result: "refused", reason: "invalid-update", updateDigest: "f".repeat(64)},
+] as const)("retries instead of freezing a refusal that is not this entry's final one: %j", async result => {
+  const f = fixture({result}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "retry"});
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {
