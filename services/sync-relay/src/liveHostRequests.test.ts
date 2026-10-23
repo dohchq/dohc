@@ -164,6 +164,29 @@ it("cancels a queued and a running held read on its caller's signal, and frees t
   l.lifetime.abort();
 });
 
+it("keeps a cancelled running held read's workspace and slot until its work settles", async () => {
+  const l = heldLane({maxRunning: 2}), settle = deferred<void>(), caller = new AbortController();
+  // Work that sees its cancellation at once but settles only when the engine answers.
+  const slow = vi.fn(async (signal: AbortSignal) => {l.started.push(signal); await settle.promise; throw signal.reason;});
+  const first = l.read("workspace-a", "read", caller.signal, slow);
+  const refused = expect(first).rejects.toThrow("caller left");
+  caller.abort(new Error("caller left")); await refused;
+  expect(l.started[0]!.aborted).toBe(true);
+  await expect(l.read("workspace-a", "another read", undefined, async () => "a")).rejects.toBeInstanceOf(HeldReadBusyError);
+  await expect(l.read("workspace-a", "read", undefined, slow), "an identical read is refused too").rejects.toBeInstanceOf(HeldReadBusyError);
+  const other = deferred<unknown>(), third = vi.fn(async () => "c");
+  const beside = l.read("workspace-b", "read", undefined, l.work(other.promise));
+  expect(l.started).toHaveLength(2);
+  const waiting = l.read("workspace-c", "read", undefined, third);
+  expect(third).not.toHaveBeenCalled();
+  settle.resolve();
+  await expect(waiting).resolves.toBe("c");
+  await expect(l.read("workspace-a", "another read", undefined, async () => "a")).resolves.toBe("a");
+  other.resolve("b"); await expect(beside).resolves.toBe("b");
+  expect(slow).toHaveBeenCalledOnce();
+  l.lifetime.abort();
+});
+
 it("refuses a different held read for a workspace that has one, and lets an identical one join it", async () => {
   const l = heldLane(), answer = deferred<unknown>(), work = vi.fn(l.work(answer.promise));
   const first = l.read("workspace", "read", undefined, work), joined = l.read("workspace", "read", undefined, work);

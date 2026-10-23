@@ -768,7 +768,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
             }
             OutputItem::Blob { response, egress } => {
                 let request_id = response.id;
-                let outcome = write_blob_egress(&mut output, response, egress, limits).await;
+                let outcome = write_blob_egress(&mut output, response, egress, None, limits).await;
                 lock(&active_egress).remove(&request_id);
                 outcome?;
             }
@@ -791,12 +791,13 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     wrote: false,
                     frame_pending: false,
                 };
+                // Cancellation and the deadline end the stream between frames,
+                // so the connection's other requests go on. Only retirement
+                // interrupts a frame.
                 let result = tokio::select! {
                     biased;
-                    ()=cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output cancelled")),
                     ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
-                    ()=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline.into()).await,None=>std::future::pending().await}}=>Err(io::Error::new(io::ErrorKind::TimedOut,"native restore output expired")),
-                    result=write_blob_egress(&mut fenced,response,egress,limits)=>result,
+                    result=write_blob_egress(&mut fenced,response,egress,Some(&*guard),limits)=>result,
                 };
                 lock(&active_egress).remove(&request_id);
                 if result.is_err() && !fenced.frame_pending && !guard.is_current() {
@@ -891,7 +892,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
     ) -> std::task::Poll<Result<usize, io::Error>> {
         let this = self.get_mut();
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(&mut || {
+        if !this.guard.with_unretired(&mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_write(cx, bytes);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -911,7 +912,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
     ) -> std::task::Poll<Result<(), io::Error>> {
         let this = self.get_mut();
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(&mut || {
+        if !this.guard.with_unretired(&mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_flush(cx);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -932,36 +933,49 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
     }
 }
 
+/// Streams `egress` and then `response`. Before each frame it stops, with an
+/// error envelope, once the request or its `guard` was cancelled or expired;
+/// a `guard` no longer current for another reason ends it with an error.
 async fn write_blob_egress<W: AsyncWrite + Unpin>(
     output: &mut W,
     response: Response,
     egress: BlobEgress,
+    guard: Option<&dyn OutputGuard>,
     limits: &WireLimits,
 ) -> Result<(), io::Error> {
     let request_id = response.id;
-    let interruption = |deadline: Option<std::time::Instant>| {
-        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            WireError::new(
+    let interruption = || -> Result<Option<WireError>, io::Error> {
+        let expired = |deadline: Option<std::time::Instant>| {
+            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        };
+        if expired(egress.deadline) || guard.is_some_and(|guard| expired(guard.deadline())) {
+            return Ok(Some(WireError::new(
                 ErrorCode::DeadlineExceeded,
                 "versionedBinary.readBlob egress deadline elapsed",
-            )
-        } else {
-            WireError::new(
+            )));
+        }
+        if egress.cancel.is_cancelled()
+            || guard.is_some_and(|guard| guard.cancel_signal().is_cancelled())
+        {
+            return Ok(Some(WireError::new(
                 ErrorCode::Cancelled,
                 "versionedBinary.readBlob egress cancelled",
-            )
+            )));
         }
+        if guard.is_some_and(|guard| !guard.is_current()) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "native restore output retired",
+            ));
+        }
+        Ok(None)
     };
-    if egress.cancel.is_cancelled()
-        || egress
-            .deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-    {
+    if let Some(error) = interruption()? {
         return write_envelope(
             output,
             &Envelope::Error(ErrorEnvelope {
                 id: Some(response.id),
-                error: interruption(egress.deadline),
+                error,
             }),
             limits,
         )
@@ -987,16 +1001,12 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
 
     let chunk_bytes = limits.max_blob_chunk_bytes as usize;
     for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
-        if egress.cancel.is_cancelled()
-            || egress
-                .deadline
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
+        if let Some(error) = interruption()? {
             return write_envelope(
                 output,
                 &Envelope::Error(ErrorEnvelope {
                     id: Some(request_id),
-                    error: interruption(egress.deadline),
+                    error,
                 }),
                 limits,
             )
@@ -1653,6 +1663,14 @@ mod tests {
         fn deadline(&self) -> Option<std::time::Instant> {
             self.deadline
         }
+        // As the live host's guard: a frame under way finishes unless its owner retired.
+        fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+            if self.retired.is_cancelled() {
+                return false;
+            }
+            action();
+            true
+        }
     }
 
     struct BlockedWriter {
@@ -1904,27 +1922,227 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guarded_blob_interruption_during_partial_frame_closes_output() {
-        for retire in [false, true] {
+    async fn guarded_blob_retirement_during_partial_frame_closes_output() {
+        let retired = CancelSignal::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.send(guarded_blob(Arc::new(TestOutputGuard {
+            cancel: CancelSignal::new(),
+            retired: retired.clone(),
+            deadline: None,
+            dropped: Arc::new(AtomicBool::new(false)),
+        })))
+        .await
+        .unwrap();
+        tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+            id: 10,
+            result: serde_json::Value::Null,
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let task = tokio::spawn(async move {
+            write_output(
+                writer,
+                &mut rx,
+                &WireLimits::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+        });
+        let mut prefix = [0; 8];
+        reader.read_exact(&mut prefix).await.unwrap();
+        retired.cancel();
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        let mut transcript = prefix.to_vec();
+        reader.read_to_end(&mut transcript).await.unwrap();
+        let mut decoder = FrameDecoder::new(WireLimits::default());
+        decoder.push(&transcript);
+        assert!(
+            decoder.next_frame().unwrap().is_none(),
+            "partial frame must not be followed by another envelope"
+        );
+    }
+
+    /// Writes the first frame after `interrupt_after` complete ones in two
+    /// parts: it interrupts after the first, then reports a full pipe once,
+    /// as a slow reader makes the writer wait mid-frame.
+    struct InterruptMidFrame<W> {
+        output: W,
+        completed: usize,
+        interrupt_after: usize,
+        interrupted: bool,
+        waited: bool,
+        interrupt: CancelSignal,
+        deadline: Option<std::time::Instant>,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for InterruptMidFrame<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.completed < self.interrupt_after || self.waited {
+                return Pin::new(&mut self.output).poll_write(cx, bytes);
+            }
+            if self.interrupted {
+                self.waited = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let half = bytes.len().div_ceil(2);
+            let written = Pin::new(&mut self.output).poll_write(cx, &bytes[..half]);
+            if matches!(written, Poll::Ready(Ok(_))) {
+                self.interrupted = true;
+                if let Some(deadline) = self.deadline {
+                    while std::time::Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                } else {
+                    self.interrupt.cancel();
+                }
+            }
+            written
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            let result = Pin::new(&mut self.output).poll_flush(cx);
+            if matches!(result, Poll::Ready(Ok(()))) {
+                self.completed += 1;
+            }
+            result
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.output).poll_shutdown(cx)
+        }
+    }
+
+    // A held contributions request cancelled, or past its deadline, mid-frame
+    // finishes that frame and ends with its own error; the connection's next
+    // answer still arrives. A lost owner still stops it mid-frame.
+    #[tokio::test]
+    async fn guarded_blob_cancel_or_deadline_mid_frame_ends_only_that_request() {
+        for interruption in [
+            ErrorCode::Cancelled,
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::WorkspaceUnavailable,
+        ] {
             let cancel = CancelSignal::new();
             let retired = CancelSignal::new();
-            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-            tx.send(guarded_blob(Arc::new(TestOutputGuard {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let deadline = (interruption == ErrorCode::DeadlineExceeded)
+                .then(|| std::time::Instant::now() + Duration::from_secs(1));
+            let guard = Arc::new(TestOutputGuard {
                 cancel: cancel.clone(),
                 retired: retired.clone(),
-                deadline: None,
-                dropped: Arc::new(AtomicBool::new(false)),
-            })))
-            .await
-            .unwrap();
+                deadline,
+                dropped: dropped.clone(),
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(guard)).await.unwrap();
             tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
                 id: 10,
-                result: serde_json::Value::Null,
+                result: serde_json::json!({ "ok": true }),
             })))
             .await
             .unwrap();
             drop(tx);
-            let (writer, mut reader) = tokio::io::duplex(8);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
+            let limits = WireLimits {
+                max_blob_chunk_bytes: 1024,
+                ..WireLimits::default()
+            };
+            let mut transcript = Vec::new();
+            let output = InterruptMidFrame {
+                output: &mut transcript,
+                completed: 0,
+                // BlobStart whole, then the first chunk interrupted halfway.
+                interrupt_after: 1,
+                interrupted: false,
+                waited: false,
+                interrupt: if interruption == ErrorCode::WorkspaceUnavailable {
+                    retired
+                } else {
+                    cancel
+                },
+                deadline,
+            };
+            let written = write_output(output, &mut rx, &limits, active.clone()).await;
+            assert!(dropped.load(Ordering::SeqCst));
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("BlobStart missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::BlobStart(start) if start.request_id == 9)
+            );
+            if interruption == ErrorCode::WorkspaceUnavailable {
+                assert_eq!(written.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                assert!(
+                    decoder.next_frame().unwrap().is_none(),
+                    "partial frame must not be followed by another envelope"
+                );
+                continue;
+            }
+            written.expect("a request-scoped interruption leaves the connection writing");
+            assert!(lock(&active).is_empty());
+            let Some(Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            }) = decoder.next_frame().unwrap()
+            else {
+                panic!("interrupted chunk did not finish");
+            };
+            assert_eq!(stream_id, 9);
+            assert!(!fin);
+            assert_eq!(bytes, vec![42; limits.max_blob_chunk_bytes as usize]);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("request interruption missing");
+            };
+            let Envelope::Error(error) = decode_control(&payload, &limits).unwrap() else {
+                panic!("blob data continued after interruption");
+            };
+            assert_eq!(error.id, Some(9));
+            assert_eq!(error.error.code, interruption);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10 && response.result["ok"] == true)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_blob_releases_reservation_on_retired_write_and_flush() {
+        for flush_only in [false, true] {
+            let retired = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let polled = Arc::new(Notify::new());
+            let bytes = Arc::new(AtomicUsize::new(0));
+            let guard = Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: retired.clone(),
+                deadline: None,
+                dropped: dropped.clone(),
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.send(guarded_blob(guard)).await.unwrap();
+            drop(tx);
+            let writer = BlockedWriter {
+                polled: polled.clone(),
+                flush_only,
+                bytes: bytes.clone(),
+            };
             let task = tokio::spawn(async move {
                 write_output(
                     writer,
@@ -1934,79 +2152,20 @@ mod tests {
                 )
                 .await
             });
-            let mut prefix = [0; 8];
-            reader.read_exact(&mut prefix).await.unwrap();
-            if retire {
-                retired.cancel();
+            polled.notified().await;
+            assert!(!dropped.load(Ordering::SeqCst));
+            retired.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            if flush_only {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
             } else {
-                cancel.cancel();
+                result.unwrap();
+                assert_eq!(bytes.load(Ordering::SeqCst), 0);
             }
-            assert_eq!(
-                task.await.unwrap().unwrap_err().kind(),
-                io::ErrorKind::ConnectionAborted
-            );
-            let mut transcript = prefix.to_vec();
-            reader.read_to_end(&mut transcript).await.unwrap();
-            let mut decoder = FrameDecoder::new(WireLimits::default());
-            decoder.push(&transcript);
-            assert!(
-                decoder.next_frame().unwrap().is_none(),
-                "partial frame must not be followed by another envelope"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn guarded_blob_releases_reservation_on_cancelled_write_and_flush() {
-        for flush_only in [false, true] {
-            for retire in [false, true] {
-                let cancel = CancelSignal::new();
-                let retired = CancelSignal::new();
-                let dropped = Arc::new(AtomicBool::new(false));
-                let polled = Arc::new(Notify::new());
-                let bytes = Arc::new(AtomicUsize::new(0));
-                let guard = Arc::new(TestOutputGuard {
-                    cancel: cancel.clone(),
-                    retired: retired.clone(),
-                    deadline: None,
-                    dropped: dropped.clone(),
-                });
-                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                tx.send(guarded_blob(guard)).await.unwrap();
-                drop(tx);
-                let writer = BlockedWriter {
-                    polled: polled.clone(),
-                    flush_only,
-                    bytes: bytes.clone(),
-                };
-                let task = tokio::spawn(async move {
-                    write_output(
-                        writer,
-                        &mut rx,
-                        &WireLimits::default(),
-                        Arc::new(Mutex::new(HashMap::new())),
-                    )
-                    .await
-                });
-                polled.notified().await;
-                assert!(!dropped.load(Ordering::SeqCst));
-                if retire {
-                    retired.cancel();
-                } else {
-                    cancel.cancel();
-                }
-                let result = tokio::time::timeout(Duration::from_secs(2), task)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                if flush_only {
-                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
-                } else {
-                    result.unwrap();
-                    assert_eq!(bytes.load(Ordering::SeqCst), 0);
-                }
-                assert!(dropped.load(Ordering::SeqCst));
-            }
+            assert!(dropped.load(Ordering::SeqCst));
         }
     }
 
@@ -2053,40 +2212,6 @@ mod tests {
             );
             assert!(decoder.next_frame().unwrap().is_none());
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn guarded_blob_partial_frame_deadline_closes_output() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let dropped = Arc::new(AtomicBool::new(false));
-        tx.send(guarded_blob(Arc::new(TestOutputGuard {
-            cancel: CancelSignal::new(),
-            retired: CancelSignal::new(),
-            deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
-            dropped: dropped.clone(),
-        })))
-        .await
-        .unwrap();
-        drop(tx);
-        let (writer, mut reader) = tokio::io::duplex(8);
-        let task = tokio::spawn(async move {
-            write_output(
-                writer,
-                &mut rx,
-                &WireLimits::default(),
-                Arc::new(Mutex::new(HashMap::new())),
-            )
-            .await
-        });
-        let mut prefix = [0; 8];
-        reader.read_exact(&mut prefix).await.unwrap();
-        assert!(!dropped.load(Ordering::SeqCst));
-        tokio::time::advance(Duration::from_secs(11)).await;
-        assert_eq!(
-            task.await.unwrap().unwrap_err().kind(),
-            io::ErrorKind::TimedOut
-        );
-        assert!(dropped.load(Ordering::SeqCst));
     }
 
     impl AsyncWrite for BlockedWriter {
@@ -3073,7 +3198,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(bytes.len() + 4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, None, &limits)
             .await
             .expect("write blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3145,7 +3270,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, None, &limits)
             .await
             .expect("write empty blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3213,7 +3338,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response, egress, &limits)
+        write_blob_egress(&mut output, response, egress, None, &limits)
             .await
             .expect("write cancellation");
         output.shutdown().await.expect("close transcript");

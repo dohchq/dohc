@@ -71,6 +71,13 @@ pub trait OutputGuard: std::fmt::Debug + Send + Sync {
         action();
         true
     }
+    /// [`Self::with_current`] for a blob frame already under way. A guard
+    /// whose cancellation and deadline can wait for the frame's end refuses
+    /// here only once its owner retired; the writer acts on the rest between
+    /// frames, so the connection's other requests go on.
+    fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+        self.with_current(action)
+    }
     fn deadline(&self) -> Option<Instant> {
         None
     }

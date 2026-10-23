@@ -126,7 +126,7 @@ type HeldJob = {key: string; waiters: Set<HeldWaiter>; controller: AbortControll
  * identical one, by `key`, joins it and shares its result, up to `maxWaiters`
  * callers. A caller leaves on its own signal or deadline, and the last to leave
  * cancels the read, queued or running. A cancelled read keeps its running slot
- * until its work settles.
+ * and its workspace until its work settles.
  */
 export function heldReadLane(options: {maxRunning: number; maxQueued: number; maxWaiters: number; deadlineMs: number; signal: AbortSignal}) {
   for (const value of [options.maxRunning, options.maxQueued, options.maxWaiters, options.deadlineMs]) {
@@ -141,10 +141,13 @@ export function heldReadLane(options: {maxRunning: number; maxQueued: number; ma
       next.start();
     }
   };
+  // A running job keeps its workspace until its work settles, refusing every new caller.
   const abandon = (workspaceId: string, job: HeldJob, reason: unknown) => {
-    if (jobs.get(workspaceId) === job) jobs.delete(workspaceId);
     const index = queued.indexOf(job);
-    if (index >= 0) queued.splice(index, 1);
+    if (index >= 0) {
+      queued.splice(index, 1);
+      if (jobs.get(workspaceId) === job) jobs.delete(workspaceId);
+    }
     job.controller.abort(reason);
   };
 
@@ -154,7 +157,8 @@ export function heldReadLane(options: {maxRunning: number; maxQueued: number; ma
       const scope = liveHostSignal(options.signal, caller);
       if (scope.signal.aborted) {scope.dispose(); reject(scope.signal.reason); return;}
       let job = jobs.get(workspaceId);
-      if (job ? job.key !== key || job.waiters.size >= options.maxWaiters : running >= options.maxRunning && queued.length >= options.maxQueued) {
+      if (job ? job.controller.signal.aborted || job.key !== key || job.waiters.size >= options.maxWaiters
+        : running >= options.maxRunning && queued.length >= options.maxQueued) {
         scope.dispose(); reject(new HeldReadBusyError()); return;
       }
       if (!job) {

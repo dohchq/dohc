@@ -221,6 +221,14 @@ impl OutputGuard for HostOutputGuard {
         action();
         true
     }
+    fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+        let _fence = lock(&self.host.output_fence);
+        if !self.host.current(&self.host.connection) {
+            return false;
+        }
+        action();
+        true
+    }
 }
 
 impl std::fmt::Debug for ApplicationOutputGuard {
