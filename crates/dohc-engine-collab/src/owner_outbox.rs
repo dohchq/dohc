@@ -1433,6 +1433,7 @@ pub(crate) fn retry_in_tx(
     validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
     let binding = input
         .binding
+        .clone()
         .normalized()
         .map_err(OwnerOutboxError::InvalidInput)?;
     require_workspace(workspace_id, &binding.workspace_id)?;
@@ -1497,11 +1498,12 @@ pub(crate) fn retry_in_tx(
             |row| row.get(0),
         )
         .map_err(read_sql)?;
+    // The document must still be live at the binding the owner saw.
     if newer
         || marker.is_some_and(|marker| {
-            marker
-                .lineage_claim_id
-                .is_some_and(|lineage| lineage != binding.lineage_claim_id)
+            marker.regime != crate::Regime::Replicated
+                || marker.lineage_claim_id.as_deref() != Some(binding.lineage_claim_id.as_str())
+                || marker.path.as_deref() != Some(binding.current_path.as_str())
         })
     {
         return Err(OwnerOutboxError::ParentMismatch);
@@ -2604,9 +2606,17 @@ mod tests {
         drop(store);
         let mut store = EngineStore::open(&dir.join("engine.db"), 30).expect("reopen refused");
         let frozen = read_pending(&store, "workspace-1", &outbox).expect("refused");
+        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
+        assert_eq!(frozen.quarantine_reason.as_deref(), Some("invalid-update"));
         assert_eq!(frozen.retry_delivery_id, None);
+        assert_eq!(frozen.entries, pending.entries);
+        assert_eq!(frozen.base_update, pending.base_update);
         assert!(matches!(
             acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])]),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        assert!(matches!(
+            append(&mut store, "workspace-1", input("key-4", b"four", 13)),
             Err(OwnerOutboxError::Frozen)
         ));
     }
@@ -2685,8 +2695,8 @@ mod tests {
         ));
         let illegal = store.write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
             tx.execute(
-                "UPDATE owner_ydoc_outboxes SET state='active',retry_delivery_id='owner-delivery-x' \
-                 WHERE outbox_id=?1",
+                "UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,\
+                 observed_binding_json=NULL,retry_delivery_id='owner-delivery-x' WHERE outbox_id=?1",
                 [&active],
             )
             .map_err(write_sql)

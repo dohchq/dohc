@@ -778,6 +778,28 @@ describe("a server that pushes its copy of a workspace", () => {
     await vi.waitFor(() => expect(s.sync.mock.calls.length).toBeGreaterThan(1));
     readHead.mockRestore(); currentBinding.mockRestore();
   });
+  it("delivers a quarantined draft whose owner asked to try again", async () => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    const draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
+    const capture = vi.fn(async () => {throw new Error("Device delivery is unavailable.");});
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
+      baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
+      oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: "delivery",
+      entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
+    const currentBinding = vi.mocked(storage.automationRecordBinding);
+    const s = await server(storage, h, {client: client as unknown as EngineClient,
+      recordDelivery: {namespace: "relay", capture}});
+    await s.openReplica();
+    await vi.waitFor(() => expect(s.errors.some(([context]) => context.startsWith("deliver automation record"))).toBe(true));
+    expect(readHead).toHaveBeenCalledWith("outbox");
+    expect(capture).toHaveBeenCalled();
+    readHead.mockRestore(); currentBinding.mockRestore();
+  });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {

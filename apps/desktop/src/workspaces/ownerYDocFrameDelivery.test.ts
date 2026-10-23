@@ -5,8 +5,10 @@ import {afterEach, expect, it, vi} from "vitest";
 import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createNamedLiveFrameSession, type NamedFrameAppliedUpdate, type NamedFrameSubmissionResult} from "../../../../services/sync-relay/src/namedLiveFrameSession";
+import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
+import type {LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {OwnerYDocFrameDelivery, type OwnerAcceptedState, type OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
-import type {OwnerYDocDeliveryEnvelope} from "./ownerYDocOutbox";
+import {OwnerYDocOutboxDrainer, type OwnerYDocDeliveryEnvelope} from "./ownerYDocOutbox";
 
 vi.mock("node:timers/promises", async importOriginal => {
   const timers = await importOriginal<typeof import("node:timers/promises")>();
@@ -298,4 +300,43 @@ it("keeps an entry's submitted account through a missing lookup", async () => {
   options.accountId = "owner"; options.result = undefined;
   expect(await pass()).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.submit.mock.calls[1]![0]).toEqual(submitted);
+});
+
+it("finishes an accepted Try again of a quarantined head and resumes delivery", async () => {
+  const outbox = {state: "quarantined" as "quarantined" | "active", retryDeliveryId: envelope.deliveryId as string | null};
+  // Like the engine, a quarantined outbox proves and acknowledges only the head its owner asked to try again.
+  const granted = (deliveryId: string) => outbox.state !== "quarantined" || outbox.retryDeliveryId === deliveryId;
+  const applied = new Map<number, string>(), checked = deferred<void>();
+  const isReceiptApplied = vi.fn<OwnerAcceptedState["isReceiptApplied"]>(async ({receipt}) => {
+    checked.resolve();
+    if (!granted(receipt.deliveryId)) throw new Error("owner-outbox-frozen");
+    return applied.get(receipt.journalCursor) === receipt.updateDigest;
+  });
+  const f = fixture({state: {isReceiptApplied,
+    applyAcceptedFrame: async input => {applied.set(input.journalCursor, hash(input.updateBytes)); return "applied";}}});
+  const head = (): Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> => ({outboxId: "outbox", binding, baseUpdate: envelope.baseUpdate,
+    baseUpdateDigest: envelope.baseUpdateDigest, state: outbox.state, pendingBytes: 3, oldestEntryAtMs: 0,
+    quarantineReason: outbox.state === "quarantined" ? "invalid-update" : null, observedBinding: null, retryDeliveryId: outbox.retryDeliveryId,
+    entry: {sequence: 4, appendKey: "append", deliveryId: envelope.deliveryId, update: envelope.update, updateDigest: envelope.updateDigest, byteLength: 3, createdAtMs: 0}});
+  class GrantedOutbox extends OwnerYDocOutbox {
+    override readHead = vi.fn(async () => head());
+    override acknowledge = vi.fn(async (_outboxId: string, receipts: readonly LiveUpdateReceipt[]) => {
+      if (receipts.length !== 1 || !granted(receipts[0]!.deliveryId)) throw new Error("owner-outbox-frozen");
+      Object.assign(outbox, {state: "active", retryDeliveryId: null});
+      return {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null};
+    });
+    override quarantine = vi.fn(async () => {});
+  }
+  const engine = new GrantedOutbox({sendRequest: async () => {throw new Error("unexpected request");}}, "handle");
+  const drainer = new OwnerYDocOutboxDrainer(engine, "outbox", f.delivery);
+  disposals.push(() => {drainer.dispose(); engine.dispose();});
+  const pass = drainer.drainOnce();
+  await checked.promise;
+  f.feed();
+  expect(await pass).toBe("acknowledged");
+  expect(isReceiptApplied).toHaveBeenLastCalledWith({binding, receipt: f.receipt}, expect.any(AbortSignal));
+  expect(engine.acknowledge).toHaveBeenCalledWith("outbox", [f.receipt]);
+  expect(engine.quarantine).not.toHaveBeenCalled();
+  expect(outbox).toEqual({state: "active", retryDeliveryId: null});
+  expect(f.submit).toHaveBeenCalledOnce();
 });
