@@ -6,7 +6,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
 import {liveEditors} from "./liveEditors.js";
-import {heldReadLane, queueLiveHostRequests} from "./liveHostRequests.js";
+import {HeldReadBusyError, heldReadLane, queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -652,6 +652,9 @@ export async function startServiceLiveHost(options: {
       } catch (error) {
         const invalidated = ended();
         if (invalidated) return invalidated;
+        // The engine runs one proof per workspace and refuses other reads beside it.
+        if (error instanceof EngineRequestError && error.wireError?.code === "OVERLOADED" &&
+          error.wireError.message === "held-read-busy") throw new HeldReadBusyError();
         throw error;
       }
       return ended() ?? read;

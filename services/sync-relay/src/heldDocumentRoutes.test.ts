@@ -1,10 +1,13 @@
 import {createHash} from "node:crypto";
+import {EventEmitter} from "node:events";
+import type {ServerResponse} from "node:http";
 import {afterEach, describe, expect, it, vi} from "vitest";
+import {DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
+import {HELD_BODY_SEND_DEADLINE_MS, MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
   type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage, type StreamedBlob} from "./heldDocumentRoutes";
 import {HeldReadBusyError} from "./liveHostRequests";
 
@@ -546,6 +549,91 @@ describe("held document read admission", () => {
     const admitted = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
     expect(admitted.status).toBe(200);
     await admitted.body!.cancel();
+  });
+
+  /**
+   * Two artifacts answered that together leave too little of the byte budget for another, and the paths
+   * that read them. `asked` lists each workspace the host read held work for.
+   */
+  async function fullBudget(asked: string[] = []) {
+    const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 2.2));
+    const f = await relay(fakeHost({
+      heldContributions: async workspaceId => {asked.push(workspaceId); return {inspected: preserved, contributions: large};},
+      heldDocument: async workspaceId => {asked.push(workspaceId); return preserved;},
+    }));
+    owned(f, "owner-1", "workspace-3");
+    const artifact = (workspaceId: string) =>
+      `${workspaceId}/held-documents/${held.objectId}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
+    const answered = [await f.get(artifact(scope.workspaceId)), await f.get(artifact("workspace-3"))];
+    expect(answered.map(response => response.status)).toEqual([200, 200]);
+    const strangers = () => f.get(artifact("workspace-2"), {authorization: "Bearer stranger"});
+    return {f, answered, artifact, strangers};
+  }
+
+  it("answer an artifact or Markdown read 429 without asking the host while the byte budget can't fit one, after the ownership check", async () => {
+    const asked: string[] = [];
+    const {f, answered, artifact} = await fullBudget(asked);
+    const other = `workspace-2/held-documents/${held.objectId}`;
+    for (const path of [artifact("workspace-2"), `${other}/markdown?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`]) {
+      const refused = await f.get(path, {authorization: "Bearer stranger"});
+      expect(refused.status, path).toBe(429);
+      expect(await refused.json()).toMatchObject({code: "held_read_busy"});
+    }
+    expect(asked, "the host read nothing for them").toEqual([scope.workspaceId, "workspace-3"]);
+    // A caller who doesn't own the workspace learns nothing about the budget.
+    expect((await f.get(artifact(scope.workspaceId), {authorization: "Bearer editor"})).status).toBe(404);
+    // The details hold no body, so they are still answered.
+    const details = await f.get(other, {authorization: "Bearer stranger"});
+    expect(details.status).toBe(200);
+    await details.json();
+    for (const response of answered) await response.body!.cancel();
+  });
+
+  /** A response whose client takes a write only when the test drains it, as node:http reports one. */
+  class SlowResponse extends EventEmitter {
+    destroyed = false;
+    writableFinished = false;
+    written = 0;
+    write(chunk: Uint8Array): boolean {this.written += chunk.length; return false;}
+    end(): void {this.writableFinished = true;}
+    destroy(): this {this.destroyed = true; queueMicrotask(() => this.emit("close")); return this;}
+  }
+  const sending = (response: Response) => {
+    const outgoing = new SlowResponse();
+    return {outgoing, piping: pipeResponseBody(response.body!, outgoing as unknown as ServerResponse)};
+  };
+
+  it("free an unread body's slot and bytes after the drain timeout, and a slow body's at the send deadline", async () => {
+    const {f, answered, strangers} = await fullBudget();
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      // Both clients read the headers, then take nothing.
+      const stalled = answered.map(sending);
+      await vi.waitFor(() => {for (const {outgoing} of stalled) expect(outgoing.written).toBeGreaterThan(0);});
+      expect((await strangers()).status, "the budget is full").toBe(429);
+      await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS);
+      expect(stalled.map(({outgoing}) => outgoing.destroyed)).toEqual([true, true]);
+      await Promise.all(stalled.map(({piping}) => piping));
+      const slow = await strangers();
+      expect(slow.status, "their slots and bytes are free").toBe(200);
+
+      // This client takes a view every 30 s, never slow enough for the drain timeout.
+      const {outgoing, piping} = sending(slow);
+      const step = 30_000;
+      for (let elapsed = step; elapsed < HELD_BODY_SEND_DEADLINE_MS; elapsed += step) {
+        await vi.advanceTimersByTimeAsync(step);
+        outgoing.emit("drain");
+      }
+      expect((await strangers()).status, "its slot holds until the deadline").toBe(429);
+      await vi.advanceTimersByTimeAsync(step);
+      const again = await strangers();
+      expect(again.status, "the deadline frees it").toBe(200);
+      outgoing.emit("drain");
+      await piping;
+      expect(outgoing.destroyed, "the unfinished body fails").toBe(true);
+      expect(outgoing.written).toBeLessThan(MAX_HELD_BODY_BYTES / 2.2);
+      await again.body!.cancel();
+    } finally {vi.useRealTimers();}
   });
 });
 

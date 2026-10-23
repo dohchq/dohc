@@ -47,6 +47,8 @@ export const MAX_HELD_CONTRIBUTIONS_BYTES = 64 * 1024 * 1024;
 export const MAX_HELD_BODY_BYTES = 128 * 1024 * 1024;
 /** The most held reads one owner has admitted at once, across all their workspaces. */
 export const MAX_HELD_READS_PER_OWNER = 2;
+/** How long an answer's body may take to send whole before it fails and its slot and bytes free. */
+export const HELD_BODY_SEND_DEADLINE_MS = 5 * 60_000;
 const HELD_BODY_CHUNK_BYTES = 256 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 
@@ -111,16 +113,25 @@ export function withStreamedContributions(inspected: HeldDocumentInspection, str
   return {inspected, contributions: streamed.bytes};
 }
 
-/** `bytes` as a body sent a view at a time, which calls `release` once it closes or is cancelled. */
+/**
+ * `bytes` as a body sent a view at a time, which calls `release` once it closes, is cancelled, or fails
+ * at {@link HELD_BODY_SEND_DEADLINE_MS}.
+ */
 function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
-  let offset = 0;
+  let offset = 0, deadline: ReturnType<typeof setTimeout> | undefined;
+  const end = () => {clearTimeout(deadline); release();};
   return new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (offset === bytes.length) {controller.close(); release(); return;}
-      const end = Math.min(bytes.length, offset + HELD_BODY_CHUNK_BYTES);
-      controller.enqueue(bytes.subarray(offset, end)); offset = end;
+    start(controller) {
+      deadline = setTimeout(() => {controller.error(new Error("Held document body send deadline elapsed.")); release();},
+        HELD_BODY_SEND_DEADLINE_MS);
+      deadline.unref();
     },
-    cancel: release,
+    pull(controller) {
+      if (offset === bytes.length) {controller.close(); end(); return;}
+      const next = Math.min(bytes.length, offset + HELD_BODY_CHUNK_BYTES);
+      controller.enqueue(bytes.subarray(offset, next)); offset = next;
+    },
+    cancel: end,
   }, {highWaterMark: 0});
 }
 
@@ -188,6 +199,10 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     const query = objectId === undefined ? page(url) : null;
     const wanted = read ? inspectedQuery(url) : null;
     if (objectId !== undefined && !read && url.search) throw badRequest("Invalid held document query.");
+    // A body the budget could not fit is refused before the host reads it.
+    if (read && bodyBytes > MAX_HELD_BODY_BYTES - (read === "contributions" ? MAX_HELD_CONTRIBUTIONS_BYTES : MAX_BLOB_BYTES)) {
+      throw relayError("held_read_busy");
+    }
     const host = options.host();
     if (!host) throw notFound();
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
