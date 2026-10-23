@@ -88,12 +88,14 @@ function keptView(row: ServiceKeptEdits) {
  * a durable recovery copy of this refusal exists, after which the server may
  * let the document go. Each names the refusal it saw.
  */
-async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, workspaceId: string, input: Record<string, unknown>, signal: AbortSignal) {
+async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, workspaceId: string, input: Record<string, unknown>,
+  guard: () => void, signal: AbortSignal) {
   if (Object.keys(input).sort().join() !== "action,generation,outboxId" || !["read", "retry", "copied"].includes(String(input.action)) ||
     typeof input.outboxId !== "string" || !Number.isSafeInteger(input.generation)) throw badRequest("A kept edits action, queue and refusal are required.");
   const changed = () => relayError("conflict", "This document changed. Open Live documents to check it.");
   const kept = storage.readServiceKeptEdits(workspaceId, input.outboxId);
-  if (!kept || kept.generation !== input.generation) throw changed();
+  if (!kept) throw notFound();
+  if (kept.generation !== input.generation) throw changed();
   if (input.action === "read") {
     const queue = await host.keptEdits.read(kept, signal);
     if (storage.readServiceKeptEdits(workspaceId, kept.outboxId)?.generation !== kept.generation) throw changed();
@@ -105,19 +107,42 @@ async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, w
     return {ok: true};
   }
   if (kept.retrying) throw changed();
-  if (!await host.keptEdits.retry(kept, signal)) throw relayError("conflict", "Live editing is off for this document. Save a recovery copy to get your edits back.");
-  storage.markServiceKeptEditsRetrying({workspaceId, outboxId: kept.outboxId, generation: kept.generation});
+  const outcome = await host.keptEdits.retry(kept, guard, signal);
+  if (outcome === "unavailable") throw relayError("conflict", "Live editing is off for this document. Save a recovery copy to get your edits back.");
+  if (outcome === "changed") throw changed();
   return {ok: true};
 }
 
+/** The paths the enrollment routes answer: the workspace's live host and the owner's actions on edits the server kept. */
+export const isServiceHostEnrollmentPath = (pathname: string) => /^\/sync\/[^/]+\/live-host(?:\/kept-edits)?$/.test(pathname);
+
 type KeptEditsHost = Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "keptEdits" | "reconcile">;
+
+/** Whole-queue recovery reads the relay runs at once. The rest wait their turn, holding no queue bytes. */
+export const MAX_KEPT_EDITS_READS = 2;
+function readTurns(max: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> => {
+    while (active >= max) {
+      signal.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const wake = () => {signal.removeEventListener("abort", stop); resolve();};
+        const stop = () => {const index = waiting.indexOf(wake); if (index >= 0) waiting.splice(index, 1); reject(signal.reason);};
+        waiting.push(wake); signal.addEventListener("abort", stop, {once: true});
+      });
+    }
+    active++;
+    try {return await work();} finally {active--; waiting.shift()?.();}
+  };
+}
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
   host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged" | "keptEdits">;
 }) {
   const {storage, history, host} = options;
-  const activation = storage.createServiceActivationStore(history);
+  const activation = storage.createServiceActivationStore(history), reads = readTurns(MAX_KEPT_EDITS_READS);
   const changed = (row: ServiceHostEnrollment) => !storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched";
   // Nothing its owner does, not even a Pause or Stop, continues a document
   // whose hosted replica diverged. Its store stays for the operator.
@@ -152,9 +177,12 @@ export function createServiceHostEnrollmentRoutes(options: {
       const refusalPage = request.method === "GET" && url.searchParams.get("refusals") === "1" &&
         [...url.searchParams.keys()].every(key => key === "refusals" || key === "after") &&
         url.searchParams.getAll("refusals").length === 1 && url.searchParams.getAll("after").length <= 1;
-      if (retiredPage && refusalPage) throw notFound();
+      const keptPage = request.method === "GET" && url.searchParams.get("kept") === "1" &&
+        [...url.searchParams.keys()].every(key => key === "kept" || key === "after") &&
+        url.searchParams.getAll("kept").length === 1 && url.searchParams.getAll("after").length === 1;
+      if ([retiredPage, refusalPage, keptPage].filter(Boolean).length > 1) throw notFound();
       const keptPath = parts.length === 5 && parts[4] === "kept-edits" && request.method === "POST" && !url.search;
-      if ((parts.length !== 4 && !keptPath) || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage && !refusalPage) || request.headers.has("cookie") ||
+      if ((parts.length !== 4 && !keptPath) || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage && !refusalPage && !keptPage) || request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") || !["GET", "POST", "DELETE"].includes(request.method)) throw notFound();
       const workspaceId = parseWorkspaceId(decodeURIComponent(parts[2]!));
       const actor = await options.resolveActor(request, workspaceId);
@@ -168,20 +196,31 @@ export function createServiceHostEnrollmentRoutes(options: {
         return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired",
           ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
       }
+      // Later pages of the edits the server kept, after the first page's `keptEditsCursor`.
+      if (keptPage) {
+        const after = Number(url.searchParams.get("after"));
+        if (!/^[1-9][0-9]*$/.test(url.searchParams.get("after")!) || !Number.isSafeInteger(after)) throw badRequest("A kept edits cursor is required.");
+        const page = storage.listServiceKeptEdits(workspaceId, after);
+        return response({ok: true, keptEdits: page.keptEdits.map(keptView), nextCursor: page.nextCursor});
+      }
       // Whether the workspace's hosted replica diverged, even once its owner stopped every document.
       if (request.method === "GET") {
         const identity = storage.getWorkspaceIdentity(workspaceId), kept = storage.listServiceKeptEdits(workspaceId);
         return response({ok: true, diverged: !!identity && host.diverged({workspaceId, ...identity}),
-          documents: storage.listServiceHostEnrollments(workspaceId).map(state), ...(kept.length ? {keptEdits: kept.map(keptView)} : {})});
+          documents: storage.listServiceHostEnrollments(workspaceId).map(state), ...(kept.keptEdits.length ? {keptEdits: kept.keptEdits.map(keptView)} : {}),
+          ...(kept.nextCursor === null ? {} : {keptEditsCursor: kept.nextCursor})});
       }
       if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Expected a JSON request.");
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (keptPath) {
-        const result = await keptEditsAction(storage, host, workspaceId, input, request.signal);
-        guard();
-        return response(result);
+        const answer = async () => {
+          const result = await keptEditsAction(storage, host, workspaceId, input, guard, request.signal);
+          guard();
+          return response(result);
+        };
+        return input.action === "read" ? await reads(request.signal, answer) : await answer();
       }
       if (request.method === "DELETE") {
         if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||

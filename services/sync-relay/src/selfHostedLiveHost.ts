@@ -334,7 +334,7 @@ export async function startSelfHostedLiveHost(options: {
         if (!current) throw new Error("This server does not hold the workspace's live documents now.");
         return current.readKeptEdits(kept, signal);
       },
-      async retry(kept: ServiceKeptEdits, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, signal) : false;},
+      async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, guard, signal) : "unavailable" as const;},
     },
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},

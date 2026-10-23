@@ -426,14 +426,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   forgetServiceKeptEdits(input: {workspaceId: string; outboxId: string}) {
     return serviceKeptEditsStorage.forgetServiceKeptEdits(this, input);
   }
-  listServiceKeptEdits(workspaceId: string) {
-    return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId);
+  releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}) {
+    return serviceKeptEditsStorage.releaseServiceKeptEdits(this, document);
+  }
+  listServiceKeptEdits(workspaceId: string, after?: number) {
+    return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId, after);
   }
   readServiceKeptEdits(workspaceId: string, outboxId: string) {
     return serviceKeptEditsStorage.readServiceKeptEdits(this, workspaceId, outboxId);
   }
+  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}) {
+    return serviceKeptEditsStorage.serviceKeptEditsOf(this, document);
+  }
   markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
+  }
+  endServiceKeptEditsRetry(input: {workspaceId: string; outboxId: string}) {
+    return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, input);
   }
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);

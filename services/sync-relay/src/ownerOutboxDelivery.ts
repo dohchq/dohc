@@ -11,6 +11,7 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import { SERVICE_KEPT_EDITS_REASONS } from "./storage/serviceKeptEdits.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 
 export type LiveAdmissionValidation = LiveJournalValidation | {
@@ -90,21 +91,6 @@ export async function drainOwnerOutbox(options: {
   if (admission.keptOnServer && typeof outboxId === "string" && status.quarantined === undefined) {
     storage.forgetServiceKeptEdits({workspaceId: binding.workspaceId, outboxId});
   }
-  if (status.quarantined) {
-    // With no Try again outstanding, no known refusal is left to record.
-    const known = refusals.get(held);
-    if (known) refusals.recorded(held, known);
-    adoption.applied(); return {admittedEntries: 0, hasMore: false};
-  }
-  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
-  if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
-  const quarantine = async (known: OwnerKnownRefusal) => {
-    await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
-      params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
-    refusals.recorded(held, known);
-    check();
-    if (admission.keptOnServer) storage.recordServiceKeptEdits({outboxId, binding, reason: known.reason, headDeliveryId: known.deliveryId, nowMs: Date.now()});
-  };
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
   const outbox = new OwnerYDocOutbox({sendRequest: async original => {
@@ -123,6 +109,39 @@ export async function drainOwnerOutbox(options: {
     }
     return {...response,id: original.id};
   }},options.workspace);
+  // The record of a refusal its owner can find, written before the engine's
+  // quarantine so no crash leaves a quarantine without one.
+  const keep = (outbox: string, refusal: {reason: string; deliveryId: string; key: string}) => {
+    if (admission.keptOnServer) storage.recordServiceKeptEdits({outboxId: outbox, binding, reason: refusal.reason, headDeliveryId: refusal.deliveryId,
+      refusalKey: refusal.key, nowMs: Date.now()});
+  };
+  if (status.quarantined) {
+    // With no Try again outstanding, no known refusal is left to record.
+    const known = refusals.get(held);
+    try {
+      // A quarantine whose record was lost, or forgotten once its document left, is recorded from the engine's queue.
+      if (admission.keptOnServer && typeof outboxId === "string" && !storage.readServiceKeptEdits(binding.workspaceId, outboxId)) {
+        if (known) keep(outboxId, known);
+        else {
+          const head = await outbox.readDeliveryHead(outboxId, binding); check();
+          if (head.entry && head.quarantineReason !== null && SERVICE_KEPT_EDITS_REASONS.includes(head.quarantineReason)) {
+            keep(outboxId, {reason: head.quarantineReason, deliveryId: head.entry.deliveryId, key: `quarantined:${head.entry.deliveryId}`});
+          }
+        }
+      }
+    } finally {outbox.dispose();}
+    if (known) refusals.recorded(held, known);
+    adoption.applied(); return {admittedEntries: 0, hasMore: false};
+  }
+  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
+  if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
+  const quarantine = async (known: OwnerKnownRefusal) => {
+    keep(outboxId, known);
+    await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
+      params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
+    refusals.recorded(held, known);
+    check();
+  };
   // One attempt per outbox at a time, across passes and connections.
   if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
   try {

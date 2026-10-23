@@ -23,7 +23,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
   const applied = vi.fn();
   const host = {hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [];
-  const state = {value: "active", retryDeliveryId: null as string | null};
+  const state = {value: "active", retryDeliveryId: null as string | null}, quarantine = {reason: null as string | null};
   const applyThrough = vi.fn(async (receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null> => ({...receipt,localYDocSequence: receipt.journalCursor,applicationReplayed: true}));
   let requestId = 0;
   const cursor = (snapshot: string, part: string, sequence = 0, offset = 0) => ({snapshot,part,sequence,offset});
@@ -49,7 +49,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const entry = entries.find(row => row.sequence === current.sequence);
     let bytes: Buffer, following: ReturnType<typeof cursor> | null;
     if (current.part === "header") {
-      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: null,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor}));
+      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor}));
       following = cursor(snapshot,"base");
     } else if (current.part === "base") {bytes = base; following = firstEntryCursor;}
     else if (current.part === "entryHeader") {bytes = Buffer.from(JSON.stringify(entry)); following = cursor(snapshot,"update",current.sequence);}
@@ -67,7 +67,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
   const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,
     refusals: new OwnerKnownRefusals(),validate};
-  return {entries,requests,receipts,storage,state,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
+  return {entries,requests,receipts,storage,state,quarantine,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
     adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
 
@@ -213,7 +213,7 @@ function quarantinedBy(f: ReturnType<typeof fixture>, faults: Array<"failed" | "
     if (fault === "failed") throw new Error("Engine unavailable.");
     if (refusalKey !== recorded && f.entries[0]?.deliveryId === deliveryId && (f.state.value !== "quarantined" || f.state.retryDeliveryId === deliveryId)) {
       reasons.push(reason as string); recorded = refusalKey;
-      f.state.value = "quarantined"; f.state.retryDeliveryId = null;
+      f.state.value = "quarantined"; f.state.retryDeliveryId = null; f.quarantine.reason = reason as string;
     }
     if (fault === "lost") throw new Error("Engine response lost.");
     return {id: request.id, result: {quarantined: true}} as never;
@@ -349,33 +349,70 @@ it("delivers a Try again a later validator accepts under its original delivery, 
   expect(committedDeliveries(f)).toHaveLength(4);
 });
 
+// The relay's records of server-held refusals, one per queue. Recording the same refusal again changes nothing.
+type KeptRow = {outboxId: string; reason: string; headDeliveryId: string; refusalKey: string};
+function keptOnServer(f: ReturnType<typeof fixture>) {
+  const rows = new Map<string, KeptRow>();
+  Object.assign(f.admission, {keptOnServer: true});
+  Object.assign(f.storage, {
+    recordServiceKeptEdits: vi.fn((input: KeptRow) => {if (rows.get(input.outboxId)?.refusalKey !== input.refusalKey) rows.set(input.outboxId, input);}),
+    readServiceKeptEdits: (_workspaceId: string, outboxId: string) => rows.get(outboxId) ?? null,
+    forgetServiceKeptEdits: vi.fn((input: {outboxId: string}) => {rows.delete(input.outboxId);})});
+  return rows;
+}
+
 it("records each refusal of a server-held queue for its owner until a Try again delivers it, and none for a device's queue", async () => {
-  const service = fixture(3), device = fixture(3);
-  for (const f of [service, device]) {
-    Object.assign(f.storage, {recordServiceKeptEdits: vi.fn(), forgetServiceKeptEdits: vi.fn()});
-    quarantinedBy(f); refuseOnce(f);
-  }
-  Object.assign(service.admission, {keptOnServer: true});
-  const storage = service.storage as typeof service.storage & {recordServiceKeptEdits: ReturnType<typeof vi.fn>; forgetServiceKeptEdits: ReturnType<typeof vi.fn>};
+  const service = fixture(3), device = fixture(3), rows = keptOnServer(service);
+  for (const f of [service, device]) {quarantinedBy(f); refuseOnce(f);}
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(storage.recordServiceKeptEdits.mock.calls).toEqual([[{outboxId: "outbox", binding: expect.objectContaining({objectId: "object"}),
-    reason: "invalid-update", headDeliveryId: "delivery-1", nowMs: expect.any(Number)}]]);
-  // Forgetting a queue that was never refused changes nothing.
-  storage.forgetServiceKeptEdits.mockClear();
-  // A quarantined queue, and one whose Try again is waiting, are still kept.
+  expect([...rows.values()]).toEqual([{outboxId: "outbox", binding: expect.objectContaining({objectId: "object"}),
+    reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: expect.any(String), nowMs: expect.any(Number)}]);
+  const first = rows.get("outbox")!.refusalKey;
+  // A quarantined queue, and one whose Try again is waiting, are still kept. A second refusal is a new record.
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
   service.state.retryDeliveryId = "delivery-1";
   refuseOnce(service);
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(storage.recordServiceKeptEdits).toHaveBeenCalledTimes(2);
-  expect(storage.forgetServiceKeptEdits).not.toHaveBeenCalled();
+  expect(rows.get("outbox")!.refusalKey).not.toBe(first);
   // An accepted Try again resumes the queue; the next pass forgets it.
   service.state.retryDeliveryId = "delivery-1";
   expect(await service.run()).toEqual({admittedEntries: 3, hasMore: false});
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(storage.forgetServiceKeptEdits).toHaveBeenCalledWith({workspaceId: "workspace", outboxId: "outbox"});
+  expect(rows.size).toBe(0);
+  // A device's storage has no such record to write.
   expect(await device.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect((device.storage as unknown as {recordServiceKeptEdits: ReturnType<typeof vi.fn>}).recordServiceKeptEdits).not.toHaveBeenCalled();
+  expect(device.storage).not.toHaveProperty("recordServiceKeptEdits");
+});
+
+// Proves: a server-held quarantine always has a record its owner can find. The
+// record is written before the engine's quarantine, so a reply lost between
+// them, a cancellation or a crash leaves it; a record lost anyway is rebuilt
+// from the engine's queue on the next pass. A record whose quarantine never
+// reached the engine goes once the queue delivers.
+it("leaves no server-held quarantine without its record, whatever is lost between them", async () => {
+  const f = fixture(3), rows = keptOnServer(f);
+  quarantinedBy(f, ["lost"]); refuseOnce(f);
+  await expect(f.run()).rejects.toThrow("Engine response lost.");
+  expect(f.state.value).toBe("quarantined");
+  expect(rows.get("outbox")).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  // The relay restarts having lost the record and every refusal it received.
+  rows.clear(); Object.assign(f.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get("outbox")).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  const rebuilt = rows.get("outbox")!.refusalKey;
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get("outbox")!.refusalKey).toBe(rebuilt);
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.receipts).toEqual([]);
+
+  const healed = fixture(3), kept = keptOnServer(healed);
+  quarantinedBy(healed, ["failed"]); refuseOnce(healed);
+  await expect(healed.run()).rejects.toThrow("Engine unavailable.");
+  expect(healed.state.value).toBe("active");
+  expect(kept.size).toBe(1);
+  // After a restart a later validator accepts the head, so the queue delivers and its record goes.
+  Object.assign(healed.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await healed.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(kept.size).toBe(0);
 });
 
 it.each(["admission-unavailable", "host-unavailable"])("retries the same head without quarantine while commit answers %s", async reason => {
