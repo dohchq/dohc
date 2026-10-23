@@ -25,7 +25,7 @@ import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import * as restoreProof from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
-import {LiveRestoreTooLarge, liveRestoreValidator, runLiveRestoreWork, type LiveRestoreRun} from "../../../services/sync-relay/src/liveRestoreValidation.js";
+import {LiveRestoreTooLarge, liveRestoreValidator, runLiveRestoreWork, type LiveRestoreRun, type LiveRestoreValidator} from "../../../services/sync-relay/src/liveRestoreValidation.js";
 import {canonicalVersionedAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
@@ -307,22 +307,91 @@ it("enforces the aggregate byte reservation before the operation count is full",
   } finally {f.close();}
 });
 
-it.each(["read", "review", "record"])("refuses restore evidence another connection changes while %s validation runs", async path => {
+type ContentProposal = ReturnType<typeof contentProposalFixture>;
+const restorePaths = ["read", "review", "record", "admission", "reviewed admission"] as const;
+/** Records first when `path` needs a stored proposal, then returns the call under test. */
+async function restorePath(f: ContentProposal, path: typeof restorePaths[number]) {
+  const recorded = path === "record" ? null : await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
+  const review = {...f.input, maxOutputBytes: 1_000_000};
+  return (validator: LiveRestoreValidator): Promise<unknown> => path === "read" ? f.store.readStopRestoreProposal(f.input, validator)
+    : path === "review" ? f.store.readStopRestoreReview(review, validator)
+    : path === "record" ? f.store.recordStopRestoreProposal(f.input, f.encoded, validator, 200)
+    : path === "admission" ? f.store.admitStopRestoreProposal(f.input, recorded!.proposalDigest, validator, 201)
+    : f.store.admitReviewedStopRestoreProposal(review, recorded!.proposalDigest, validator, 201);
+}
+/** Validates in this process. Asks for each of `digests` first, then runs `change` during the final run. */
+const validatingWhile = (change: () => void, digests: readonly string[] = []) => liveRestoreValidator(async work => {
+  const digest = digests.find(digest => !work.answers.has(digest));
+  if (digest !== undefined) return {kind: "needs-artifact", digest};
+  change();
+  return runLiveRestoreWork(work, policy);
+});
+const artifactText = (name: string) => new TextEncoder().encode(`${name} artifact\n`);
+const presentArtifact = artifactText("present"), absentArtifact = artifactText("absent");
+const answeredArtifacts = [hash(presentArtifact), hash(absentArtifact)];
+/** Adds `bytes` to the restored object's artifact history, below its current moment. */
+function addArtifact(f: Pick<ContentProposal, "raw" | "document" | "capture">, bytes: Uint8Array, sequence: number) {
+  f.raw.prepare("INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(bytes), bytes.length, bytes);
+  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES ('workspace',?,?,?,'main',?,?,'text',?,0)`).run(f.document.objectId, sequence, `artifact-${sequence}`, f.capture.selected.binding.currentPath, hash(bytes), bytes.length);
+}
+
+it.each(restorePaths)("completes %s while other workspaces write during validation", async path => {
   const f = contentProposalFixture();
   try {
-    if (path !== "record") await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
-    let changed: ReturnType<typeof proposalRows> | undefined;
-    const changing = liveRestoreValidator(async work => {
+    addArtifact(f, presentArtifact, 0);
+    const call = await restorePath(f, path);
+    let writes = 0;
+    const result = await call(validatingWhile(() => {
+      f.raw.prepare("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, 'other', 0)").run(`other-${++writes}`);
       f.raw.exec("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+1");
-      changed = proposalRows(f);
-      return runLiveRestoreWork(work, policy);
-    });
-    const call = path === "read" ? f.store.readStopRestoreProposal(f.input, changing)
-      : path === "review" ? f.store.readStopRestoreReview({...f.input, maxOutputBytes: 1_000_000}, changing)
-      : f.store.recordStopRestoreProposal(f.input, f.encoded, changing, 200);
-    await expect(call).rejects.toThrow("Relay evidence changed during validation.");
-    expect(changed).toBeDefined();
-    expect(proposalRows(f)).toEqual(changed);
+    }, answeredArtifacts));
+    expect(writes).toBe(1);
+    expect(result).not.toBeNull();
+    expect(f.raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").get()!.phase).toBe(path.endsWith("admission") ? "relay-admitted" : "native-fenced");
+  } finally {f.close();}
+});
+
+const evidenceChanges: readonly (readonly [string, () => ContentProposal, (f: ContentProposal) => void])[] = [
+  ["operation row", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_restore_operations SET native_receipt_json=json_set(native_receipt_json,'$.recordedAtMs',101)")],
+  ["first journal row", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1")],
+  ["accepted history tip", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=(SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal)")],
+  ["native source author", () => contentProposalFixture("owner", "device", false, true),
+    f => f.raw.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=NULL WHERE delivery_id=?").run(f.acceptedNative!.source.deliveryId)],
+  ["source moment", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_object_moments SET moment_id='replaced' WHERE relay_seq=1")],
+  ["bootstrap source", () => contentProposalFixture("bootstrap", "device"),
+    f => f.raw.exec("UPDATE sync_relay_live_delivery_bootstraps SET projected_markdown_byte_length=projected_markdown_byte_length+1")],
+  ["fetched artifact membership", () => contentProposalFixture(),
+    f => f.raw.exec("DELETE FROM sync_relay_object_moments WHERE relay_seq=0")],
+  ["absent artifact", () => contentProposalFixture(), f => addArtifact(f, absentArtifact, -1)],
+];
+it.each(restorePaths.flatMap(path => evidenceChanges.map(([name, make, change]) => [path, name, make, change] as const)))(
+  "refuses %s when its %s changes during validation", async (path, _name, make, change) => {
+    const f = make();
+    try {
+      addArtifact(f, presentArtifact, 0);
+      const call = await restorePath(f, path);
+      let changed: ReturnType<typeof proposalRows> | undefined;
+      await expect(call(validatingWhile(() => {change(f); changed = proposalRows(f);}, answeredArtifacts)))
+        .rejects.toThrow("Relay evidence changed during validation.");
+      expect(changed).toBeDefined();
+      expect(proposalRows(f)).toEqual(changed);
+    } finally {f.close();}
+  });
+
+it.each(["removed", "added"] as const)("refuses point completion when an answered artifact is %s during validation", async change => {
+  const f = contentProposalFixture();
+  try {
+    addArtifact(f, presentArtifact, 0);
+    const changing = validatingWhile(() => change === "removed" ? f.raw.exec("DELETE FROM sync_relay_object_moments WHERE relay_seq=0")
+      : addArtifact(f, absentArtifact, -1), answeredArtifacts);
+    await expect(f.store.resolveStopRestorePoint(f.input, changing)).rejects.toThrow("Relay evidence changed during validation.");
+    const resolved = await f.store.resolveStopRestorePoint(f.input, validatingWhile(() => {}, answeredArtifacts));
+    expect(resolved.point).toEqual(f.receipt.point);
   } finally {f.close();}
 });
 
@@ -1924,15 +1993,19 @@ it("workspace deletion cascades through admitted restore history",async ()=>{
 
 it("hashes copied restore state before entering the SQLite writer",async ()=>{
   const f=contentProposalFixture("owner","device",true),prototype=Object.getPrototypeOf(createHash("sha256"));
-  const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;
+  const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;const hashed:Uint8Array[]=[];
+  // The writer may hash stored evidence to compare it, never the state it admits.
   const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){
-    if(writing && typeof args[0]!=="string")throw Error("copied state hash inside writer");
+    if(writing && args[0] instanceof Uint8Array)hashed.push(new Uint8Array(args[0]));
     return Reflect.apply(update,this,args);
   });
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   try{
     const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
     expect((await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201)).phase).toBe("relay-admitted");
+    const admitted=f.raw.prepare("SELECT update_bytes,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!;
+    for(const copied of [admitted.update_bytes,admitted.validation_checkpoint_bytes] as Uint8Array[])
+      expect(hashed.some(bytes=>Buffer.compare(bytes,copied)===0)).toBe(false);
   }finally{hashSpy.mockRestore();txSpy.mockRestore();f.close();}
 });
 it("finds existing owner delivery only after authorization and refuses damaged origin",()=>{
@@ -2045,21 +2118,22 @@ it.each(["proposal","admission"])("rejects a same-length source rewrite by anoth
     expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
   }finally{f.close();}
 });
-it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes in the writer",async ()=>{
+// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged; ACKs read none.
+it("keeps every restore writer free of proposal bytes and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
-  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false;
+  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,acknowledging=false;
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
-    if(writing && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
+    if(writing && acknowledging && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
     if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
     return prepare(sql);
   });
-  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing)throw Error("byte comparison in writer");return compare(a,b);});
-  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
+  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing && acknowledging)throw Error("byte comparison in writer");return compare(a,b);});
+  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&acknowledging&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
   try {
     const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
     expect((await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200)).replayed).toBe(true);
-    const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);
+    const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);acknowledging=true;
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
       localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
     const settlement={settlementId:"\\".repeat(512),previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,localYDocSequence:application.localHeadSequence,

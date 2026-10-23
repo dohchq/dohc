@@ -1110,6 +1110,7 @@ export class LiveCommittedDeliveryStore {
         this.#storage.captureStanding();integrity(fingerprint === digest());
         integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.baselineBytes).operation, saved.operation));
         integrity(this.#ownerRow(host, saved.operation.intent.document)?.origin_json === saved.operation.basis.ownerOrigin);
+        requireStopRestoreOwnerOrigin(this.#storage, saved.operation.basis);
         saved.verifyEndpoint();
       }});
     const digest = () => createHash("sha256").update(JSON.stringify(capture)).digest("hex"), fingerprint = digest();
@@ -1120,6 +1121,14 @@ export class LiveCommittedDeliveryStore {
   }): RestoreHistoryCapture<"selected"> {
     return this.#captureRestoreHistory(input, "selected");
   }
+  /** Resolves the selected point in `validator`. Its `assertCurrent` checks the evidence in a read transaction. */
+  async resolveStopRestorePoint(input: StopRestoreLookup & {
+    host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
+  }, validator: LiveRestoreValidator, signal?: AbortSignal) {
+    const selected = this.captureStopRestorePoint(input);
+    const assertCurrent = () => this.#storage.readTx(() => selected.assertCurrent());
+    return {point: await validator.point({...selected, assertCurrent}, signal), assertCurrent};
+  }
   async recordStopRestoreProposal(input: RestoreProposalInput,
     bytes: Uint8Array, validator: LiveRestoreValidator, now: number, signal?: AbortSignal) {
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1128,6 +1137,7 @@ export class LiveCommittedDeliveryStore {
     const at = authorityInteger(now), decoded = decodeNativeRestoreProposal(bytes, budget);
     const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal(request, decoded.receiptJson,decoded.bytes.nativeSourceBytes);
     const content = await validator.proposal(capture, decoded.bytes, budget, signal);
+    const assertTailCurrent = captureSqliteReadRevision(this.#storage.db);
     const proposalDigest = createHash("sha256").update(decoded.captured).digest("hex");
     const operationId = capture.receipt.fence.operation.operationId, workspaceId = capture.selected.binding.workspaceId;
     const charge = proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, at,this.#history.namespace);
@@ -1142,6 +1152,7 @@ export class LiveCommittedDeliveryStore {
       return Buffer.compare(row.proposal_bytes,decoded.captured)===0;
     });
     return this.#storage.tx(() => {
+      assertTailCurrent();
       assertCurrentInTransaction();
       const old = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,record_sha256,length(proposal_bytes) AS bytes
         FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`).get(this.#history.namespace,operationId);
@@ -1189,7 +1200,14 @@ export class LiveCommittedDeliveryStore {
     if (!saved) return null;
     integrity(createHash("sha256").update(saved.bytes).digest("hex") === saved.proposalDigest);
     const decoded = decodeNativeRestoreProposal(saved.bytes, budget);
-    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson, decoded.bytes.nativeSourceBytes);
+    const proposalCurrent = () => {
+      const row = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,length(proposal_bytes) AS bytes
+        FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`).get(this.#history.namespace,lookup.operationId);
+      integrity(row && row.workspace_id === lookup.workspaceId && row.proposal_sha256 === saved.proposalDigest &&
+        row.candidate_sha256 === saved.candidateDigest && row.recorded_at_ms === saved.recordedAtMs && row.bytes === saved.bytes.byteLength);
+    };
+    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson,
+      decoded.bytes.nativeSourceBytes, proposalCurrent);
     const validated = await validator.proposal(capture, decoded.bytes, maxOutputBytes === undefined ? budget : {...budget, maxOutputBytes}, signal);
     integrity(validated.content.candidateDigest === saved.candidateDigest);
     return {saved, capture, validated, assertCurrentInTransaction};
@@ -1203,21 +1221,30 @@ export class LiveCommittedDeliveryStore {
   }
   async #prepareStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, validator: LiveRestoreValidator, signal: AbortSignal | undefined) {
     const request = lifecycleInput(input), maxOutputBytes = authorityInteger(input.maxOutputBytes, 1);
-    const assertDatabaseCurrent = captureSqliteReadRevision(this.#storage.db);
     const prepared = await this.#prepareStopRestoreProposal(request, validator, signal, maxOutputBytes);
     if (!prepared) return null;
-    const {saved, capture, validated} = prepared;
-    const budget = new RestoreHistoryBudget(request.maxBytes, request.maxEvents);
-    budget.chargeBytes(saved.bytes.byteLength);
-    budget.chargeEvents(capture.receipt.selectedHistory.suffix.length + capture.receipt.acceptedHistory.suffix.length);
-    const content = validated.review;
-    integrity(content);
-    capture.assertCurrent();
-    const history = this.#storage.readTx(() => {
-      assertDatabaseCurrent(); this.#restore(request, request.host);
+    const {saved, capture, validated, assertCurrentInTransaction} = prepared;
+    const historyBudget = () => {
+      const budget = new RestoreHistoryBudget(request.maxBytes, request.maxEvents);
+      budget.chargeBytes(saved.bytes.byteLength);
+      budget.chargeEvents(capture.receipt.selectedHistory.suffix.length + capture.receipt.acceptedHistory.suffix.length);
+      return budget;
+    };
+    const readHistory = (budget: RestoreHistoryBudget) => this.#storage.readTx(() => {
+      assertCurrentInTransaction(); this.#restore(request, request.host);
       return readRestoreReviewHistory(this.#storage, {document: capture.selected.binding,
         namespace: this.#history.namespace, proposalDigest: saved.proposalDigest, receipt: capture.receipt}, budget);
     });
+    const budget = historyBudget();
+    const content = validated.review;
+    integrity(content);
+    const history = readHistory(budget);
+    // The owner reviewed this history too, so admission compares it again before writing.
+    const assertReviewCurrent = () => {
+      let current: typeof history;
+      try {current = readHistory(historyBudget());} catch (cause) {throw new Error("Relay evidence changed during validation.", {cause});}
+      if (!isDeepStrictEqual(current, history)) throw new Error("Relay evidence changed during validation.");
+    };
     const review = {operationId: request.operationId, workspaceId: request.workspaceId, binding: capture.selected.binding,
       proposalDigest: saved.proposalDigest, candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs,
       point: capture.receipt.point, frozenTerminal: capture.receipt.acceptedHistory.terminal,
@@ -1227,11 +1254,10 @@ export class LiveCommittedDeliveryStore {
     const outputBytes = Buffer.byteLength(JSON.stringify(review));
     if (outputBytes > maxOutputBytes) throw new Error("Restore review exceeds its output budget.");
     budget.chargeBytes(outputBytes);
-    capture.assertCurrent(); assertDatabaseCurrent();
-    return {review, prepared};
+    return {review, prepared, assertReviewCurrent};
   }
-  #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[]) {
-    const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);
+  /** `proposalCurrent` checks any stored proposal the receipt came from along with the rest of the evidence. */
+  #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[], proposalCurrent?: () => void) {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1249,11 +1275,13 @@ export class LiveCommittedDeliveryStore {
     for (const source of receipt.nativeSources) {
       if ("adoptionId" in source.source && source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.expectedLocalSequence);
     }
+    // Artifact reads later charge the shared budget; every source check gets what was left at capture.
+    const sourceBytes = historyBudget.bytes, sourceEvents = historyBudget.events;
     const verifySources = () => {
       const operation=readStopRestoreInTransaction(this.#storage,lookup);integrity(operation);
       integrity(operation.phase === "native-fenced" && isDeepStrictEqual(operation.nativeReceipt, receipt.fence));
       const through = operation.terminal?.journalCursor ?? 0, document = operation.intent.document;
-      const sourceBudget = new RestoreHistoryBudget(historyBudget.bytes, historyBudget.events);
+      const sourceBudget = new RestoreHistoryBudget(sourceBytes, sourceEvents);
       for (const [index,source] of receipt.nativeSources.entries()) {
         const lookup={document,namespace:operation.basis.namespace,through,eventCount:accepted.proof.eventCount,deliveryId:source.deliveryId};
         const metadata=ownedSourceBytes?revalidateAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget,ownedSourceBytes[index]!):readAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget);
@@ -1279,14 +1307,16 @@ export class LiveCommittedDeliveryStore {
       integrity((ownerOrigin?.evidenceDigest ?? createHash("sha256").update(JSON.stringify(origin)).digest("hex")) === receipt.originEvidenceDigest);
     };
     const fingerprint = createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
-    this.#storage.readTx(verifySources);
-    const assertCurrentInTransaction = () => {this.#storage.captureStanding();assertDatabaseCurrent();};
-    const assertCurrent = () => this.#storage.readTx(() => {
-      assertCurrentInTransaction();
-      integrity(createHash("sha256").update(JSON.stringify(receipt)).digest("hex")===fingerprint);
-      selected.assertCurrent();accepted.assertCurrent();ownerOrigin?.assertCurrent();
-    });
-    assertCurrent();
+    this.#storage.readTx(() => {verifySources();selected.assertCurrent();accepted.assertCurrent();});
+    // Compares only this restore's evidence, so writes elsewhere in the relay never refuse it.
+    const assertCurrentInTransaction = () => {
+      this.#storage.captureStanding();
+      try {
+        integrity(createHash("sha256").update(JSON.stringify(receipt)).digest("hex")===fingerprint);
+        selected.assertCurrent();accepted.assertCurrent();verifySources();proposalCurrent?.();
+      } catch (cause) {throw new Error("Relay evidence changed during validation.", {cause});}
+    };
+    const assertCurrent = () => this.#storage.readTx(assertCurrentInTransaction);
     return {capture: Object.freeze({receipt, selected, accepted, ownerOrigin, assertCurrent}), assertCurrentInTransaction};
   }
   captureStopRestoreAcceptedCut(input: StopRestoreLookup & {
@@ -1321,22 +1351,26 @@ export class LiveCommittedDeliveryStore {
       return {operation, binding, historyInput, ...history, point};
     });
     const chargedArtifacts = new Set<string>();
+    // Each answered digest, and whether this object's artifact history held it.
+    const answers = new Map<string, boolean>();
+    const stored = (digest: string) => this.#storage.db.prepare(`SELECT b.sha256,b.byte_length,length(b.content) AS actual FROM sync_relay_object_moments m
+      JOIN sync_relay_blobs b ON b.workspace_id=m.workspace_id AND b.sha256=m.blob_sha256
+      WHERE m.workspace_id=? AND m.version_id=? AND m.object_id=? AND m.path=? AND m.content_kind='text' AND m.blob_sha256=?
+      AND b.byte_length<=2097152 ORDER BY m.relay_seq LIMIT 1`)
+      .get(saved.binding.workspaceId,saved.binding.mainVersionId,saved.binding.objectId,saved.binding.currentPath,digest);
     const capture: RestoreHistoryCapture<Target> = Object.freeze({target, binding: structuredClone(saved.binding), checkpoint: saved.checkpoint,
       artifact: (digest: string) => this.#storage.readTx(() => {
         capture.assertCurrent();
         parseLiveUpdateDigest(digest);
-        const row = this.#storage.db.prepare(`SELECT b.sha256,b.byte_length,length(b.content) AS actual FROM sync_relay_object_moments m
-          JOIN sync_relay_blobs b ON b.workspace_id=m.workspace_id AND b.sha256=m.blob_sha256
-          WHERE m.workspace_id=? AND m.version_id=? AND m.object_id=? AND m.path=? AND m.content_kind='text' AND m.blob_sha256=?
-          AND b.byte_length<=2097152 ORDER BY m.relay_seq LIMIT 1`)
-          .get(saved.binding.workspaceId,saved.binding.mainVersionId,saved.binding.objectId,saved.binding.currentPath,digest);
-        if (!row) return undefined;
+        const row = stored(digest);
+        if (!row) {answers.set(digest, false); return undefined;}
         integrity(row.byte_length===row.actual);
         if (!chargedArtifacts.has(digest)) {budget.chargeBytes(authorityInteger(row.actual)); chargedArtifacts.add(digest);}
         const blob = this.#storage.db.prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
           .get(saved.binding.workspaceId,digest);
         integrity(blob?.content instanceof Uint8Array && blob.content.length===row.byte_length &&
           createHash("sha256").update(blob.content).digest("hex")===digest);
+        answers.set(digest, true);
         return new Uint8Array(blob.content);
       }),
       events: saved.events, proof: saved.proof, point: saved.point,
@@ -1346,6 +1380,9 @@ export class LiveCommittedDeliveryStore {
         integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.historyInput.baseline).operation, saved.operation));
         const current = readAcceptedHistory(this.#storage, saved.historyInput, new RestoreHistoryBudget(maxBytes, maxEvents));
         integrity(isDeepStrictEqual(current.proof, saved.proof) && current.checkpoint.digest === saved.checkpoint.digest);
+        for (const [digest, present] of answers) {
+          if ((stored(digest) !== undefined) !== present) throw new Error("Relay evidence changed during validation.");
+        }
       }});
     const digest = () => createHash("sha256").update(JSON.stringify({target: capture.target, binding: capture.binding, proof: capture.proof,
       checkpoint: {...capture.checkpoint, bytes: undefined, actualDigest: createHash("sha256").update(capture.checkpoint.bytes).digest("hex")},
@@ -1398,22 +1435,21 @@ export class LiveCommittedDeliveryStore {
   async admitReviewedStopRestoreProposal(input: RestoreProposalInput & {maxOutputBytes: number}, expectedProposalDigest: string,
     validator: LiveRestoreValidator, now: number, signal?: AbortSignal): Promise<RestoreLifecycle> {
     signal?.throwIfAborted();
-    const assertReviewCurrent = captureSqliteReadRevision(this.#storage.db);
     const prepared = await this.#prepareStopRestoreReview(input, validator, signal);
     integrity(prepared && prepared.review.proposalDigest === expectedProposalDigest);
-    return this.#admitStopRestoreProposal(input, expectedProposalDigest, now, async () => prepared.prepared, () => {
-      signal?.throwIfAborted();
-      assertReviewCurrent();
-    });
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, now, async () => prepared.prepared,
+      {signal, assertCurrent: prepared.assertReviewCurrent});
   }
+  /** With `review`, a review that changed or was cancelled before the write admits nothing. */
   async #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, now:number,
-    prepare: () => Promise<PreparedRestoreProposal | null>, assertReviewCurrent?: () => void):Promise<RestoreLifecycle> {
-    const assertProposalCurrent=captureSqliteReadRevision(this.#storage.db);
+    prepare: () => Promise<PreparedRestoreProposal | null>, review?: {signal?: AbortSignal; assertCurrent(): void}):Promise<RestoreLifecycle> {
     input=lifecycleInput(input);
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
     const historical=this.readStopRestoreLifecycle(input);
     if (historical) {integrity(historical.proposalDigest===expectedProposalDigest);return historical;}
     const prepared=await prepare();integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
+    const assertTailCurrent=captureSqliteReadRevision(this.#storage.db);
+    review?.assertCurrent();
     const {saved:proposal,capture,validated,assertCurrentInTransaction}=prepared;
     const updateBytes=validated.candidateBytes,checkpointBytes=validated.content.stateUpdate;
     const checkpointDigest=createHash("sha256").update(checkpointBytes).digest("hex"),at=authorityInteger(now);
@@ -1438,8 +1474,8 @@ export class LiveCommittedDeliveryStore {
       authorSnapshot: [], firstSeen: validated.content.replacementRanges, firstSeenDeletes: validated.content.firstSeenDeletes});
     integrity(!authorWindow.refused);
     this.#storage.tx(()=>{
-      assertReviewCurrent?.();
-      assertProposalCurrent();
+      review?.signal?.throwIfAborted();
+      assertTailCurrent();
       assertCurrentInTransaction();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
       integrity(operation.phase==="native-fenced");

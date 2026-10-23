@@ -92,9 +92,8 @@ export class LiveRestorePreparation {
       const saved = await store.readStopRestoreProposal(input, this.#validator, validation());
       if (saved) return {kind: "prepared" as const, proposalDigest: saved.proposalDigest,
         candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs, replayed: true};
-      const selected = store.captureStopRestorePoint(input);
-      const point = await this.#validator.point(selected, validation());
-      const json = JSON.stringify({fence: stopped.receipt, point});
+      const selected = await store.resolveStopRestorePoint(input, this.#validator, validation());
+      const json = JSON.stringify({fence: stopped.receipt, point: selected.point});
       const bytes = encodeNativeRestoreInput(Buffer.from(json), config.maxBytes);
       const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
         deadlineMs: connection.deadlineMs}, "prepare", bytes, config.maxBytes, signal);
