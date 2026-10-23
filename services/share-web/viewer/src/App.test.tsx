@@ -948,6 +948,29 @@ describe("App", () => {
     expect(logRequests).toBe(2);
   });
 
+  it.each([
+    ["lost answer", () => new Response(JSON.stringify({ ok: false, code: "link_unavailable" }), { status: 503 })],
+    ["lost connection", () => Promise.reject(new TypeError("Failed to fetch"))],
+  ])("offers Try again when the first files answer is a %s, not an ended link", async (_label, fail) => {
+    let inventories = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return ++inventories === 1 ? await fail() : currentPage([], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => buttonNamed("Try again") !== undefined);
+    expect(container.querySelector("[role=alert]")?.textContent).toBe(
+      "dohc couldn't open the shared files. Check your connection, then choose Try again.Try again",
+    );
+    clickButton("Try again");
+    await settle(() => container.querySelector(".viewer") !== null);
+    expect(inventories).toBe(2);
+    expect(container.textContent).not.toContain("couldn't open");
+  });
+
   it("renders a successful empty share instead of refusing it", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -4676,7 +4699,7 @@ describe("App", () => {
       expect(logPaths).toHaveLength(12);
     });
 
-    it("refuses a non-429 log failure without retrying", async () => {
+    it("offers Try again for a non-429 log failure without retrying it unasked", async () => {
       vi.useFakeTimers();
       const logPaths: string[] = [];
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -4691,9 +4714,9 @@ describe("App", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await renderApp();
+      await renderApp(() => buttonNamed("Try again") !== undefined);
 
-      expect(container.textContent).toContain("This link isn't available.");
+      expect(container.textContent).toContain("dohc couldn't open the shared files.");
       expect(logPaths).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(0);
     });

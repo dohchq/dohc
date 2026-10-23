@@ -72,6 +72,23 @@ it("shows the name this browser set on an earlier visit, with no field to change
   expect(posts[0]?.body).not.toHaveProperty("claimedName");
 });
 
+it("shows the name another tab set first in place of the field, and the next post sends none", async () => {
+  const already = "This link holder already has a name. Post with that name, or with none.";
+  server({
+    channels: attempt => attempt === 0 ? undefined : Promise.resolve(jsonResponse({shareId: "share", profileName: "Sam",
+      channels: [{channelWireId: "wire", name: "Team", access: "read-write"}]})),
+    post: (_body, attempt) => attempt === 0 ? jsonResponse({ok: false, code: "link_name_already_set", error: already}, 409) : undefined,
+  });
+  await render(); await opened();
+  setControlValue(nameField()!, "Alex"); setControlValue(composer()!, "Count me in"); await act(async () => send().click());
+  await settle(() => text().includes("Posting as Sam"));
+  expect(nameField()).toBeNull();
+  expect(text()).toContain(already);
+  expect(composer()?.value).toBe("Count me in");
+  await act(async () => send().click()); await settle(() => composer()?.value === "");
+  expect(posts[1]?.body).not.toHaveProperty("claimedName");
+});
+
 it("keeps the draft when a post's answer is lost, and its Try again sends the same post", async () => {
   server({post: (_body, attempt) => attempt === 0 ? unavailable() : undefined});
   await render(); await opened(); setControlValue(composer()!, "Count me in"); await act(async () => send().click());

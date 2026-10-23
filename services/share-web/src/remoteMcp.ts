@@ -47,7 +47,7 @@ const discussionPostSchema = z.object({
 const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
 type LinkChannel = z.infer<typeof linkChannelSchema>;
 const LINK_CHAT_BODY_BYTES = 8_000;
-const CHANNEL_POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
+const POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
   "Send it again with the same idempotencyKey and fields; it posts only once.";
 const channelPostSchema = z.object({
   body: z.string().describe("Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed.")
@@ -122,6 +122,14 @@ const text = (value: unknown): CallToolResult => {
   return {content: [{type: "text", text: encoded}], ...(value && typeof value === "object" ? {structuredContent: value as Record<string, unknown>, ...("ok" in value && value.ok === false ? {isError: true} : {})} : {})};
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
+// A post whose answer was lost may have landed, so it answers null; its key makes a retry safe.
+const sentPost = async (send: () => Promise<Response>): Promise<Response | null> => {
+  const response = await send().catch(() => null);
+  if (response?.status !== 503) return response;
+  await response.body?.cancel().catch(() => {});
+  return null;
+};
+const postUnknown = (): CallToolResult => text({ok: false, code: "link_unavailable", error: POST_UNKNOWN});
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
   if (!response.ok) {
     const value = await readBoundedJson(response, 4096, signal).catch(() => null);
@@ -200,8 +208,10 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     description: "Post a discussion message to this shared link when its permissions allow comments.",
     inputSchema: discussionPostSchema,
   }, async ({ body, idempotencyKey, claimedName }) => {
+    const response = await sentPost(() => options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) }));
+    if (!response) return postUnknown();
     try {
-      return text(await jsonResponse(await options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) })));
+      return text(await jsonResponse(response));
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   if (channel) {
@@ -223,14 +233,9 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
       description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
       inputSchema: channelPostSchema,
     }, async ({body, idempotencyKey, threadId, claimedName}) => {
-      // A post whose answer was lost may have landed; its key makes a retry safe.
-      const unknown = text({ok: false, code: "link_unavailable", error: CHANNEL_POST_UNKNOWN});
-      let response: Response;
-      try {
-        response = await options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
-          ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})});
-      } catch {return unknown;}
-      if (response.status === 503) {await response.body?.cancel().catch(() => {}); return unknown;}
+      const response = await sentPost(() => options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
+        ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})}));
+      if (!response) return postUnknown();
       try {
         // A refusal the agent can act on arrives as a sentence.
         if (!response.ok && response.status !== 404) {

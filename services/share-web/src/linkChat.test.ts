@@ -102,6 +102,7 @@ async function browser(s: Stack, secret: string) {
   const headers = { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-dohc-link-session": session, cookie };
   return {
     meta: () => s.send("/api/view/meta", { headers }),
+    view: (path: string) => s.send(`/api/view/${path}`, { headers }),
     read: (path: string) => s.send(`/api/view/chat/${path}`, { headers }),
     post: (body: Record<string, unknown>, changed: Record<string, string | null> = {}) => {
       const sent = new Headers({ ...headers, "content-type": "application/json" });
@@ -274,6 +275,25 @@ it("answers a lost share answer as retryable, so neither a browser nor an agent 
     s.lost.set("GET /sync/link/share", loss);
     await expect(mcp.listTools(), loss).rejects.toThrow(/"code":"link_unavailable"/u);
     expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  }
+});
+
+it("answers a lost files, change history, file or discussion answer as retryable, not as an ended link", async () => {
+  const s = await stack();
+  const b = await browser(s, (await s.link("read-write")).secret);
+  const blob = "a".repeat(64);
+  for (const [call, path] of [
+    ["GET /sync/link/current", "current"],
+    ["GET /sync/link/log", "log?since=0&hold=0"],
+    [`GET /sync/link/blobs/${blob}`, `blob/${blob}`],
+    ["GET /sync/link/discussion", "discussion"],
+  ] as const) {
+    const answered = (await b.view(path)).status;
+    s.lost.set(call, "connection");
+    const lost = await b.view(path);
+    expect(lost.status, path).toBe(503);
+    expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
+    expect((await b.view(path)).status, path).toBe(answered);
   }
 });
 

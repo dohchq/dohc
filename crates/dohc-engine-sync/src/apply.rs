@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
     LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, bump_chat_conversation_revision,
-    chat_thread_display_title, index_replicated_chat_message_search_rows,
+    chat_thread_display_title, index_replicated_chat_message_search_rows, replicated_source_origin,
     upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
@@ -1259,7 +1259,7 @@ fn apply_thread(
     // Only the relay names a link post's new thread, so no device can take
     // one first and leave the link post on a thread of its own making.
     if payload.thread_id.starts_with(LINK_THREAD_ID_PREFIX)
-        && !op.origin_id.starts_with(LINK_ORIGIN_PREFIX)
+        && !replicated_source_origin(&op.origin_id).starts_with(LINK_ORIGIN_PREFIX)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat thread id is reserved for link posts",

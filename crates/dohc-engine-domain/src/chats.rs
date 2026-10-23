@@ -1655,6 +1655,15 @@ pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, D
     }
 }
 
+/// The origin that wrote a replicated op. A named recipient stores a shared
+/// op under `shared:<shareId>:<source>`; share ids contain no `:`.
+pub fn replicated_source_origin(origin_id: &str) -> &str {
+    origin_id
+        .strip_prefix("shared:")
+        .and_then(|rest| rest.split_once(':'))
+        .map_or(origin_id, |(_, source)| source)
+}
+
 /// A replicated message's link provenance. A link message names its grant and
 /// link principal, carries no account, owner, origin or chain depth, stays
 /// within the link body cap, uses the link message id prefix, and comes from
@@ -1672,6 +1681,7 @@ pub fn validate_replicated_link_author(
     let invalid = || DomainError::InvalidInput {
         reason: "chat message link author is invalid",
     };
+    let source = replicated_source_origin(origin_id);
     let id = |value: &str| {
         !value.is_empty()
             && value.encode_utf16().count() <= MAX_AUTHOR_USER_ID_CHARS
@@ -1686,7 +1696,7 @@ pub fn validate_replicated_link_author(
                 && !account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
-                && origin_id.strip_prefix(LINK_ORIGIN_PREFIX) == Some(principal_id) =>
+                && source.strip_prefix(LINK_ORIGIN_PREFIX) == Some(principal_id) =>
         {
             Ok(Some(ChatMessageLinkAuthor {
                 grant_id: grant_id.to_owned(),

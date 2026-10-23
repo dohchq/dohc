@@ -2,6 +2,7 @@ import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
 import {normalizeShareDiscussionDisplayName} from "@dohc/security-contract/share-discussion";
 import {linkChatClient, openLinkChannel, type LinkChannel} from "./linkChat";
 import {ChannelView, ended, type ChatChannelClient} from "./ChatChannel";
+import {NamedChatError} from "./namedChat";
 import "./namedRecipient.css";
 import "./namedChat.css";
 
@@ -40,9 +41,19 @@ export function LinkChannelPanel({session, channelWireId, fallback}: {session: s
     const base = linkChatClient(session, channel, () => sentName.current);
     // The relay keeps the first name a link sends; after that the field is gone.
     return {...base, async post(post, signal) {
-      const named = sentName.current !== null, message = await base.post(post, signal);
-      if (named) setCommittedName(message.authorDisplayName);
-      return message;
+      const named = sentName.current !== null;
+      try {
+        const message = await base.post(post, signal);
+        if (named) setCommittedName(message.authorDisplayName);
+        return message;
+      } catch (error) {
+        // Another tab set the name first: the channel answer names it.
+        if (error instanceof NamedChatError && error.code === "link_name_already_set") {
+          const reread = await openLinkChannel(session, channel.channelWireId, signal).catch(() => null);
+          if (reread?.profileName && !signal.aborted) setCommittedName(reread.profileName);
+        }
+        throw error;
+      }
     }};
   }, [session, channel]);
 

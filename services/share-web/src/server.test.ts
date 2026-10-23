@@ -1444,12 +1444,11 @@ describe("share-web relay call", () => {
     { name: "log", path: "/api/view/log?since=0&hold=0&current=true" },
     { name: "blob", path: `/api/view/blob/${blobSha}` },
   ];
-  // A lost or unreadable answer to these says nothing about the link, so it is retryable.
-  // Meta streams its body, so only a lost connection shows there.
-  const retryable = new Map<string, ReadonlySet<number | string>>([
-    ["meta", new Set(["network error"])],
-    ["chat channels", new Set(["401, oversized body", "401, body fails", "network error"])],
-  ]);
+  // A lost or unreadable answer to all but a handoff says nothing about the link, so it is retryable.
+  // Only these read a refusal's whole body, so only they see it break.
+  const retryable = (name: string) => name !== "handoff";
+  const buffered = new Set(["discussion", "discussion append", "discussion activity", "chat channels"]);
+  const unreadable = new Set<number | string>(["401, oversized body", "401, body fails"]);
 
   // The fake relay answers exchange and refresh itself; `relay` answers the route's call.
   async function linkSession(
@@ -1520,7 +1519,8 @@ describe("share-web relay call", () => {
 
   it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
     for (const listed of outcomes) {
-      const outcome = retryable.get(target.name)?.has(listed.relay) ? { ...listed, status: 503 } : listed;
+      const lost = listed.relay === "network error" || (buffered.has(target.name) && unreadable.has(listed.relay));
+      const outcome = lost && retryable(target.name) ? { ...listed, status: 503 } : listed;
       const state = await linkSession(async () => {
         switch (outcome.relay) {
           case "network error":
@@ -1588,7 +1588,7 @@ describe("share-web relay call", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(state.calls[0]!.signal.aborted).toBe(true);
       const timedOut = await stalled;
-      expect({ status: timedOut.status, body: await timedOut.text() }).toEqual(retryable.has(target.name)
+      expect({ status: timedOut.status, body: await timedOut.text() }).toEqual(retryable(target.name)
         ? { status: 503, body: JSON.stringify(linkRefusalBody("link_unavailable")) }
         : { status: 404, body: shareWebRefusalBody });
 
@@ -1598,7 +1598,7 @@ describe("share-web relay call", () => {
       await started;
       browser.abort();
       expect(state.calls[1]!.signal.aborted).toBe(true);
-      expect((await abandoned).status).toBe(retryable.has(target.name) ? 503 : 404);
+      expect((await abandoned).status).toBe(retryable(target.name) ? 503 : 404);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1664,7 +1664,7 @@ describe("share-web relay call", () => {
 
     const answer = await pending;
     expect(answer.status).toBe(
-      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : retryable.has(target.name) ? 503 : 404),
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : retryable(target.name) ? 503 : 404),
     );
     expect(answer.headers.has("set-cookie")).toBe(false);
     await answer.body?.cancel();
@@ -1736,8 +1736,8 @@ describe("share-web protected discussion proxy", () => {
   }
 
   async function expectDiscussionUnavailable(response: Response): Promise<void> {
-    expect(response.status).toBe(404);
-    expect(await response.text()).toBe(shareWebRefusalBody);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual(linkRefusalBody("link_unavailable"));
   }
 
   it("accepts an unknown-length relay response of exactly 2 MiB", async () => {
@@ -1907,7 +1907,7 @@ describe("share-web protected discussion proxy", () => {
       expect(relayed.every((value) => !value.signal.aborted)).toBe(true);
       await vi.advanceTimersByTimeAsync(1);
       expect(relayed.every((value) => value.signal.aborted)).toBe(true);
-      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(404));
+      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(503));
       const retry = await handler(request(path, init));
       expect(retry.status).toBe(200);
       expect(await retry.json()).toEqual(page);
@@ -2201,16 +2201,16 @@ describe("share-web protected discussion proxy", () => {
     ...[
       { name: "success", expectedStatus: 200 },
       { name: "upstream refusal", expectedStatus: 404 },
-      { name: "abort", expectedStatus: 404 },
-      { name: "timeout", expectedStatus: 404 },
-      { name: "malformed response", expectedStatus: 404 },
-      { name: "thrown fetch", expectedStatus: 404 },
+      { name: "abort", expectedStatus: 503 },
+      { name: "timeout", expectedStatus: 503 },
+      { name: "malformed response", expectedStatus: 503 },
+      { name: "thrown fetch", expectedStatus: 503 },
     ].map(terminal => ({ ...terminal, ...holdRoutes[0]! })),
     ...[
       { name: "success", expectedStatus: 200 },
       { name: "upstream refusal", expectedStatus: 404 },
-      { name: "abort", expectedStatus: 404 },
-      { name: "thrown fetch", expectedStatus: 404 },
+      { name: "abort", expectedStatus: 503 },
+      { name: "thrown fetch", expectedStatus: 503 },
     ].map(terminal => ({ ...terminal, ...holdRoutes[1]! })),
   ])("releases $kind capacity after $name", async ({ name, expectedStatus, path, publicBody }) => {
     let phase: "terminal" | "hold" | "probe" = "terminal";
@@ -3175,10 +3175,10 @@ describe("share-web protected discussion proxy", () => {
     expect(activityRequests[1]!.signal.aborted).toBe(true);
     expect({
       status: abortedResponse.status,
-      body: await abortedResponse.clone().text(),
+      body: await abortedResponse.clone().json(),
     }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
+      status: 503,
+      body: linkRefusalBody("link_unavailable"),
     });
 
     const refused = await handler(request(path, { headers }));

@@ -1711,6 +1711,7 @@ export function createShareWebApplication({
         ...(appendBody === null ? {} : { body: appendBody, exchangeKey: true }),
         holdMs,
         buffered: true,
+        retryable: true,
         ...(isActivity
           ? { limiter: activityHoldLimiter, ifSessionChanged: true }
           : { ifSessionChanged: true, refusal: discussionRefusal }),
@@ -1727,7 +1728,7 @@ export function createShareWebApplication({
       if (pathname === "/api/view/current") {
         const collectionPath = new URL(request.url).searchParams.get("collectionPath");
         const query = collectionPath === null ? "" : `?${new URLSearchParams({ collectionPath })}`;
-        return await callRelay(request, authenticated, { path: `/sync/link/current${query}` });
+        return await callRelay(request, authenticated, { path: `/sync/link/current${query}`, retryable: true });
       }
       if (pathname === "/api/view/log") {
         const hold = new URL(request.url).searchParams.get("hold") ?? "0";
@@ -1739,6 +1740,7 @@ export function createShareWebApplication({
           holdMs: Number(hold),
           limiter: activityHoldLimiter,
           ifSessionChanged: true,
+          retryable: true,
         });
       }
       const sha = pathname.slice("/api/view/blob/".length);
@@ -1748,6 +1750,7 @@ export function createShareWebApplication({
       return await callRelay(request, authenticated, {
         path: `/sync/link/blobs/${sha}`,
         limiter: blobProxyLimiter,
+        retryable: true,
         ok: (relayResponse, holdSlot) => streamingBlobResponse(relayResponse, holdSlot()),
       });
     }

@@ -72,6 +72,7 @@ export const TEXT_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 type ViewerState =
   | { status: "loading" }
   | { status: "refused" }
+  | { status: "load-failed" }
   | { status: "version-mismatch"; message: string }
   | {
       status: "ready";
@@ -1074,6 +1075,7 @@ function OpenInDohc(props: { session: string }) {
 
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [selectedPath, setSelectedPath] = useState("");
   const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
@@ -1129,7 +1131,10 @@ export function App() {
         if (current) {
           setState(error instanceof VersionMismatchError
             ? { status: "version-mismatch", message: error.message }
-            : { status: "refused" });
+            // A lost answer or a lost connection says nothing about the link.
+            : (error instanceof ViewResponseError && error.status >= 500) || error instanceof TypeError
+              ? { status: "load-failed" }
+              : { status: "refused" });
         }
       }
     })();
@@ -1137,7 +1142,7 @@ export function App() {
       current = false;
       controller.abort();
     };
-  }, []);
+  }, [loadAttempt]);
 
   const readySession = state.status === "ready" ? state.session : null;
   const readyFiles = state.status === "ready" ? state.files : null;
@@ -1330,6 +1335,25 @@ export function App() {
         available={available} onClose={() => setEditing(null)} />;
   }
   if (state.status === "refused") return <Unavailable />;
+  if (state.status === "load-failed") {
+    return (
+      <main className="state">
+        <div className="handoff-panel" role="alert">
+          <p>dohc couldn't open the shared files. Check your connection, then choose Try again.</p>
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => {
+              setState({ status: "loading" });
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      </main>
+    );
+  }
   if (state.status === "version-mismatch") return <main className="state"><p>{state.message}</p></main>;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];

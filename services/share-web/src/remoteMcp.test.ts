@@ -2,7 +2,7 @@ import {afterEach, expect, it} from "vitest";
 import { createHash } from "node:crypto";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
-import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
+import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {asRecord} from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
@@ -58,6 +58,8 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
   let revoked = false;
   let rateLimited: string | undefined;
   let refusalCode: "link_read_rate_limited" | "link_unavailable" = "link_read_rate_limited";
+  // The relay path whose next answer is lost after the relay made it.
+  let lost: string | undefined;
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -69,6 +71,10 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     async fetchRelay(request) {
       calls.push(request);
       const path = new URL(request.url).pathname;
+      if (path === lost) {
+        lost = undefined;
+        throw new TypeError("connection reset");
+      }
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
@@ -111,8 +117,29 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;}};
+  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;},
+    lose(path: string) {lost = path;}};
 }
+
+it("tells an agent to try again when a files, changes, file or discussion answer is lost", async () => {
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const again = {isError: true, content: [{type: "text", text: LINK_REFUSALS.link_unavailable.error}]};
+  for (const [path, name, args] of [
+    ["/sync/link/current", "dohc_list_files", {}],
+    ["/sync/link/log", "dohc_list_changes", {}],
+    [`/sync/link/blobs/${first}`, "dohc_read_file", {blobSha256: first}],
+    ["/sync/link/discussion", "dohc_read_discussion", {}],
+  ] as const) {
+    f.lose(path);
+    expect(await client.callTool({name, arguments: args}), name).toMatchObject(again);
+    expect((await client.callTool({name, arguments: args})).isError, name).toBeFalsy();
+  }
+  // A post whose answer was lost may have landed, so the agent keeps its key.
+  f.lose("/sync/link/discussion");
+  expect(await client.callTool({name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "same-key"}})).toMatchObject({isError: true,
+    structuredContent: {ok: false, code: "link_unavailable",
+      error: "dohc could not confirm this post, so it may have posted. Send it again with the same idempotencyKey and fields; it posts only once."}});
+});
 
 it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
   const f = fixture(); const client = await f.connect(await f.exchange());
