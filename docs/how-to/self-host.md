@@ -403,6 +403,7 @@ A check that must wait for room gets a retry.
 The relay refuses an edit whose check needs more than 128 MiB, or whose document state and new edit total more than 16 MiB.
 Two validation processes run the checks, each with its own heap of up to 512 MiB.
 When a check runs out of that heap, the relay refuses the edit as too large and keeps running.
+An owner's refused edit is kept unapplied, and that document's later owner edits wait behind it.
 These budgets exclude the validation processes' memory, the session host's document state, and OS socket buffers.
 
 These limits fit 20 people with three documents open each, with capacity left for owners and other devices.

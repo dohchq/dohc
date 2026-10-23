@@ -31,6 +31,8 @@ it("uses the captured native session and translates owner outbox calls to its na
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.acknowledge",params:{outboxId:"actual-outbox",receipts:[]}}),undefined);
   await f.transport.client.sendRequest({...f.request,id:7,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"provenance-refused"}});
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason:"provenance-refused"}}),undefined);
+  await f.transport.client.sendRequest({...f.request,id:9,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"capacity-refused"}});
+  expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason:"capacity-refused"}}),undefined);
   await expect(f.transport.client.sendRequest({...f.request,id:8,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"arbitrary"}})).rejects.toThrow();
 });
 it("refuses foreign bindings, sessions, and retirement without invoking native adoption",async()=>{

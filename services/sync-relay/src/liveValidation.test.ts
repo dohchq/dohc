@@ -1,5 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
@@ -93,6 +96,41 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   await pool.close(); await closing;
   await expect(validate(input)).rejects.toThrow("closed");
 });
+
+it("keeps the process alive until close has ended its idle child", async () => {
+  const {input} = fixture();
+  // Nothing else holds this process open once the job completes and its child goes idle.
+  const script = `const {createLiveValidationExecutor} = await import(process.argv[1]);
+    const pool = createLiveValidationExecutor();
+    const result = await pool.validator(${JSON.stringify(policy)})({document: ${JSON.stringify(input.document)}, currentPath: "note.md",
+      checkpoint: new Uint8Array(Buffer.from(process.argv[2], "base64")), suffix: [], candidate: Uint8Array.of(0, 0)});
+    if (result.kind !== "accepted") throw new Error("Expected accepted validation");
+    await pool.close();
+    console.log("closed");`;
+  const {stdout} = await promisify(execFile)(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
+    "--input-type=module", "-e", script, new URL("./liveValidation.ts", import.meta.url).href, Buffer.from(input.checkpoint).toString("base64")]);
+  expect(stdout.trim()).toBe("closed");
+});
+
+it("fails a job whose fork is refused for open files, frees its slot, and keeps the relay up", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
+  // The held job runs far longer than the test, so only the failed fork's slot can free capacity.
+  const held = new AbortController();
+  const other = Promise.resolve(pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}, held.signal))
+    .catch((error: unknown) => error);
+  const binding = (process as unknown as {binding(name: string): unknown}).binding;
+  const {Process} = binding("process_wrap") as {Process: {prototype: {spawn(options: unknown): number}}};
+  const {UV_EMFILE} = binding("uv") as {UV_EMFILE: number};
+  const spawn = Process.prototype.spawn;
+  // Node returns before creating stdio, then emits `error` and `close`.
+  Process.prototype.spawn = () => {Process.prototype.spawn = spawn; return UV_EMFILE;};
+  try {
+    await expect(validate(input)).rejects.toThrow("EMFILE");
+  } finally {Process.prototype.spawn = spawn;}
+  await validate.waitForCapacity!();
+  expect((await validate(input)).kind).toBe("accepted");
+  held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
+}, 60_000);
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 /** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */

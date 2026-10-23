@@ -311,7 +311,7 @@ export function startExistingOwnerDeviceTransport(options: {
         } else if (operation.method === "liveApplication.quarantineOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
           const params = configRecord(operation.params, ["registrationId", "reason"]);
-          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict") throw new Error("Invalid owner quarantine reason.");
+          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict" && params.reason !== "capacity-refused") throw new Error("Invalid owner quarantine reason.");
           const response = await config.client.sendRequest({...request, method: "ydoc.ownerOutbox.quarantine",
             params: {outboxId: registration.outboxId, reason: params.reason}}, signal);
           owner.assertCurrent(); result = response.result;

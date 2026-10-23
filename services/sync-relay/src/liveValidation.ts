@@ -81,6 +81,10 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       if (held) handle?.ref();
       else handle?.unref();
   };
+  // A fork refused before it started has no process to signal.
+  const kill = (slot: Slot) => {
+    if (slot.child.pid !== undefined) slot.child.kill("SIGKILL");
+  };
   function spawn() {
     const source = import.meta.url.endsWith(".ts");
     const child = fork(
@@ -111,21 +115,22 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
     const exited = new Promise<void>((resolve) => (exit = resolve));
     const slot: Slot = { child, busy: false, heapExhausted: false, exited };
     slots.add(slot);
-    let carry = "";
-    child.stderr!.setEncoding("utf8");
-    child.stderr!.on("data", (text: string) => {
-      process.stderr.write(text);
-      const seen = carry + text;
-      if (/Reached heap limit|JavaScript heap out of memory/.test(seen))
-        slot.heapExhausted = true;
-      carry = seen.slice(-32);
-    });
-    child.on("error", () => {}); // A failed idle child must not crash the relay.
+    // Listen before touching stdio: a fork refused with EMFILE has none, then errors and closes.
+    child.on("error", () => {}); // A failed child must not crash the relay.
     // `close` follows the exit and the end of stderr, so its verdict is complete.
     child.once("close", () => {
       slots.delete(slot);
       exit();
       notify();
+    });
+    let carry = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (text: string) => {
+      process.stderr.write(text);
+      const seen = carry + text;
+      if (/Reached heap limit|JavaScript heap out of memory/.test(seen))
+        slot.heapExhausted = true;
+      carry = seen.slice(-32);
     });
     hold(slot, false);
     return slot;
@@ -162,7 +167,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       const fail = (error: unknown) => {
         if (!settle()) return;
         // The slot stays busy until the child has exited.
-        slot.child.kill("SIGKILL");
+        kill(slot);
         reject(error);
       };
       const abort = () => fail(signal!.reason);
@@ -184,6 +189,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       slot.child.once("error", fail);
       slot.child.once("close", ended);
       signal?.addEventListener("abort", abort, { once: true });
+      // A refused fork has no channel; its `error` event fails the job.
+      if (slot.child.pid === undefined) return;
       // Advanced serialization copies typed arrays; never detach storage or caller buffers.
       try {
         slot.child.send(work, (error) => {
@@ -211,7 +218,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
     notify();
     await Promise.all(
       [...slots].map((slot) => {
-        slot.child.kill("SIGKILL");
+        // Keep the relay alive until each child has closed.
+        hold(slot, true);
+        kill(slot);
         return slot.exited;
       }),
     );

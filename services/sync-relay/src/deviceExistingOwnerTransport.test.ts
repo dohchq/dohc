@@ -216,6 +216,12 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
     await peer!.sendRequest({id: 31,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "provenance-refused"}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "provenance-refused"}});
+    singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
+    await peer!.sendRequest({id: 32,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "capacity-refused"}});
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "capacity-refused"}});
+    const quarantines = singleton.sendRequest.mock.calls.length;
+    await expect(peer!.sendRequest({id: 33,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "arbitrary"}})).rejects.toThrow();
+    expect(singleton.sendRequest.mock.calls.length).toBe(quarantines);
     await peer!.sendRequest({id: 22,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
     const beforeFence = owner.finishHandoff.mock.calls.length;
     // A fence refused for unpublished settlements changes nothing and keeps the registration.
