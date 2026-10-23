@@ -169,12 +169,14 @@ pub fn commit_relay_cursor(
     })
 }
 
-/// Drop the deferred work and applied settlements a committed pass reported.
+/// Drop the deferred work, applied settlements and drain reports a committed
+/// pass reported.
 pub(crate) fn release_settlement_report_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     report_id: &str,
 ) -> Result<(), SyncError> {
+    crate::drain_report::release_in_tx(tx, workspace_id, report_id)?;
     tx.execute(
         "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
         params![workspace_id, report_id],

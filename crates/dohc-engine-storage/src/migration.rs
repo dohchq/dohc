@@ -3789,6 +3789,8 @@ UPDATE ydoc_deferred_updates SET ingress_kind='local'
   WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=ydoc_deferred_updates.workspace_id);
 ALTER TABLE ydoc_deferred_updates ADD COLUMN lineage_replacement_json TEXT
     CHECK (lineage_replacement_json IS NULL OR json_valid(lineage_replacement_json));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN applied_refusal TEXT
+    CHECK (applied_refusal IS NULL OR length(applied_refusal) > 0);
 ALTER TABLE relay_deferred_ops ADD COLUMN relay_namespace TEXT
     CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
 ALTER TABLE relay_deferred_ops ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
@@ -3799,6 +3801,30 @@ ALTER TABLE relay_deferred_ops ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'le
         AND json_extract(envelope_json,'$.relaySeq') > 0)));
 UPDATE relay_deferred_ops SET ingress_kind='local'
   WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=relay_deferred_ops.workspace_id);
+CREATE TABLE ydoc_drain_reports (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    report_json TEXT NOT NULL CHECK (json_valid(report_json)),
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+DROP TRIGGER ydoc_pending_artifacts_settled;
+CREATE TRIGGER ydoc_pending_artifacts_settled AFTER UPDATE OF last_settled_sha,settled_update_seq ON ydoc_docs
+WHEN NEW.settled_update_seq=NEW.head_update_seq AND EXISTS (
+    SELECT 1 FROM snapshots s WHERE s.workspace_id=NEW.workspace_id
+      AND s.version_id=NEW.version_id AND s.object_id=NEW.object_id
+      AND s.blob_sha256=NEW.last_settled_sha)
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=NEW.workspace_id
+      AND reason_code='document-artifact-recovery-failed'
+      AND (origin_id,origin_seq) IN (SELECT origin_id,origin_seq FROM ydoc_pending_artifacts
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id);
+    DELETE FROM ydoc_pending_artifacts WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id
+      AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u WHERE u.workspace_id=NEW.workspace_id
+        AND u.version_id=NEW.version_id AND u.object_id=NEW.object_id);
+END;
 ";
 
 /// The triggers that keep and move a released tail generation. A store
@@ -4851,7 +4877,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "42a14fcc86e1232b0fa2bd88b73c94522939f206e70d95889cdccbaeb2e796d9",
+                "319580cc44af92c61b5250f42c7565bdac7fd21abed9c8470f525b4a8926d00b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -6631,7 +6631,7 @@ impl Desktop {
 /// The relay's hosted feed for the host's scope. Each row keeps its origin
 /// coordinate and takes the next relay position after the host's cursor.
 struct HostedFeed {
-    documents: Vec<dohc_engine_sync::HostedScopeDocument>,
+    scope: std::sync::Mutex<dohc_engine_sync::HostedScope>,
     rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     /// Rows an earlier feed placed, which the relay still knows.
@@ -6645,6 +6645,18 @@ struct HostedFeed {
 impl HostedFeed {
     fn new(documents: &[(&str, &str)]) -> Self {
         Self {
+            scope: std::sync::Mutex::new(Self::scope("scope", documents)),
+            rows: Default::default(),
+            blobs: Default::default(),
+            placed: Vec::new(),
+            first: 10,
+            pulls: Default::default(),
+        }
+    }
+
+    fn scope(token: &str, documents: &[(&str, &str)]) -> dohc_engine_sync::HostedScope {
+        dohc_engine_sync::HostedScope {
+            token: token.into(),
             documents: documents
                 .iter()
                 .map(|(object_id, path)| dohc_engine_sync::HostedScopeDocument {
@@ -6652,12 +6664,13 @@ impl HostedFeed {
                     path: (*path).into(),
                 })
                 .collect(),
-            rows: Default::default(),
-            blobs: Default::default(),
-            placed: Vec::new(),
-            first: 10,
-            pulls: Default::default(),
         }
+    }
+
+    /// Announce a new scope, under `token`: its documents, each at its path.
+    /// A pull under an earlier token gets the new scope and no rows.
+    fn rescope(&self, token: &str, documents: &[(&str, &str)]) {
+        *self.scope.lock().unwrap() = Self::scope(token, documents);
     }
 
     fn pulls(&self) -> usize {
@@ -6774,12 +6787,14 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
         req: dohc_engine_sync::HostedPullRequest,
     ) -> Result<dohc_engine_sync::HostedPullResponse, dohc_engine_sync::RelayError> {
         self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let scope = self.scope.lock().unwrap().clone();
+        let current = req.scope_token.as_deref() == Some(scope.token.as_str());
         let ops: Vec<_> = self
             .rows
             .lock()
             .unwrap()
             .iter()
-            .filter(|op| op.relay_seq.unwrap() > req.cursor)
+            .filter(|op| current && op.relay_seq.unwrap() > req.cursor)
             .filter(|op| {
                 req.object_id
                     .as_ref()
@@ -6788,10 +6803,7 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
             .cloned()
             .collect();
         Ok(dohc_engine_sync::HostedPullResponse {
-            scope: dohc_engine_sync::HostedScope {
-                token: "scope".into(),
-                documents: self.documents.clone(),
-            },
+            scope,
             next_cursor: ops.last().map_or(req.cursor, |op| op.relay_seq.unwrap()),
             ops,
             has_more: false,
@@ -7890,11 +7902,11 @@ async fn artifact_recovery_that_meets_a_released_hold_reports_it_and_records_no_
     w.close().await;
 }
 
-/// A peer's update a ready document's live session queues behind its lease
-/// leaves the document ready at the commit, so the engine keeps its session
-/// and registration, and the session settles what it queued. A document
-/// already held for queued work stays waiting while the same update is
-/// queued.
+/// A control, not a distinguishing test: a ready document never has a
+/// complete read of its own, so the readiness rule never decides it. A
+/// peer's update its live session queues behind its lease leaves it ready at
+/// the commit, and the session settles what it queued. A document already
+/// held for queued work stays waiting while the same update is queued.
 #[tokio::test]
 async fn a_peer_update_queued_behind_a_live_session_keeps_its_ready_document_ready() {
     let mut w = retained_window(Retained::Carried).await;
@@ -7942,6 +7954,322 @@ async fn a_peer_update_queued_behind_a_live_session_keeps_its_ready_document_rea
         dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting)
     );
     assert_eq!(queued_updates(&w.store).len(), 1);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Adopt the scope `client`'s feed now announces under `token`: a pass that
+/// applies nothing.
+fn rescoped(
+    store: &mut EngineStore,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    token: &str,
+    documents: &[(&str, &str)],
+) {
+    client.transport().rescope(token, documents);
+    let pass = hosted_pass(
+        store,
+        client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(pass.pending_cursor.is_none(), "{pass:?}");
+}
+
+/// The window's document, held for its queued desktop fold: the fold queued
+/// behind the host's session, which acknowledged it, and the drain as the
+/// session ended held it for the work the released chain retains.
+async fn held_for_a_queued_fold() -> (
+    RetainedWindow,
+    Desktop,
+    dohc_engine_sync::RelaySyncClient<HostedFeed>,
+) {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (fold, fold_bytes) = desktop
+        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+        .await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    feed.serve(fold, fold_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let live = live_hosted_pass(&mut w.store, &client);
+    assert!(pass_commit(&mut w.store, &client, &live).committed);
+    let hold = settled_drain(&mut w.store)
+        .released_hold
+        .expect("the drain holds the fold");
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(hold)
+    );
+    assert_eq!(queued_updates(&w.store).len(), 1);
+    (w, desktop, client)
+}
+
+/// `pass` read `object` to the end of its rows, with the queued fold still
+/// standing, wrote none of its heads, and leaves it waiting.
+fn completed_waiting(store: &EngineStore, pass: &dohc_engine_sync::HostedPassOutcome) {
+    let read = &pass
+        .pending_cursor
+        .as_ref()
+        .expect("a pass to commit")
+        .reads["object"];
+    assert!(read.complete && !read.heads_written, "{read:?}");
+    assert_eq!(
+        pass.held.get("object"),
+        Some(&dohc_engine_sync::HostedHold::WorkWaiting),
+        "{pass:?}"
+    );
+    assert_eq!(queued_updates(store).len(), 1, "the fold stays queued");
+}
+
+/// The commit stored `object` waiting, and it still is after a restart. The
+/// next pass's drain holds it again for the fold.
+fn waits_then_holds_again(
+    w: &mut RetainedWindow,
+    client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
+) {
+    let waiting =
+        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting);
+    assert_eq!(hosted_status(&w.store, "object"), waiting);
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        waiting,
+        "after a restart"
+    );
+    assert_eq!(queued_updates(&w.store).len(), 1);
+    let again = committed_pass(&mut w.store, client);
+    assert!(
+        matches!(
+            again.held.get("object"),
+            Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { .. })
+        ),
+        "{again:?}"
+    );
+    assert!(matches!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(
+            dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { .. }
+        )
+    ));
+    assert!(w.text().contains(RETAINED));
+}
+
+/// Sol's readiness ruling, its first case: a document held for its queued
+/// fold leaves the scope, which the work its chain retains keeps from
+/// parking, and returns. Its return clears the stored hold and backfills it
+/// from the start. Its read completes with the fold still queued, so the
+/// pass and its commit keep it waiting, with no heads written, never ready.
+/// A backfill that reads the fold again stops there and holds it afresh, so
+/// the feed serves none of its rows on the return: the read the readiness
+/// rule decides is one that completes.
+#[tokio::test]
+async fn a_returning_document_keeps_its_queued_released_work_waiting() {
+    let (mut w, desktop, client) = held_for_a_queued_fold().await;
+    assert!(
+        !dohc_engine_sync::hosted_document_parkable(&w.store, "workspace", "object").unwrap(),
+        "the work it accepted keeps it from parking"
+    );
+    rescoped(&mut w.store, &client, "away", &[]);
+    client.transport().rows.lock().unwrap().clear();
+    rescoped(&mut w.store, &client, "back", &[("object", WINDOW_PATH)]);
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Backfilling
+    );
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    completed_waiting(&w.store, &pass);
+    commit_pass(&mut w.store, &client, &pass);
+    waits_then_holds_again(&mut w, &client);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's readiness ruling, its second case: a stopped read's commit
+/// replaces the released hold's stored reason with one no drain takes up. Once
+/// that blocker is gone, the next read completes with the fold still queued,
+/// so the document waits; the drain after that holds it again.
+#[tokio::test]
+async fn a_document_whose_stopped_read_clears_keeps_its_queued_released_work_waiting() {
+    let (mut w, desktop, client) = held_for_a_queued_fold().await;
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    // Its read stops at a conflict child whose parent the feed withholds.
+    let mut cursor = pass.pending_cursor.clone().unwrap();
+    let read = cursor.reads.get_mut("object").unwrap();
+    let withheld = dohc_engine_sync::HostedHold::ConflictParentWithheld {
+        conflict_id: "withheld".into(),
+    };
+    read.stopped = Some(withheld.clone());
+    read.complete = false;
+    read.heads_written = false;
+    let committed = client
+        .commit_hosted_cursor(
+            &mut w.store,
+            "workspace",
+            &cursor,
+            &ReleasedTails::uncached(),
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
+            committed: true,
+            ..
+        })
+    ));
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(withheld)
+    );
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    // The feed serves nothing that stops it now.
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    completed_waiting(&w.store, &pass);
+    commit_pass(&mut w.store, &client, &pass);
+    waits_then_holds_again(&mut w, &client);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's readiness ruling, its last three cases: a ready document the scope
+/// moves away from its head, with a peer's append its session queued, keeps
+/// the mismatch its complete reads find, across a restart. Once the scope
+/// names its head's path again it waits for that append, and once a drain
+/// applies it the next pass writes its heads and it becomes ready.
+#[tokio::test]
+async fn a_moved_document_keeps_its_mismatch_then_waits_for_its_queued_work_before_ready() {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let (append, append_bytes) = desktop.append(&w.lineage, "A desktop paragraph.").await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    feed.serve(append, append_bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let live = live_hosted_pass(&mut w.store, &client);
+    assert!(pass_commit(&mut w.store, &client, &live).committed);
+    assert_eq!(queued_updates(&w.store).len(), 1, "the lease queued it");
+    rescoped(
+        &mut w.store,
+        &client,
+        "moved",
+        &[("object", "notes/moved.md")],
+    );
+    let mismatch = dohc_engine_sync::HostedHold::ScopePathMismatch {
+        scope_path: "notes/moved.md".into(),
+        head_path: Some(WINDOW_PATH.into()),
+    };
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(mismatch.clone())
+    );
+    for restarted in [false, true] {
+        if restarted {
+            w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+        }
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        let read = &pass.pending_cursor.as_ref().unwrap().reads["object"];
+        assert!(read.complete && !read.heads_written, "{read:?}");
+        assert_eq!(pass.held.get("object"), Some(&mismatch), "{pass:?}");
+        assert_eq!(queued_updates(&w.store).len(), 1);
+        commit_pass(&mut w.store, &client, &pass);
+        assert_eq!(
+            hosted_status(&w.store, "object"),
+            dohc_engine_sync::HostedDocumentStatus::Held(mismatch.clone())
+        );
+    }
+
+    rescoped(&mut w.store, &client, "named", &[("object", WINDOW_PATH)]);
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    let read = &pass.pending_cursor.as_ref().unwrap().reads["object"];
+    assert!(read.complete && !read.heads_written, "{read:?}");
+    assert_eq!(
+        pass.held.get("object"),
+        Some(&dohc_engine_sync::HostedHold::WorkWaiting),
+        "{pass:?}"
+    );
+    assert_eq!(queued_updates(&w.store).len(), 1);
+    commit_pass(&mut w.store, &client, &pass);
+    let waiting =
+        dohc_engine_sync::HostedDocumentStatus::Held(dohc_engine_sync::HostedHold::WorkWaiting);
+    assert_eq!(hosted_status(&w.store, "object"), waiting);
+    w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        waiting,
+        "after a restart"
+    );
+
+    // The drain applies the append; the pass that makes it ready writes its
+    // heads.
+    let mut pass = committed_pass(&mut w.store, &client);
+    assert_eq!(queued_updates(&w.store), Vec::new(), "{pass:?}");
+    assert!(w.text().contains("A desktop paragraph."));
+    if hosted_status(&w.store, "object") != dohc_engine_sync::HostedDocumentStatus::Ready {
+        pass = committed_pass(&mut w.store, &client);
+    }
+    assert!(
+        pass.pending_cursor.as_ref().unwrap().reads["object"].heads_written,
+        "{pass:?}"
+    );
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Ready
+    );
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's readiness ruling 3: archived admission precedes the live lease. A
+/// ready document whose session is live receives a peer's update of its
+/// archived lineage that released tails protect. The archive keeps its
+/// state, the update is neither acknowledged nor queued, and the commit
+/// holds the document, which ends its session.
+#[tokio::test]
+async fn a_live_documents_protected_archived_update_stays_in_the_feed_and_holds_it() {
+    let mut w = retained_window(Retained::Carried).await;
+    let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
+    let archive = archive_lineage(&mut w);
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Ready
+    );
+    let (update, bytes) = desktop.append(&w.lineage, "An archived paragraph.").await;
+    let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+    let update = feed.serve(update, bytes);
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let pass = live_hosted_pass(&mut w.store, &client);
+    assert!(
+        holds_archived(pass.held.get("object"), &w.lineage, &archive, &update),
+        "{pass:?}"
+    );
+    assert!(!journaled(&w.store, &update), "not acknowledged");
+    assert_eq!(queued_feeds(&w.store), Vec::<String>::new(), "not queued");
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    assert!(pass_commit(&mut w.store, &client, &pass).committed);
+    assert_eq!(
+        hosted_status(&w.store, "object"),
+        dohc_engine_sync::HostedDocumentStatus::Held(pass.held["object"].clone()),
+        "a document that is not ready ends its session"
+    );
     desktop.close().await;
     w.close().await;
 }
@@ -8080,6 +8408,19 @@ impl dohc_engine_sync::LeaseProbe for BothLive {
 /// The scope of a feed holding the record and the window's document.
 const BOTH: [(&str, &str); 2] = [(RECORD_OBJECT, RECORD_PATH), ("object", WINDOW_PATH)];
 
+/// Each row a feed served, with its bytes, in relay order.
+type Served = Vec<(dohc_engine_sync::ReplicationEnvelope, Vec<u8>)>;
+
+/// A new client, as a new request has, over a feed of [`BOTH`] serving
+/// `rows` at the positions the first feed served them.
+fn served_again(rows: &Served) -> dohc_engine_sync::RelaySyncClient<HostedFeed> {
+    let feed = HostedFeed::new(&BOTH);
+    for (op, bytes) in rows {
+        feed.serve(op.clone(), bytes.clone());
+    }
+    dohc_engine_sync::RelaySyncClient::new(feed)
+}
+
 /// The window with the record added, and a client whose feed served the
 /// record's title change and two desktop appends while both documents were
 /// live: a committed pass queued all three, and both documents are ready.
@@ -8088,6 +8429,17 @@ async fn record_and_window_queued() -> (
     Desktop,
     dohc_engine_sync::RelaySyncClient<HostedFeed>,
 ) {
+    let (w, desktop, client, _) = record_and_window_served().await;
+    (w, desktop, client)
+}
+
+/// [`record_and_window_queued`], with the rows its feed served.
+async fn record_and_window_served() -> (
+    RetainedWindow,
+    Desktop,
+    dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    Served,
+) {
     let mut w = retained_window(Retained::Carried).await;
     add_collection_record(&mut w);
     let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
@@ -8095,9 +8447,14 @@ async fn record_and_window_queued() -> (
     let (second, second_bytes) = desktop.append(&w.lineage, "A second paragraph.").await;
     let (titled, titled_bytes) = record_title_update(&w.store, "Remote");
     let feed = HostedFeed::new(&BOTH);
-    feed.serve(titled, titled_bytes);
-    feed.serve(first, first_bytes);
-    feed.serve(second, second_bytes);
+    let mut rows = Served::new();
+    for (op, bytes) in [
+        (titled, titled_bytes),
+        (first, first_bytes),
+        (second, second_bytes),
+    ] {
+        rows.push((feed.serve(op, bytes.clone()), bytes));
+    }
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     let live = loop {
@@ -8118,7 +8475,199 @@ async fn record_and_window_queued() -> (
     assert!(pass_commit(&mut w.store, &client, &live).committed);
     assert_eq!(queued_updates(&w.store).len(), 3);
     assert_eq!(field_history(&w.store), 0);
-    (w, desktop, client)
+    (w, desktop, client, rows)
+}
+
+/// How many of `facts` report the record's title change to "Remote".
+fn remote_titles(facts: &[dohc_engine_domain::CollectionRecordApplyFacts]) -> usize {
+    facts
+        .iter()
+        .filter(|facts| {
+            facts.record_id == RECORD_ID
+                && facts.fields.iter().any(|field| {
+                    field.field_name == "title" && field.next_json.as_deref() == Some("\"Remote\"")
+                })
+        })
+        .count()
+}
+
+/// How many drain reports the store keeps.
+fn drain_reports(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_drain_reports", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap()
+}
+
+/// After a pass waited with the record's queued title change removed and
+/// its report owed: resume it, or abandon it, with a restart or not, and
+/// run the next request. That request reports the change once, its commit
+/// acknowledges the report, and the pass after it reports nothing.
+fn owed_title_reported_once(
+    w: &mut RetainedWindow,
+    after: AfterWait,
+    client: dohc_engine_sync::RelaySyncClient<HostedFeed>,
+    cache: dohc_engine_collab::WriterDocCache,
+    pending: Box<PendingValidation>,
+    rows: &Served,
+) {
+    assert_eq!(field_history(&w.store), 1, "{after:?}");
+    assert!(
+        !record_update_parked(&w.store),
+        "{after:?}: its row is gone"
+    );
+    assert_eq!(drain_reports(&w.store), 1, "{after:?}: its report is owed");
+    let (client, mut cache) = match after {
+        AfterWait::Resume => {
+            pending.validate().wait().unwrap();
+            (client, cache)
+        }
+        AfterWait::Abandon | AfterWait::Restart => {
+            drop(pending);
+            if matches!(after, AfterWait::Restart) {
+                w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+            }
+            (
+                served_again(rows),
+                dohc_engine_collab::WriterDocCache::new(),
+            )
+        }
+    };
+    let mut pass = hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(remote_titles(&pass.record_facts), 1, "{after:?}: {pass:?}");
+    if matches!(after, AfterWait::Restart) {
+        // A pass that reported it and never committed leaves it owed.
+        w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+        pass = hosted_pass(&mut w.store, &client, &mut cache);
+        assert_eq!(remote_titles(&pass.record_facts), 1, "{after:?}: {pass:?}");
+    }
+    assert_eq!(field_history(&w.store), 1, "{after:?}");
+    assert!(pass_commit(&mut w.store, &client, &pass).committed);
+    assert_eq!(drain_reports(&w.store), 0, "{after:?}: acknowledged");
+    let next = hosted_pass(&mut w.store, &client, &mut cache);
+    assert_eq!(remote_titles(&next.record_facts), 0, "{after:?}: {next:?}");
+}
+
+/// Sol's ruling 1, window (c): a pass's op for the record drains its queued
+/// title change before it applies, which removes that row, and a later op of
+/// the window waits for validation. Whether the request resumes, is
+/// abandoned, or the store restarts, the change reaches the next reporting
+/// boundary once through the drain report its removal wrote.
+#[tokio::test]
+async fn an_ingress_drains_facts_survive_a_later_ops_wait() {
+    for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
+        let (mut w, desktop, client, mut rows) = record_and_window_served().await;
+        let record_lineage = record_lineage(&w.store);
+        let head = dohc_engine_collab::load_persisted(&w.store, &record_key())
+            .unwrap()
+            .unwrap();
+        let remote = Ydoc::wire();
+        remote.apply(&head.doc.encode_full_state()).unwrap();
+        let paragraph = remote.richdoc_append_paragraph("A record paragraph.");
+        let record_op = peer_update(&record_key(), RECORD_PATH, &record_lineage, 1, &paragraph);
+        let (third, third_bytes) = desktop.append(&w.lineage, "A third paragraph.").await;
+        for (op, bytes) in [(record_op, paragraph), (third, third_bytes)] {
+            rows.push((client.transport().serve(op, bytes.clone()), bytes));
+        }
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let waited = client.pull_hosted_workspace(
+            &mut w.store,
+            &mut cache,
+            "workspace",
+            "relay",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::RelayError::ValidationPending(pending)) = waited else {
+            panic!("{after:?}: {waited:?}");
+        };
+        owed_title_reported_once(&mut w, after, client, cache, pending, &rows);
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// Sol's ruling 1, window (b): the pass's inactive drain applies the
+/// record's queued title change, which an earlier drain applied to the head
+/// before its lineage was archived, to that archive and removes its row; the
+/// window's drain then waits for validation. Whether the request resumes,
+/// is abandoned, or the store restarts, the change reaches the next
+/// reporting boundary once through the drain report its removal wrote.
+#[tokio::test]
+async fn an_inactive_drains_facts_survive_a_later_wait() {
+    for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
+        let (mut w, desktop, client, rows) = record_and_window_served().await;
+        // An earlier drain applied the change and stopped before its cleanup.
+        let (stopped, _cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            &mut w.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &record_key(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(remote_titles(&stopped.record_facts), 1, "{after:?}");
+        assert!(record_update_parked(&w.store), "{after:?}");
+        // Its lineage is archived and another takes the head. The archive
+        // refuses while rows are queued, so they are set aside around it.
+        let lineage = record_lineage(&w.store);
+        let head = dohc_engine_collab::load_persisted(&w.store, &record_key())
+            .unwrap()
+            .unwrap();
+        let vector = hex_sha256(&head.doc.encode_state_vector());
+        execute(
+            &mut w.store,
+            "CREATE TEMP TABLE set_aside AS SELECT * FROM ydoc_deferred_updates; \
+             DELETE FROM ydoc_deferred_updates;",
+        );
+        w.store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_collab::archive_active_lineage_in_tx(
+                    tx,
+                    &record_key(),
+                    &lineage,
+                    &vector,
+                    None,
+                    1_600,
+                )
+            })
+            .unwrap();
+        let successor = Ydoc::wire();
+        successor.apply(&head.doc.encode_full_state()).unwrap();
+        dohc_engine_collab::claim_base(
+            &mut w.store,
+            &record_key(),
+            ContentKind::Richdoc,
+            &successor.encode_full_state(),
+            &NoFaults,
+            1_700,
+        )
+        .unwrap();
+        assert_ne!(record_lineage(&w.store), lineage, "{after:?}");
+        execute(
+            &mut w.store,
+            "INSERT INTO ydoc_deferred_updates SELECT * FROM set_aside; DROP TABLE set_aside; \
+             UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting', \
+               backfill_cursor=(SELECT main_cursor FROM hosted_replicas)",
+        );
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let waited = client.pull_hosted_workspace(
+            &mut w.store,
+            &mut cache,
+            "workspace",
+            "relay",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        );
+        let Err(dohc_engine_sync::RelayError::ValidationPending(pending)) = waited else {
+            panic!("{after:?}: {waited:?}");
+        };
+        owed_title_reported_once(&mut w, after, client, cache, pending, &rows);
+        desktop.close().await;
+        w.close().await;
+    }
 }
 
 /// How many field-history rows the record has.
@@ -8134,6 +8683,20 @@ fn record_history(store: &EngineStore, record_id: &str) -> i64 {
                 "SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1",
                 [record_id],
                 |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// How many moments the record has, and how many conflicts the store keeps.
+fn record_moments_and_conflicts(store: &EngineStore) -> (i64, i64) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM moments WHERE object_id=?1), \
+                   (SELECT COUNT(*) FROM conflicts)",
+                [RECORD_OBJECT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
         })
         .unwrap()
@@ -8200,6 +8763,7 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
         assert_eq!(field_history(&w.store), 1, "{after:?}");
         assert!(record_update_parked(&w.store), "{after:?}");
         assert_eq!(queued_updates(&w.store).len(), 3, "{after:?}");
+        let committed = record_moments_and_conflicts(&w.store);
 
         let (client, mut cache) = match after {
             AfterWait::Resume => {
@@ -8226,26 +8790,33 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
             .count();
         assert_eq!(reported, 1, "{after:?}: {pass:?}");
         assert_eq!(field_history(&w.store), 1, "{after:?}");
+        // Sol's fifth ruling: draining the record again duplicates nothing.
+        assert_eq!(
+            record_moments_and_conflicts(&w.store),
+            committed,
+            "{after:?}: no moment or conflict again"
+        );
         assert_eq!(queued_updates(&w.store), Vec::new(), "{after:?}");
         assert!(w.text().contains("A second paragraph."), "{after:?}");
         assert!(pass_commit(&mut w.store, &client, &pass).committed);
         let next = hosted_pass(&mut w.store, &client, &mut cache);
         assert!(next.record_facts.is_empty(), "{after:?}: {next:?}");
+        assert_eq!(record_moments_and_conflicts(&w.store), committed, "{after:?}");
         desktop.close().await;
         w.close().await;
     }
 }
 
-/// Sol's sixth test, across documents: artifact recovery finished the
-/// record's drain before the window's waited, and lost the record's facts
-/// with the request. Each drain's rows now stay queued until no drain waits,
-/// so after an abandoned recovery, or a restart, the record's update keeps
-/// its facts, recovery records no failure, and the record's next drain
-/// reports them once. The record's projection already wrote its artifact,
-/// so recovery itself does not take it up again.
+/// Sol's sixth test and ruling 2, across documents: artifact recovery
+/// finished the record's drain before the window's waited, and lost the
+/// record's facts with the request. Each drain's rows now stay queued until
+/// no drain waits, and the record keeps its pending artifact while they do,
+/// so whether the recovery resumes, is abandoned or the store restarts,
+/// recovery itself takes the record up again and reports its facts and its
+/// file once, with no recovery failure.
 #[tokio::test]
 async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait() {
-    for after in [AfterWait::Abandon, AfterWait::Restart] {
+    for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
         let (mut w, desktop, _client) = record_and_window_queued().await;
         // Both sessions ended with their own edits settled and their
         // artifacts unwritten; the record's recovers first.
@@ -8274,18 +8845,35 @@ async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait
             &NoFaults,
         )
         .unwrap();
-        assert!(waited.waiting.is_some(), "{after:?}");
+        let Some(pending) = waited.waiting else {
+            panic!("{after:?}: the window's drain waits");
+        };
         assert!(
             waited.record_facts.is_empty(),
             "{after:?}: reports nothing yet"
         );
         assert_eq!(field_history(&w.store), 1, "{after:?}");
         assert!(record_update_parked(&w.store), "{after:?}");
-        drop(waited);
-        if matches!(after, AfterWait::Restart) {
-            let db = engine_db_path(&w.root).unwrap();
-            w.store = EngineStore::open(&db, 0).unwrap();
-            cache = dohc_engine_collab::WriterDocCache::new();
+        let marked: bool = w
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_pending_artifacts WHERE object_id=?1)",
+                    [RECORD_OBJECT],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(marked, "{after:?}: its artifact stays pending");
+        match after {
+            AfterWait::Resume => pending.validate().wait().unwrap(),
+            AfterWait::Abandon => drop(pending),
+            AfterWait::Restart => {
+                drop(pending);
+                let db = engine_db_path(&w.root).unwrap();
+                w.store = EngineStore::open(&db, 0).unwrap();
+                cache = dohc_engine_collab::WriterDocCache::new();
+            }
         }
         let (mut facts, mut changes) = (Vec::new(), Vec::new());
         loop {
@@ -8304,35 +8892,37 @@ async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait
                 None => break,
             }
         }
-        // The record's projection wrote its artifact, so recovery leaves it;
-        // its update stays queued with its facts for its next drain.
-        assert!(
-            facts.iter().all(|facts| facts.record_id != RECORD_ID),
-            "{after:?}: {facts:?}"
-        );
-        assert!(record_update_parked(&w.store), "{after:?}");
-        assert!(
-            changes.iter().all(|change| change.path != RECORD_PATH),
-            "{after:?}: {changes:?}"
-        );
-        let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(
-            &mut w.store,
-            &mut cache,
-            &record_key(),
-            &NoFaults,
-        )
-        .unwrap();
         assert_eq!(
-            drained
-                .record_facts
+            facts
                 .iter()
                 .filter(|facts| facts.record_id == RECORD_ID)
                 .count(),
             1,
-            "{after:?}: {drained:?}"
+            "{after:?}: {facts:?}"
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|change| change.path == RECORD_PATH && change.operation == "write")
+                .count(),
+            1,
+            "{after:?}: {changes:?}"
         );
         assert_eq!(field_history(&w.store), 1, "{after:?}");
         assert!(!record_update_parked(&w.store), "{after:?}");
+        assert_eq!(queued_updates(&w.store), Vec::new(), "{after:?}");
+        let again = dohc_engine_sync::drain_open_document_artifacts(
+            &mut w.store,
+            &mut cache,
+            "workspace",
+            &dohc_engine_sync::NoLiveLeases,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            again.record_facts.is_empty() && again.changes.is_empty(),
+            "{after:?}: reported once"
+        );
         let failures: i64 = w
             .store
             .read_with(|conn| {
@@ -8460,11 +9050,10 @@ async fn a_drain_that_waits_after_a_committed_prefix_keeps_its_facts() {
     }
 }
 
-async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) {
-    let case = format!("{from:?} refused={refused}");
-    let mut w = retained_window(Retained::Carried).await;
-    let sourced: bool = w
-        .store
+/// Whether an outbox entry's native source names a window journal update
+/// above its snapshot, so a compaction past it moves the generation.
+fn window_source_above_snapshot(store: &EngineStore) -> bool {
+    store
         .read_with(|conn| {
             conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN ydoc_docs d \
@@ -8477,23 +9066,21 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
                 |row| row.get(0),
             )
         })
-        .unwrap();
-    assert!(
-        sourced,
-        "{case}: an outbox entry's native source above the snapshot"
-    );
+        .unwrap()
+}
 
-    // The document becomes a Collection record, and its journal fills to one
-    // update short of compaction.
-    std::fs::create_dir_all(w.root.path().join("notes")).unwrap();
-    seed_head(
-        &mut w.store,
-        "notes-schema",
-        "notes/collection.yaml",
-        "fields:\n  title:\n    type: text\n",
-    );
-    let head = w.head();
-    let mut filler = vec![head.frontmatter_set("id", WINDOW_RECORD_ID).unwrap()];
+/// The window document's journal position its snapshot covers.
+fn window_snapshot(store: &EngineStore) -> i64 {
+    dohc_engine_collab::read_marker(store, &window_key())
+        .unwrap()
+        .unwrap()
+        .head_snapshot_seq
+}
+
+/// Fill the window document's journal to one update short of compaction:
+/// `leading`, then paragraph appends, each made on `head`.
+fn fill_window_journal(w: &mut RetainedWindow, head: &Ydoc, leading: Vec<Vec<u8>>) {
+    let mut filler = leading;
     while window_pending(&w.store) + (filler.len() as i64) < 63 {
         filler.push(head.richdoc_append_paragraph(&format!("Filler {}.", filler.len())));
     }
@@ -8514,7 +9101,56 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
         )
         .unwrap();
     }
-    assert_eq!(window_pending(&w.store), 63, "{case}");
+    assert_eq!(window_pending(&w.store), 63);
+}
+
+/// Validate `tails` for the window lineage's current generation, and answer
+/// whether they protect it.
+fn validated_protection(w: &RetainedWindow, tails: &ReleasedTails) -> bool {
+    use dohc_engine_collab::live_update_application::LineageProtection;
+    loop {
+        let decided = w
+            .store
+            .read_with(|conn| {
+                Ok::<_, dohc_engine_storage::StorageError>(
+                    dohc_engine_collab::live_update_application::lineage_protection(
+                        conn,
+                        &window_key(),
+                        &w.lineage,
+                        tails,
+                    ),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        match decided {
+            LineageProtection::Pending(pending) => pending.validate().wait().unwrap(),
+            LineageProtection::Unprotected => return false,
+            LineageProtection::Protected(_) => return true,
+        }
+    }
+}
+
+async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) {
+    let case = format!("{from:?} refused={refused}");
+    let mut w = retained_window(Retained::Carried).await;
+    assert!(
+        window_source_above_snapshot(&w.store),
+        "{case}: an outbox entry's native source above the snapshot"
+    );
+
+    // The document becomes a Collection record, and its journal fills to one
+    // update short of compaction.
+    std::fs::create_dir_all(w.root.path().join("notes")).unwrap();
+    seed_head(
+        &mut w.store,
+        "notes-schema",
+        "notes/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let head = w.head();
+    let id = head.frontmatter_set("id", WINDOW_RECORD_ID).unwrap();
+    fill_window_journal(&mut w, &head, vec![id]);
     let doc = w.head();
     w.store
         .write_with(&NoFaults, |tx| {
@@ -8575,32 +9211,11 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
     prove_retained_delivery(&w);
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     let tails = cache.released_tails(&w.store);
-    loop {
-        let decided = w
-            .store
-            .read_with(|conn| {
-                Ok::<_, dohc_engine_storage::StorageError>(
-                    dohc_engine_collab::live_update_application::lineage_protection(
-                        conn,
-                        &window_key(),
-                        &w.lineage,
-                        &tails,
-                    ),
-                )
-            })
-            .unwrap()
-            .unwrap();
-        match decided {
-            dohc_engine_collab::live_update_application::LineageProtection::Pending(pending) => {
-                pending.validate().wait().unwrap();
-            }
-            dohc_engine_collab::live_update_application::LineageProtection::Unprotected => break,
-            dohc_engine_collab::live_update_application::LineageProtection::Protected(_) => {
-                panic!("{case}: the applied delivery leaves nothing protected")
-            }
-        }
-    }
-    let generation = window_generation(&w.store);
+    assert!(
+        !validated_protection(&w, &tails),
+        "{case}: the applied delivery leaves nothing protected"
+    );
+    let (generation, snapshot) = (window_generation(&w.store), window_snapshot(&w.store));
     tails.pause_validation();
     let stopped = dohc_engine_sync::drain_deferred_ydoc_for_key(
         &mut w.store,
@@ -8614,6 +9229,10 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
         "{case}: a waiting drain reports nothing"
     );
     let pending = stopped.waiting.expect("the second update waits");
+    assert!(
+        window_snapshot(&w.store) > snapshot,
+        "{case}: compaction advanced the snapshot"
+    );
     assert_ne!(
         window_generation(&w.store),
         generation,
@@ -8683,6 +9302,113 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
         "{case}"
     );
     w.close().await;
+}
+
+/// Sol's sixth ruling, its mechanism form: the same post-prefix wait with
+/// the Carried window still protected, so only structurally safe updates
+/// apply. Of two queued paragraph appends the first applies; its compaction
+/// moves the snapshot past the outbox entry's native source, which moves the
+/// generation, so the second's decision waits. At the paused validation the
+/// first is in the head, the second is not, and both rows stay queued.
+/// Whether validation then resumes, is cancelled or the store restarts, the
+/// next drain applies the second, and each lands once.
+#[tokio::test]
+async fn a_protected_drain_that_waits_after_a_committed_prefix_keeps_its_rows() {
+    for from in [FromPause::Resume, FromPause::Cancel, FromPause::Restart] {
+        let case = format!("{from:?}");
+        let mut w = retained_window(Retained::Carried).await;
+        assert!(window_source_above_snapshot(&w.store), "{case}");
+        let head = w.head();
+        fill_window_journal(&mut w, &head, Vec::new());
+
+        // Two paragraph appends queue while the document is live.
+        let replica = Ydoc::wire();
+        replica.apply(&w.native()).unwrap();
+        let first = replica.richdoc_append_paragraph("A first paragraph.");
+        let second = replica.richdoc_append_paragraph("A second paragraph.");
+        let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+        for (seq, bytes) in [(0, first), (1, second)] {
+            feed.serve(
+                peer_update(&window_key(), WINDOW_PATH, &w.lineage, seq, &bytes),
+                bytes,
+            );
+        }
+        let client = dohc_engine_sync::RelaySyncClient::new(feed);
+        let live = live_hosted_pass(&mut w.store, &client);
+        assert!(pass_commit(&mut w.store, &client, &live).committed);
+        assert_eq!(queued_updates(&w.store).len(), 2, "{case}");
+
+        // The tails validate for the current generation and still protect
+        // the window; then validation pauses.
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let tails = cache.released_tails(&w.store);
+        assert!(validated_protection(&w, &tails), "{case}: still protected");
+        let (generation, snapshot) = (window_generation(&w.store), window_snapshot(&w.store));
+        tails.pause_validation();
+        let stopped = dohc_engine_sync::drain_deferred_ydoc_for_key(
+            &mut w.store,
+            &mut cache,
+            &window_key(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            stopped.refusals.is_empty() && stopped.released_hold.is_none(),
+            "{case}: nothing refused or held"
+        );
+        let pending = stopped.waiting.expect("the second append waits");
+        assert!(
+            window_snapshot(&w.store) > snapshot,
+            "{case}: compaction advanced the snapshot"
+        );
+        assert_ne!(
+            window_generation(&w.store),
+            generation,
+            "{case}: compaction moved it"
+        );
+        let validating = std::thread::spawn(move || pending.validate().wait());
+        tails.wait_for_paused_validation();
+        let text = w.text();
+        assert!(text.contains("A first paragraph."), "{case}: it committed");
+        assert!(!text.contains("A second paragraph."), "{case}: it waits");
+        assert!(text.contains(RETAINED), "{case}");
+        assert_eq!(queued_updates(&w.store).len(), 2, "{case}: both stay queued");
+
+        let drained = match from {
+            FromPause::Resume => {
+                tails.resume_validation();
+                validating.join().unwrap().unwrap();
+                dohc_engine_sync::drain_deferred_ydoc_for_key(
+                    &mut w.store,
+                    &mut cache,
+                    &window_key(),
+                    &NoFaults,
+                )
+                .unwrap()
+            }
+            FromPause::Cancel | FromPause::Restart => {
+                tails.close();
+                assert!(validating.join().unwrap().is_err(), "{case}");
+                if matches!(from, FromPause::Restart) {
+                    let db = engine_db_path(&w.root).unwrap();
+                    w.store = EngineStore::open(&db, 0).unwrap();
+                }
+                settled_drain(&mut w.store)
+            }
+        };
+        assert!(
+            drained.waiting.is_none()
+                && drained.refusals.is_empty()
+                && drained.released_hold.is_none(),
+            "{case}: {drained:?}"
+        );
+        let text = w.text();
+        assert_eq!(text.matches("A first paragraph.").count(), 1, "{case}");
+        assert_eq!(text.matches("A second paragraph.").count(), 1, "{case}");
+        assert!(text.contains(RETAINED), "{case}");
+        assert_eq!(queued_updates(&w.store), Vec::new(), "{case}");
+        w.close().await;
+    }
 }
 
 /// Sol's fifth and Opus's sixth findings: a close's drain read a failed

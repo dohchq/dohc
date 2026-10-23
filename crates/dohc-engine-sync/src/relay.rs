@@ -2798,7 +2798,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // The inactive drain's refusals reach the pass as pending refusals,
         // and the facts of rows it removes that applied to a head before
-        // their lineage was archived reach it here. A document whose
+        // their lineage was archived reach it as drain reports. A document whose
         // archived lineage released tails protect holds for it. Each lineage
         // is decided again here.
         let archived = match crate::ydoc_apply::drain_inactive_ydoc_updates(
@@ -2806,12 +2806,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
             &cache.released_tails(store),
             &mut Vec::new(),
+            crate::ydoc_apply::InactiveReport::Durable,
             faults,
         ) {
-            Ok(drained) => {
-                p.pass.record_facts.extend(drained.record_facts);
-                drained.holds
-            }
+            Ok(drained) => drained.holds,
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
@@ -2826,7 +2824,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // Each pass decides again for queued work a drain held, so its
         // document frees once that work no longer needs holding. What those
         // drains commit is the pass's, once: when one waits, each keeps its
-        // rows queued for the next attempt to report.
+        // rows queued for the next attempt to report, and the rows they
+        // remove leave drain reports.
         if matches!(p.holding, Holding::ByDocument { .. }) {
             let released = crate::ydoc_apply::drain_released_holds(
                 store,
@@ -2841,20 +2840,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
-            let mut drained = released.drained;
-            p.pass.record_facts.append(&mut drained.record_facts);
-            for refusal in drained.refusals {
+            for refusal in released.refusals {
                 push_refusal_once(&mut p.pass.refusals, refusal);
             }
-            for declined in drained.sharing_declined {
-                push_sharing_declined_once(&mut p.pass.sharing_declined, declined);
-            }
-            p.pass.conflicts_opened = p
-                .pass
-                .conflicts_opened
-                .checked_add(drained.conflicts_opened)
-                .ok_or(RelayError::InvalidResponse)?;
-            if let Some(pending) = drained.waiting {
+            if let Some(pending) = released.waiting {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
         }
@@ -2896,6 +2885,22 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             insert_changed_path(&mut pass.changed_paths, change);
         }
         pass.record_facts.extend(settlements.record_facts);
+        // What this pass's drains, and any abandoned pass's, removed from the
+        // queue reaches the pass here, under the same token.
+        let drained =
+            crate::drain_report::claim(store, workspace_id, &mut settlements.report_id, faults)
+                .map_err(local)?;
+        pass.record_facts.extend(drained.record_facts);
+        for change in drained.extras.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        for declined in drained.extras.sharing_declined {
+            push_sharing_declined_once(&mut pass.sharing_declined, declined);
+        }
+        pass.conflicts_opened = pass
+            .conflicts_opened
+            .checked_add(drained.extras.conflicts_opened)
+            .ok_or(RelayError::InvalidResponse)?;
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
         // pending sidecar under a unique local report token and return it here.
@@ -2942,15 +2947,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // stands in its document's row, which the pass reads when it settles
         // that document.
         if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-            let drained = crate::ydoc_apply::drain_inactive_ydoc_updates(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(
                 store,
                 crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
                 &cache.released_tails(store),
                 &mut p.archived_protected,
+                crate::ydoc_apply::InactiveReport::Durable,
                 faults,
             )
             .map_err(local)?;
-            p.pass.record_facts.extend(drained.record_facts);
         }
         // Retained work replays under the feed it arrived on.
         let recorded = match &p.holding {

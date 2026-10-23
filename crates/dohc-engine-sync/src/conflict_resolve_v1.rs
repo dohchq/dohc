@@ -4084,6 +4084,7 @@ mod tests {
             crate::ydoc_apply::InactiveScope::Workspace("ws"),
             &tails,
             &mut Vec::new(),
+            crate::ydoc_apply::InactiveReport::Returned,
             faults,
         )
         .map(|drained| drained.refusals)

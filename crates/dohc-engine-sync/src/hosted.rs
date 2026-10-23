@@ -1229,8 +1229,10 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: heads still parked, retained or queued work of it still waiting, a
-/// live edit it refused, or a head away from the path its scope names.
+/// ready: heads still parked, a released hold whose row still stands,
+/// retained work of it still waiting, a live edit it refused, a head away
+/// from the path its scope names, or queued work it still owes, in that
+/// order. A reason it stored before counts only where it still holds.
 /// `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
@@ -1249,24 +1251,6 @@ fn completed_hold(
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
-    // Queued Y.Doc work a held document still owes keeps it waiting; the
-    // end-of-pass drain takes that work up again. A ready document's live
-    // session settles what it queues behind its lease.
-    if conn
-        .query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN ydoc_deferred_updates u \
-                 ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
-                 WHERE d.workspace_id=?1 AND d.object_id=?2 AND {HELD_FOR_DRAIN} \
-                   AND {OUTSTANDING_YDOC_UPDATE})"
-            ),
-            params![workspace_id, object_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(SyncError::corrupt)?
-    {
-        return Ok(Some(HostedHold::WorkWaiting));
-    }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
     }
@@ -1278,14 +1262,25 @@ fn completed_hold(
         )
         .map_err(SyncError::corrupt)?;
     let head_path = head_path(conn, workspace_id, object_id)?;
-    Ok(
-        (head_path.as_deref() != Some(scope_path.as_str())).then_some(
-            HostedHold::ScopePathMismatch {
-                scope_path,
-                head_path,
-            },
-        ),
-    )
+    if head_path.as_deref() != Some(scope_path.as_str()) {
+        return Ok(Some(HostedHold::ScopePathMismatch {
+            scope_path,
+            head_path,
+        }));
+    }
+    // Queued Y.Doc work it still owes keeps it waiting, whatever held it
+    // before; the end-of-pass drain takes that work up again.
+    let waiting: bool = conn
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
+                 WHERE u.workspace_id=?1 AND u.object_id=?2 AND {OUTSTANDING_YDOC_UPDATE})"
+            ),
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(waiting.then_some(HostedHold::WorkWaiting))
 }
 
 /// A write of each head `object_id` has, for the pass whose commit can make
