@@ -123,6 +123,22 @@ describe("FileInspector renders markdown through the shared component map", () =
     vi.clearAllMocks();
   });
 
+  it("opens a note over 64 KiB in bytes as the read preview, even under 64 Ki characters", async () => {
+    // A live session seeds at most 64 KiB of UTF-8, so the WYSIWYG editor
+    // must not open a note past it without one (#2521).
+    const japanese = `# 長いメモ\n\n${"長いメモの段落です。".repeat(2_500)}\n`;
+    expect(japanese.length).toBeLessThan(64 * 1024);
+    expect(new TextEncoder().encode(japanese).byteLength).toBeGreaterThan(64 * 1024);
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: japanese, truncated: false }));
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      expect((await screen.findByTestId("markdown-edit-toggle")).textContent).toContain("Edit");
+    } finally {
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
+
   it("shows a table as a table, inside the wrapper that keeps the page from scrolling sideways", async () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
