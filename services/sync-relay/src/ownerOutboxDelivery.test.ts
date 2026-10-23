@@ -349,6 +349,35 @@ it("delivers a Try again a later validator accepts under its original delivery, 
   expect(committedDeliveries(f)).toHaveLength(4);
 });
 
+it("records each refusal of a server-held queue for its owner until a Try again delivers it, and none for a device's queue", async () => {
+  const service = fixture(3), device = fixture(3);
+  for (const f of [service, device]) {
+    Object.assign(f.storage, {recordServiceKeptEdits: vi.fn(), forgetServiceKeptEdits: vi.fn()});
+    quarantinedBy(f); refuseOnce(f);
+  }
+  Object.assign(service.admission, {keptOnServer: true});
+  const storage = service.storage as typeof service.storage & {recordServiceKeptEdits: ReturnType<typeof vi.fn>; forgetServiceKeptEdits: ReturnType<typeof vi.fn>};
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(storage.recordServiceKeptEdits.mock.calls).toEqual([[{outboxId: "outbox", binding: expect.objectContaining({objectId: "object"}),
+    reason: "invalid-update", headDeliveryId: "delivery-1", nowMs: expect.any(Number)}]]);
+  // Forgetting a queue that was never refused changes nothing.
+  storage.forgetServiceKeptEdits.mockClear();
+  // A quarantined queue, and one whose Try again is waiting, are still kept.
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  service.state.retryDeliveryId = "delivery-1";
+  refuseOnce(service);
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(storage.recordServiceKeptEdits).toHaveBeenCalledTimes(2);
+  expect(storage.forgetServiceKeptEdits).not.toHaveBeenCalled();
+  // An accepted Try again resumes the queue; the next pass forgets it.
+  service.state.retryDeliveryId = "delivery-1";
+  expect(await service.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(storage.forgetServiceKeptEdits).toHaveBeenCalledWith({workspaceId: "workspace", outboxId: "outbox"});
+  expect(await device.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect((device.storage as unknown as {recordServiceKeptEdits: ReturnType<typeof vi.fn>}).recordServiceKeptEdits).not.toHaveBeenCalled();
+});
+
 it.each(["admission-unavailable", "host-unavailable"])("retries the same head without quarantine while commit answers %s", async reason => {
   const f = fixture(1);
   f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "retry", reason}} as never);

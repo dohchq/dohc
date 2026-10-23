@@ -35,6 +35,20 @@ it("discovers only owned synced workspaces and sends credentials only to their p
   await expect(session!.documents(new AbortController().signal)).rejects.toThrow("changed");
 });
 
+it("sends the owner's kept-edits actions to the owner route, and reads the list fresh after one changes it", async () => {
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  const signal = new AbortController().signal;
+  await session.documents(signal);
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true})));
+  expect(await session.keptEdits({action: "copied", outboxId: "outbox", generation: 2}, signal)).toEqual({ok: true});
+  expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host/kept-edits", expect.objectContaining({method: "POST",
+    headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({action: "copied", outboxId: "outbox", generation: 2}), redirect: "error"}));
+  await session.documents(signal);
+  expect(f.fetch).toHaveBeenCalledTimes(3);
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "conflict"}), {status: 409}));
+  await expect(session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal)).rejects.toThrow("This document changed.");
+});
+
 const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 it("reports an older relay's non-JSON refusal before parsing a success body", async () => {
   const f=fixture(), session=(await f.connection.connect(f.workspace,new AbortController().signal))!;

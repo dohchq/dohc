@@ -89,7 +89,7 @@ function harness() {
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
   const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
   const retryOwnerLiveQuarantine = vi.fn<Dependencies["retryOwnerLiveQuarantine"]>(async () => undefined);
-  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json"}));
+  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer"}));
   const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
   const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:action!=="release",document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null,
     ...(action==="release" ? {materialized:true} : {})}));
@@ -355,6 +355,13 @@ describe("owner live document enrollment", () => {
       expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
     });
 
+    // This computer's release cannot write edits the server keeps for a document it hosts.
+    it("keeps edits the server keeps when this computer's release writes the file", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, storedOn: "server", incident: "server:outbox:1"}]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
     // Settlement committed but a blocked materialization left the file as it was.
     it("claims no recovery when the release did not write the file", async () => {
       const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
@@ -382,7 +389,7 @@ describe("owner live document enrollment", () => {
     it("saves a recovery copy for the workspace's own path, and only there", async () => {
       const h = harness();
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "notes/a.md"}))
-        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json"});
+        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer"});
       expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith(h.workspace, "notes/a.md");
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId: "other", path: "notes/a.md"})).rejects.toThrow();
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "../outside.md"})).rejects.toThrow();
@@ -424,7 +431,7 @@ describe("owner live document enrollment", () => {
         ? {ok: true, documents: [], nextCursor: null}
         : {ok: true, documents: [{path: "live.md", status: "ready"}, {path: "other.md", status: "ready"}]});
       expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toEqual({documents: [
-        {path: "live.md", status: "ready", canResume: false, quarantine: "paused"},
+        {path: "live.md", status: "ready", canResume: false, quarantine: "paused", storedOn: "this-computer"},
         {path: "other.md", status: "ready", canResume: false},
       ], nextCursor: null});
       await h.invoke(relayShareOperations.retryOwnerLiveQuarantine.channel, {workspaceId, objectId: "object", incident: quarantine.incident});

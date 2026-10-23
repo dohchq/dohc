@@ -27,6 +27,11 @@ export interface OwnerOutboxAdmission {
   readonly maxBytesPerDrain: number;
   /** Outlives every pass and connection, so a refusal received once is recorded, not admitted again. */
   readonly refusals: OwnerKnownRefusals;
+  /**
+   * Set where the queue lives on the service host, so its owner can find and
+   * recover a refused queue there. A device's queue is on the owner's computer.
+   */
+  readonly keptOnServer?: boolean;
   validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
@@ -81,6 +86,10 @@ export async function drainOwnerOutbox(options: {
   };
   const status = await readStatus(), outboxId = status.outboxId;
   const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  // A queue that delivers again, as after an accepted Try again, is no longer kept for its owner.
+  if (admission.keptOnServer && typeof outboxId === "string" && status.quarantined === undefined) {
+    storage.forgetServiceKeptEdits({workspaceId: binding.workspaceId, outboxId});
+  }
   if (status.quarantined) {
     // With no Try again outstanding, no known refusal is left to record.
     const known = refusals.get(held);
@@ -94,6 +103,7 @@ export async function drainOwnerOutbox(options: {
       params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
     refusals.recorded(held, known);
     check();
+    if (admission.keptOnServer) storage.recordServiceKeptEdits({outboxId, binding, reason: known.reason, headDeliveryId: known.deliveryId, nowMs: Date.now()});
   };
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");

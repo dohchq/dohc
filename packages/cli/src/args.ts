@@ -329,9 +329,11 @@ const DOCUMENT_VERBS = {
   },
   "kept-edits": {
     capabilityId: "workspace.status",
-    summary: "List live documents whose edits the server refused. dohc keeps those edits on this computer.",
+    summary: "List live documents whose edits the server refused, and where dohc keeps those edits.",
     operands: "",
-    notes: ["A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident."],
+    notes: ["storedOn is this-computer, or server for a document the server hosts.",
+      "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "A recovery of copied means the server keeps the edits and your recovery copy of them is saved."],
     parse: input => {
       noExtraArgs(input.operands, "document kept-edits");
       return { verb: "liveKeptEdits" };
@@ -339,11 +341,12 @@ const DOCUMENT_VERBS = {
   },
   "save-recovery-copy": {
     capabilityId: "share.live.document.recovery.save",
-    summary: "Save a document's kept edits next to it. The edits stay kept on this computer.",
+    summary: "Save a document's kept edits next to it. The edits stay where dohc keeps them.",
     operands: "<path>",
     notes: ["Accepts every recovery except not-written.",
       "A not-written document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices.",
       "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
+      "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
       "dohc writes these files itself, not as the agent that asked."],
     parse: input => ({ verb: "saveRecoveryCopy", path: parsePath(input, "document save-recovery-copy") }),
   },
@@ -351,7 +354,7 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.document.retry",
     summary: "Send a document's kept edits to the server once more.",
     operands: "<path> <incident>",
-    notes: ["Take the incident from kept-edits. Accepts only a recovery of paused.",
+    notes: ["Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps.",
       "A not-written or stopping document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices.",
       "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
     parse: input => {

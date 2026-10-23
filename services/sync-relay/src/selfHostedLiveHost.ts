@@ -13,6 +13,7 @@ import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admi
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor} from "./storage/serviceHostEnrollment";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import {deriveServiceHostBearer} from "./serviceHostCredential";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
 import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
@@ -326,6 +327,14 @@ export async function startSelfHostedLiveHost(options: {
       const unblocked = current?.unblock(document) ?? false;
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
+    },
+    /** The running daemon's reads and Try again of refused queues it keeps for their owners. */
+    keptEdits: {
+      read(kept: ServiceKeptEdits, signal?: AbortSignal) {
+        if (!current) throw new Error("This server does not hold the workspace's live documents now.");
+        return current.readKeptEdits(kept, signal);
+      },
+      async retry(kept: ServiceKeptEdits, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, signal) : false;},
     },
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},

@@ -96,6 +96,23 @@ export function createServerOwnerConnection(options: {
           refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
         },
+        // A read carries the whole queue: up to the server's 64 MiB outbox, its base and checkpoint, in base64.
+        async keptEdits(input, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host/kept-edits`, {
+            method: "POST", headers: {authorization: `Bearer ${session.value.token}`, "content-type": "application/json"},
+            body: JSON.stringify(input), signal: requestSignal, redirect: "error",
+          });
+          assertCurrent(); requestSignal.throwIfAborted();
+          const value = await readBoundedJson(response, 256 * 1024 * 1024, requestSignal);
+          assertCurrent();
+          if (response.status === 409) throw new Error("This document changed. Open Live documents to check it.");
+          if (!response.ok) throw new Error("dohc could not reach your kept edits on the server. Try again.");
+          // The next pass reads the list the action changed, not one cached before it.
+          if (input.action !== "read") discovery.delete(workspace.workspaceId);
+          return value;
+        },
         async retire(binding, attempt) {
           assertCurrent();const requestSignal=AbortSignal.any([signal,attempt]);
           const response=await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,{

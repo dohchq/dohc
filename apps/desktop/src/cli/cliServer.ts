@@ -246,11 +246,11 @@ export interface CliKeptCopiesPort {
 }
 
 // Live documents whose edits the server refused, which dohc keeps on this
-// computer, and the two steps the desktop's Notices row offers for them:
-// Save recovery copy and Try again. Paths are workspace-relative.
+// computer or on the server, and the two steps the desktop's Notices row
+// offers for them: Save recovery copy and Try again. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
-  saveRecoveryCopy(path: string): Promise<{ copyPath: string | null; packagePath: string }>;
+  saveRecoveryCopy(path: string): Promise<{ copyPath: string | null; packagePath: string; storedOn: "this-computer" | "server" }>;
   retry(path: string, incident: string): Promise<void>;
 }
 
@@ -3017,7 +3017,7 @@ async function dispatchWorkspace(
       try {
         const saved = await keptEdits.saveRecoveryCopy(request.args.path);
         await notifyWrite(options, context);
-        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath) };
+        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn };
       } catch (error) {
         return pathFreeFailure(error, `dohc could not save a recovery copy of ${request.args.path}.`);
       }

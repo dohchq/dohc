@@ -189,7 +189,7 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
         const quarantine = quarantines.find(candidate => candidate.path === row.path);
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery});
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
@@ -238,8 +238,10 @@ export function createRelaySharesIpcHandlers<
       }
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId);
-      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined ? "kept" : "none"};
+      // This computer's release can write only the edits it keeps. Edits the server keeps stay there.
+      const kept=local===undefined ? undefined : dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId);
+      const quarantined=kept?.storedOn==="this-computer", onServer=kept?.storedOn==="server";
+      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
       let result: unknown;
       try {
         const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
@@ -274,7 +276,7 @@ export function createRelaySharesIpcHandlers<
         return {keptEdits:"kept"};
       }
       operation.assertCurrent();
-      return {keptEdits:!quarantined ? "none" : keptEditsOf(released)};
+      return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released)};
     });
   };
 

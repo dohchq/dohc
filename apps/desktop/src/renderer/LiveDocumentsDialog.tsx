@@ -12,8 +12,9 @@ export type LiveDocumentRow = {
   reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
-  /** The server refused this document's edits for good, and this computer keeps them. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written";
+  /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "copied";
+  storedOn?: "this-computer" | "server";
 };
 
 /** What a Stop did with edits the server refused. */
@@ -147,7 +148,7 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
-  if (row.quarantine === "paused") return "Paused";
+  if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
   if (row.quarantine === "stopping") return "Stopping";
   if (row.quarantine === "stopped-kept" || row.quarantine === "not-written") return "Stopped";
@@ -200,7 +201,9 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
 function quarantineNote(row: LiveDocumentRow): string | null {
   switch (row.quarantine) {
     case "paused":
-      return "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
+      return `The server could not accept your edits. dohc kept them ${row.storedOn === "server" ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`;
+    case "copied":
+      return "The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.";
     case "retrying":
       return "dohc is sending your kept edits to the server once more.";
     case "stopping":

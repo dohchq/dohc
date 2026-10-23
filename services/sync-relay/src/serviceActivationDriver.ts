@@ -415,7 +415,7 @@ export class ServiceActivationDriver {
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publish:signal=>workspace.replica.publish(signal),
       ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
-        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,validate:c.validateAdmission}});
+        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,keptOnServer:true,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:targetKey(target),...state};
   }
   // Clears readiness when the owner may no longer use its exact binding.

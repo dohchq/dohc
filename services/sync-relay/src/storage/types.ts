@@ -626,6 +626,14 @@ export interface SyncRelayStorage {
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
+  /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
+  recordServiceKeptEdits(input: {outboxId: string; binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; nowMs: number}): void;
+  forgetServiceKeptEdits(input: {workspaceId: string; outboxId: string}): void;
+  listServiceKeptEdits(workspaceId: string): readonly import("./serviceKeptEdits").ServiceKeptEdits[];
+  readServiceKeptEdits(workspaceId: string, outboxId: string): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;

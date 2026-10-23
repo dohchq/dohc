@@ -7,10 +7,10 @@ export const LIVE_RECOVERY_FORMAT = "dohc.live-recovery";
 const OPEN = "Apply checkpoint when present, then base, then each update in order, as Yjs v1 updates to an empty Y.Doc. Each sha256 is the hex SHA-256 of the decoded bytes.";
 
 /** The queue being saved: which file it belongs to, why it waits, and where it is kept. */
-export type LiveRecoverySource = {path: string; reason: string; storedOn: "this-computer"};
+export type LiveRecoverySource = {path: string; reason: string; storedOn: "this-computer" | "server"};
 
-/** Workspace-relative paths of what Save recovery copy wrote. */
-export type LiveRecoveryFiles = {copyPath: string | null; packagePath: string};
+/** Workspace-relative paths of what Save recovery copy wrote, and where the kept edits stay. */
+export type LiveRecoveryFiles = {copyPath: string | null; packagePath: string; storedOn: LiveRecoverySource["storedOn"]};
 
 /** Where Save recovery copy writes. `create` makes one new file on disk and refuses an existing path with EEXIST. */
 export type LiveRecoveryWrites = {
@@ -26,7 +26,7 @@ const isEexist = (error: unknown) => (error as NodeJS.ErrnoException).code === "
 const Bytes = z.object({sha256: z.string().regex(/^[0-9a-f]{64}$/), byteLength: z.number().int().positive(), base64: z.string().min(1)}).strict();
 const LiveRecoveryPackage = z.object({
   format: z.literal(LIVE_RECOVERY_FORMAT), version: z.literal(1), open: z.string(), savedAt: z.string(),
-  path: z.string().min(1), reason: z.string().min(1), storedOn: z.literal("this-computer"),
+  path: z.string().min(1), reason: z.string().min(1), storedOn: z.enum(["this-computer", "server"]),
   outboxId: z.string().min(1), binding: z.unknown().transform(value => parseLiveObjectBinding(value)),
   checkpoint: Bytes.nullable(), base: Bytes,
   updates: z.array(Bytes.extend({sequence: z.number().int().positive(), deliveryId: z.string().min(1), appendKey: z.string().min(1),
@@ -110,10 +110,10 @@ export async function saveLiveRecoveryCopy(recovery: LiveRecoveryPackage, writes
     catch (error) {if (isEexist(error)) continue; throw error;}
     try {
       const markdown = await projection.run({kind: "recover", updates});
-      return {copyPath: markdown === null ? null : await writes.create(copyName, markdown), packagePath};
+      return {copyPath: markdown === null ? null : await writes.create(copyName, markdown), packagePath, storedOn: recovery.storedOn};
     } catch (error) {
       console.error("[desktop] live recovery copy kept only its package:", error);
-      return {copyPath: null, packagePath};
+      return {copyPath: null, packagePath, storedOn: recovery.storedOn};
     }
   }
   throw new Error("dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again.");

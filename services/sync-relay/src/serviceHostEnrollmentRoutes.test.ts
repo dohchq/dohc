@@ -8,9 +8,20 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./servic
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
+import {decodeOwnerYDocOutboxRecovery, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// A refused queue as the service host's engine reads it back: an adoption seed, then a native entry.
+function keptQueue(kept: ServiceKeptEdits): OwnerYDocOutboxRecovery {
+  const base = new Uint8Array([1, 2, 3]), updates = [new Uint8Array([4]), new Uint8Array([5, 6])];
+  return {outboxId: kept.outboxId, binding: kept.binding, baseUpdateDigest: sha(base), baseUpdate: base, checkpoint: new Uint8Array([9]),
+    state: "quarantined", pendingBytes: 3, oldestEntryAtMs: 1, quarantineReason: kept.reason, observedBinding: null, retryDeliveryId: null,
+    entries: updates.map((update, index) => ({sequence: index + 1, appendKey: index === 0 ? "owner-adoption:seed" : "native-2",
+      deliveryId: `delivery-${index + 1}`, updateDigest: sha(update), update, byteLength: update.byteLength, createdAtMs: index + 1}))};
+}
 const key = new Uint8Array(32).fill(17), namespace = "service-route-test";
 const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.",
   hostedFeed: true, authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
@@ -26,6 +37,7 @@ async function fixture() {
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
+    keptEdits: {read: vi.fn(async (kept: ServiceKeptEdits) => keptQueue(kept)), retry: vi.fn(async (_kept: ServiceKeptEdits) => true)},
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
@@ -59,6 +71,56 @@ it("requires bearer owner authority, rejects ambient credentials and rejects unk
   expect((await f.handle(f.request("DELETE", {path: binding.currentPath, workspaceId: scope.workspaceId}))).status).toBe(400);
   expect((await f.handle(f.request("POST", {shareId: scope.shareId}, {"content-type": "text/plain"}))).status).toBe(400);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+});
+
+it("lets only the workspace's owner see, read, try again and confirm a copy of edits the server kept, admitting and publishing none of them", async () => {
+  const f = await fixture();
+  const refuse = () => f.storage.recordServiceKeptEdits({outboxId: "outbox-1", binding, reason: "invalid-update", headDeliveryId: "delivery-1", nowMs: 5});
+  refuse();
+  const kept = {objectId: binding.objectId, path: binding.currentPath, outboxId: "outbox-1", reason: "invalid-update"};
+  const list = async () => ((await (await f.handle(f.request())).json()) as {keptEdits?: unknown}).keptEdits;
+  const act = (action: string, generation = 1) => f.handle(f.request("POST", {action, outboxId: "outbox-1", generation}, {}, "/kept-edits"));
+  expect(await list()).toEqual([{...kept, generation: 1, recovery: "paused"}]);
+  // A recipient of the owner's shares, and the owner of another workspace, learn and reach nothing.
+  for (const actor of [{workspaceId: scope.workspaceId, userId: "recipient"}, {workspaceId: "other-workspace", userId: "owner-1"}]) {
+    f.setActor(actor);
+    expect((await f.handle(f.request())).status).toBe(404);
+    for (const action of ["read", "retry", "copied"]) expect((await act(action)).status).toBe(404);
+  }
+  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
+  expect(f.host.keptEdits.read).not.toHaveBeenCalled();
+  expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
+  expect(f.storage.readServiceKeptEdits(scope.workspaceId, "outbox-1")).toMatchObject({retrying: false, copied: false});
+  expect((await act("read", 2)).status).toBe(409);
+  expect((await f.handle(f.request("POST", {action: "read", outboxId: "outbox-1"}, {}, "/kept-edits"))).status).toBe(400);
+  // The read returns every byte, and the relay accepts and publishes none of them.
+  const count = (table: string) => Number(f.raw.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count);
+  const before = [count("sync_relay_live_update_journal"), count("sync_relay_log")];
+  const read = (await (await act("read")).json()) as {queue: unknown};
+  expect(read).toMatchObject({ok: true, ...kept, generation: 1, recovery: "paused"});
+  expect(decodeOwnerYDocOutboxRecovery(read.queue)).toEqual(keptQueue(f.storage.readServiceKeptEdits(scope.workspaceId, "outbox-1")!));
+  expect([count("sync_relay_live_update_journal"), count("sync_relay_log")]).toEqual(before);
+  expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
+  // Try again, once per refusal.
+  expect(await (await act("retry")).json()).toEqual({ok: true});
+  expect(await list()).toEqual([{...kept, generation: 1, recovery: "retrying"}]);
+  expect((await act("retry")).status).toBe(409);
+  expect(f.host.keptEdits.retry).toHaveBeenCalledTimes(1);
+  // Refused again: a copy of the earlier refusal would not cover it.
+  refuse();
+  const held = () => f.storage.serviceKeptEditsHeld({workspaceId: scope.workspaceId, objectId: binding.objectId});
+  expect((await act("copied")).status).toBe(409);
+  expect(held()).toBe(true);
+  expect(await (await act("copied", 2)).json()).toEqual({ok: true});
+  expect(await list()).toEqual([{...kept, generation: 2, recovery: "copied"}]);
+  expect(held()).toBe(false);
+  // Without live authority here, Try again grants nothing.
+  f.host.keptEdits.retry.mockResolvedValueOnce(false);
+  expect((await act("retry", 2)).status).toBe(409);
+  expect(await list()).toEqual([{...kept, generation: 2, recovery: "copied"}]);
+  // A queue that delivers again is forgotten.
+  f.storage.forgetServiceKeptEdits({workspaceId: scope.workspaceId, outboxId: "outbox-1"});
+  expect(await list()).toBeUndefined();
 });
 
 it("discovers rich documents in folders, skips other content, and preserves a paused enrollment", async () => {

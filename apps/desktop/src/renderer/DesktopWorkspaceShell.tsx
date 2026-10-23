@@ -1831,7 +1831,8 @@ export function DesktopWorkspaceShell(props: {
       const identity=identityOf(row.objectId), incident=`${row.recovery}\n${row.incident}`;
       if (shown.get(identity)===incident) continue;
       shown.set(identity,incident);
-      const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on","This computer"],["Reason",row.reason],["Incident",row.incident]];
+      const onServer=row.storedOn==="server";
+      const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on",onServer ? "The server" : "This computer"],["Reason",row.reason],["Incident",row.incident]];
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path);},additional:[open]};
       // A Stop runs again: it finishes a waiting Stop, or writes the file a finished one could not.
@@ -1871,8 +1872,15 @@ export function DesktopWorkspaceShell(props: {
           reportShellError(`dohc could not try again to send your edits to ${row.path}.`,error,retry,undefined,identity);
         });
       };
+      // The server keeps them, and the owner's recovery copy is here: nothing is at risk, so the row stays quiet.
+      if (row.recovery==="copied") {
+        reportShellFailure({title:`Live editing paused for ${row.path}`,tone:"warning",quiet:true,
+          message:"The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.",
+          details,retry,action:save,identity});
+        continue;
+      }
       reportShellFailure({title:`Live editing paused for ${row.path}`,
-        message:"The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.",
+        message:`The server could not accept your edits. dohc kept them ${onServer ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`,
         details,retry,action:save,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped]);
@@ -2460,7 +2468,7 @@ export function DesktopWorkspaceShell(props: {
         const slash = saved.packagePath.lastIndexOf("/");
         const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
         showSuccessNotice(saved.copyPath
-          ? `Saved a recovery copy of ${path} in ${folder}. Your kept edits stay on this computer.`
+          ? `Saved a recovery copy of ${path} in ${folder}. Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.`
           : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.`,
         undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
       }, (error: unknown) => {

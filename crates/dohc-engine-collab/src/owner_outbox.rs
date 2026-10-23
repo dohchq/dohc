@@ -2910,6 +2910,28 @@ mod tests {
     }
 
     #[test]
+    fn a_granted_try_again_keeps_its_document_loaded_until_an_outcome_uses_it_up() {
+        let (_dir, mut store, outbox, _pending) = refused_queue("owner-outbox-unload-grant");
+        let pending = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    crate::live_update_application::unload_pending(conn, "workspace-1", "object-1")
+                })
+                .expect("unload pending")
+        };
+        // A refused queue waits for its owner, not for delivery.
+        assert_eq!(pending(&store), None);
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        assert_eq!(
+            pending(&store),
+            Some(crate::live_update_application::UnloadPending::Delivery)
+        );
+        // Refused again, the grant is used up.
+        refuse(&mut store, &outbox);
+        assert_eq!(pending(&store), None);
+    }
+
+    #[test]
     fn a_repeated_try_again_keeps_the_outstanding_grant() {
         let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-twice");
         let first = retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");

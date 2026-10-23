@@ -1092,13 +1092,15 @@ pub enum UnloadPending {
 
 /// The settlement clause reads only the binding's current lineage: a restore
 /// replaces the lineage, and the replaced one never settles again. `?3` counts
-/// deferred updates.
+/// deferred updates. A refused queue waits for its owner, not for delivery,
+/// unless the owner's Try again granted its head an attempt.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
-            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
+            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0
+                AND (state<>'quarantined' OR retry_delivery_id IS NOT NULL)),
     EXISTS(SELECT 1 FROM live_device_update_applications a
         JOIN live_device_application_bindings b
             ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id

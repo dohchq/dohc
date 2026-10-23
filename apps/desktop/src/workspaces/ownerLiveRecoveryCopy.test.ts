@@ -67,7 +67,7 @@ it("rebuilds the kept edits from the package alone after the server accepted the
   const {root, writes} = await workspace(), {recovery, markdown} = queue(5, 2);
   expect(recovery.entries.map(entry => entry.sequence)).toEqual([3, 4, 5]);
   const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), writes, directDocumentProjection);
-  expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"});
+  expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(markdown);
   const written = JSON.parse(await readFile(join(root, saved.packagePath), "utf8"));
   expect(written.open).toMatch(/^Apply checkpoint when present, then base, then each update in order/);
@@ -91,7 +91,7 @@ it("keeps the original bytes in a package when the edits cannot be read as a doc
   const {root, writes} = await workspace(), {recovery} = queue(5, 2);
   // Without the checkpoint, the kept edits wait on the accepted ones they build on.
   const saved = await saveLiveRecoveryCopy(liveRecoveryPackage({...recovery, checkpoint: null}, source), writes, directDocumentProjection);
-  expect(saved).toEqual({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json"});
+  expect(saved).toEqual({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
   const written = JSON.parse(await readFile(join(root, saved.packagePath), "utf8"));
   expect(written.updates.map((update: {base64: string}) => Buffer.from(update.base64, "base64")))
     .toEqual(recovery.entries.map(entry => Buffer.from(entry.update)));
@@ -107,7 +107,7 @@ it("writes the package before the copy is projected, and keeps it when the proje
   vi.spyOn(console, "error").mockImplementation(() => {});
   try {
     const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), writes, projection);
-    expect(saved).toEqual({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json"});
+    expect(saved).toEqual({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
     expect(projection.run).toHaveBeenCalledOnce();
     expect(reopen(JSON.parse(await readFile(packaged, "utf8")))).toBeTruthy();
   } finally {vi.restoreAllMocks();}
@@ -118,7 +118,7 @@ it("never replaces a file, and gives the copy and its package the same free numb
   await writes.create("notes/plan (recovered).md", "older copy");
   await writes.create("notes/plan (recovered 2).dohc-recovery.json", "older package");
   const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), writes, directDocumentProjection);
-  expect(saved).toEqual({copyPath: "notes/plan (recovered 3).md", packagePath: "notes/plan (recovered 3).dohc-recovery.json"});
+  expect(saved).toEqual({copyPath: "notes/plan (recovered 3).md", packagePath: "notes/plan (recovered 3).dohc-recovery.json", storedOn: "this-computer"});
   expect(await readFile(join(root, "notes/plan (recovered).md"), "utf8")).toBe("older copy");
   expect(await readFile(join(root, "notes/plan (recovered 2).dohc-recovery.json"), "utf8")).toBe("older package");
   await writeFile(join(root, "untouched.md"), "x");

@@ -389,7 +389,7 @@ function makeBaseBridge(
     ),
     saveOwnerLiveRecoveryCopy: vi.fn(
       async (payload: import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyPayload): Promise<import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyResult> =>
-        ({ copyPath: payload.path.replace(/\.md$/u, " (recovered).md"), packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json") }),
+        ({ copyPath: payload.path.replace(/\.md$/u, " (recovered).md"), packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json"), storedOn: "this-computer" }),
     ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,

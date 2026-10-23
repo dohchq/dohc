@@ -33,7 +33,9 @@ import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desk
 import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
 import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
-import {readOwnerLiveQuarantines, readOwnerLiveQueue, retryOwnerLiveQuarantine, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord} from "./ownerLiveQuarantine";
+import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, retryOwnerLiveQuarantine, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
+import {decodeOwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
+import {z} from "zod";
 import type {UnwrittenReleases} from "./ownerLiveReleases";
 import type {LiveRecoveryFiles} from "./ownerLiveRecoveryCopy";
 import type {DocumentProjection} from "./documentProjection";
@@ -53,6 +55,8 @@ export interface ServerOwnerDelivery {
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
     retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
+    /** The owner's read, Try again or confirmed copy of edits the server keeps, by the refusal the owner saw. */
+    keptEdits(input: {action: "read" | "retry" | "copied"; outboxId: string; generation: number}, signal: AbortSignal): Promise<unknown>;
   } | null>;
 }
 /**
@@ -171,6 +175,28 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId === null
     ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}`
     : `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`;
+  // Refused queues the server keeps for documents it hosts, as each pass last
+  // read them from the server's live document list.
+  const serverQuarantines = new Map<string, ServerKeptEdits[]>();
+  const serverIncident = (row: ServerKeptEdits) => `server:${row.outboxId}:${row.generation}`;
+  const setServerQuarantines = (workspaceId: string, rows: ServerKeptEdits[]) => {
+    if (JSON.stringify(rows) === JSON.stringify(serverQuarantines.get(workspaceId) ?? [])) return;
+    if (rows.length) serverQuarantines.set(workspaceId, rows); else serverQuarantines.delete(workspaceId);
+    notifyRenderer({workspaceId});
+  };
+  const serverQuarantinesOf = (workspaceId: string) =>
+    dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverQuarantines.get(workspaceId) ?? [] : [];
+  // One request to the server as the workspace's owner.
+  async function withServerSession<Result>(workspaceId: string, work: (session: NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>, signal: AbortSignal) => Promise<Result>) {
+    const server = dependencies.serverOwnerDelivery;
+    const unreachable = () => new Error("dohc could not reach your kept edits on the server. Check that you are signed in, then try again.");
+    if (!server || !workspaceAuthorities.withOperation || !server.workspaceIds().includes(workspaceId)) throw unreachable();
+    return workspaceAuthorities.withOperation(workspaceId, async operation => {
+      const session = await server.connect(operation.workspace, operation.signal);
+      if (!session) throw unreachable();
+      return work(session, AbortSignal.any([operation.signal, session.signal]));
+    });
+  }
   // Returns its own rows, which the caller can trust even when a later read owns the cache.
   async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string): Promise<OwnerLiveQuarantineRecord[]> {
     const read = (ownerQuarantineReads.get(workspaceId) ?? 0) + 1;
@@ -297,6 +323,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               });
               } catch (error) {check();console.error("[desktop] owner Stop discovery failed:",error);}
               const response = await session.documents(signal);
+              check();
+              // A list that does not parse keeps the last answer: the edits are still on the server.
+              try {setServerQuarantines(workspaceId, readServerKeptEdits(response));}
+              catch (error) {console.error("[desktop] server kept edits list failed:", error);}
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
               const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
@@ -731,13 +761,27 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
     },
     ownerLiveStopFailures(workspaceId:string) {return [...(ownerStopFailures.get(workspaceId)?.values() ?? [])];},
+    // A document's queue on this computer speaks for it before any the server keeps.
     ownerLiveQuarantines(workspaceId: string): OwnerLiveQuarantine[] {
-      return (ownerQuarantines.get(workspaceId) ?? []).map(row => ({objectId: row.objectId, path: row.path, reason: row.reason,
+      const local: OwnerLiveQuarantine[] = (ownerQuarantines.get(workspaceId) ?? []).map(row => ({objectId: row.objectId, path: row.path, reason: row.reason,
         storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery}));
+      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId))
+        .map((row): OwnerLiveQuarantine => ({objectId: row.objectId, path: row.path, reason: row.reason, storedOn: "server",
+          incident: serverIncident(row), recovery: row.recovery}))];
     },
     refreshOwnerLiveQuarantines,
     /** Grants the refused head one more attempt, if the owner saw this incident. */
     async retryOwnerLiveQuarantine(workspace: EngineWorkspace, objectId: string, incident: string): Promise<void> {
+      if (incident.startsWith("server:")) {
+        const row = serverQuarantinesOf(workspace.workspaceId).find(candidate => candidate.objectId === objectId && serverIncident(candidate) === incident);
+        if (!row || row.recovery === "retrying") throw new Error("This document changed. Open Live documents to check it.");
+        await withServerSession(workspace.workspaceId, (session, signal) =>
+          session.keptEdits({action: "retry", outboxId: row.outboxId, generation: row.generation}, signal));
+        setServerQuarantines(workspace.workspaceId, serverQuarantinesOf(workspace.workspaceId)
+          .map((candidate): ServerKeptEdits => candidate === row ? {...row, recovery: "retrying"} : candidate));
+        ownerDelivery?.retry?.(workspace.workspaceId);
+        return;
+      }
       await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
         const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
@@ -801,6 +845,36 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         return row?.outboxId ? recovery.liveRecoveryPackage(await readOwnerLiveQueue(client, handle, {...row, outboxId: row.outboxId}),
           {path: row.path, reason: row.reason, storedOn: "this-computer"}) : null;
       });
+      const writes = {
+        create: (relative: string, text: string) => createDurableFile(workspace.rootPath, relative, text),
+        exists: (relative: string) => lstat(join(workspace.rootPath, relative)).then(() => true,
+          (error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return false; throw error;}),
+      };
+      // Edits the server keeps: read them whole, write them here, then tell
+      // the server a durable copy of this refusal exists, so it may let the
+      // document go. Until it hears, it keeps them.
+      const held = queued ? undefined : serverQuarantinesOf(workspace.workspaceId).find(row => row.path === path);
+      if (held) {
+        const read = z.object({ok: z.literal(true), outboxId: z.literal(held.outboxId), generation: z.literal(held.generation), queue: z.unknown()})
+          .parse(await withServerSession(workspace.workspaceId, (session, signal) =>
+            session.keptEdits({action: "read", outboxId: held.outboxId, generation: held.generation}, signal)));
+        const queue = decodeOwnerYDocOutboxRecovery(read.queue);
+        if (queue.outboxId !== held.outboxId || queue.binding.objectId !== held.objectId || queue.state !== "quarantined") {
+          throw new Error("This document changed. Open Live documents to check it.");
+        }
+        const files = await recovery.saveLiveRecoveryCopy(recovery.liveRecoveryPackage(queue, {path: held.path, reason: held.reason, storedOn: "server"}),
+          writes, dependencies.documentProjection);
+        try {
+          await withServerSession(workspace.workspaceId, (session, signal) =>
+            session.keptEdits({action: "copied", outboxId: held.outboxId, generation: held.generation}, signal));
+          setServerQuarantines(workspace.workspaceId, serverQuarantinesOf(workspace.workspaceId)
+            .map((row): ServerKeptEdits => row.outboxId === held.outboxId && row.generation === held.generation ? {...row, recovery: "copied"} : row));
+        } catch (error) {
+          // The copy is written. The server keeps the edits until a later save confirms one.
+          console.error("[desktop] the server did not record the recovery copy:", error);
+        }
+        return files;
+      }
       let saved = queued;
       if (!saved) {
         const releases = dependencies.ownerLiveReleases;
@@ -809,11 +883,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         if (text === null) throw new Error("dohc has no kept edits for this file. Open Live documents to check it.");
         saved = recovery.parseLiveRecoveryPackage(text);
       }
-      return recovery.saveLiveRecoveryCopy(saved, {
-        create: (relative, text) => createDurableFile(workspace.rootPath, relative, text),
-        exists: relative => lstat(join(workspace.rootPath, relative)).then(() => true,
-          (error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return false; throw error;}),
-      }, dependencies.documentProjection);
+      return recovery.saveLiveRecoveryCopy(saved, writes, dependencies.documentProjection);
     },
     clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
       const failures=ownerStopFailures.get(workspaceId);if (!failures) return;

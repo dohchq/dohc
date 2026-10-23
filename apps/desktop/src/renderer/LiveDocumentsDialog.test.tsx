@@ -1080,6 +1080,21 @@ describe("LiveDocumentsDialog", () => {
       expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
     });
 
+    it("says the server keeps a hosted document's refused edits until a recovery copy is saved", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "paused", storedOn: "server" }),
+        row("docs/b.md", { quarantine: "copied", storedOn: "server" })]));
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const paused = await screen.findByTestId("live-document-row-docs/a.md");
+      expect(paused.textContent).toContain("The server could not accept your edits. dohc kept them on the server. Save a recovery copy to get them back.");
+      expect(paused.textContent).not.toContain("this computer");
+      const copied = screen.getByTestId("live-document-row-docs/b.md");
+      expect(within(copied).getByText("Paused")).toBeTruthy();
+      expect(copied.textContent).toContain("dohc kept them on the server. Your recovery copy is on this computer.");
+      expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+      expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+    });
+
     it("offers Try again and a recovery copy for edits a Stop took but could not write", async () => {
       const h = harness();
       h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));

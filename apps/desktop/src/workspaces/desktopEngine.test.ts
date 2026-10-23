@@ -12,7 +12,8 @@ import {
   type EngineDaemonLifecycleOptions,
   type EngineClientSpawnOptions,
 } from "@dohc/workspace-engine-client/daemon";
-import { createDesktopEngine } from "./desktopEngine";
+import { createDesktopEngine, type ServerOwnerDelivery } from "./desktopEngine";
+import { encodeOwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { EngineRelayClient } from "./engineRelayClient";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import type { RegistryEntry } from "./registryStore";
@@ -36,8 +37,8 @@ vi.mock("./nativeOwnerDelivery", async () => ({runNativeOwnerDeliveryPass: owner
   OwnerKnownRefusals: (await vi.importActual<typeof import("./ownerYDocOutbox")>("./ownerYDocOutbox")).OwnerKnownRefusals}));
 // Stands in for the engine's durable owner queues, which outlive every desktop process.
 const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn(), queue: vi.fn()}));
-vi.mock("./ownerLiveQuarantine", () => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry,
-  readOwnerLiveQueue: quarantineMock.queue}));
+vi.mock("./ownerLiveQuarantine", async importOriginal => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry,
+  readOwnerLiveQueue: quarantineMock.queue, readServerKeptEdits: (await importOriginal<typeof import("./ownerLiveQuarantine")>()).readServerKeptEdits}));
 // Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
 vi.mock("./installedReaderConfig", async importOriginal => {
   const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
@@ -175,8 +176,10 @@ beforeEach(() => {
   quarantineMock.queue.mockReset();
 });
 
-/** A server-owned workspace whose delivery offers these documents, for quarantine tests. */
-async function quarantinedOwner(documents: {path: string; objectId: string}[]) {
+type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
+const unexpectedKeptEdits = async (): Promise<unknown> => {throw new Error("Unexpected kept edits request.");};
+/** A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`. */
+async function quarantinedOwner(documents: {path: string; objectId: string}[], server: {kept?: () => unknown[]; keptEdits?: ServerSession["keptEdits"]} = {}) {
   const f = fixture(), credentials = new AbortController();
   Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
   const rootPath = await createTestScratch("dohc-owner-quarantine-");
@@ -189,8 +192,10 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[]) {
     attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
   f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
     connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-      retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
-        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}}))})})};
+      retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits,
+      documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
+        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}})),
+        ...(server.kept ? {keptEdits: server.kept()} : {})})})};
   const workspace = () => f.authorities.withAuthority("owner", lease =>
     ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
   return {f, credentials, binding: bindingOf("notes/plan.md", "object"), workspace};
@@ -910,7 +915,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents})};
     ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -948,7 +953,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {},
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits,
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -991,7 +996,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
     const refused = (recovery: "paused" | "retrying") => [{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
       outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}];
     quarantineMock.read.mockResolvedValue(refused("paused"));
@@ -1134,7 +1139,7 @@ describe("server owner peer lifecycle", () => {
       // The queue is gone, and Save recovery copy still rebuilds the kept edits from what was saved before the release.
       const queueReads = quarantineMock.queue.mock.calls.length;
       const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
-      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"});
+      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
       expect(await readFile(join(f.rows.get("owner")!.rootPath, saved.copyPath!), "utf8")).toContain("kept");
       expect(quarantineMock.queue).toHaveBeenCalledTimes(queueReads);
     } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset(); vi.restoreAllMocks();}
@@ -1209,7 +1214,7 @@ describe("server owner peer lifecycle", () => {
     try {
       expect(await f.engine.start()).toBe(true);
       const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
-      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"});
+      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
       const recovery = JSON.parse(await readFile(join(f.rows.get("owner")!.rootPath, saved.packagePath), "utf8"));
       expect(recovery.updates.map((entry: {base64: string}) => Buffer.from(entry.base64, "base64"))).toEqual([Buffer.from(update)]);
       expect(await readFile(join(f.rows.get("owner")!.rootPath, saved.copyPath!), "utf8")).toContain("kept");
@@ -1218,6 +1223,42 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "stopped-kept"}]);
       await expect(f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "other.md")).rejects.toThrow("dohc has no kept edits for this file.");
     } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
+  });
+
+  // Edits the server keeps for a document it hosts: the server's list names
+  // them, Save recovery copy writes the server's queue beside the document and
+  // only then tells the server, and Try again names the server's refusal.
+  it("saves edits the server keeps from the server's queue, then confirms the copy, and tries them again on the server", async () => {
+    let kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"}];
+    const requests: {action: string; outboxId: string; generation: number}[] = [];
+    const {f, credentials, binding, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
+      keptEdits: async input => {
+        requests.push(input);
+        if (input.action === "read") return {ok: true, ...kept[0], queue: encodeOwnerYDocOutboxRecovery({...recoveryQueue(binding).queue, outboxId: "server-outbox"})};
+        kept = [{...kept[0]!, recovery: input.action === "copied" ? "copied" : "retrying"}];
+        return {ok: true};
+      }});
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: "notes/plan.md",
+        reason: "invalid-update", storedOn: "server", incident: "server:server-outbox:1", recovery: "paused"}]));
+      const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
+      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server"});
+      const root = f.rows.get("owner")!.rootPath;
+      expect(JSON.parse(await readFile(join(root, saved.packagePath), "utf8"))).toMatchObject({storedOn: "server", outboxId: "server-outbox"});
+      expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("kept");
+      // The copy was on disk before the server heard of it.
+      expect(requests).toEqual([{action: "read", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 1}]);
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{storedOn: "server", recovery: "copied"}]);
+      // The engine on this computer was never asked for the server's queue.
+      expect(quarantineMock.queue).not.toHaveBeenCalled();
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:0")).rejects.toThrow("This document changed.");
+      await f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:1");
+      expect(requests.at(-1)).toEqual({action: "retry", outboxId: "server-outbox", generation: 1});
+      expect(quarantineMock.retry).not.toHaveBeenCalled();
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "retrying"}]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
   // Proves: a document the server refused names the workspace's reason over
@@ -1246,7 +1287,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, diverged, documents: rows})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents: async () => ({ok: true, diverged, documents: rows})})};
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
@@ -1312,7 +1353,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {

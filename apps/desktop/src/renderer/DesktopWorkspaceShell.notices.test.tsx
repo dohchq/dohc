@@ -8,7 +8,7 @@ import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { OwnerLiveDocumentsResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -192,13 +192,13 @@ describe("edits the server refused", () => {
   it("saves a recovery copy from the notice, opens it, and keeps the notice", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, recovery: "stopped-kept"}));
-    const saving = deferred<{copyPath: string | null; packagePath: string}>();
+    const saving = deferred<SaveOwnerLiveRecoveryCopyResult>();
     bridge.saveOwnerLiveRecoveryCopy = vi.fn(() => saving.promise);
     renderShell(bridge);
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
-    await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"}); await saving.promise; });
+    await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"}); await saving.promise; });
     expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
     expect(screen.getByRole("button", {name: "Open"})).toBeTruthy();
     // The edits stay queued, so the notice that holds them stays too.
@@ -212,7 +212,7 @@ describe("edits the server refused", () => {
     bridge.getSyncStatus = vi.fn(async () => quarantined(quarantine));
     bridge.saveOwnerLiveRecoveryCopy = vi.fn()
       .mockRejectedValueOnce(new Error("dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again."))
-      .mockResolvedValueOnce({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json"});
+      .mockResolvedValueOnce({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
     renderShell(bridge);
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
@@ -225,7 +225,7 @@ describe("edits the server refused", () => {
   it("runs one save per file at a time, and names the workspace folder for a file at its top", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, path: "plan.md"}));
-    const saving = deferred<{copyPath: string | null; packagePath: string}>();
+    const saving = deferred<SaveOwnerLiveRecoveryCopyResult>();
     bridge.saveOwnerLiveRecoveryCopy = vi.fn(() => saving.promise);
     renderShell(bridge);
     const user = userEvent.setup();
@@ -233,8 +233,38 @@ describe("edits the server refused", () => {
     await user.click(save);
     await user.click(save);
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
-    await act(async () => { saving.resolve({copyPath: "plan (recovered).md", packagePath: "plan (recovered).dohc-recovery.json"}); await saving.promise; });
+    await act(async () => { saving.resolve({copyPath: "plan (recovered).md", packagePath: "plan (recovered).dohc-recovery.json", storedOn: "this-computer"}); await saving.promise; });
     expect(await screen.findByText("Saved a recovery copy of plan.md in the workspace folder. Your kept edits stay on this computer.")).toBeTruthy();
+  });
+
+  // A document the server hosts keeps its refused edits on the server. Until
+  // the owner's recovery copy is saved, the notice says so, and it stays.
+  it("says dohc kept them on the server until a recovery copy is saved, then quietly that the copy is here", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const server = {...quarantine, storedOn: "server" as const, incident: "server:outbox:1"};
+    let status = quarantined(server);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
+      status = quarantined({...server, recovery: "copied"});
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server" as const};
+    });
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByText("The server could not accept your edits. dohc kept them on the server. Save a recovery copy to get them back.")).toBeTruthy();
+    expect(within(toast).queryByText(BODY)).toBeNull();
+    const user = userEvent.setup();
+    await user.click(within(toast).getByRole("button", {name: "Save recovery copy"}));
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on the server.")).toBeTruthy();
+    act(() => bridge.emitWorkspaceActivity());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const copied = "The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.";
+    expect(await within(notices).findByText(copied)).toBeTruthy();
+    expect(within(notices).queryByText("The server could not accept your edits. dohc kept them on the server. Save a recovery copy to get them back.")).toBeNull();
+    // Try again still names the server's refusal.
+    await user.click(within(within(notices).getByText(copied).closest("li")!).getByRole("button", {name: "Try again"}));
+    expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, objectId: "object-1", incident: "server:outbox:1"});
   });
 
   // The release committed, then settlement could not write the file.

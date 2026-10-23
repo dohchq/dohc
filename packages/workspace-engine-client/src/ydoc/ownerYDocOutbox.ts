@@ -250,6 +250,46 @@ function nullableString(value: unknown, name: string): string | null {
   return value;
 }
 
+const sha256Hex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** A recovery read as JSON, for a refused queue another computer keeps. */
+export function encodeOwnerYDocOutboxRecovery(recovery: OwnerYDocOutboxRecovery): JsonValue {
+  const {baseUpdate, checkpoint, entries, ...header} = recovery;
+  return {...header, baseUpdateBase64: bytesToBase64(baseUpdate), checkpointBase64: checkpoint === null ? null : bytesToBase64(checkpoint),
+    entries: entries.map(({update, ...entry}) => ({...entry, updateBase64: bytesToBase64(update)}))} as unknown as JsonValue;
+}
+
+/** Reads {@link encodeOwnerYDocOutboxRecovery}'s JSON. Refuses bytes that do not match their digests or the queue's size. */
+export function decodeOwnerYDocOutboxRecovery(value: unknown): OwnerYDocOutboxRecovery {
+  const raw = record(value, "owner outbox recovery");
+  if (!Array.isArray(raw.entries)) throw new TypeError("entries must be an array.");
+  const baseUpdate = base64ToBytes(raw.baseUpdateBase64, "baseUpdateBase64"), baseUpdateDigest = digestField(raw, "baseUpdateDigest");
+  if (baseUpdate.byteLength === 0 || sha256Hex(baseUpdate) !== baseUpdateDigest) throw new TypeError("Owner outbox base does not match its digest.");
+  const pendingBytes = wireInteger(raw, "pendingBytes");
+  let total = 0, lastSequence = 0;
+  const entries = raw.entries.map((item: unknown): OwnerYDocOutboxEntry => {
+    const entry = record(item, "owner outbox entry"), update = base64ToBytes(entry.updateBase64, "updateBase64");
+    const sequence = wireInteger(entry, "sequence", 1), updateDigest = digestField(entry, "updateDigest"), byteLength = wireInteger(entry, "byteLength", 1);
+    if (sequence <= lastSequence || update.byteLength !== byteLength || sha256Hex(update) !== updateDigest) throw new TypeError("Owner outbox entry does not match its digest.");
+    if (Object.hasOwn(entry, "personEdit") && entry.personEdit !== true) throw new TypeError("Invalid owner person marker.");
+    lastSequence = sequence; total += byteLength;
+    return {sequence, appendKey: stringField(entry, "appendKey"), deliveryId: stringField(entry, "deliveryId"), updateDigest, update, byteLength,
+      createdAtMs: wireInteger(entry, "createdAtMs"),
+      ...(entry.personEdit === true ? {personEdit: true as const} : {}),
+      ...(Object.hasOwn(entry, "automationDeclaration") ? {automationDeclaration: parseAutomationDeclaration(entry.automationDeclaration)} : {}),
+      ...(Object.hasOwn(entry, "agentDeclaration") ? {agentDeclaration: parseAgentDeclaration(entry.agentDeclaration)} : {}),
+      ...(Object.hasOwn(entry, "nativeSource") ? {nativeSource: nativeSource(entry.nativeSource, updateDigest)} : {})};
+  });
+  if (total !== pendingBytes) throw new TypeError("Owner outbox entries do not match its pending bytes.");
+  const observed = raw.observedBinding;
+  return {outboxId: stringField(raw, "outboxId"), binding: parseLiveObjectBinding(raw.binding), baseUpdateDigest, baseUpdate,
+    checkpoint: raw.checkpointBase64 === null ? null : base64ToBytes(raw.checkpointBase64, "checkpointBase64"),
+    state: state(raw.state), pendingBytes, oldestEntryAtMs: raw.oldestEntryAtMs === null ? null : wireInteger(raw, "oldestEntryAtMs"), entries,
+    quarantineReason: nullableString(raw.quarantineReason, "quarantineReason"),
+    observedBinding: observed === null ? null : parseLiveObjectBinding(observed),
+    retryDeliveryId: nullableString(raw.retryDeliveryId, "retryDeliveryId")};
+}
+
 export class OwnerYDocOutbox {
   private readonly requester: WorkspaceDaemonRequester;
   private disposed = false;

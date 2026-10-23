@@ -413,19 +413,21 @@ export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
 export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 
 // One document whose owner edits the server refused for good. The edits wait
-// in a queue on this computer until the owner tries again or stops live
-// editing. `incident` changes with each refusal, so a repeated refusal is news.
+// in a queue on this computer, or on the server when the server hosts the
+// document, until the owner tries again or stops live editing. `incident`
+// changes with each refusal, so a repeated refusal is news.
 export const OwnerLiveQuarantine = z.object({
   objectId: z.string().min(1).max(512),
   path: SAFE_RELATIVE_PATH,
   reason: z.string().min(1).max(128),
-  storedOn: z.literal("this-computer"),
+  storedOn: z.enum(["this-computer", "server"]),
   incident: z.string().min(1).max(1024),
   // paused: waiting for the owner. retrying: the owner's Try again waits for
   // delivery. stopping: a Stop waits for the server to stop live editing.
   // stopped-kept: a Stop finished but kept the queue. not-written: a Stop took
   // the edits into the document but could not write them to the file.
-  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
+  // copied: the server keeps them, and a recovery copy is on this computer.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "copied"]),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
@@ -436,10 +438,12 @@ export type RetryOwnerLiveQuarantinePayload = z.infer<typeof RetryOwnerLiveQuara
 export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
 export type SaveOwnerLiveRecoveryCopyPayload = z.infer<typeof SaveOwnerLiveRecoveryCopyPayload>;
 // The readable copy is null when the kept edits could not be read as a document;
-// the package next to it always holds their original bytes.
+// the package next to it always holds their original bytes. `storedOn` is
+// where the kept edits stay after the save.
 export const SaveOwnerLiveRecoveryCopyResult = z.object({
   copyPath: SAFE_RELATIVE_PATH.nullable(),
   packagePath: SAFE_RELATIVE_PATH,
+  storedOn: OwnerLiveQuarantine.shape.storedOn,
 }).strict();
 export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
 
@@ -449,8 +453,9 @@ export const OwnerLiveDocument = z.object({
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
-  // The server refused this document's edits for good, and this computer keeps them.
+  // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
+  storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // What a Stop did with edits the server refused: wrote them into the file,

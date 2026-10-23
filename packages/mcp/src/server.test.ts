@@ -103,7 +103,7 @@ describe("share-level tool profiles", () => {
     const requests: unknown[] = [];
     const { client } = await connectedToolNames({ root, home: base.home, request: async request => {
       requests.push(request);
-      return "incident" in request.args ? { ok: true, path: "plan.md" } : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: "." };
+      return "incident" in request.args ? { ok: true, path: "plan.md" } : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "this-computer" };
     } });
     expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "dohc_retry_kept_edits", arguments: { path: "plan.md", incident: "outbox:delivery:0" } })).isError).not.toBe(true);

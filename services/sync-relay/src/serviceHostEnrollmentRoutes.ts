@@ -9,7 +9,9 @@ import type {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "./shareFilter";
 import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
-import {badRequest, errorResponse, notFound, RelayError} from "./errors";
+import {badRequest, errorResponse, notFound, relayError, RelayError} from "./errors";
+import {encodeOwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -74,9 +76,45 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
   return {refusals, nextCursor: page.nextCursor?.shareId ?? null};
 }
 
+/** A refused queue the server keeps, as its owner sees it. */
+function keptView(row: ServiceKeptEdits) {
+  return {objectId: row.objectId, path: row.binding.currentPath, outboxId: row.outboxId, reason: row.reason, generation: row.generation,
+    recovery: row.retrying ? "retrying" : row.copied ? "copied" : "paused"};
+}
+
+/**
+ * The owner's actions on a refused queue the server keeps. `read` returns it
+ * whole for a recovery copy, `retry` is Try again, and `copied` records that
+ * a durable recovery copy of this refusal exists, after which the server may
+ * let the document go. Each names the refusal it saw.
+ */
+async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, workspaceId: string, input: Record<string, unknown>, signal: AbortSignal) {
+  if (Object.keys(input).sort().join() !== "action,generation,outboxId" || !["read", "retry", "copied"].includes(String(input.action)) ||
+    typeof input.outboxId !== "string" || !Number.isSafeInteger(input.generation)) throw badRequest("A kept edits action, queue and refusal are required.");
+  const changed = () => relayError("conflict", "This document changed. Open Live documents to check it.");
+  const kept = storage.readServiceKeptEdits(workspaceId, input.outboxId);
+  if (!kept || kept.generation !== input.generation) throw changed();
+  if (input.action === "read") {
+    const queue = await host.keptEdits.read(kept, signal);
+    if (storage.readServiceKeptEdits(workspaceId, kept.outboxId)?.generation !== kept.generation) throw changed();
+    return {ok: true, ...keptView(kept), queue: encodeOwnerYDocOutboxRecovery(queue)};
+  }
+  if (input.action === "copied") {
+    if (!storage.confirmServiceKeptEditsCopy({workspaceId, outboxId: kept.outboxId, generation: kept.generation})) throw changed();
+    host.reconcile();
+    return {ok: true};
+  }
+  if (kept.retrying) throw changed();
+  if (!await host.keptEdits.retry(kept, signal)) throw relayError("conflict", "Live editing is off for this document. Save a recovery copy to get your edits back.");
+  storage.markServiceKeptEditsRetrying({workspaceId, outboxId: kept.outboxId, generation: kept.generation});
+  return {ok: true};
+}
+
+type KeptEditsHost = Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "keptEdits" | "reconcile">;
+
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged" | "keptEdits">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
@@ -115,10 +153,12 @@ export function createServiceHostEnrollmentRoutes(options: {
         [...url.searchParams.keys()].every(key => key === "refusals" || key === "after") &&
         url.searchParams.getAll("refusals").length === 1 && url.searchParams.getAll("after").length <= 1;
       if (retiredPage && refusalPage) throw notFound();
-      if (parts.length !== 4 || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage && !refusalPage) || request.headers.has("cookie") ||
+      const keptPath = parts.length === 5 && parts[4] === "kept-edits" && request.method === "POST" && !url.search;
+      if ((parts.length !== 4 && !keptPath) || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage && !refusalPage) || request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") || !["GET", "POST", "DELETE"].includes(request.method)) throw notFound();
       const workspaceId = parseWorkspaceId(decodeURIComponent(parts[2]!));
       const actor = await options.resolveActor(request, workspaceId);
+      // Only the workspace's owner, never a recipient of its shares.
       const guard = () => {request.signal.throwIfAborted(); if (actor.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();};
       guard();
       if (refusalPage) return response({ok: true, ...serviceHostEnrollmentRefusals(storage, workspaceId, actor.userId,
@@ -130,14 +170,19 @@ export function createServiceHostEnrollmentRoutes(options: {
       }
       // Whether the workspace's hosted replica diverged, even once its owner stopped every document.
       if (request.method === "GET") {
-        const identity = storage.getWorkspaceIdentity(workspaceId);
+        const identity = storage.getWorkspaceIdentity(workspaceId), kept = storage.listServiceKeptEdits(workspaceId);
         return response({ok: true, diverged: !!identity && host.diverged({workspaceId, ...identity}),
-          documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
+          documents: storage.listServiceHostEnrollments(workspaceId).map(state), ...(kept.length ? {keptEdits: kept.map(keptView)} : {})});
       }
       if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Expected a JSON request.");
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
+      if (keptPath) {
+        const result = await keptEditsAction(storage, host, workspaceId, input, request.signal);
+        guard();
+        return response(result);
+      }
       if (request.method === "DELETE") {
         if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||
           (input.objectId !== undefined && (typeof input.objectId !== "string" || input.retire !== true)) ||

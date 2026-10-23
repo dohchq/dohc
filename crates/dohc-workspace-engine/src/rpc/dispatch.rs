@@ -1341,16 +1341,22 @@ mod tests {
                 ErrorCode::Forbidden
             );
         }
-        request.method = "sync.pull".into();
+        // Only the configured host's own connection reaches an owner queue;
+        // the relay checks the owner's standing before it asks.
         let other = ConnectionOwner::authenticated();
         ctx.connection = Some(other.handle());
-        assert_eq!(
-            service
-                .ensure_configured_host_method(&ctx, &request)
-                .unwrap_err()
-                .code,
-            ErrorCode::Forbidden
-        );
+        for method in ["sync.pull", "ydoc.ownerOutbox.readPending", "ydoc.ownerOutbox.retry"] {
+            request.method = method.into();
+            assert_eq!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden,
+                "{method}"
+            );
+        }
+        request.method = "sync.pull".into();
         ctx.connection = Some(owner.handle());
         owner.retire();
         assert_eq!(

@@ -1194,30 +1194,36 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
-// Live documents whose edits the server refused for good, as this computer
-// keeps them. `recovery` is paused while they wait for the owner, retrying
+// Live documents whose edits the server refused for good, as dohc keeps them
+// on this computer or, for a document the server hosts, on the server
+// (`storedOn`). `recovery` is paused while they wait for the owner, retrying
 // while Try again waits for the server, stopping while a Stop waits for it,
-// and stopped-kept or not-written after a Stop kept them.
+// stopped-kept or not-written after a Stop kept them, and copied once a
+// recovery copy of edits the server keeps is on this computer.
+const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
     keptEdits: z.array(z.object({
       path: z.string().min(1),
       reason: z.string().min(1),
+      storedOn: keptEditsStoredOnSchema,
       incident: keptEditsIncidentSchema,
-      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "copied"]),
     }).strict()),
   }).strict(),
   rawFailureSchema,
 ]);
 // The package always holds every kept edit. `copyPath` is null when dohc
-// could not read the edits as a document. Both sit in `folder`.
+// could not read the edits as a document. Both sit in `folder`. The kept
+// edits stay where `storedOn` says.
 const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
     copyPath: z.string().min(1).nullable(),
     packagePath: z.string().min(1),
     folder: z.string().min(1),
+    storedOn: keptEditsStoredOnSchema,
   }).strict(),
   rawFailureSchema,
 ]);

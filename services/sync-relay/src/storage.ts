@@ -15,6 +15,7 @@ import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
+import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -418,6 +419,27 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
+  recordServiceKeptEdits(input: Parameters<typeof serviceKeptEditsStorage.recordServiceKeptEdits>[1]) {
+    return serviceKeptEditsStorage.recordServiceKeptEdits(this, input);
+  }
+  forgetServiceKeptEdits(input: {workspaceId: string; outboxId: string}) {
+    return serviceKeptEditsStorage.forgetServiceKeptEdits(this, input);
+  }
+  listServiceKeptEdits(workspaceId: string) {
+    return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId);
+  }
+  readServiceKeptEdits(workspaceId: string, outboxId: string) {
+    return serviceKeptEditsStorage.readServiceKeptEdits(this, workspaceId, outboxId);
+  }
+  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
+  }
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);
+  }
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}) {
+    return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);

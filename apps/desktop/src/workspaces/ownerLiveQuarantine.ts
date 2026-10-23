@@ -1,6 +1,22 @@
 import {OwnerYDocOutbox, type LiveObjectBinding} from "@dohc/workspace-engine-client";
 import type {EngineClient, OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
+import {z} from "zod";
 import type {UnwrittenRelease} from "./ownerLiveReleases";
+
+const ServerKeptEdits = z.object({
+  objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
+  reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(), recovery: z.enum(["paused", "retrying", "copied"]),
+}).strict();
+/**
+ * A refused queue the server keeps for a document it hosts. `generation`
+ * names the refusal; Try again and a confirmed copy name it back.
+ */
+export type ServerKeptEdits = z.infer<typeof ServerKeptEdits>;
+
+/** The server's refused queues, from its live document list. Absent means none. */
+export function readServerKeptEdits(response: unknown): ServerKeptEdits[] {
+  return z.object({keptEdits: z.array(ServerKeptEdits).max(256).optional()}).parse(response).keptEdits ?? [];
+}
 
 // Enrollment recovers these by itself. Only a refusal waits for the owner.
 const BINDING_QUARANTINES = new Set(["stale-binding", "restore-fenced", "binding-changed"]);
