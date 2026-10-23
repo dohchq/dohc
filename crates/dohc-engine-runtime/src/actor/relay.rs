@@ -1921,16 +1921,25 @@ impl ActorHandle {
         .await
     }
 
-    /// One held document and what its binding preserves, read on the
-    /// store's writer so nothing changes it meanwhile.
+    /// One held document and what its binding preserves. The actor only
+    /// admits the proof and, once it is done, compares what it read with
+    /// bounded reads; the proof runs on a blocking thread of its own, and
+    /// nothing on the actor waits for it. An answer whose evidence moved
+    /// meanwhile is stale, with nothing preserved, and nothing proves again.
     pub async fn held_document(
         &self,
         workspace_id: String,
         object_id: String,
     ) -> Result<Option<dohc_engine_sync::HeldDocumentInspection>, RuntimeError> {
+        let proofs = self.held_proofs.clone();
+        let job = self.run(move |store, _cache| Ok(proofs.job(store))).await?;
+        let proof = tokio::task::spawn_blocking(move || {
+            dohc_engine_sync::prove_held_document(&job, &workspace_id, &object_id)
+        })
+        .await
+        .map_err(|_| RuntimeError::WorkerPanicked)??;
         self.run(move |store, _cache| {
-            dohc_engine_sync::inspect_held_document(store, &workspace_id, &object_id)
-                .map_err(RuntimeError::from)
+            dohc_engine_sync::release_held_proof(store, proof).map_err(RuntimeError::from)
         })
         .await
     }

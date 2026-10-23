@@ -11171,6 +11171,9 @@ mod settlement_drain;
 #[path = "owner_publication/released_namespaces.rs"]
 mod released_namespaces;
 
+#[path = "owner_publication/held_proof.rs"]
+mod held_proof;
+
 /// A decision of [`released_window_measure`] on `tails`, kept for one open
 /// store as the actor keeps them, run to its end as the actor's relay
 /// coordinator runs it: each attempt, with the request for the validation it

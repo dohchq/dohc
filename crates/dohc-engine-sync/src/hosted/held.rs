@@ -1,13 +1,18 @@
 //! The documents a hosted replica holds for retained work a released chain
 //! left, as their owner reviews them: found in object ID order from durable
 //! state alone, so discovery needs no editor and survives a restart, and each
-//! inspected against its stored binding. Nothing here writes.
+//! inspected against its stored binding. Inspection proves off the store's
+//! actor and is released there only while what it read still stands. Nothing
+//! here writes.
 
+use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::{
-    ContributionArtifact, HeldInspection, Preservation, inspect_held,
+    ContributionArtifact, HeldInspection, HeldProofJob, HeldProofs, LineageCoordinates,
+    Preservation, inspect_held, store_identity,
 };
 
 use super::*;
+use crate::ydoc_apply::protection_failure;
 
 /// One document the replica holds for released retained work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,45 +123,188 @@ pub fn list_held_documents(
 /// The held document `object_id` of the replica's current scope, its binding
 /// checked against what the store holds now and, while it stands, what it
 /// preserves. Inspection reads the state of the lineage the binding names,
-/// an archived one included. The hold and everything its binding names are
-/// read in one transaction, so a current answer describes one state. None
-/// when the workspace is not hosted or the document is not held for released
-/// work.
+/// an archived one included. None when the workspace is not hosted or the
+/// document is not held for released work. [`prove_held_document`] and
+/// [`release_held_proof`] in turn, for a caller with no actor to keep free.
 pub fn inspect_held_document(
     store: &EngineStore,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<HeldDocumentInspection>, SyncError> {
-    store.read_with(|conn| {
-        read_only(conn, |tx| {
-            let Some(document) = held_in(tx, workspace_id, object_id)? else {
-                return Ok(None);
-            };
-            let preservation = if document.binding_stale || !feed_matches(tx, &document.binding)? {
+    let job = HeldProofs::default().job(store);
+    let proof = prove_held_document(&job, workspace_id, object_id)?;
+    release_held_proof(store, proof)
+}
+
+/// What a held document's proof found, and what it read to find it. Only
+/// [`release_held_proof`] hands its inspection over.
+#[derive(Debug)]
+pub struct HeldProof {
+    inspection: Option<HeldDocumentInspection>,
+    freshness: HeldFreshness,
+}
+
+/// What a held document's proof read beyond the evidence its document's
+/// released tail generation covers, each by key, so the store's writer can
+/// compare it again without enumerating, replaying or hashing anything: the
+/// open and identity of the store, the workspace and its main version, the
+/// replica's scope and the feed it reads, the hold with its binding, reason,
+/// continuation and stale flag, and the coordinates of the lineage that
+/// binding names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldFreshness {
+    opening: u64,
+    engine: String,
+    workspace_id: String,
+    object_id: String,
+    /// None once the workspace is gone.
+    main_version_id: Option<String>,
+    /// None for a workspace that is not hosted.
+    scope_generation: Option<i64>,
+    /// The replication epoch and stream the replica reads.
+    feed: Option<(String, String)>,
+    hold: Option<HeldDocument>,
+    lineage: Option<LineageCoordinates>,
+}
+
+/// Inspect the held document `object_id` as [`inspect_held_document`]
+/// describes, off the store's writer: on `job`'s own reader, in one read
+/// transaction whose snapshot is fixed before the hold is read. Everything
+/// the inspection needs runs here: tail enumeration, provenance validation,
+/// replay, merging, projection and the contribution artifact. The reader
+/// closes before this returns.
+pub fn prove_held_document(
+    job: &HeldProofJob,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<HeldProof, SyncError> {
+    let mut reader = job.reader().map_err(protection_failure)?;
+    let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;
+    let freshness = freshness(&tx, job.opening(), engine, workspace_id, object_id)?;
+    let inspection = match &freshness.hold {
+        None => None,
+        Some(document) => {
+            let preservation = if document.binding_stale
+                || !feed_matches(&freshness, &document.binding)
+            {
                 None
             } else {
-                match inspect_held(tx, &document.binding)
-                    .map_err(crate::ydoc_apply::protection_failure)?
-                {
+                match inspect_held(&tx, &document.binding).map_err(protection_failure)? {
                     HeldInspection::Current(preservation) => Some(preservation),
                     HeldInspection::Stale => None,
                 }
             };
-            let status = if preservation.is_some() {
-                HeldBindingStatus::Current
-            } else {
-                HeldBindingStatus::Stale
-            };
             let contributions = preservation
                 .as_ref()
                 .map(|preservation| ContributionArtifact::of(&document.binding, preservation));
-            Ok(Some(HeldDocumentInspection {
-                document,
-                status,
+            Some(HeldDocumentInspection {
+                document: document.clone(),
+                status: if preservation.is_some() {
+                    HeldBindingStatus::Current
+                } else {
+                    HeldBindingStatus::Stale
+                },
                 preservation,
                 contributions,
+            })
+        }
+    };
+    tx.rollback().map_err(SyncError::corrupt)?;
+    drop(reader);
+    Ok(HeldProof {
+        inspection,
+        freshness,
+    })
+}
+
+/// `proof`'s inspection, while everything it read still stands on `store`,
+/// the store's writer, as one read transaction of bounded reads finds it.
+/// Otherwise the document as the store holds it now, stale, with nothing
+/// preserved and no artifact; nothing proves again. None when nothing holds
+/// the document now.
+pub fn release_held_proof(
+    store: &EngineStore,
+    proof: HeldProof,
+) -> Result<Option<HeldDocumentInspection>, SyncError> {
+    let HeldProof {
+        inspection,
+        freshness: proved,
+    } = proof;
+    let opening = store.opening();
+    store.read_with(|conn| {
+        read_only(conn, |tx| {
+            let engine = store_identity(tx).map_err(protection_failure)?;
+            let now = freshness(tx, opening, engine, &proved.workspace_id, &proved.object_id)?;
+            if now == proved {
+                return Ok(inspection);
+            }
+            Ok(now.hold.map(|document| HeldDocumentInspection {
+                document,
+                status: HeldBindingStatus::Stale,
+                preservation: None,
+                contributions: None,
             }))
         })
+    })
+}
+
+/// What `conn` reads of a held document's freshness, by key alone, on the
+/// store open `opening` whose identity is `engine`.
+fn freshness(
+    conn: &Connection,
+    opening: u64,
+    engine: String,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<HeldFreshness, SyncError> {
+    let main_version_id = conn
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let scope_generation = conn
+        .query_row(
+            "SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let feed = conn
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let hold = held_in(conn, workspace_id, object_id)?;
+    let lineage = hold
+        .as_ref()
+        .map(|document| {
+            let binding = &document.binding;
+            let doc = DocKey {
+                workspace_id: binding.workspace_id.clone(),
+                version_id: binding.main_version_id.clone(),
+                object_id: binding.object_id.clone(),
+            };
+            LineageCoordinates::read(conn, &doc, &binding.lineage_claim_id)
+        })
+        .transpose()
+        .map_err(protection_failure)?;
+    Ok(HeldFreshness {
+        opening,
+        engine,
+        workspace_id: workspace_id.to_owned(),
+        object_id: object_id.to_owned(),
+        main_version_id,
+        scope_generation,
+        feed,
+        hold,
+        lineage,
     })
 }
 
@@ -233,21 +381,17 @@ fn held_document((object_id, path, state, held): HeldRow) -> Result<HeldDocument
 }
 
 /// Whether the replica still reads the feed `binding`'s update arrived on.
-fn feed_matches(conn: &Connection, binding: &ReleasedLineageBinding) -> Result<bool, SyncError> {
-    let feed: Option<(String, String)> = conn
-        .query_row(
-            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
-            [&binding.workspace_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
+fn feed_matches(freshness: &HeldFreshness, binding: &ReleasedLineageBinding) -> bool {
     let incoming = &binding.incoming;
-    Ok(feed.as_ref().map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))
-        == Some((
-            incoming.replication_epoch.as_str(),
-            incoming.stream_identity.as_str(),
-        )))
+    freshness.workspace_id == binding.workspace_id
+        && freshness
+            .feed
+            .as_ref()
+            .map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))
+            == Some((
+                incoming.replication_epoch.as_str(),
+                incoming.stream_identity.as_str(),
+            ))
 }
 
 #[cfg(test)]

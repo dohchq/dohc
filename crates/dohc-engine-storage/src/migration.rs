@@ -3342,12 +3342,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// A document's released tail generation changes with every row its tails
 /// read: activations, outboxes and their entries, applications and accepted
 /// history, seed captures, the journal rows native entries name, the
-/// document's head and lineage columns, and terminal blobs. A row that claims
+/// document's head and lineage columns, and terminal blobs, and with the
+/// stored bytes of each entry's update, which a held document's inspection
+/// merges. A row that claims
 /// another document still moves the document whose entry holds its delivery,
 /// and an activation moves the documents of every activation whose chain
 /// passes through it.
-/// Each trigger finds those documents by index; a blob no terminal entry
-/// holds, a journal row no entry names, or a compaction whose bound passes
+/// Each trigger finds those documents by index; a blob no entry names, a
+/// journal row no entry names, or a compaction whose bound passes
 /// no sequence an entry names, moves nothing. The first
 /// activation of a document creates its row, which outlives the document, so
 /// a recreated document never reads an earlier generation. A generation only
@@ -3667,22 +3669,31 @@ CREATE TRIGGER released_tail_document_delete AFTER DELETE ON ydoc_docs BEGIN
         WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
 END;
 CREATE TRIGGER released_tail_blob_insert AFTER INSERT ON binary_blobs
-WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=NEW.sha256) BEGIN
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=NEW.sha256) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=NEW.sha256);
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=NEW.sha256
+         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=NEW.sha256);
 END;
 CREATE TRIGGER released_tail_blob_update AFTER UPDATE OF sha256,byte_length,bytes ON binary_blobs
-WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest IN (OLD.sha256,NEW.sha256)) BEGIN
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest IN (OLD.sha256,NEW.sha256)) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest IN (OLD.sha256,NEW.sha256));
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest IN (OLD.sha256,NEW.sha256)
+         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest IN (OLD.sha256,NEW.sha256));
 END;
 CREATE TRIGGER released_tail_blob_delete AFTER DELETE ON binary_blobs
-WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=OLD.sha256) BEGIN
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=OLD.sha256)
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=OLD.sha256) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=OLD.sha256);
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=OLD.sha256
+         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=OLD.sha256);
 END;
 INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
     object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
@@ -4920,7 +4931,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "2d0b60ade044856058c7d781884589242d40b5c674e18445eb9eb353c404ca0e",
+                "aa781cd9fb9435be0d3f1c7e68eadc5b5a8335d8d9e4ee86e30b412b3542ec76",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8729,6 +8740,18 @@ mod tests {
         );
         step("DELETE FROM binary_blobs WHERE sha256='refused'", &["a"]);
         step("DELETE FROM binary_blobs WHERE sha256='unrelated'", &[]);
+        // The bytes an entry's update names, which a held document's
+        // inspection merges, move that entry's document as a terminal blob
+        // does: arriving, changing and going.
+        step(
+            "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+               byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state)
+             VALUES ('outbox-b',3,'key-b-3','delivery-b','merged',1,0,0,1,0,'active')",
+            &["b"],
+        );
+        step("INSERT INTO binary_blobs VALUES ('merged',1,X'00')", &["b"]);
+        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'", &["b"]);
+        step("DELETE FROM binary_blobs WHERE sha256='merged'", &["b"]);
     }
 
     /// A generation at its bound fails the mutation that would move it, even

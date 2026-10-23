@@ -652,6 +652,44 @@ mod tests {
         }
     }
 
+    /// Sol's ruling B, item 4: an inspection's proof runs off the workspace's
+    /// actor. While one holds at its snapshot, the host's discovery RPC, which
+    /// reads on that actor, completes; the inspection answers once its proof
+    /// goes on.
+    #[tokio::test]
+    async fn host_rpcs_complete_while_an_inspection_proof_holds() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, (_owner, _ingress), ctx, handle) = attached_host(&root).await;
+        let proofs = service.open(Some(&handle)).unwrap().actor.held_proofs();
+        proofs.pause_proofs();
+        let one = json!({"workspaceId": "attached", "objectId": "object"});
+        let mut inspecting =
+            std::pin::pin!(service.sync_held_document(&ctx, Some(handle.clone()), one, 2));
+        tokio::select! {
+            () = proofs.paused_proof() => {}
+            answered = &mut inspecting => {
+                proofs.resume_proofs();
+                panic!("the inspection answered before its proof held: {:?}", answered.map(|answer| answer.response.result));
+            }
+        }
+        let listed = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            service.sync_held_documents(
+                &ctx,
+                Some(handle.clone()),
+                json!({"workspaceId": "attached", "limit": 8}),
+                3,
+            ),
+        )
+        .await;
+        proofs.resume_proofs();
+        let refused = listed.expect("discovery answers while the proof holds").unwrap_err();
+        assert_eq!(refused.message, "workspace is not a hosted replica", "it reached the actor");
+        let answered = inspecting.await.unwrap();
+        assert!(answered.response.result.is_null(), "nothing is held: {answered:?}");
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
     /// Out-of-range pages and object IDs are refused before anything reads.
     #[tokio::test]
     async fn held_document_requests_are_bounded() {

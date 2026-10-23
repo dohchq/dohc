@@ -12,8 +12,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, Waker};
 
 mod binding;
+mod held;
 mod preservation;
 pub use binding::ContributionArtifact;
+pub use held::{store_identity, HeldProofJob, HeldProofs, LineageCoordinates};
 pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
     PreservationStatus, PreservedState,
@@ -733,6 +735,13 @@ fn validate_committed(
 ) -> Result<Validated, ValidationError> {
     let (doc, lineage, requested) = &job.key;
     let mut reader = open_reader(path).map_err(|_| ValidationError::Failed)?;
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(hook) = *READER_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        hook(&reader);
+    }
     let stopped = Arc::clone(&shared.stopped);
     reader
         .progress_handler(
@@ -1145,13 +1154,6 @@ fn open_reader(path: &std::path::Path) -> Result<Connection, ApplicationError> {
             dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
         )))
         .map_err(read_sql)?;
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(hook) = *READER_HOOK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-    {
-        hook(&reader);
-    }
     Ok(reader)
 }
 
@@ -1245,30 +1247,41 @@ impl ReleasedLineageBinding {
         head_digest: String,
     ) -> Result<Self, ApplicationError> {
         let doc = key.doc;
-        let current_path = conn
-            .query_row(
-                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                params![doc.workspace_id, doc.version_id, doc.object_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(read_sql)?;
-        let restore_generation = match restore_fence::current_generation(conn, doc) {
-            Ok(generation) => Some(generation.unwrap_or(0)),
-            Err(CollabError::RestoreFenced) => None,
-            Err(error) => return Err(error.into()),
-        };
         Ok(Self {
             workspace_id: doc.workspace_id.clone(),
             main_version_id: doc.version_id.clone(),
             object_id: doc.object_id.clone(),
             lineage_claim_id: key.lineage_claim_id.to_owned(),
-            current_path,
-            restore_generation,
+            current_path: bound_path(conn, doc)?,
+            restore_generation: bound_restore_generation(conn, doc)?,
             incoming: key.incoming.clone(),
             head_digest,
             tails,
         })
+    }
+}
+
+/// The document's path, as a binding names it; none when no alias holds it.
+fn bound_path(conn: &Connection, doc: &DocKey) -> Result<Option<String>, ApplicationError> {
+    conn.query_row(
+        "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![doc.workspace_id, doc.version_id, doc.object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(read_sql)
+}
+
+/// The document's restore generation, as a binding names it: 0 before any
+/// restore, none while one fences it.
+fn bound_restore_generation(
+    conn: &Connection,
+    doc: &DocKey,
+) -> Result<Option<i64>, ApplicationError> {
+    match restore_fence::current_generation(conn, doc) {
+        Ok(generation) => Ok(Some(generation.unwrap_or(0))),
+        Err(CollabError::RestoreFenced) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 

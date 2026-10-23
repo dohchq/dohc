@@ -76,7 +76,7 @@ use crate::identity::EngineDbIdentity;
 pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
-use dohc_engine_collab::live_update_application::ReleasedTails;
+use dohc_engine_collab::live_update_application::{HeldProofs, ReleasedTails};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -211,6 +211,8 @@ pub struct WorkspaceActor {
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     /// The store's released tails, whose worker validates off the actor.
     released_tails: ReleasedTails,
+    /// The store's held-document proofs, which run off the actor.
+    held_proofs: HeldProofs,
     pulls: relay::PullPermit,
 }
 
@@ -378,6 +380,7 @@ impl WorkspaceActor {
                     link_drain_holds,
                     current_views: Arc::default(),
                     released_tails,
+                    held_proofs: HeldProofs::default(),
                     pulls: relay::PullPermit::default(),
                 };
                 #[cfg(unix)]
@@ -413,6 +416,7 @@ impl WorkspaceActor {
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             current_views: Arc::clone(&self.current_views),
             released_tails: self.released_tails.clone(),
+            held_proofs: self.held_proofs.clone(),
             pulls: self.pulls.clone(),
         }
     }
@@ -511,6 +515,7 @@ pub struct ActorHandle {
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
     released_tails: ReleasedTails,
+    held_proofs: HeldProofs,
     pulls: relay::PullPermit,
 }
 
@@ -564,6 +569,12 @@ impl ActorHandle {
     #[doc(hidden)]
     pub fn released_tails(&self) -> ReleasedTails {
         self.released_tails.clone()
+    }
+
+    /// The held-document proofs the actor admits, for tests that hold them.
+    #[doc(hidden)]
+    pub fn held_proofs(&self) -> HeldProofs {
+        self.held_proofs.clone()
     }
 
     /// Completes once a pull has found another holding the store's pull
@@ -1118,6 +1129,7 @@ mod saturation_tests {
             link_drain_holds: holds,
             current_views: Arc::default(),
             released_tails: ReleasedTails::default(),
+            held_proofs: HeldProofs::default(),
             pulls: relay::PullPermit::default(),
         };
         prepare(&actor.handle());
