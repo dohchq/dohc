@@ -63,6 +63,13 @@ vi.mock("./editor/artifactSource", () => ({
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
 import { rememberLossyNoteVerdictForTests } from "./editor/lossyNote";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -2006,7 +2013,7 @@ describe("engine markdown source view", () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     // Past the WYSIWYG limit, so the first version opens as the read preview.
     const firstBody = Array.from(
-      { length: Math.ceil(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 450) },
+      { length: Math.max(201, Math.ceil(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 450)) },
       (_, index) =>
         `# First ${index + 1}\n\n${"first document padding ".repeat(20)}\n\n`,
     ).join("");
