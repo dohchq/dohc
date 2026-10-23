@@ -51,6 +51,7 @@ const csvMode = (name: "Table" | "Raw") =>
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 setupFileInspectorTests();
 
@@ -1165,7 +1166,7 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("opens large editable Markdown in CodeMirror and keeps every rapid keystroke", async () => {
-    const largeBody = `# Large\n\n${"Body line\n".repeat(8_000)}`;
+    const largeBody = `# Large\n\n${"Body line\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 8)}`;
     const typed = "profilex-0123456789-abcdefghij";
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: largeBody,
@@ -1400,7 +1401,7 @@ describe("markdown editor unmount flush", () => {
     // over the WYSIWYG threshold opens in read mode without being truncated
     // (truncated would make PageIdentity read-only and skip the save entirely).
     const bigBody = `---\ntitle: Plan\n---\n\n${LARGE_READ_MODE_FILLER}`;
-    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    expect(bigBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: bigBody,
       truncated: false,

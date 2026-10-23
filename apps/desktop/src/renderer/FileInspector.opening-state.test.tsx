@@ -34,6 +34,7 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 setupFileInspectorTests();
 
@@ -879,7 +880,7 @@ describe("markdown document opening state", () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Plan\n---\n\n${"body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Plan\n---\n\n${"body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 4)}`;
     const newestLocalBody = initialBody.replace(
       "title: Plan",
       "title: Newest local title",
@@ -1224,7 +1225,7 @@ describe("markdown document opening state", () => {
 
   it("rereads legacy Markdown after a write overlaps a newer content request", async () => {
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 4)}`;
     const externalBody = initialBody.replace("title: Base", "title: External");
     const initialHash = "3".repeat(64);
     const localHash = "4".repeat(64);
@@ -1407,7 +1408,7 @@ describe("markdown document opening state", () => {
 
   it("captures the same legacy conflict again after its first recovery is dismissed", async () => {
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 4)}`;
     const initialHash = "9".repeat(64);
     const externalHash = "b".repeat(64);
     bridge.bridgeMock.readWorkspaceText
