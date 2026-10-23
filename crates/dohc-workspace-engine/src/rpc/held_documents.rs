@@ -188,8 +188,11 @@ impl EngineService {
         let inspected = Self::read_under_ctx(
             &cancellation,
             "sync.heldDocument",
-            open.actor
-                .held_document(open.workspace_id.clone(), params.object_id.clone()),
+            open.actor.held_document(
+                open.workspace_id.clone(),
+                params.object_id.clone(),
+                cancellation.token(),
+            ),
         )
         .await?;
         self.held_documents_open(ctx, &handle, &params.workspace_id)?;
@@ -201,11 +204,13 @@ impl EngineService {
         let bytes = match params.stream {
             Some(HeldStream::Markdown) if outside => inspected
                 .preservation
-                .and_then(|preservation| preservation.preserved)
-                .map(|preserved| preserved.markdown.into_bytes()),
+                .as_ref()
+                .and_then(|preservation| preservation.preserved.as_ref())
+                .map(|preserved| preserved.markdown.as_bytes()),
             Some(HeldStream::Contributions) => inspected
                 .contributions
-                .map(|contributions| contributions.bytes),
+                .as_ref()
+                .map(|contributions| contributions.bytes.as_slice()),
             _ => None,
         };
         let Some(bytes) = bytes else {
@@ -224,16 +229,17 @@ impl EngineService {
         Ok(answer(result, Some(blob)))
     }
 
-    /// `bytes` as the blob of request `request_id`, once the egress budget
-    /// holds them and the caller may still have them: the configured host's
-    /// connection can end, or the workspace detach, while the budget waits.
+    /// A copy of `bytes` as the blob of request `request_id`, made once the
+    /// egress budget holds it and the caller may still have it: the
+    /// configured host's connection can end, or the workspace detach, while
+    /// the budget waits. Until then the bytes stay the shared inspection's.
     async fn held_blob_egress(
         &self,
         ctx: &RequestContext,
         handle: &WorkspaceHandle,
         workspace_id: &str,
         cancellation: &OperationCancellation,
-        bytes: Vec<u8>,
+        bytes: &[u8],
         request_id: u64,
     ) -> Result<BlobEgress, WireError> {
         if bytes.len() > BLOB_EGRESS_BYTE_BUDGET {
@@ -249,8 +255,8 @@ impl EngineService {
         self.held_documents_open(ctx, handle, workspace_id)?;
         Ok(BlobEgress {
             stream_id: request_id,
-            sha256: dohc_engine_storage::hex_sha256(&bytes),
-            bytes,
+            sha256: dohc_engine_storage::hex_sha256(bytes),
+            bytes: bytes.to_vec(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
             byte_permit: Some(byte_permit),
@@ -623,7 +629,7 @@ mod tests {
                 &handle,
                 "attached",
                 &cancellation,
-                b"# Preserved\n".to_vec(),
+                b"# Preserved\n",
                 9,
             ));
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -686,6 +692,50 @@ mod tests {
         let refused = listed.expect("discovery answers while the proof holds").unwrap_err();
         assert_eq!(refused.message, "workspace is not a hosted replica", "it reached the actor");
         let answered = inspecting.await.unwrap();
+        assert!(answered.response.result.is_null(), "nothing is held: {answered:?}");
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    /// Sol's ruling B, item 6: each caller's own deadline ends only its own
+    /// wait. Two callers share a proof held at its snapshot; the one whose
+    /// deadline passes answers that, and the other answers once the proof
+    /// goes on.
+    #[tokio::test]
+    async fn each_callers_deadline_ends_only_its_wait() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, (_owner, _ingress), ctx, handle) = attached_host(&root).await;
+        let proofs = service.open(Some(&handle)).unwrap().actor.held_proofs();
+        proofs.pause_proofs();
+        let one = json!({"workspaceId": "attached", "objectId": "object"});
+        let mut waiting =
+            std::pin::pin!(service.sync_held_document(&ctx, Some(handle.clone()), one.clone(), 2));
+        tokio::select! {
+            () = proofs.paused_proof() => {}
+            answered = &mut waiting => {
+                proofs.resume_proofs();
+                panic!("the inspection answered before its proof held: {:?}", answered.map(|answer| answer.response.result));
+            }
+        }
+        let mut bounded = ctx.clone();
+        bounded.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        let mut expiring =
+            std::pin::pin!(service.sync_held_document(&bounded, Some(handle.clone()), one, 3));
+        tokio::select! {
+            () = proofs.callers("attached", 2) => {}
+            answered = &mut expiring => {
+                proofs.resume_proofs();
+                panic!("the second caller answered before it joined: {:?}", answered.map(|answer| answer.response.result));
+            }
+        }
+        let expired = expiring.await.map(|answer| answer.response.result).unwrap_err();
+        assert_eq!(expired.code, ErrorCode::DeadlineExceeded, "{expired:?}");
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            std::future::Future::poll(waiting.as_mut(), &mut context).is_pending(),
+            "the other caller still waits"
+        );
+        proofs.resume_proofs();
+        let answered = waiting.await.unwrap();
         assert!(answered.response.result.is_null(), "nothing is held: {answered:?}");
         service.workspace_close(Some(handle)).await.unwrap();
     }

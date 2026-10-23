@@ -5,14 +5,29 @@
 //! actor and is released there only while what it read still stands. Nothing
 //! here writes.
 
+use std::sync::Arc;
+
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::{
-    ContributionArtifact, HeldInspection, HeldProofJob, HeldProofs, LineageCoordinates,
-    Preservation, inspect_held, store_identity,
+    self as live, ContributionArtifact, HeldInspection, HeldProofJob, LineageCoordinates,
+    Preservation, ProofStage, inspect_held, store_identity,
 };
+use dohc_engine_storage::StorageError;
 
 use super::*;
 use crate::ydoc_apply::protection_failure;
+
+/// What one held proof answers every caller that shares it: what it found,
+/// or why it failed.
+pub type ProvedHeld = Result<HeldProof, Arc<SyncError>>;
+
+/// The held-document proofs of one store's actor, each keyed by the whole
+/// freshness its caller reads at admission: callers share a proof only when
+/// they ask the same of the same state.
+pub type HeldProofs = live::HeldProofs<HeldFreshness, ProvedHeld>;
+
+/// [`admit_held_proof`]'s answer.
+pub type HeldProofAdmission = live::HeldProofAdmission<HeldFreshness, ProvedHeld>;
 
 /// One document the replica holds for released retained work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,16 +146,18 @@ pub fn inspect_held_document(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<HeldDocumentInspection>, SyncError> {
-    let job = HeldProofs::default().job(store);
-    let proof = prove_held_document(&job, workspace_id, object_id)?;
-    release_held_proof(store, proof)
+    let proof = prove_held_document(&HeldProofJob::of(store), workspace_id, object_id)?;
+    let released = release_held_proof(store, &proof)?;
+    drop(proof);
+    Ok(released
+        .map(|inspection| Arc::try_unwrap(inspection).unwrap_or_else(|shared| (*shared).clone())))
 }
 
 /// What a held document's proof found, and what it read to find it. Only
 /// [`release_held_proof`] hands its inspection over.
 #[derive(Debug)]
 pub struct HeldProof {
-    inspection: Option<HeldDocumentInspection>,
+    inspection: Option<Arc<HeldDocumentInspection>>,
     freshness: HeldFreshness,
 }
 
@@ -150,9 +167,9 @@ pub struct HeldProof {
 /// open and identity of the store, the workspace and its main version, the
 /// replica's scope and the feed it reads, the hold with its binding, reason,
 /// continuation and stale flag, and the coordinates of the lineage that
-/// binding names.
+/// binding names. Proofs are coalesced by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HeldFreshness {
+pub struct HeldFreshness {
     opening: u64,
     engine: String,
     workspace_id: String,
@@ -171,13 +188,15 @@ struct HeldFreshness {
 /// describes, off the store's writer: on `job`'s own reader, in one read
 /// transaction whose snapshot is fixed before the hold is read. Everything
 /// the inspection needs runs here: tail enumeration, provenance validation,
-/// replay, merging, projection and the contribution artifact. The reader
-/// closes before this returns.
+/// replay, merging, projection and the contribution artifact, each checking
+/// between its units whether `job` stopped. The reader closes before this
+/// returns, however it returns.
 pub fn prove_held_document(
     job: &HeldProofJob,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<HeldProof, SyncError> {
+    let stop = job.stop();
     let mut reader = job.reader().map_err(protection_failure)?;
     let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;
     let freshness = freshness(&tx, job.opening(), engine, workspace_id, object_id)?;
@@ -189,15 +208,21 @@ pub fn prove_held_document(
             {
                 None
             } else {
-                match inspect_held(&tx, &document.binding).map_err(protection_failure)? {
+                match inspect_held(&tx, &document.binding, stop).map_err(protection_failure)? {
                     HeldInspection::Current(preservation) => Some(preservation),
                     HeldInspection::Stale => None,
                 }
             };
-            let contributions = preservation
-                .as_ref()
-                .map(|preservation| ContributionArtifact::of(&document.binding, preservation));
-            Some(HeldDocumentInspection {
+            let contributions = match &preservation {
+                Some(preservation) => {
+                    stop.check(ProofStage::Encoding).map_err(protection_failure)?;
+                    let artifact = ContributionArtifact::of(&document.binding, preservation);
+                    stop.check(ProofStage::Encoding).map_err(protection_failure)?;
+                    Some(artifact)
+                }
+                None => None,
+            };
+            Some(Arc::new(HeldDocumentInspection {
                 document: document.clone(),
                 status: if preservation.is_some() {
                     HeldBindingStatus::Current
@@ -206,7 +231,7 @@ pub fn prove_held_document(
                 },
                 preservation,
                 contributions,
-            })
+            }))
         }
     };
     tx.rollback().map_err(SyncError::corrupt)?;
@@ -217,33 +242,67 @@ pub fn prove_held_document(
     })
 }
 
+/// Admit a proof of the held document `object_id` to `proofs`, keyed by its
+/// freshness as `store`, the store's writer, reads it now with bounded
+/// reads: a caller that asks the same of the same state joins the running
+/// proof, and any other request for the workspace while one runs is busy.
+pub fn admit_held_proof(
+    store: &EngineStore,
+    proofs: &HeldProofs,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<HeldProofAdmission, SyncError> {
+    let key = current_freshness(store, workspace_id, object_id)?;
+    Ok(proofs.admit(store, workspace_id, key))
+}
+
 /// `proof`'s inspection, while everything it read still stands on `store`,
 /// the store's writer, as one read transaction of bounded reads finds it.
 /// Otherwise the document as the store holds it now, stale, with nothing
 /// preserved and no artifact; nothing proves again. None when nothing holds
-/// the document now.
+/// the document now. Each caller that shared the proof releases it for
+/// itself.
 pub fn release_held_proof(
     store: &EngineStore,
-    proof: HeldProof,
-) -> Result<Option<HeldDocumentInspection>, SyncError> {
-    let HeldProof {
-        inspection,
-        freshness: proved,
-    } = proof;
+    proof: &HeldProof,
+) -> Result<Option<Arc<HeldDocumentInspection>>, SyncError> {
+    let proved = &proof.freshness;
+    let now = current_freshness(store, &proved.workspace_id, &proved.object_id)?;
+    if now == *proved {
+        return Ok(proof.inspection.clone());
+    }
+    Ok(now.hold.map(|document| {
+        Arc::new(HeldDocumentInspection {
+            document,
+            status: HeldBindingStatus::Stale,
+            preservation: None,
+            contributions: None,
+        })
+    }))
+}
+
+/// A failed proof's error, again for each caller that shared it: a busy
+/// store as busy, and anything else as the corrupt evidence it read, with
+/// the proof's own error as its source.
+pub fn shared_proof_failure(error: &Arc<SyncError>) -> SyncError {
+    if matches!(**error, SyncError::Storage(StorageError::FileLocked)) {
+        return SyncError::Storage(StorageError::FileLocked);
+    }
+    SyncError::Storage(StorageError::corrupt_public(Arc::clone(error)))
+}
+
+/// What `store`, the store's writer, reads of a held document's freshness
+/// now, in one read transaction.
+fn current_freshness(
+    store: &EngineStore,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<HeldFreshness, SyncError> {
     let opening = store.opening();
     store.read_with(|conn| {
         read_only(conn, |tx| {
             let engine = store_identity(tx).map_err(protection_failure)?;
-            let now = freshness(tx, opening, engine, &proved.workspace_id, &proved.object_id)?;
-            if now == proved {
-                return Ok(inspection);
-            }
-            Ok(now.hold.map(|document| HeldDocumentInspection {
-                document,
-                status: HeldBindingStatus::Stale,
-                preservation: None,
-                contributions: None,
-            }))
+            freshness(tx, opening, engine, workspace_id, object_id)
         })
     })
 }

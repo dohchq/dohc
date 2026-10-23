@@ -15,7 +15,10 @@ mod binding;
 mod held;
 mod preservation;
 pub use binding::ContributionArtifact;
-pub use held::{store_identity, HeldProofJob, HeldProofs, LineageCoordinates};
+pub use held::{
+    store_identity, HeldProofAdmission, HeldProofError, HeldProofJob, HeldProofRun, HeldProofStop,
+    HeldProofWait, HeldProofs, LineageCoordinates, ProofStage, Stop, MAX_PROOF_WAITERS,
+};
 pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
     PreservationStatus, PreservedState,
@@ -294,13 +297,14 @@ impl ReleasedLineageBinding {
 }
 
 /// The value `result` reads, or none when its evidence does not read.
-/// Storage failures stay errors.
+/// Storage failures and a cancelled read stay errors.
 pub(super) fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, ApplicationError> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(
             error @ (ApplicationError::Storage(_)
-            | ApplicationError::Collab(CollabError::Storage(_))),
+            | ApplicationError::Collab(CollabError::Storage(_))
+            | ApplicationError::Cancelled),
         ) => Err(error),
         Err(_) => Ok(None),
     }
@@ -1361,7 +1365,7 @@ fn protected_tails(
         SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         SCANS_HERE.with(|scans| scans.set(scans.get() + 1));
     }
-    Ok(window_work(conn, doc, lineage)?.map(|work| match work {
+    Ok(window_work(conn, doc, lineage, Stop::NEVER)?.map(|work| match work {
         WindowWork::Listed(tails) => {
             ProtectedTails::Listed(tails.into_iter().map(|(tail, _)| tail).collect())
         }
@@ -1380,11 +1384,12 @@ enum WindowWork {
     Invalid,
 }
 
-/// [`protected_tails`], keeping the work each tail retains.
+/// [`protected_tails`], keeping the work each tail retains, until `stop`.
 fn window_work(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
+    stop: Stop<'_>,
 ) -> Result<Option<WindowWork>, ApplicationError> {
     let Some(window) = readable(super::settled_base::released_window(conn, doc, lineage))? else {
         return Ok(Some(WindowWork::Invalid));
@@ -1409,6 +1414,7 @@ fn window_work(
                 doc,
                 lineage,
                 &activation_id,
+                stop,
             ))?,
             None => None,
         };

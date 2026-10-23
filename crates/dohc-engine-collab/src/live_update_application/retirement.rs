@@ -6,8 +6,8 @@ use super::owner_activations::{
     activation_by_id, current_activation, lineage_origin_id, ActivationAdoption, OwnerActivation,
 };
 use super::released_protection::{
-    readable, ContributionLocator, PreservationFinding, PreservationReason, RetainedAuthors,
-    RetainedContribution, TailWork,
+    readable, ContributionLocator, PreservationFinding, PreservationReason, ProofStage,
+    RetainedAuthors, RetainedContribution, Stop, TailWork,
 };
 use super::*;
 use crate::owner_outbox::{
@@ -817,13 +817,14 @@ pub(crate) fn released_binding(
 /// whose evidence contradicts itself is a contradiction of the work it names,
 /// or of the tail when nothing names that work, and every other entry is
 /// still checked. Evidence that does not enumerate, or a storage failure, is
-/// an error.
+/// an error, and so is `stop`, checked before each entry.
 pub(crate) fn unproven_retained(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
     tail: &str,
+    stop: Stop<'_>,
 ) -> Result<TailWork, ApplicationError> {
     let mut work = Found {
         namespace,
@@ -833,6 +834,7 @@ pub(crate) fn unproven_retained(
     let chain = chain_activations(conn, namespace, tail)?;
     let (_, manifest) = released_tail(conn, namespace, tail)?;
     for carried in manifest {
+        stop.check(ProofStage::Validation)?;
         let receipt = &carried.receipt;
         let locator = ContributionLocator::Carried {
             delivery_id: receipt.delivery_id.clone(),
@@ -887,6 +889,7 @@ pub(crate) fn unproven_retained(
         ])
         .map_err(read_sql)?;
     while let Some(row) = rows.next().map_err(read_sql)? {
+        stop.check(ProofStage::Validation)?;
         let outbox_id: String = row.get(0).map_err(read_sql)?;
         let sequence: i64 = row.get(1).map_err(read_sql)?;
         let append_key: String = row.get(2).map_err(read_sql)?;

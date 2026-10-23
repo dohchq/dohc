@@ -144,9 +144,11 @@ impl RetainedContribution {
 /// so an archived hold is inspected against its archive, never the head.
 /// Tails are validated afresh on `conn`, with nothing kept; run it inside
 /// one transaction, or on the store's only writer, so every read agrees.
+/// `stop` ends it, cancelled, at its next check.
 pub fn inspect_held(
     conn: &Connection,
     binding: &ReleasedLineageBinding,
+    stop: Stop<'_>,
 ) -> Result<HeldInspection, ApplicationError> {
     let doc = DocKey {
         workspace_id: binding.workspace_id.clone(),
@@ -154,7 +156,7 @@ pub fn inspect_held(
         object_id: binding.object_id.clone(),
     };
     let lineage = binding.lineage_claim_id.as_str();
-    let (state, digest) = match lineage_state(conn, &doc, lineage)? {
+    let (state, digest) = match lineage_state(conn, &doc, lineage, stop)? {
         None => return Ok(HeldInspection::Stale),
         Some(LineageState::Read(canonical, kind, digest)) => (Some((canonical, kind)), digest),
         // A head whose journal does not load has no digest to compare; the
@@ -166,7 +168,7 @@ pub fn inspect_held(
     if digest != binding.head_digest {
         return Ok(HeldInspection::Stale);
     }
-    let Some(work) = window_work(conn, &doc, lineage)? else {
+    let Some(work) = window_work(conn, &doc, lineage, stop)? else {
         return Ok(HeldInspection::Stale);
     };
     let (tails, work) = match work {
@@ -225,7 +227,7 @@ pub fn inspect_held(
             None,
         )));
     };
-    preserve(&canonical, kind, findings, readable, |digest| {
+    preserve(&canonical, kind, findings, readable, stop, |digest| {
         stored_source(conn, digest)
     })
     .map(HeldInspection::Current)
@@ -265,12 +267,15 @@ fn corrupt(error: &CollabError) -> bool {
 
 /// The state `lineage` of the document keeps: the head's, loaded from its
 /// journal, or an archived one's, from the full state its archive keeps.
-/// None when the document holds no such lineage.
+/// None when the document holds no such lineage. `stop` is checked before
+/// the state loads, and again before and after it is hashed.
 fn lineage_state(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
+    stop: Stop<'_>,
 ) -> Result<Option<LineageState>, ApplicationError> {
+    stop.check(ProofStage::Replay)?;
     if let Some(marker) = durable::read_marker_in(conn, doc)? {
         if marker.lineage_claim_id.as_deref() == Some(lineage) {
             let head = match durable::load_doc_in(conn, doc) {
@@ -278,7 +283,9 @@ fn lineage_state(
                 Err(error) if corrupt(&error) => return Ok(Some(LineageState::Corrupt(None))),
                 Err(error) => return Err(error.into()),
             };
+            stop.check(ProofStage::Replay)?;
             let digest = hex_sha256(&head.encode_full_state());
+            stop.check(ProofStage::Replay)?;
             return Ok(Some(LineageState::Read(head, marker.content_kind, digest)));
         }
     }
@@ -297,12 +304,14 @@ fn lineage_state(
     let Source::Bytes(bytes) = stored_source(conn, &digest)? else {
         return Ok(Some(LineageState::Corrupt(Some(digest))));
     };
+    stop.check(ProofStage::Replay)?;
     let state = Ydoc::wire();
     match state.apply(&bytes) {
         Ok(()) => {}
         Err(error) if corrupt(&error) => return Ok(Some(LineageState::Corrupt(Some(digest)))),
         Err(error) => return Err(error.into()),
     }
+    stop.check(ProofStage::Replay)?;
     Ok(Some(LineageState::Read(state, ContentKind::parse(&kind)?, digest)))
 }
 
@@ -383,11 +392,15 @@ impl Integration {
 /// naming one delivery under different digests are not compared with each
 /// other: each tail's work is validated alone, and both apply, so neither
 /// one's work is lost from the merge.
+///
+/// `stop` is checked before each contribution loads and again before it
+/// applies, and before the merged state is projected and encoded.
 fn preserve(
     canonical: &Ydoc,
     kind: ContentKind,
     mut findings: Vec<PreservationFinding>,
     work: Vec<(String, Vec<RetainedContribution>)>,
+    stop: Stop<'_>,
     mut load: impl FnMut(&str) -> Result<Source, ApplicationError>,
 ) -> Result<Preservation, ApplicationError> {
     // A full-state encoding drops what the canonical state holds pending.
@@ -408,6 +421,7 @@ fn preserve(
     let mut waiting: Vec<(RetainedContribution, Integration)> = Vec::new();
     for (namespace, contributions) in &work {
         for contribution in contributions {
+            stop.check(ProofStage::Merge)?;
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
             let bytes = match load(contribution.update_digest())? {
                 Source::Bytes(bytes) => bytes,
@@ -420,6 +434,7 @@ fn preserve(
                     continue;
                 }
             };
+            stop.check(ProofStage::Merge)?;
             let before = integrated(&scratch);
             if scratch.apply(&bytes).is_err() {
                 findings.push(held_back(PreservationReason::MalformedUpdate));
@@ -457,6 +472,7 @@ fn preserve(
     merged.dedup();
     let complete = findings.is_empty();
     let preserved = if complete {
+        stop.check(ProofStage::Projection)?;
         let projection = scratch.project(kind)?.content;
         let markdown = match kind {
             ContentKind::Richdoc => scratch
@@ -464,6 +480,7 @@ fn preserve(
                 .unwrap_or(projection),
             ContentKind::Plaintext | ContentKind::Scene => projection,
         };
+        stop.check(ProofStage::Projection)?;
         Some(PreservedState {
             markdown,
             full_state: scratch.encode_full_state(),
@@ -534,6 +551,7 @@ mod tests {
             ContentKind::Richdoc,
             Vec::new(),
             vec![("namespace".to_owned(), work)],
+            Stop::NEVER,
             |digest| {
                 Ok(match stored.get(digest) {
                     Some(bytes) if hex_sha256(bytes) == digest => Source::Bytes(bytes.clone()),
@@ -691,6 +709,7 @@ mod tests {
             ContentKind::Richdoc,
             vec![finding(PreservationReason::ContradictoryEvidence, Some("other"), None)],
             vec![("namespace".to_owned(), vec![outbox(1, &first)])],
+            Stop::NEVER,
             |_| Ok(Source::Missing),
         )
         .unwrap();

@@ -114,6 +114,12 @@ pub enum RuntimeError {
     #[error("request cancelled")]
     Cancelled,
 
+    /// The workspace already has a held-document proof that asks something
+    /// else, one still stopping, or as many callers as one answers. Nothing
+    /// waits for it; the caller asks again later.
+    #[error("another held document read is running for this workspace")]
+    HeldReadBusy,
+
     /// A fault-injected domain transaction crashed before acknowledgement.
     #[error("operation crashed before acknowledgement")]
     OperationCrashed,
@@ -156,6 +162,7 @@ impl RuntimeError {
                         "owner-outbox-configured-budget-mismatch"
                     }
                     ApplicationError::Interrupted => "operation-crashed",
+                    ApplicationError::Cancelled => "cancelled",
                     ApplicationError::PublicationPending => "live-application-publication-pending",
                     ApplicationError::MaterializationPending => {
                         "settlement-materialization-pending"
@@ -179,6 +186,7 @@ impl RuntimeError {
             RuntimeError::WorkspaceHardlinked => "workspace-hardlinked",
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
+            RuntimeError::HeldReadBusy => "held-read-busy",
             RuntimeError::OperationCrashed => "operation-crashed",
             RuntimeError::DrainWaiting(_) => "retryable-state",
         }

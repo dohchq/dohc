@@ -88,7 +88,7 @@ fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
 fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork {
     f.store
         .read_with(|conn| {
-            retirement::unproven_retained(conn, &tail.namespace, &f.key, &f.binding.lineage_claim_id, &tail.activation_id)
+            retirement::unproven_retained(conn, &tail.namespace, &f.key, &f.binding.lineage_claim_id, &tail.activation_id, Stop::NEVER)
         })
         .unwrap()
 }
@@ -291,7 +291,7 @@ fn unproven_or_unreadable_retained_evidence_protects() {
 
 /// What inspecting `binding` finds of `f`, which must still be current.
 fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
-    match f.store.read_with(|conn| inspect_held(conn, binding)).unwrap() {
+    match f.store.read_with(|conn| inspect_held(conn, binding, Stop::NEVER)).unwrap() {
         HeldInspection::Current(preservation) => preservation,
         HeldInspection::Stale => panic!("the binding was just derived"),
     }

@@ -1926,20 +1926,70 @@ impl ActorHandle {
     /// bounded reads; the proof runs on a blocking thread of its own, and
     /// nothing on the actor waits for it. An answer whose evidence moved
     /// meanwhile is stale, with nothing preserved, and nothing proves again.
+    ///
+    /// A caller that asks what the workspace's running proof asks, of the
+    /// same state, shares it; any other is busy. `token`, the caller's own
+    /// cancellation or deadline, ends only its wait. The last caller to leave
+    /// stops the proof, and answers once its reader closed, or after twice
+    /// SQLite's busy timeout.
     pub async fn held_document(
         &self,
         workspace_id: String,
         object_id: String,
-    ) -> Result<Option<dohc_engine_sync::HeldDocumentInspection>, RuntimeError> {
+        token: CancellationToken,
+    ) -> Result<Option<Arc<dohc_engine_sync::HeldDocumentInspection>>, RuntimeError> {
+        use dohc_engine_collab::live_update_application::HeldProofError;
+        use dohc_engine_sync::HeldProofAdmission;
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
         let proofs = self.held_proofs.clone();
-        let job = self.run(move |store, _cache| Ok(proofs.job(store))).await?;
-        let proof = tokio::task::spawn_blocking(move || {
-            dohc_engine_sync::prove_held_document(&job, &workspace_id, &object_id)
-        })
-        .await
-        .map_err(|_| RuntimeError::WorkerPanicked)??;
-        self.run(move |store, _cache| {
-            dohc_engine_sync::release_held_proof(store, proof).map_err(RuntimeError::from)
+        let (admitted_workspace, admitted_object) = (workspace_id.clone(), object_id.clone());
+        let admission = self
+            .run(move |store, _cache| {
+                dohc_engine_sync::admit_held_proof(
+                    store,
+                    &proofs,
+                    &admitted_workspace,
+                    &admitted_object,
+                )
+                .map_err(RuntimeError::from)
+            })
+            .await?;
+        let mut wait = match admission {
+            HeldProofAdmission::Started(run, wait) => {
+                // Nothing awaits the thread: the proof answers its callers,
+                // and an unrun one ends as closed.
+                drop(tokio::task::spawn_blocking(move || {
+                    run.prove(|job| {
+                        dohc_engine_sync::prove_held_document(job, &workspace_id, &object_id)
+                            .map_err(Arc::new)
+                    });
+                }));
+                wait
+            }
+            HeldProofAdmission::Joined(wait) => wait,
+            HeldProofAdmission::Busy => return Err(RuntimeError::HeldReadBusy),
+            HeldProofAdmission::Closed => return Err(RuntimeError::ActorUnavailable),
+        };
+        let proved = tokio::select! {
+            biased;
+            () = token.cancelled() => None,
+            proved = &mut wait => Some(proved),
+        };
+        let Some(proved) = proved else {
+            let _ = tokio::time::timeout(super::HELD_PROOF_CLOSE_BOUND, wait.leave()).await;
+            return Err(RuntimeError::Cancelled);
+        };
+        let proved = proved.map_err(|error| match error {
+            HeldProofError::Closed => RuntimeError::ActorUnavailable,
+            HeldProofError::Panicked => RuntimeError::WorkerPanicked,
+        })?;
+        self.run(move |store, _cache| match &*proved {
+            Ok(proof) => {
+                dohc_engine_sync::release_held_proof(store, proof).map_err(RuntimeError::from)
+            }
+            Err(failure) => Err(dohc_engine_sync::shared_proof_failure(failure).into()),
         })
         .await
     }

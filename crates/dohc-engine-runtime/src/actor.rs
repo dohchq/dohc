@@ -76,7 +76,8 @@ use crate::identity::EngineDbIdentity;
 pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
-use dohc_engine_collab::live_update_application::{HeldProofs, ReleasedTails};
+use dohc_engine_collab::live_update_application::ReleasedTails;
+use dohc_engine_sync::HeldProofs;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,6 +122,13 @@ impl ClaimAnnouncer {
 /// usable data capacity at exactly [`COMMAND_QUEUE_CAPACITY`] while guaranteeing
 /// `Close` always has a home, so shutdown never spins or starves.
 const CHANNEL_CAPACITY: usize = COMMAND_QUEUE_CAPACITY + 1;
+
+/// How long close, or a held read's last caller, waits for a stopped held
+/// proof's reader to close: twice SQLite's busy timeout. A stopped proof
+/// ends at its next statement step or stage check; between them it may wait
+/// out that timeout, or replay, merge or encode one document's state.
+pub(crate) const HELD_PROOF_CLOSE_BOUND: std::time::Duration =
+    std::time::Duration::from_millis(2 * dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS as u64);
 
 /// The actor lifecycle, observable via [`ActorHandle::lifecycle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,6 +482,10 @@ impl WorkspaceActor {
         // before the store's files can be replaced. A request waiting on it
         // fails as unavailable.
         self.released_tails.close();
+        // So do held proofs. One left running past the bound closes its
+        // reader at its next check; a restore it meets meanwhile fails on
+        // the open file rather than waiting.
+        self.held_proofs.close(HELD_PROOF_CLOSE_BOUND);
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {

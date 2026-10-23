@@ -50,12 +50,13 @@ pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
 pub use released_protection::{
     inspect_held, lineage_protection, protection, store_identity, ContributionArtifact,
-    ContributionLocator, HeldInspection, HeldProofJob, HeldProofs, IncomingCoordinate,
+    ContributionLocator, HeldInspection, HeldProofAdmission, HeldProofError, HeldProofJob,
+    HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, IncomingCoordinate,
     LineageCoordinates, LineageProtection, PendingValidation, Preservation, PreservationFinding,
-    PreservationReason, PreservationStatus, PreservedState, ProtectedTail, ProtectedTails,
-    Protection, ProtectionKey, ReleasedLineageBinding, ReleasedTails, RetainedAuthors,
-    RetainedContribution, RetainedCoverage, TailRelease, UnprovenCommitment, Validation,
-    ValidationError,
+    PreservationReason, PreservationStatus, PreservedState, ProofStage, ProtectedTail,
+    ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding, ReleasedTails,
+    RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
+    UnprovenCommitment, Validation, ValidationError, MAX_PROOF_WAITERS,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -126,6 +127,9 @@ pub enum ApplicationError {
     ConfiguredByteBudgetExceeded,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
+    /// A read stopped because nobody waits for it any more.
+    #[error("the read was cancelled")]
+    Cancelled,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
     #[error(

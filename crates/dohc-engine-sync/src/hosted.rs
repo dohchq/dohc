@@ -29,8 +29,9 @@ use crate::{ReplicationEnvelope, SyncError};
 
 pub use held::{
     HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage, HeldProof,
-    MAX_HELD_DOCUMENTS_PAGE, inspect_held_document, list_held_documents, prove_held_document,
-    release_held_proof,
+    HeldProofAdmission, HeldProofs, MAX_HELD_DOCUMENTS_PAGE, ProvedHeld, admit_held_proof,
+    inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
+    shared_proof_failure,
 };
 #[cfg(test)]
 pub(crate) use park::OCCUPANTS_READ;

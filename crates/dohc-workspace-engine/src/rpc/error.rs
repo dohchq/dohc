@@ -262,6 +262,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
                 "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
             );
         }
+        // Another held proof holds the workspace; nothing queued, ask again.
+        RuntimeError::HeldReadBusy => {
+            return WireError::new(ErrorCode::Overloaded, "held-read-busy");
+        }
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
         }
