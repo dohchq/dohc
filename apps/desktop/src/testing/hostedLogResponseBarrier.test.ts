@@ -127,7 +127,7 @@ it("holds later pulls until release and forwards them through the next barrier",
   });
 });
 
-it("reports an abandoned captured client and keeps its retry held until release", async () => {
+it("reports an abandoned captured client and serves its retry through the next barrier", async () => {
   let requests = 0;
   await withProxy((_request, response) => response.end(String(++requests)), async proxy => {
     const first = proxy.holdNextHostedLogResponse("chosen");
