@@ -10,7 +10,7 @@ Two questions at once: what is this control made of, and what do its words say. 
 
 Tokens themselves are not documented here. `apps/desktop/src/renderer/styles.css` is the source of truth, mirrored in `tokens.ts`, and `tokens.test.ts` fails when the two drift or when a pair misses WCAG AA. Read the code for values. Read this for meaning.
 
-The discipline behind the words is the `dohc-writing` skill: Orwell plus ASD-STE100 Simplified Technical English, applied by register. UI copy is almost entirely the strict register, because the user acts on it and cannot ask a follow-up question.
+UI copy follows the instruction rules in the `dohc-writing` skill, because a person acts on it and cannot ask a follow-up question.
 
 ## Identity
 
