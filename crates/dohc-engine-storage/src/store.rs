@@ -294,13 +294,18 @@ impl EngineStore {
             .map_or((0, 0), |c| c.writer_work_for_test())
     }
 
-    #[cfg(test)]
-    pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
+    /// How many checkpoint requests the background worker has finished.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn checkpoint_completed_for_test(&self) -> u64 {
         self.checkpoints.as_ref().unwrap().completed_for_test()
     }
 
-    #[cfg(test)]
-    pub(crate) fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
+    /// Returns once the background worker finished a checkpoint request
+    /// after the `before`th, which it must within a minute.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
         self.checkpoints
             .as_ref()
             .unwrap()

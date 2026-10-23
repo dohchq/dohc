@@ -6483,6 +6483,54 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
     }
 }
 
+/// Sol's r2c-3c-6 finding 2 and Opus's finding 3: a proof reserves what
+/// decoding its hold's binding holds, from the binding's stored length,
+/// before it reads it. Under a budget smaller than that, it decodes nothing,
+/// its callers hear it is too large, and nothing reserved passes the budget.
+#[test]
+fn a_proof_reserves_its_binding_before_it_decodes_it() {
+    use dohc_engine_collab::live_update_application::{
+        HeldProofLimit, ProofStop, binding_decodes_on_this_thread,
+    };
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc");
+    let binding = released_binding("doc", "doc.md", 1);
+    let held = store
+        .write_with(&NoFaults, |tx| {
+            crate::hosted::hold_released_in_tx(tx, &binding, ReleasedHoldContinuation::Frozen, false)
+        })
+        .unwrap();
+    assert!(matches!(held, TxnOutcome::Committed(true)), "{held:?}");
+    let budget = binding.canonical_json().len() as u64;
+    let limit = HeldProofLimit::new(1, budget, 0);
+    let proofs = HeldProofs::new(limit.clone());
+    let crate::HeldProofAdmission::Started(run, _wait) =
+        admit_held_proof(&store, &proofs, "ws", "doc").unwrap()
+    else {
+        panic!("a free workspace starts its proof")
+    };
+    let mut observed = None;
+    run.prove(|job| {
+        let decodes = binding_decodes_on_this_thread();
+        let answer = prove_held_document(job, "ws", "doc").map_err(std::sync::Arc::new);
+        observed = Some((
+            answer
+                .as_ref()
+                .err()
+                .map(|error| matches!(**error, SyncError::Cancelled)),
+            job.stopped(),
+            binding_decodes_on_this_thread() - decodes,
+        ));
+        let bytes = answer.as_ref().map_or(0, crate::HeldProof::retained_bytes);
+        (answer, bytes)
+    });
+    let (cancelled, stopped, decodes) = observed.expect("the proof ran");
+    assert_eq!(cancelled, Some(true), "it stopped");
+    assert_eq!(stopped, Some(ProofStop::TooLarge));
+    assert_eq!(decodes, 0, "it decoded nothing");
+    assert!(limit.peak_reserved_bytes() <= budget);
+}
+
 /// Binding version 2 replaced version 1, which nothing reads: a hold that
 /// stored a version 1 binding reads as damage, never as no hold, and stays
 /// stored.

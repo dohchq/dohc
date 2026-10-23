@@ -67,7 +67,17 @@ const ARTIFACT_VERSION: i64 = 1;
 const ARTIFACT_CHECK_EVERY: usize = 1024;
 
 /// The most a [`ContributionArtifact`] holds: what one blob streams.
-const MAX_ARTIFACT_BYTES: usize = dohc_engine_storage::MAX_BLOB_BYTES;
+pub(super) const MAX_ARTIFACT_BYTES: usize = dohc_engine_storage::MAX_BLOB_BYTES;
+
+/// The most memory encoding one value, or one piece of a binding, as
+/// canonical JSON holds for each byte of its text before it is appended:
+/// its JSON value, and each string escaped, up to six bytes a byte, once by
+/// itself and once in the piece.
+const JSON_BYTES_PER_TEXT_BYTE: u64 = 24;
+
+/// What one value's or piece's JSON holds beyond its text: its keys,
+/// punctuation and numbers.
+const JSON_OVERHEAD_BYTES: u64 = 1024;
 
 /// Everything a current preservation names, as one canonical JSON document
 /// the owner downloads by its SHA-256: the format version, the binding, each
@@ -86,16 +96,19 @@ pub struct ContributionArtifact {
 impl ContributionArtifact {
     /// The artifact of `preservation` under `binding`, written in canonical
     /// order one binding tail and one contribution at a time, its memory
-    /// reserved through `stop` before each growth and refused as too large
-    /// before it passes [`MAX_ARTIFACT_BYTES`]; `stop` is checked before it
-    /// starts, every [`ARTIFACT_CHECK_EVERY`] tails and contributions, and
-    /// around each hash.
+    /// reserved through `stop` before each growth, and the value and binding
+    /// piece it writes before appending each reserved before it starts.
+    /// None, with nothing allocated past it, once it would pass the cap
+    /// [`Stop::artifact_cap`], [`MAX_ARTIFACT_BYTES`] for a proof that set
+    /// none; the proof goes on. `stop` is checked before it starts, every
+    /// [`ARTIFACT_CHECK_EVERY`] tails and contributions, and around each
+    /// hash.
     pub fn of(
         binding: &ReleasedLineageBinding,
         preservation: &Preservation,
         stop: Stop<'_>,
-    ) -> Result<Self, ApplicationError> {
-        Self::within(binding, preservation, stop, MAX_ARTIFACT_BYTES)
+    ) -> Result<Option<Self>, ApplicationError> {
+        Self::within(binding, preservation, stop, stop.artifact_cap())
     }
 
     /// [`Self::of`] within `cap` bytes.
@@ -104,60 +117,139 @@ impl ContributionArtifact {
         preservation: &Preservation,
         stop: Stop<'_>,
         cap: usize,
-    ) -> Result<Self, ApplicationError> {
-        fn listed(
-            contributions: &[RetainedContribution],
-            out: &mut Capped<'_>,
-            stop: Stop<'_>,
-        ) -> Result<(), ApplicationError> {
-            out.push("[")?;
-            for (index, contribution) in contributions.iter().enumerate() {
-                if index % ARTIFACT_CHECK_EVERY == 0 {
-                    stop.check(ProofStage::Encoding)?;
-                }
-                if index > 0 {
-                    out.push(",")?;
-                }
-                out.value(&contribution_value(contribution))?;
-            }
-            out.push("]")
-        }
+    ) -> Result<Option<Self>, ApplicationError> {
         stop.check(ProofStage::Encoding)?;
-        // [`write_canonical`]'s form, its keys in order, written as it goes.
-        let mut text = Capped::new(cap, stop);
-        text.push("{\"binding\":")?;
-        write_binding(binding, &mut |piece: &str| text.push(piece), stop)?;
-        text.push(",\"coveredContributions\":[")?;
-        for (index, (namespace, contributions)) in preservation.covered.iter().enumerate() {
-            if index > 0 {
-                text.push(",")?;
-            }
-            text.push("{\"contributions\":")?;
-            listed(contributions, &mut text, stop)?;
-            text.push(",\"namespace\":")?;
-            text.value(&Value::String(namespace.clone()))?;
-            text.push("}")?;
+        let mut buffers = stop.working();
+        if buffers.limited() {
+            buffers.grow(buffer_bytes(binding, preservation))?;
         }
-        text.push("],\"mergedContributionIds\":")?;
-        let merged_from = text.len();
-        listed(&preservation.merged, &mut text, stop)?;
-        let merged_to = text.len();
-        text.push(",\"version\":")?;
-        text.value(&Value::from(ARTIFACT_VERSION))?;
-        text.push("}")?;
+        let mut text = Capped::new(cap, stop);
+        let merged = match encode(binding, preservation, stop, &mut text) {
+            Ok(merged) => merged,
+            Err(_) if text.over => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let text = text.text;
         stop.check(ProofStage::Encoding)?;
-        let merged =
-            UnprovenCommitment::committed(preservation.merged.len(), &text[merged_from..merged_to]);
+        let merged = UnprovenCommitment::committed(preservation.merged.len(), &text[merged]);
         stop.check(ProofStage::Encoding)?;
         let sha256 = hex_sha256(text.as_bytes());
         stop.check(ProofStage::Encoding)?;
-        Ok(Self {
+        Ok(Some(Self {
             bytes: text.into_bytes(),
             sha256,
             merged,
-        })
+        }))
     }
+}
+
+/// [`write_canonical`]'s form of the artifact, its keys in order, written
+/// to `text` as it goes; where its merged list runs.
+fn encode(
+    binding: &ReleasedLineageBinding,
+    preservation: &Preservation,
+    stop: Stop<'_>,
+    text: &mut Capped<'_>,
+) -> Result<std::ops::Range<usize>, ApplicationError> {
+    fn listed(
+        contributions: &[RetainedContribution],
+        out: &mut Capped<'_>,
+        stop: Stop<'_>,
+    ) -> Result<(), ApplicationError> {
+        out.push("[")?;
+        for (index, contribution) in contributions.iter().enumerate() {
+            if index % ARTIFACT_CHECK_EVERY == 0 {
+                stop.check(ProofStage::Encoding)?;
+            }
+            if index > 0 {
+                out.push(",")?;
+            }
+            out.value(&contribution_value(contribution))?;
+        }
+        out.push("]")
+    }
+    text.push("{\"binding\":")?;
+    write_binding(binding, &mut |piece: &str| text.push(piece), stop)?;
+    text.push(",\"coveredContributions\":[")?;
+    for (index, (namespace, contributions)) in preservation.covered.iter().enumerate() {
+        if index > 0 {
+            text.push(",")?;
+        }
+        text.push("{\"contributions\":")?;
+        listed(contributions, text, stop)?;
+        text.push(",\"namespace\":")?;
+        text.value(&Value::String(namespace.clone()))?;
+        text.push("}")?;
+    }
+    text.push("],\"mergedContributionIds\":")?;
+    let merged_from = text.len();
+    listed(&preservation.merged, text, stop)?;
+    let merged_to = text.len();
+    text.push(",\"version\":")?;
+    text.value(&Value::from(ARTIFACT_VERSION))?;
+    text.push("}")?;
+    Ok(merged_from..merged_to)
+}
+
+/// What encoding the artifact of `preservation` under `binding` holds
+/// beside the artifact, sized for the longest of each: the binding's head
+/// as a JSON value and the piece of it written before its tails, one tail's
+/// piece, and one value, a contribution or a namespace, before it is
+/// appended.
+fn buffer_bytes(binding: &ReleasedLineageBinding, preservation: &Preservation) -> u64 {
+    let incoming = &binding.incoming;
+    let head = [
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        &binding.lineage_claim_id,
+        &binding.head_digest,
+        &incoming.replication_epoch,
+        &incoming.stream_identity,
+        &incoming.origin_id,
+    ]
+    .iter()
+    .map(|text| text.len())
+    .sum::<usize>()
+        + binding.current_path.as_ref().map_or(0, String::len)
+        + incoming.relay_namespace.as_ref().map_or(0, String::len);
+    let tail = match &*binding.tails {
+        ProtectedTails::Listed(tails) => tails
+            .iter()
+            .map(|tail| {
+                tail.namespace.len()
+                    + tail.activation_id.len()
+                    + tail.release.as_ref().map_or(0, |release| release.path.len())
+                    + match &tail.coverage {
+                        RetainedCoverage::Unproven(unproven) => unproven.digest.len(),
+                        RetainedCoverage::Invalid => 0,
+                    }
+            })
+            .max()
+            .unwrap_or(0),
+        ProtectedTails::Invalid => 0,
+    };
+    let value = preservation
+        .covered
+        .iter()
+        .flat_map(|(namespace, contributions)| {
+            contributions
+                .iter()
+                .map(RetainedContribution::text_bytes)
+                .chain([namespace.len()])
+        })
+        .chain(preservation.merged.iter().map(RetainedContribution::text_bytes))
+        .max()
+        .unwrap_or(0);
+    [head, tail, value]
+        .iter()
+        .map(|text| {
+            u64::try_from(*text)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(JSON_BYTES_PER_TEXT_BYTE)
+                .saturating_add(JSON_OVERHEAD_BYTES)
+        })
+        .fold(0, u64::saturating_add)
 }
 
 /// Text that never grows past its cap, its capacity included, and reserves
@@ -168,6 +260,8 @@ struct Capped<'a> {
     stop: Stop<'a>,
     /// One value's canonical JSON, before it is appended.
     unit: String,
+    /// It refused to pass its cap.
+    over: bool,
 }
 
 impl<'a> Capped<'a> {
@@ -177,6 +271,7 @@ impl<'a> Capped<'a> {
             cap,
             stop,
             unit: String::new(),
+            over: false,
         }
     }
 
@@ -184,15 +279,18 @@ impl<'a> Capped<'a> {
         self.text.len()
     }
 
-    /// Append `piece`, unless that passes the cap: too large, and nothing
-    /// allocated.
+    /// Append `piece`, unless that passes the cap: over budget, marked
+    /// over, and nothing allocated.
     fn push(&mut self, piece: &str) -> Result<(), ApplicationError> {
-        let needed = self
+        let Some(needed) = self
             .text
             .len()
             .checked_add(piece.len())
             .filter(|needed| *needed <= self.cap)
-            .ok_or_else(|| self.stop.refuse(ProofStop::TooLarge))?;
+        else {
+            self.over = true;
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
+        };
         if needed > self.text.capacity() {
             let grown = needed
                 .max(self.text.capacity().saturating_mul(2))
@@ -433,9 +531,17 @@ impl ReleasedLineageBinding {
     /// `SHA256(UTF8("dohc:released-lineage-binding:v3\0") || canonical bytes)`,
     /// in lowercase hex.
     pub fn digest(&self) -> String {
-        let mut input = DIGEST_DOMAIN.to_vec();
-        input.extend_from_slice(self.canonical_json().as_bytes());
-        hex_sha256(&input)
+        Self::canonical_digest(&self.canonical_json())
+    }
+
+    /// [`Self::digest`] of the binding whose canonical JSON is `canonical`,
+    /// hashed in place: a stored binding [`Self::from_canonical_json`] reads
+    /// is its canonical JSON, so this names it without encoding it again.
+    pub fn canonical_digest(canonical: &str) -> String {
+        let mut digest = Sha256::new();
+        digest.update(DIGEST_DOMAIN);
+        digest.update(canonical.as_bytes());
+        dohc_engine_storage::hex(&digest.finalize())
     }
 
     /// The binding `text` encodes, or none unless `text` is exactly its
@@ -802,7 +908,9 @@ mod tests {
                 merged: listed(&parsed["mergedContributionIds"]),
                 preserved: None,
             };
-            let artifact = ContributionArtifact::of(&binding, &preservation, Stop::NEVER).unwrap();
+            let artifact = ContributionArtifact::of(&binding, &preservation, Stop::NEVER)
+                .unwrap()
+                .expect("within its cap");
             assert_eq!(std::str::from_utf8(&artifact.bytes).unwrap(), vector["canonical"], "{name}");
             assert_eq!(artifact.sha256, vector["sha256"], "{name}");
             assert_eq!(
@@ -1111,6 +1219,23 @@ mod tests {
         );
     }
 
+    /// Opus's r2c-3c-6 finding 3: a stored binding's digest, hashed in place
+    /// from its canonical bytes, is the one its encoding names, for every
+    /// pinned vector.
+    #[test]
+    fn a_digest_hashed_in_place_is_the_bindings_own() {
+        for vector in vectors()["valid"].as_array().unwrap() {
+            let canonical = vector["canonical"].as_str().unwrap();
+            let binding = ReleasedLineageBinding::from_canonical_json(canonical).unwrap();
+            let mut encoded = DIGEST_DOMAIN.to_vec();
+            encoded.extend_from_slice(binding.canonical_json().as_bytes());
+            let digest = ReleasedLineageBinding::canonical_digest(canonical);
+            assert_eq!(digest, hex_sha256(&encoded), "{}", vector["name"]);
+            assert_eq!(digest, binding.digest(), "{}", vector["name"]);
+            assert_eq!(digest, vector["digest"].as_str().unwrap(), "{}", vector["name"]);
+        }
+    }
+
     /// The digest names the domain as well as the bytes.
     #[test]
     fn the_digest_is_domain_separated() {
@@ -1245,8 +1370,9 @@ mod tests {
     }
 
     /// Sol's r2c-3c-4 finding 2: an artifact refuses before it would pass
-    /// its cap, and never allocates past it; with no proof to answer for it,
-    /// it is over budget. One exactly at its cap encodes.
+    /// its cap, and never allocates past it. Opus's r2c-3c-6 finding 1: past
+    /// its cap there is no artifact, and the proof that encoded it goes on,
+    /// unstopped, to answer the rest. One exactly at its cap encodes.
     #[test]
     fn an_artifact_refuses_before_it_allocates_past_its_cap() {
         let mut text = Capped::new(10_000, Stop::NEVER);
@@ -1260,6 +1386,7 @@ mod tests {
             assert!(text.text.capacity() <= 10_000, "{}", text.text.capacity());
         };
         assert!(matches!(refused, ApplicationError::ConfiguredByteBudgetExceeded), "{refused:?}");
+        assert!(text.over);
         assert_eq!((pushed, text.len()), (10, 9_990));
         assert!(text.text.capacity() <= 10_000);
 
@@ -1271,10 +1398,28 @@ mod tests {
             merged: carried_and_outbox(),
             preserved: None,
         };
-        let whole = ContributionArtifact::of(&binding, &preservation, Stop::NEVER).unwrap();
+        let whole = ContributionArtifact::of(&binding, &preservation, Stop::NEVER)
+            .unwrap()
+            .expect("within its cap");
         let at_cap = ContributionArtifact::within(&binding, &preservation, Stop::NEVER, whole.bytes.len());
-        assert_eq!(at_cap.as_ref().ok(), Some(&whole), "exactly at its cap");
+        assert_eq!(at_cap.ok().flatten().as_ref(), Some(&whole), "exactly at its cap");
         let past = ContributionArtifact::within(&binding, &preservation, Stop::NEVER, whole.bytes.len() - 1);
-        assert!(matches!(past, Err(ApplicationError::ConfiguredByteBudgetExceeded)), "{past:?}");
+        assert!(matches!(past, Ok(None)), "{past:?}");
+
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let store = dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        let proofs: HeldProofs<(), u32> = HeldProofs::new(HeldProofLimit::default());
+        proofs.set_artifact_cap(whole.bytes.len() - 1);
+        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+            panic!("a free workspace starts its proof")
+        };
+        let mut encoded = None;
+        run.prove(|job| {
+            encoded = Some((ContributionArtifact::of(&binding, &preservation, job.stop()), job.stopped()));
+            (0, 0)
+        });
+        let (encoded, stopped) = encoded.expect("the proof ran");
+        assert!(matches!(encoded, Ok(None)), "{encoded:?}");
+        assert_eq!(stopped, None, "the proof goes on");
     }
 }

@@ -8385,8 +8385,12 @@ async fn an_archived_hold_is_inspected_against_its_archive() {
     let (native, rows) = (w.native(), native_rows(&w.store));
 
     let inspection = inspected_window(&w.store);
-    let artifact: serde_json::Value =
-        serde_json::from_slice(&inspection.contributions.as_ref().unwrap().bytes).unwrap();
+    let artifact = inspection
+        .contributions
+        .as_ref()
+        .and_then(dohc_engine_sync::HeldContributions::artifact)
+        .expect("an artifact");
+    let artifact: serde_json::Value = serde_json::from_slice(&artifact.bytes).unwrap();
     let bound = ReleasedLineageBinding::from_json(&artifact["binding"]).unwrap();
     assert_eq!(bound.digest(), inspection.document.binding_digest);
     assert_eq!(bound.lineage_claim_id, w.lineage);

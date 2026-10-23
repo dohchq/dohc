@@ -218,11 +218,14 @@ const { authors: _carriedAuthors, ...carriedAt } = carried;
 const { authors: _outboxAuthors, ...outboxAt } = outbox;
 const artifactBytes = Buffer.from(listedArtifact.canonical, "utf8");
 const complete = { status: "complete", reasons: [], mergedContributions: listedArtifact.mergedContributions,
-  contributionsSha256: listedArtifact.sha256, contributionsByteLength: artifactBytes.length, markdown,
-  markdownSha256: sha(markdown), markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 49152 };
+  contributionsSha256: listedArtifact.sha256, contributionsByteLength: artifactBytes.length, contributionsTooLarge: false,
+  markdown, markdownSha256: sha(markdown), markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 49152 };
 const inspected = { ...held, status: "current", preservation: complete, resolution: null };
 // What no merged contributions commit to.
 const nothingMerged = emptyArtifact.mergedContributions;
+// Complete preservation whose artifact is past what one blob streams.
+const tooLarge = { ...complete, mergedContributions: null, contributionsSha256: null, contributionsByteLength: null,
+  contributionsTooLarge: true };
 
 describe("held document inspection contract", () => {
   it("keeps a page of held document summaries, and refuses one that claims more with nothing listed", () => {
@@ -243,6 +246,12 @@ describe("held document inspection contract", () => {
     const contained = { ...complete, mergedContributions: nothingMerged };
     expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: contained })?.preservation).toEqual(contained);
     expect(decodeHostedSyncResult("sync.heldDocument", null)).toBeNull();
+  });
+
+  it("keeps preservation and its text whose artifact is too large, naming no artifact", () => {
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: tooLarge })?.preservation).toEqual(tooLarge);
+    const streamed = { ...tooLarge, markdown: null };
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: streamed })?.preservation).toEqual(streamed);
   });
 
   // One reason with its total, and the examples listed of it.
@@ -331,6 +340,15 @@ describe("held document inspection contract", () => {
     ["an artifact digest that is no SHA-256", { preservation: { ...complete, contributionsSha256: "A".repeat(64) } }],
     ["an empty artifact", { preservation: { ...complete, contributionsByteLength: 0 } }],
     ["no artifact", { preservation: { ...complete, contributionsSha256: undefined, contributionsByteLength: undefined } }],
+    ["no artifact, not too large", { preservation: { ...tooLarge, contributionsTooLarge: false } }],
+    ["no merged commitment, not too large", { preservation: { ...complete, mergedContributions: null } }],
+    ["no artifact digest, not too large", { preservation: { ...complete, contributionsSha256: null } }],
+    ["no artifact length, not too large", { preservation: { ...complete, contributionsByteLength: null } }],
+    ["an artifact too large to name, named", { preservation: { ...complete, contributionsTooLarge: true } }],
+    ["a too-large artifact's merged commitment", { preservation: { ...tooLarge, mergedContributions: nothingMerged } }],
+    ["a too-large artifact's digest", { preservation: { ...tooLarge, contributionsSha256: listedArtifact.sha256 } }],
+    ["a too-large artifact's length", { preservation: { ...tooLarge, contributionsByteLength: artifactBytes.length } }],
+    ["no word on whether the artifact is too large", { preservation: { ...complete, contributionsTooLarge: undefined } }],
     ["a resolution this round never records", { resolution: {} }],
   ])("rejects %s", (_case, patch) => {
     expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
@@ -371,6 +389,7 @@ describe("held document contribution artifact", () => {
     ["bytes its length does not name", [Buffer.concat([artifactBytes, Buffer.from(" ")]), inspected]],
     ["bytes its digest does not name", [Buffer.from(listedArtifact.canonical.replace("relay-a\"}]", "relay-b\"}]")), inspected]],
     ["a stale inspection", [artifactBytes, { ...inspected, status: "stale", preservation: null, bindingStale: true }]],
+    ["an inspection whose artifact is too large", [artifactBytes, { ...inspected, preservation: tooLarge }]],
     ["bytes that are no UTF-8", namedBytes(Buffer.from([0x7b, 0xff, 0x7d]))],
     ["bytes that are no JSON", named(null, "{")],
     ["whitespace", named(null, JSON.stringify(artifact, null, 1))],

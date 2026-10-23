@@ -27,6 +27,7 @@ use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::transport::ServiceResponse;
 use dohc_engine_protocol::wire::Response;
 use dohc_engine_protocol::wire::WorkspaceHandle;
+use dohc_engine_sync::HeldContributions;
 use dohc_engine_sync::HeldDocument;
 use dohc_engine_sync::HeldDocumentInspection;
 use dohc_engine_sync::HeldDocumentsPage;
@@ -156,8 +157,10 @@ impl EngineService {
     /// length; the binding and the covered and merged contributions are
     /// named only by the contribution artifact's digest and length. With
     /// `stream`, which needs a connection that negotiated blobs, the left-out
-    /// Markdown or the artifact streams as a blob under the request's ID. The
-    /// answer is withheld once the workspace's live host retires.
+    /// Markdown or the artifact streams as a blob under the request's ID. An
+    /// artifact past what one blob streams has none: the answer says so, and
+    /// nothing streams for it. The answer is withheld once the workspace's
+    /// live host retires.
     pub(super) async fn sync_held_document(
         &self,
         ctx: &RequestContext,
@@ -201,19 +204,7 @@ impl EngineService {
         };
         let (result, outside) =
             inspection_answer(request_id, &inspected, HELD_RESPONSE_BYTE_BUDGET)?;
-        let bytes = match params.stream {
-            Some(HeldStream::Markdown) if outside => inspected
-                .preservation
-                .as_ref()
-                .and_then(|preservation| preservation.preserved.as_ref())
-                .map(|preserved| preserved.markdown.as_bytes()),
-            Some(HeldStream::Contributions) => inspected
-                .contributions
-                .as_ref()
-                .map(|contributions| contributions.bytes.as_slice()),
-            _ => None,
-        };
-        let Some(bytes) = bytes else {
+        let Some(bytes) = streamed(&inspected, params.stream, outside) else {
             return Ok(answer(result, None));
         };
         let blob = self
@@ -261,6 +252,29 @@ impl EngineService {
             deadline: ctx.deadline,
             byte_permit: Some(byte_permit),
         })
+    }
+}
+
+/// What `stream` streams of `inspected`: Markdown its answer leaves out,
+/// `outside`, or its contribution artifact. Nothing for an inspection with
+/// neither; an artifact too large to stream has none, and the answer says so.
+fn streamed(
+    inspected: &HeldDocumentInspection,
+    stream: Option<HeldStream>,
+    outside: bool,
+) -> Option<&[u8]> {
+    match stream {
+        Some(HeldStream::Markdown) if outside => inspected
+            .preservation
+            .as_ref()
+            .and_then(|preservation| preservation.preserved.as_ref())
+            .map(|preserved| preserved.markdown.as_bytes()),
+        Some(HeldStream::Contributions) => inspected
+            .contributions
+            .as_ref()
+            .and_then(HeldContributions::artifact)
+            .map(|artifact| artifact.bytes.as_slice()),
+        _ => None,
     }
 }
 
@@ -368,7 +382,7 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
                 .as_ref()
                 .map(|preserved| preserved.markdown.as_str());
             let outside = markdown.map_or(0, json_string_encoded_len) > MAX_INBAND_CONTENT_BYTES;
-            (preservation_outline(preservation, contributions, !outside), outside)
+            (preservation_outline(preservation, contributions.artifact(), !outside), outside)
         }
         _ => (Value::Null, false),
     };
@@ -378,9 +392,12 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
     (result, outside)
 }
 
+/// `preservation`'s outline, naming its contribution artifact by its digest,
+/// length and merged commitment; with none, too large to stream, it names
+/// none of them and says so.
 fn preservation_outline(
     preservation: &Preservation,
-    contributions: &ContributionArtifact,
+    contributions: Option<&ContributionArtifact>,
     inband: bool,
 ) -> Value {
     let preserved = preservation.preserved.as_ref();
@@ -402,12 +419,13 @@ fn preservation_outline(
                 "examples": [],
             }))
             .collect::<Vec<_>>(),
-        "mergedContributions": {
-            "count": contributions.merged.count,
-            "digest": contributions.merged.digest,
-        },
-        "contributionsSha256": contributions.sha256,
-        "contributionsByteLength": contributions.bytes.len(),
+        "mergedContributions": contributions.map(|artifact| json!({
+            "count": artifact.merged.count,
+            "digest": artifact.merged.digest,
+        })),
+        "contributionsSha256": contributions.map(|artifact| artifact.sha256.as_str()),
+        "contributionsByteLength": contributions.map(|artifact| artifact.bytes.len()),
+        "contributionsTooLarge": contributions.is_none(),
         "markdown": preserved.filter(|_| inband).map(|preserved| preserved.markdown.as_str()),
         "markdownSha256": preserved
             .map(|preserved| dohc_engine_storage::hex_sha256(preserved.markdown.as_bytes())),
@@ -838,12 +856,14 @@ mod tests {
         binding: &ReleasedLineageBinding,
         preservation: Preservation,
     ) -> HeldDocumentInspection {
-        let contributions = ContributionArtifact::of(binding, &preservation, Stop::NEVER).unwrap();
+        let contributions = ContributionArtifact::of(binding, &preservation, Stop::NEVER)
+            .unwrap()
+            .expect("within its cap");
         HeldDocumentInspection {
             document: held_by(binding),
             status: HeldBindingStatus::Current,
             preservation: Some(preservation),
-            contributions: Some(contributions),
+            contributions: Some(HeldContributions::Artifact(contributions)),
         }
     }
 
@@ -1022,7 +1042,7 @@ mod tests {
         let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
         assert!(response_encoded_bytes(7, &answer) <= HELD_RESPONSE_BYTE_BUDGET);
         assert!(outside, "the text streams");
-        let artifact = inspected.contributions.as_ref().unwrap();
+        let artifact = inspected.contributions.as_ref().and_then(HeldContributions::artifact).unwrap();
         let preservation = &answer["preservation"];
         assert_eq!(preservation["markdown"], Value::Null);
         assert_eq!(preservation["contributionsSha256"], dohc_engine_storage::hex_sha256(&artifact.bytes));
@@ -1073,8 +1093,51 @@ mod tests {
         let merged = &answer["preservation"]["mergedContributions"];
         assert_eq!(*merged, json!({"count": 0, "digest": dohc_engine_storage::hex_sha256(&empty)}));
         assert_ne!(merged["digest"], answer["preservation"]["contributionsSha256"]);
-        let listed: Value = serde_json::from_slice(&inspected.contributions.unwrap().bytes).unwrap();
+        let artifact = inspected.contributions.as_ref().and_then(HeldContributions::artifact).unwrap();
+        let listed: Value = serde_json::from_slice(&artifact.bytes).unwrap();
         assert_eq!(listed["coveredContributions"], json!([]));
         assert_eq!(listed["mergedContributionIds"], json!([]));
+        assert_eq!(answer["preservation"]["contributionsTooLarge"], false);
+    }
+
+    /// Opus's r2c-3c-6 finding 1: an inspection whose artifact would pass
+    /// what one blob streams still answers its preservation, outline and
+    /// Markdown alike, and names no artifact, saying it is too large. Its
+    /// Markdown streams; its contributions stream nothing.
+    #[test]
+    fn an_artifact_too_large_to_stream_leaves_the_preservation_answering() {
+        let markdown = "# Plan\n".repeat(10_000);
+        let bound = binding("object", "docs/object.md", ProtectedTails::Invalid);
+        let inspected = HeldDocumentInspection {
+            document: held_by(&bound),
+            status: HeldBindingStatus::Current,
+            preservation: Some(Preservation {
+                status: PreservationStatus::Complete,
+                findings: Vec::new(),
+                covered: Vec::new(),
+                merged: Vec::new(),
+                preserved: Some(PreservedState {
+                    markdown: markdown.clone(),
+                    full_state: Vec::new(),
+                }),
+            }),
+            contributions: Some(HeldContributions::TooLarge),
+        };
+        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        assert!(outside, "the text streams");
+        let preservation = &answer["preservation"];
+        assert_eq!(answer["status"], "current");
+        assert_eq!(preservation["status"], "complete");
+        assert_eq!(preservation["contributionsTooLarge"], true);
+        for absent in ["mergedContributions", "contributionsSha256", "contributionsByteLength"] {
+            assert_eq!(preservation[absent], Value::Null, "{absent}");
+        }
+        assert_eq!(preservation["markdownSha256"], dohc_engine_storage::hex_sha256(markdown.as_bytes()));
+        assert_eq!(preservation["markdownByteLength"], markdown.len());
+        assert_eq!(
+            streamed(&inspected, Some(HeldStream::Markdown), outside),
+            Some(markdown.as_bytes())
+        );
+        assert_eq!(streamed(&inspected, Some(HeldStream::Contributions), outside), None);
     }
 }

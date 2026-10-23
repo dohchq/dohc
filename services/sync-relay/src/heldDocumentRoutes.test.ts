@@ -34,8 +34,11 @@ const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096
 const contributions = Buffer.from(JSON.stringify({binding, coveredContributions: [], mergedContributionIds: [], version: 1}));
 const preserved: HeldDocumentInspection = {...held, status: "current", resolution: null, preservation: {status: "complete",
   reasons: [], mergedContributions: {count: 0, digest: "e".repeat(64)}, contributionsSha256: sha256(contributions),
-  contributionsByteLength: contributions.length, markdown, markdownSha256: sha256(markdown),
+  contributionsByteLength: contributions.length, contributionsTooLarge: false, markdown, markdownSha256: sha256(markdown),
   markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 48 * 1024}};
+// The same preservation, its artifact past what the engine streams: only the artifact is refused.
+const tooLarge: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, mergedContributions: null,
+  contributionsSha256: null, contributionsByteLength: null, contributionsTooLarge: true}};
 const markdownPath = `${scope.workspaceId}/held-documents/${held.objectId}/markdown` +
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`;
 const contributionsPath = `${scope.workspaceId}/held-documents/${held.objectId}/contributions` +
@@ -346,6 +349,22 @@ describe("held document routes", () => {
     expect(await refused.text()).not.toContain("coveredContributions");
   });
 
+  it("answer an artifact too large to stream 413 under the binding inspected, while its details and text still answer", async () => {
+    const f = await relay(fakeHost({heldDocument: answering(tooLarge), heldContributions: streaming(tooLarge)}));
+    const refused = await f.get(contributionsPath);
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({code: "payload_too_large"});
+    const details = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`);
+    expect(details.status).toBe(200);
+    expect((await details.json()).preservation).toMatchObject({status: "complete", contributionsTooLarge: true, contributionsSha256: null});
+    const text = await f.get(markdownPath);
+    expect(text.status).toBe(200);
+    expect(await text.text()).toBe(markdown);
+    const params = new URLSearchParams({bindingDigest: "e".repeat(64), sha256: sha256(contributions)});
+    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions?${params}`)).status,
+      "under another binding").toBe(404);
+  });
+
   it("answer no artifact for a stale binding, or a document no longer held, as a missing document", async () => {
     const stale = await relay(fakeHost({heldContributions: streaming(inspection)}));
     expect((await stale.get(contributionsPath)).status).toBe(404);
@@ -391,8 +410,9 @@ describe("streamed held document contributions", () => {
     expect(withStreamedContributions(preserved, blob(unhashed, {sha256: sha256(contributions)})).contributions).toBe(unhashed);
   });
 
-  it("names no artifact for an inspection that is not current", () => {
+  it("names no artifact for an inspection that is not current, or whose artifact is too large", () => {
     expect(withStreamedContributions(inspection, undefined)).toEqual({inspected: inspection, contributions: null});
+    expect(withStreamedContributions(tooLarge, undefined)).toEqual({inspected: tooLarge, contributions: null});
   });
 });
 

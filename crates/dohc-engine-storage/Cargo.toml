@@ -13,6 +13,9 @@ description = "SQLite storage for the workspace engine: one writable connection 
 # lane (provably zero overhead). Enabled by `dohc-engine-testkit` for the
 # in-process crash tier and by `cargo test --workspace` via feature unification.
 fault-injection = []
+# Hooks tests above this crate wait on, such as the background checkpoint's
+# completions. Production builds must not enable this feature.
+test-support = []
 
 [dependencies]
 # `hooks` counts open work and search changes; `functions` exposes the search counter.

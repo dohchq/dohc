@@ -1099,6 +1099,51 @@ async fn closing_with_a_reader_past_the_bound_fails() {
     desktop.close().await;
 }
 
+/// Sol's r2c-3c-6 finding 1 and Opus's finding 2: a proof runs off the
+/// actor, so its worker's death stops none of it. While its reader stays
+/// open past the close bound, opening the store again evicts and closes the
+/// dead actor and answers that the store is in use, with no successor, and
+/// so does every open until the reader closes; then the store opens again.
+#[tokio::test]
+async fn a_dead_actors_reader_keeps_its_store_fenced() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.set_close_bound(Duration::ZERO);
+    proofs.pause_proofs_at(ProofStage::Validation);
+    proofs.linger_stopped_proofs();
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof validates", proofs.paused_proof()).await;
+    let died = w.actor.on_connection(|_| panic!("the worker dies")).await;
+    assert!(matches!(died, Err(RuntimeError::ActorUnavailable)), "{died:?}");
+    reached("the worker exits", w.actor.worker_exited()).await;
+    let RetainedWindow {
+        owner,
+        supervisor,
+        store,
+        root,
+        ..
+    } = w;
+    drop(store);
+    owner.close().await.unwrap();
+    let db = engine_db_path(&root).unwrap();
+    for what in ["evicting the dead actor", "while it drains"] {
+        let refused = supervisor.open(&db, 2).map(drop);
+        assert!(matches!(refused, Err(RuntimeError::StoreInUse)), "{what}: {refused:?}");
+        assert_eq!(supervisor.actor_count(), 0, "{what}: no successor started");
+    }
+    assert!(!proofs.drained(), "the reader is still open");
+    drop(resume);
+    let answered = answered(request).await;
+    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    proofs.wait_for_drained();
+    let reopened = supervisor.open(&db, 3).unwrap();
+    assert!(reopened.created_actor, "the drained store opens again");
+    drop(reopened);
+    supervisor.close_all().unwrap();
+    desktop.close().await;
+}
+
 /// Sol's r2c-3c-2 finding 4 and Opus's "old finding 2": a proof held at its
 /// merge while writes through the actor push the WAL past the mark where
 /// held readers give way. Every write succeeds; a new proof is busy while the
@@ -1140,8 +1185,9 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
 /// Opus's r2c-3c-4 finding 2: once a proof gave way to the WAL, an idle
 /// store proves again with no write after it. Each admission that finds the
 /// WAL pressing runs the writer's bounded checkpoint and asks the background
-/// worker for the rest, so a caller that asks again once busy is soon
-/// answered; with nothing checkpointing, every ask would stay busy.
+/// worker for the rest, so a caller that asks again once that checkpoint
+/// finished is soon answered; with nothing checkpointing, every ask would
+/// stay busy. Opus's r2c-3c-6 finding 4: it asks again only then.
 #[tokio::test]
 async fn an_idle_store_proves_again_after_a_proof_gave_way() {
     const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
@@ -1163,16 +1209,45 @@ async fn an_idle_store_proves_again_after_a_proof_gave_way() {
     assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
     let mut asked = 0;
     let answer = loop {
+        let completed = w.actor.checkpoints_completed_for_test().await.unwrap();
         match answered(inspection(&w, &CancellationToken::new())).await {
             Err(RuntimeError::HeldReadBusy) => {
                 asked += 1;
-                assert!(asked < 10_000, "the idle store never proved again");
-                tokio::task::yield_now().await;
+                assert!(asked < 100, "the idle store never proved again");
+                w.actor
+                    .wait_for_checkpoint_completion_for_test(completed)
+                    .await
+                    .unwrap();
             }
             answer => break answer,
         }
     };
     assert_eq!(answer.unwrap().expect("held").status, HeldBindingStatus::Current);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Opus's r2c-3c-6 finding 1: a hold whose contribution artifact passes its
+/// cap still answers current, with the preservation, Markdown included, it
+/// answers within the cap, and names no artifact, which it says is too
+/// large. Only the artifact is refused.
+#[tokio::test]
+async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let within = answered(inspection(&w, &CancellationToken::new()))
+        .await
+        .unwrap()
+        .expect("held");
+    assert!(matches!(within.contributions, Some(dohc_engine_sync::HeldContributions::Artifact(_))));
+    w.actor.held_proofs().set_artifact_cap(1);
+    let past = answered(inspection(&w, &CancellationToken::new()))
+        .await
+        .unwrap()
+        .expect("held");
+    assert_eq!(past.status, HeldBindingStatus::Current);
+    assert!(past.preservation.is_some());
+    assert_eq!(past.preservation, within.preservation, "the preservation, Markdown included");
+    assert_eq!(past.contributions, Some(dohc_engine_sync::HeldContributions::TooLarge));
     desktop.close().await;
     w.close().await;
 }

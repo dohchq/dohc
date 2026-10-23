@@ -16,7 +16,7 @@ export type HeldReadInvalidated = {readonly invalidated: "registration" | "attac
 
 /**
  * An inspection with the contribution artifact the engine streamed for it, exactly the bytes it names;
- * null when the inspection is not current, so it names none.
+ * null when the inspection is not current, or its artifact is too large, so it names none.
  */
 export type HeldContributionsRead = {inspected: HeldDocumentInspection; contributions: Uint8Array | null};
 
@@ -110,11 +110,12 @@ export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed
 
 /**
  * `inspected` with the contribution artifact the engine streamed for it. A
- * current inspection names one, and the stream must be exactly its bytes.
+ * current inspection names one unless it is too large, and the stream must
+ * be exactly its bytes.
  */
 export function withStreamedContributions(inspected: HeldDocumentInspection, streamed: StreamedBlob | undefined): HeldContributionsRead {
   const preservation = inspected.preservation;
-  if (preservation === null) return {inspected, contributions: null};
+  if (preservation === null || preservation.contributionsTooLarge) return {inspected, contributions: null};
   if (!announces(streamed, preservation.contributionsSha256, preservation.contributionsByteLength)) {
     throw new Error("Held document contributions do not match their inspection.");
   }
@@ -159,7 +160,8 @@ function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<U
  * artifact's digest. The Markdown route answers the whole text of a current,
  * complete preservation, and the contributions route the artifact of a
  * current one, each only while the binding and digest the caller inspected
- * still name it.
+ * still name it. An artifact past what the engine streams answers too large,
+ * and its preservation and Markdown still answer.
  */
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
   // One admitted read per owner and workspace, and MAX_HELD_READS_PER_OWNER per owner, each until its
@@ -234,8 +236,12 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     if (!standing() || answered === null || "invalidated" in answered) throw notFound();
     if (wanted && read === "contributions") {
       const {inspected, contributions} = answered as HeldContributionsRead;
-      if (inspected.status !== "current" || inspected.bindingDigest !== wanted.bindingDigest || contributions === null ||
-        inspected.preservation?.contributionsSha256 !== wanted.sha256) throw notFound();
+      if (inspected.status !== "current" || inspected.bindingDigest !== wanted.bindingDigest) throw notFound();
+      // Whatever artifact the caller names, this binding's is past what the engine streams.
+      if (inspected.preservation?.contributionsTooLarge) {
+        throw relayError("payload_too_large", "Held document contributions exceed the blob limit.");
+      }
+      if (contributions === null || inspected.preservation?.contributionsSha256 !== wanted.sha256) throw notFound();
       if (contributions.length > MAX_HELD_CONTRIBUTIONS_BYTES) {
         throw relayError("payload_too_large", "Held document contributions exceed the blob limit.");
       }

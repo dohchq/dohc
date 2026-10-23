@@ -6,6 +6,20 @@
 use super::*;
 use crate::ContentKind;
 
+/// The most memory a Y.Doc holds for each byte of the encoded state and
+/// updates applied to it, its items, branches and indexes included: an
+/// estimate, conservative for text, that measuring a proof's peak keeps
+/// honest.
+const YDOC_BYTES_PER_ENCODED_BYTE: u64 = 24;
+
+/// What one journal row a lineage's load lists holds: its sequence and
+/// blob digest.
+const LOADED_ROW_BYTES: u64 = 128;
+
+/// What one contribution adds to a merge's lists beyond its bytes: its
+/// place in the merged list and any finding, with room for each to double.
+const CONTRIBUTION_SLOT_BYTES: u64 = 2048;
+
 /// What [`inspect_held`] found for a binding.
 #[derive(Debug)]
 pub enum HeldInspection {
@@ -177,7 +191,7 @@ impl ContributionLocator {
 
 impl RetainedContribution {
     /// The bytes its text keeps, its authors included.
-    fn text_bytes(&self) -> usize {
+    pub(super) fn text_bytes(&self) -> usize {
         match self {
             Self::Carried {
                 delivery_id,
@@ -224,7 +238,10 @@ impl RetainedContribution {
 /// so an archived hold is inspected against its archive, never the head.
 /// Tails are validated afresh on `conn`, with nothing kept; run it inside
 /// one transaction, or on the store's only writer, so every read agrees.
-/// `stop` ends it, cancelled, at its next check.
+/// `stop` ends it, cancelled, at its next check. What it works with is
+/// reserved of `stop`'s memory before it is allocated, from the stored
+/// sizes of what it reads: the lineage's state before it loads, each tail's
+/// evidence before it is validated, and the merge as it grows.
 pub fn inspect_held(
     conn: &Connection,
     binding: &ReleasedLineageBinding,
@@ -236,6 +253,10 @@ pub fn inspect_held(
         object_id: binding.object_id.clone(),
     };
     let lineage = binding.lineage_claim_id.as_str();
+    let mut working = stop.working();
+    if working.limited() {
+        working.grow(lineage_workload(conn, &doc, lineage)?)?;
+    }
     let (state, digest) = match lineage_state(conn, &doc, lineage, stop)? {
         None => return Ok(HeldInspection::Stale),
         Some(LineageState::Read(canonical, kind, digest)) => (Some((canonical, kind)), digest),
@@ -248,7 +269,7 @@ pub fn inspect_held(
     if digest != binding.head_digest {
         return Ok(HeldInspection::Stale);
     }
-    let Some(work) = window_work(conn, &doc, lineage, stop)? else {
+    let Some(work) = window_work(conn, &doc, lineage, stop, &mut working)? else {
         return Ok(HeldInspection::Stale);
     };
     let (tails, work) = match work {
@@ -307,10 +328,78 @@ pub fn inspect_held(
             None,
         )));
     };
-    preserve(&canonical, kind, findings, readable, stop, |digest| {
-        stored_source(conn, digest)
-    })
+    preserve(
+        &canonical,
+        kind,
+        findings,
+        readable,
+        stop,
+        |digest| stored_length(conn, digest),
+        |digest| stored_source(conn, digest),
+    )
     .map(HeldInspection::Current)
+}
+
+/// What loading `lineage`'s state holds at most, from the stored lengths of
+/// the blobs it loads, read before any loads: the head's latest snapshot and
+/// the journal rows after it, listed, or the full state an archive keeps.
+/// Each blob loads, applies to the state, and the state is hashed as its
+/// full state.
+fn lineage_workload(conn: &Connection, doc: &DocKey, lineage: &str) -> Result<u64, ApplicationError> {
+    let head = durable::read_marker_in(conn, doc)?
+        .is_some_and(|marker| marker.lineage_claim_id.as_deref() == Some(lineage));
+    let (rows, bytes): (i64, Option<i64>) = if head {
+        conn.prepare_cached(
+            "WITH snapshot AS (SELECT up_to_seq,snapshot_blob_sha256 AS sha256 FROM ydoc_snapshots
+               WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+               ORDER BY up_to_seq DESC LIMIT 1),
+             loaded AS (SELECT sha256 FROM snapshot
+               UNION ALL SELECT update_blob_sha256 FROM ydoc_updates
+               WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+               AND seq>coalesce((SELECT up_to_seq FROM snapshot),0))
+             SELECT count(*),sum(length(b.bytes)) FROM loaded l
+             LEFT JOIN binary_blobs b ON b.sha256=l.sha256",
+        )
+        .map_err(read_sql)?
+        .query_row(
+            params![doc.workspace_id, doc.version_id, doc.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(read_sql)?
+    } else {
+        conn.prepare_cached(
+            "SELECT count(*),sum(length(b.bytes)) FROM ydoc_inactive_lineages l
+             LEFT JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256
+             WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3
+             AND l.lineage_claim_id=?4",
+        )
+        .map_err(read_sql)?
+        .query_row(
+            params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(read_sql)?
+    };
+    Ok(unsigned(rows)
+        .saturating_mul(LOADED_ROW_BYTES)
+        .saturating_add(unsigned(bytes.unwrap_or(0)).saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 2)))
+}
+
+/// A stored count or length, which is never negative.
+fn unsigned(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+/// The length of the bytes stored under `digest`, without loading them; 0
+/// when none are.
+fn stored_length(conn: &Connection, digest: &str) -> Result<u64, ApplicationError> {
+    let length: Option<Option<i64>> = conn
+        .prepare_cached("SELECT length(bytes) FROM binary_blobs WHERE sha256=?1")
+        .map_err(read_sql)?
+        .query_row([digest], |row| row.get(0))
+        .optional()
+        .map_err(read_sql)?;
+    Ok(unsigned(length.flatten().unwrap_or(0)))
 }
 
 fn finding(
@@ -480,13 +569,17 @@ impl Integration {
 ///
 /// `stop` is checked around the scratch state's reconstruction, before each
 /// contribution loads and again before it applies, and around the merged
-/// state's projection and encoding.
+/// state's projection and encoding. What the merge works with is reserved of
+/// its memory before it is allocated: the scratch state once the encoding it
+/// rebuilds from has its length, each contribution by the `length` of its
+/// bytes before they `load`, and the projection by everything merged.
 fn preserve(
     canonical: &Ydoc,
     kind: ContentKind,
     mut findings: Vec<PreservationFinding>,
     work: Vec<(String, Vec<RetainedContribution>)>,
     stop: Stop<'_>,
+    mut length: impl FnMut(&str) -> Result<u64, ApplicationError>,
     mut load: impl FnMut(&str) -> Result<Source, ApplicationError>,
 ) -> Result<Preservation, ApplicationError> {
     // A full-state encoding drops what the canonical state holds pending.
@@ -500,6 +593,11 @@ fn preserve(
     }
     stop.check(ProofStage::Merge)?;
     let base = canonical.encode_full_state();
+    let mut merging = u64::try_from(base.len()).unwrap_or(u64::MAX);
+    // The scratch state, and the state vector and delete set read of it
+    // before and after each application.
+    let mut working = stop.working();
+    working.grow(merging.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 2))?;
     stop.check(ProofStage::Merge)?;
     let scratch = Ydoc::wire();
     scratch.apply(&base)?;
@@ -512,6 +610,16 @@ fn preserve(
     for (namespace, contributions) in &work {
         for contribution in contributions {
             stop.check(ProofStage::Merge)?;
+            // Its bytes, what they add to the scratch state, to the state
+            // vector and delete set read of it and to what waits on them,
+            // and its place in the lists.
+            let bytes = length(contribution.update_digest())?;
+            working.grow(
+                bytes
+                    .saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 4)
+                    .saturating_add(CONTRIBUTION_SLOT_BYTES),
+            )?;
+            merging = merging.saturating_add(bytes);
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
             let bytes = match load(contribution.update_digest())? {
                 Source::Bytes(bytes) => bytes,
@@ -562,6 +670,9 @@ fn preserve(
     merged.dedup();
     let complete = findings.is_empty();
     let preserved = if complete {
+        // The projection, its Markdown source and the document checking
+        // that source rebuilds, and the merged full state.
+        working.grow(merging.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 4))?;
         stop.check(ProofStage::Projection)?;
         let projection = scratch.project(kind)?.content;
         let markdown = match kind {
@@ -644,6 +755,7 @@ mod tests {
             Vec::new(),
             vec![("namespace".to_owned(), work)],
             Stop::NEVER,
+            |digest| Ok(stored.get(digest).map_or(0, |bytes| bytes.len() as u64)),
             |digest| {
                 Ok(match stored.get(digest) {
                     Some(bytes) if hex_sha256(bytes) == digest => Source::Bytes(bytes.clone()),
@@ -820,6 +932,81 @@ mod tests {
         assert!(few.retained_bytes() >= few.preserved.as_ref().unwrap().full_state.len());
     }
 
+    /// Sol's r2c-3c-6 finding 2: a merge reserves what it works with of a
+    /// real proof's memory before it allocates it. With room for all of it,
+    /// it preserves, and what it keeps fits what it reserved. With room for
+    /// less than the scratch state, it refuses before rebuilding it; with
+    /// room for the scratch state alone, before it loads a contribution.
+    /// Either way the proof is too large, and nothing reserved ever passes
+    /// its memory.
+    #[test]
+    fn a_merge_reserves_what_it_works_with_before_it_allocates_it() {
+        let canonical = Ydoc::wire();
+        canonical
+            .rewrite_content_to_markdown(
+                ContentKind::Richdoc,
+                &"A paragraph someone wrote in their plan.\n\n".repeat(2_000),
+            )
+            .unwrap();
+        let writer = Ydoc::wire();
+        writer.apply(&canonical.encode_full_state()).unwrap();
+        let added = writer.richdoc_append_paragraph(&"Added work. ".repeat(1_000));
+        let stored = stored(&[&added]);
+        let scratch = canonical.encode_full_state().len() as u64 * (YDOC_BYTES_PER_ENCODED_BYTE + 2);
+        let contribution =
+            added.len() as u64 * (YDOC_BYTES_PER_ENCODED_BYTE + 4) + CONTRIBUTION_SLOT_BYTES;
+        let directory = dohc_test_scratch::ScratchDir::new().unwrap();
+        let store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        // What the merge answers within `capacity`, whether its proof
+        // stopped, how many contributions it loaded, how many checks it
+        // passed, and the most it reserved at once.
+        let merged = |capacity: u64| {
+            let limit = HeldProofLimit::new(1, capacity, 0);
+            let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
+            let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+                panic!("a free workspace starts its proof")
+            };
+            let (mut answer, mut loads) = (None, 0);
+            run.prove(|job| {
+                let preserved = preserve(
+                    &canonical,
+                    ContentKind::Richdoc,
+                    Vec::new(),
+                    vec![("namespace".to_owned(), vec![outbox(1, &added)])],
+                    job.stop(),
+                    |digest| Ok(stored.get(digest).map_or(0, |bytes| bytes.len() as u64)),
+                    |digest| {
+                        loads += 1;
+                        Ok(stored.get(digest).map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone())))
+                    },
+                );
+                answer = Some((preserved, job.stopped()));
+                ((), 0)
+            });
+            let (preserved, stopped) = answer.expect("the proof ran");
+            (preserved, stopped, loads, proofs.checks_passed(), limit.peak_reserved_bytes())
+        };
+
+        let (preserved, stopped, loads, _, peak) = merged(1 << 30);
+        let preserved = preserved.expect("room for all of it");
+        assert_eq!((preserved.status, stopped, loads), (PreservationStatus::Complete, None, 1));
+        assert!(
+            peak >= scratch + contribution + preserved.retained_bytes() as u64,
+            "what it keeps fits what it reserved: {peak}"
+        );
+
+        for (room, what, passed) in [
+            (scratch - 1, "the scratch state", 1),
+            (scratch + contribution - 1, "a contribution", 3),
+        ] {
+            let (preserved, stopped, loads, checks, peak) = merged(room);
+            assert!(matches!(preserved, Err(ApplicationError::Cancelled)), "{what}: {preserved:?}");
+            assert_eq!(stopped, Some(ProofStop::TooLarge), "{what}");
+            assert_eq!((loads, checks), (0, passed), "{what}: refused before it was allocated");
+            assert!(peak <= room, "{what}: {peak} reserved within {room}");
+        }
+    }
+
     /// Findings the caller brings, such as a tail whose evidence does not
     /// read, hold preservation back; the worst status wins.
     #[test]
@@ -831,6 +1018,7 @@ mod tests {
             vec![finding(PreservationReason::ContradictoryEvidence, Some("other"), None)],
             vec![("namespace".to_owned(), vec![outbox(1, &first)])],
             Stop::NEVER,
+            |_| Ok(0),
             |_| Ok(Source::Missing),
         )
         .unwrap();

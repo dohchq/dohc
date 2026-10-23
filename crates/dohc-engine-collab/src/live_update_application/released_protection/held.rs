@@ -7,9 +7,10 @@
 //! that ask the same of the same state, and stopped once none of them waits, its
 //! store closes, its store's WAL needs its reader gone, or its deadline
 //! passes. A daemon runs a few proofs at once, within a memory budget its
-//! proofs and their results share: a proof takes more of it before it grows
-//! what its result keeps past its reservation, and a result keeps only what
-//! fits.
+//! proofs and their results share: a proof takes more of it before it holds
+//! more than its reservation, while it works or in what its result keeps,
+//! and a result keeps only what fits.
+use super::binding::MAX_ARTIFACT_BYTES;
 use super::*;
 use crate::ContentKind;
 use dohc_engine_storage::{HeldReader, WalPressure};
@@ -38,9 +39,9 @@ const READER_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The proofs one daemon runs at once, across all its stores.
 const MAX_RUNNING_PROOFS: usize = 2;
 
-/// What a starting proof reserves of its daemon's proof memory: its
-/// contribution artifact, up to the 64 MiB a blob streams, and the growth of
-/// the text it encodes into.
+/// What a starting proof reserves of its daemon's proof memory: what most
+/// proofs hold while they work and keep, a contribution artifact up to the
+/// 64 MiB a blob streams included. A proof takes more before it holds more.
 const PROOF_RESERVATION_BYTES: u64 = 128 << 20;
 
 /// The memory a daemon's running proofs, and the results their callers
@@ -90,6 +91,8 @@ struct ProofState<K, T> {
     deadline: Duration,
     /// How long close waits for proofs' readers to close.
     close_bound: Duration,
+    /// The largest contribution artifact a proof admitted now encodes.
+    artifact_cap: usize,
     #[cfg(any(test, feature = "test-support"))]
     admitted: u64,
 }
@@ -124,9 +127,8 @@ pub enum HeldProofError {
     /// its deadline. Its caller asks again later.
     #[error("the held document's proof gave way to the store's writes or its deadline")]
     Busy,
-    /// What the proof's result keeps is more than its daemon's proof memory
-    /// holds, or its contribution artifact more than one may hold. Asking
-    /// again answers the same.
+    /// What the proof holds while it works, or its result keeps, is more
+    /// than its daemon's proof memory holds. Asking again answers the same.
     #[error("the held document's answer is larger than a held read may keep")]
     TooLarge,
     #[error("the held document's proof panicked")]
@@ -158,11 +160,11 @@ pub enum ProofStop {
     Preempted = 3,
     /// It reached its deadline.
     Deadline = 4,
-    /// Its daemon's proof memory could not hold more of what its result
-    /// keeps until other proofs and results free theirs.
+    /// Its daemon's proof memory could not hold more of what it works with
+    /// or its result keeps until other proofs and results free theirs.
     Memory = 5,
-    /// What its result keeps would never fit: more than its daemon's proof
-    /// memory, or a contribution artifact past its cap.
+    /// What it works with or its result keeps would never fit: more than its
+    /// daemon's proof memory.
     TooLarge = 6,
 }
 
@@ -248,10 +250,10 @@ impl Halt {
 /// and the memory they and the results their callers still hold keep, which
 /// never passes its capacity. A proof takes its reservation only when it
 /// starts, and is busy beyond it, never queued; it takes more before it
-/// grows what its result keeps past that, and is busy or too large when
-/// that does not fit. It frees its place once its reader closed and its
-/// result is handed over, and its result keeps what fits of its memory
-/// until the last caller drops it.
+/// holds more than that, while it works or in what its result keeps, and is
+/// busy or too large when that does not fit. It frees its place once its
+/// reader closed and its result is handed over, and its result keeps what
+/// fits of its memory until the last caller drops it.
 #[derive(Clone)]
 pub struct HeldProofLimit(Arc<Mutex<Budget>>);
 
@@ -262,6 +264,9 @@ struct Budget {
     reserved: u64,
     capacity: u64,
     reservation: u64,
+    /// The most ever reserved at once.
+    #[cfg(any(test, feature = "test-support"))]
+    peak: u64,
 }
 
 impl Budget {
@@ -276,8 +281,16 @@ impl Budget {
         if others.saturating_add(bytes) > self.capacity {
             return Err(ProofStop::Memory);
         }
-        self.reserved = others + bytes;
+        self.reserve(others + bytes);
         Ok(())
+    }
+
+    fn reserve(&mut self, reserved: u64) {
+        self.reserved = reserved;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.peak = self.peak.max(reserved);
+        }
     }
 }
 
@@ -297,6 +310,8 @@ impl HeldProofLimit {
             reserved: 0,
             capacity,
             reservation,
+            #[cfg(any(test, feature = "test-support"))]
+            peak: 0,
         })))
     }
 
@@ -314,13 +329,15 @@ impl HeldProofLimit {
             return None;
         }
         budget.running += 1;
-        budget.reserved += budget.reservation;
+        let reserved = budget.reserved + budget.reservation;
+        budget.reserve(reserved);
         Some(ProofPermit {
             memory: Arc::new(ProofMemory {
                 limit: self.clone(),
                 taken: Mutex::new(Taken {
                     held: budget.reservation,
                     kept: 0,
+                    working: 0,
                 }),
             }),
         })
@@ -332,6 +349,13 @@ impl HeldProofLimit {
     pub fn reserved_bytes(&self) -> u64 {
         lock(&self.0).reserved
     }
+
+    /// The most bytes ever reserved and charged at once.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn peak_reserved_bytes(&self) -> u64 {
+        lock(&self.0).peak
+    }
 }
 
 /// A running proof's place in its daemon's limit, with the memory it holds,
@@ -341,7 +365,7 @@ struct ProofPermit {
 }
 
 /// What a running proof holds of its daemon's proof memory, which its job
-/// grows through [`Stop::reserve`].
+/// grows through [`Stop::reserve`] and [`Work::grow`].
 struct ProofMemory {
     limit: HeldProofLimit,
     taken: Mutex<Taken>,
@@ -353,21 +377,49 @@ struct Taken {
     held: u64,
     /// Bytes of what its result keeps that the proof reserved so far.
     kept: u64,
+    /// Bytes its work holds now, which its result never keeps.
+    working: u64,
+}
+
+impl Taken {
+    /// Hold at least `needed` bytes, taking more of `limit`'s memory when
+    /// they pass what is held; why not, when that does not fit.
+    fn cover(&mut self, limit: &HeldProofLimit, needed: u64) -> Result<(), ProofStop> {
+        if needed > self.held {
+            lock(&limit.0).replace(self.held, needed)?;
+            self.held = needed;
+        }
+        Ok(())
+    }
 }
 
 impl ProofMemory {
     /// Reserve `bytes` more of what the proof's result keeps, before they
-    /// are allocated, taking more of the daemon's proof memory once they
-    /// pass what the proof holds; why not, when that does not fit.
+    /// are allocated, beside what its work holds.
     fn reserve(&self, bytes: u64) -> Result<(), ProofStop> {
         let mut taken = lock(&self.taken);
         let kept = taken.kept.saturating_add(bytes);
-        if kept > taken.held {
-            lock(&self.limit.0).replace(taken.held, kept)?;
-            taken.held = kept;
-        }
+        let needed = kept.saturating_add(taken.working);
+        taken.cover(&self.limit, needed)?;
         taken.kept = kept;
         Ok(())
+    }
+
+    /// Reserve `bytes` more of what the proof's work holds, before they are
+    /// allocated, beside what its result keeps.
+    fn work(&self, bytes: u64) -> Result<(), ProofStop> {
+        let mut taken = lock(&self.taken);
+        let working = taken.working.saturating_add(bytes);
+        let needed = working.saturating_add(taken.kept);
+        taken.cover(&self.limit, needed)?;
+        taken.working = working;
+        Ok(())
+    }
+
+    /// The proof's work freed `bytes`. What it took stays held until it ends.
+    fn worked(&self, bytes: u64) {
+        let mut taken = lock(&self.taken);
+        taken.working = taken.working.saturating_sub(bytes);
     }
 }
 
@@ -446,6 +498,7 @@ impl<K, T> HeldProofs<K, T> {
                 closed: false,
                 deadline: HELD_PROOF_DEADLINE,
                 close_bound: HELD_PROOF_CLOSE_BOUND,
+                artifact_cap: MAX_ARTIFACT_BYTES,
                 #[cfg(any(test, feature = "test-support"))]
                 admitted: 0,
             }),
@@ -513,6 +566,7 @@ impl<K: PartialEq, T> HeldProofs<K, T> {
                     Some(store.wal_pressure()),
                 )),
                 memory: Some(Arc::clone(&permit.memory)),
+                artifact_cap: state.artifact_cap,
                 readers: Arc::clone(&self.0.readers),
                 #[cfg(any(test, feature = "test-support"))]
                 gate: Arc::clone(&self.0.gate),
@@ -852,6 +906,8 @@ pub struct HeldProofJob {
     /// What it holds of its daemon's proof memory; none for a proof nothing
     /// limits.
     memory: Option<Arc<ProofMemory>>,
+    /// The largest contribution artifact it encodes.
+    artifact_cap: usize,
     /// The readers its store's proofs hold open, its own among them.
     readers: Arc<OpenReaders>,
     #[cfg(any(test, feature = "test-support"))]
@@ -867,6 +923,7 @@ impl HeldProofJob {
             path: store.database_path().to_owned(),
             halt: Arc::new(Halt::new(None, None)),
             memory: None,
+            artifact_cap: MAX_ARTIFACT_BYTES,
             readers: Arc::default(),
             #[cfg(any(test, feature = "test-support"))]
             gate: Arc::default(),
@@ -1036,7 +1093,7 @@ impl Stop<'static> {
     pub const NEVER: Self = Stop(None);
 }
 
-impl Stop<'_> {
+impl<'a> Stop<'a> {
     /// Cancelled once the proof should stop, for whichever reason.
     pub fn check(self, stage: ProofStage) -> Result<(), ApplicationError> {
         let Some(job) = self.0 else {
@@ -1061,7 +1118,7 @@ impl Stop<'_> {
     /// proof memory. Cancelled when that does not fit, and the proof then
     /// answers busy, or too large when it never would.
     pub fn reserve(self, bytes: usize) -> Result<(), ApplicationError> {
-        let Some(memory) = self.0.and_then(|job| job.memory.as_ref()) else {
+        let Some(memory) = self.memory() else {
             return Ok(());
         };
         memory
@@ -1069,16 +1126,71 @@ impl Stop<'_> {
             .map_err(|reason| self.refuse(reason))
     }
 
+    /// What the proof's work holds, none yet, given back once dropped.
+    pub fn working(self) -> Work<'a> {
+        Work {
+            stop: self,
+            bytes: 0,
+        }
+    }
+
+    /// The largest contribution artifact the proof encodes.
+    pub fn artifact_cap(self) -> usize {
+        self.0.map_or(MAX_ARTIFACT_BYTES, |job| job.artifact_cap)
+    }
+
+    fn memory(self) -> Option<&'a ProofMemory> {
+        self.0.and_then(|job| job.memory.as_deref())
+    }
+
     /// Stop the proof for `reason`, a refusal of its memory, and what its
     /// work answers: cancelled, the proof answering for that reason, or over
     /// budget for a read with no proof.
-    pub(super) fn refuse(self, reason: ProofStop) -> ApplicationError {
+    fn refuse(self, reason: ProofStop) -> ApplicationError {
         match self.0 {
             Some(job) => {
                 job.stop_for(reason);
                 ApplicationError::Cancelled
             }
             None => ApplicationError::ConfiguredByteBudgetExceeded,
+        }
+    }
+}
+
+/// What a proof's work holds of its memory while it runs, reserved before
+/// it is allocated and given back once dropped. A read nothing limits holds
+/// nothing.
+#[must_use]
+pub struct Work<'a> {
+    stop: Stop<'a>,
+    bytes: u64,
+}
+
+impl Work<'_> {
+    /// Whether the proof's memory limits what this holds, so a workload is
+    /// worth reading for it.
+    pub fn limited(&self) -> bool {
+        self.stop.memory().is_some()
+    }
+
+    /// Reserve `bytes` more, before they are allocated: within the proof's
+    /// reservation, or taking more of its daemon's proof memory. Cancelled
+    /// when that does not fit, and the proof then answers busy, or too large
+    /// when it never would.
+    pub fn grow(&mut self, bytes: u64) -> Result<(), ApplicationError> {
+        let Some(memory) = self.stop.memory() else {
+            return Ok(());
+        };
+        memory.work(bytes).map_err(|reason| self.stop.refuse(reason))?;
+        self.bytes = self.bytes.saturating_add(bytes);
+        Ok(())
+    }
+}
+
+impl Drop for Work<'_> {
+    fn drop(&mut self) {
+        if let Some(memory) = self.stop.memory() {
+            memory.worked(self.bytes);
         }
     }
 }
@@ -1555,6 +1667,13 @@ impl<K, T> HeldProofs<K, T> {
     #[doc(hidden)]
     pub fn set_close_bound(&self, bound: Duration) {
         lock(&self.0.state).close_bound = bound;
+    }
+
+    /// Let proofs admitted from now on encode contribution artifacts of at
+    /// most `bytes`.
+    #[doc(hidden)]
+    pub fn set_artifact_cap(&self, bytes: usize) {
+        lock(&self.0.state).artifact_cap = bytes;
     }
 
     /// Whether the store of `workspace_id`'s running proof presses on its

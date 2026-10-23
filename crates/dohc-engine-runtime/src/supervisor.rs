@@ -176,7 +176,9 @@ impl WorkspaceSupervisor {
     /// file identity (creating an empty database file if needed), and — if a
     /// live actor for that identity already exists — its handle is returned
     /// without opening a second connection. A dead actor (its worker panicked)
-    /// is evicted and re-opened.
+    /// is evicted and re-opened, unless a held proof's reader keeps its store
+    /// past the close bound: the store then drains, and this answers
+    /// [`RuntimeError::StoreInUse`].
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
         self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None, None)
     }
@@ -308,8 +310,16 @@ impl WorkspaceSupervisor {
                 }
             }
         }
-        // Release the evicted actor's worker outside the lock.
-        drop(dead);
+        // Close the evicted actor outside the lock. Its held proofs run on
+        // threads of their own, so its worker's end stopped none of them: a
+        // reader past the close bound keeps the store, and the reservation
+        // becomes the draining slot.
+        if let Some(mut dead) = dead {
+            if let Err(RuntimeError::StoreInUse) = dead.close() {
+                self.release_markers(&[], [(identity, dead.held_proofs())]);
+                return Err(RuntimeError::StoreInUse);
+            }
+        }
 
         let held_limit = self.held_proofs.clone();
         let spawned = match mode {

@@ -636,6 +636,38 @@ impl ActorHandle {
         self.pulls.waited.notified().await;
     }
 
+    /// How many checkpoint requests the store's background worker has
+    /// finished, for tests that wait for the next.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn checkpoints_completed_for_test(&self) -> Result<u64, RuntimeError> {
+        self.run(|store, _| Ok(store.checkpoint_completed_for_test()))
+            .await
+    }
+
+    /// Completes once the store's background worker finished a checkpoint
+    /// request after the `before`th, which it must within a minute.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn wait_for_checkpoint_completion_for_test(
+        &self,
+        before: u64,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.wait_for_checkpoint_completion_for_test(before);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Completes once the actor's worker has exited, however it ended: its
+    /// lifecycle is closed and its commands go nowhere.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn worker_exited(&self) {
+        self.tx.closed().await;
+    }
+
     /// Engine diagnostics for the derived index; no store read or drain.
     pub fn link_drain_metrics(&self) -> LinkDrainMetrics {
         self.link_metrics

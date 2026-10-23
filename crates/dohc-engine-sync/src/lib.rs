@@ -69,7 +69,7 @@ use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
     DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HeldAnswer, HeldBindingStatus,
-    HeldDocument,
+    HeldContributions, HeldDocument,
     HeldDocumentInspection, HeldDocumentsPage, HeldFreshness, HeldKey, HeldProof,
     HeldProofAdmission, HeldProofs, HeldRelease, HostedCommit, HostedCursor, HostedDocumentState,
     HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState, MAX_HELD_DOCUMENTS_PAGE,

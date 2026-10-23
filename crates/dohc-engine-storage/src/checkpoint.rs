@@ -338,12 +338,12 @@ impl Checkpoints {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn completed_for_test(&self) -> u64 {
         *self.completed.0.lock().unwrap()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn wait_for_completion_for_test(&self, before: u64) {
         let (sequence, signal) = &*self.completed;
         let (sequence, _) = signal

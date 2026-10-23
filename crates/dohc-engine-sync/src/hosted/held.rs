@@ -10,7 +10,7 @@ use std::sync::Arc;
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::{
     self as live, Charged, ContributionArtifact, HeldInspection, HeldProofJob,
-    LineageCoordinates, Preservation, inspect_held, store_identity,
+    LineageCoordinates, Preservation, Work, inspect_held, store_identity,
 };
 
 use super::*;
@@ -109,8 +109,31 @@ pub struct HeldDocumentInspection {
     pub preservation: Option<Preservation>,
     /// The binding and the work that preservation covers and merged, as
     /// the owner downloads them; present with the preservation.
-    pub contributions: Option<ContributionArtifact>,
+    pub contributions: Option<HeldContributions>,
 }
+
+/// A current inspection's contribution artifact, or that it has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldContributions {
+    Artifact(ContributionArtifact),
+    /// The artifact would pass what one blob streams. The preservation, and
+    /// its Markdown, still answer.
+    TooLarge,
+}
+
+impl HeldContributions {
+    pub fn artifact(&self) -> Option<&ContributionArtifact> {
+        match self {
+            Self::Artifact(artifact) => Some(artifact),
+            Self::TooLarge => None,
+        }
+    }
+}
+
+/// The most memory decoding a stored binding holds for each of its bytes:
+/// its JSON value, the binding, its canonical JSON compared with the stored
+/// bytes, and the binding inspection derives again to compare.
+const BINDING_BYTES_PER_STORED_BYTE: u64 = 16;
 
 /// The largest page [`list_held_documents`] answers.
 pub const MAX_HELD_DOCUMENTS_PAGE: usize = 256;
@@ -264,6 +287,7 @@ impl HeldProof {
             let artifact = inspection
                 .contributions
                 .as_ref()
+                .and_then(HeldContributions::artifact)
                 .map_or(0, |artifact| artifact.bytes.capacity());
             u64::try_from(preservation + artifact).unwrap_or(u64::MAX)
         })
@@ -276,24 +300,29 @@ impl HeldProof {
 /// the inspection needs runs here: decoding the binding, tail enumeration,
 /// provenance validation, replay, merging and projection inside the
 /// transaction, then the contribution artifact once the reader closed, each
-/// checking between its units whether `job` stopped. What the preservation
-/// keeps is reserved of `job`'s memory before the artifact grows, and the
-/// artifact reserves its own as it grows. The reader closes before this
-/// returns, however it returns. A reader that cannot open is a locked
-/// store, never corrupt evidence.
+/// checking between its units whether `job` stopped. What each works with
+/// is reserved of `job`'s memory before it is allocated, decoding the
+/// binding from its stored length first. What the preservation keeps is
+/// reserved before the artifact grows, and the artifact reserves its own as
+/// it grows; one past its cap leaves the inspection with none, and the rest
+/// still answers. The reader closes before this returns, however it
+/// returns. A reader that cannot open is a locked store, never corrupt
+/// evidence.
 pub fn prove_held_document(
     job: &HeldProofJob,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<HeldProof, SyncError> {
     let stop = job.stop();
+    // What the decoded binding holds, until the artifact names it.
+    let mut working = stop.working();
     let mut reader = job.reader().map_err(protection_failure)?;
     let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;
     let key = held_key(&tx, job.opening(), engine, workspace_id, object_id)?;
     let binding = key
         .hold
         .as_ref()
-        .map(|document| held_binding(&tx, workspace_id, document))
+        .map(|document| held_binding(&tx, workspace_id, document, &mut working))
         .transpose()?;
     let lineage = binding
         .as_ref()
@@ -325,7 +354,14 @@ pub fn prove_held_document(
         (Some(binding), Some(preservation)) => {
             stop.reserve(preservation.retained_bytes())
                 .map_err(protection_failure)?;
-            Some(ContributionArtifact::of(binding, preservation, stop).map_err(protection_failure)?)
+            Some(
+                match ContributionArtifact::of(binding, preservation, stop)
+                    .map_err(protection_failure)?
+                {
+                    Some(artifact) => HeldContributions::Artifact(artifact),
+                    None => HeldContributions::TooLarge,
+                },
+            )
         }
         _ => None,
     };
@@ -517,12 +553,30 @@ fn held_in(
 }
 
 /// The binding `document`'s hold stores, which must be the one its digest
-/// names. Only a proof decodes it.
+/// names. Only a proof decodes it: what decoding holds is reserved in
+/// `working` from the binding's stored length before its bytes are read,
+/// and they decode only once they hash, as they are, to that digest. A
+/// binding that decodes is its canonical JSON, so that hash is its digest.
 fn held_binding(
     conn: &Connection,
     workspace_id: &str,
     document: &HeldDocument,
+    working: &mut Work<'_>,
 ) -> Result<ReleasedLineageBinding, SyncError> {
+    if working.limited() {
+        let length: Option<i64> = conn
+            .query_row(
+                "SELECT octet_length(released_hold_binding_json) FROM hosted_documents \
+                 WHERE workspace_id=?1 AND object_id=?2",
+                params![workspace_id, document.object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        let length = u64::try_from(length.unwrap_or(0)).unwrap_or(0);
+        working
+            .grow(length.saturating_mul(BINDING_BYTES_PER_STORED_BYTE))
+            .map_err(protection_failure)?;
+    }
     let stored: String = conn
         .query_row(
             "SELECT released_hold_binding_json FROM hosted_documents \
@@ -531,9 +585,10 @@ fn held_binding(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    ReleasedLineageBinding::from_canonical_json(&stored)
-        .filter(|binding| binding.digest() == document.binding_digest)
-        .ok_or_else(malformed)
+    if ReleasedLineageBinding::canonical_digest(&stored) != document.binding_digest {
+        return Err(malformed());
+    }
+    ReleasedLineageBinding::from_canonical_json(&stored).ok_or_else(malformed)
 }
 
 /// The `hosted_documents` columns that say what holds a document for
