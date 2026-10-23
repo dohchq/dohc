@@ -97,22 +97,34 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   await expect(validate(input)).rejects.toThrow("closed");
 });
 
-it("keeps the process alive until close has ended its idle child", async () => {
+it.each([
+  ["its idle child", ""],
+  // Shutdown starts just before the job's result handler runs.
+  ["a child whose result arrives after close begins", `const {ChildProcess} = await import("node:child_process"), emit = ChildProcess.prototype.emit;
+    ChildProcess.prototype.emit = function (event, ...args) {
+      if (event === "message") closing ??= pool.close();
+      return emit.call(this, event, ...args);
+    };`],
+])("keeps the process alive until close has ended %s", async (_case, setup) => {
   const {input} = fixture();
   // Nothing else holds this process open once the job completes and its child goes idle.
   const script = `const {createLiveValidationExecutor} = await import(process.argv[1]);
     const pool = createLiveValidationExecutor();
+    let closing;
+    ${setup}
     const result = await pool.validator(${JSON.stringify(policy)})({document: ${JSON.stringify(input.document)}, currentPath: "note.md",
       checkpoint: new Uint8Array(Buffer.from(process.argv[2], "base64")), suffix: [], candidate: Uint8Array.of(0, 0)});
     if (result.kind !== "accepted") throw new Error("Expected accepted validation");
-    await pool.close();
+    await (closing ?? pool.close());
     console.log("closed");`;
   const {stdout} = await promisify(execFile)(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
     "--input-type=module", "-e", script, new URL("./liveValidation.ts", import.meta.url).href, Buffer.from(input.checkpoint).toString("base64")]);
   expect(stdout.trim()).toBe("closed");
 });
 
-it("fails a job whose fork is refused for open files, frees its slot, and keeps the relay up", async () => {
+// Node returns before creating stdio for EMFILE, then emits `error` and `close`.
+// For EAGAIN it wraps the unopened pipes, emits `error`, and never emits `close`.
+it.each(["EMFILE", "EAGAIN"] as const)("fails a job whose fork is refused with %s, frees its slot, and keeps the relay up", async code => {
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
   // The held job runs far longer than the test, so only the failed fork's slot can free capacity.
   const held = new AbortController();
@@ -120,17 +132,17 @@ it("fails a job whose fork is refused for open files, frees its slot, and keeps 
     .catch((error: unknown) => error);
   const binding = (process as unknown as {binding(name: string): unknown}).binding;
   const {Process} = binding("process_wrap") as {Process: {prototype: {spawn(options: unknown): number}}};
-  const {UV_EMFILE} = binding("uv") as {UV_EMFILE: number};
+  const errno = (binding("uv") as Record<`UV_${typeof code}`, number>)[`UV_${code}`];
   const spawn = Process.prototype.spawn;
-  // Node returns before creating stdio, then emits `error` and `close`.
-  Process.prototype.spawn = () => {Process.prototype.spawn = spawn; return UV_EMFILE;};
+  Process.prototype.spawn = () => {Process.prototype.spawn = spawn; return errno;};
   try {
-    await expect(validate(input)).rejects.toThrow("EMFILE");
+    await expect(validate(input)).rejects.toThrow(code);
   } finally {Process.prototype.spawn = spawn;}
   await validate.waitForCapacity!();
   expect((await validate(input)).kind).toBe("accepted");
   held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
-}, 60_000);
+  await pool.close();
+}, 30_000);
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 /** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */

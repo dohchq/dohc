@@ -115,15 +115,21 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
     const exited = new Promise<void>((resolve) => (exit = resolve));
     const slot: Slot = { child, busy: false, heapExhausted: false, exited };
     slots.add(slot);
-    // Listen before touching stdio: a fork refused with EMFILE has none, then errors and closes.
-    child.on("error", () => {}); // A failed child must not crash the relay.
-    // `close` follows the exit and the end of stderr, so its verdict is complete.
-    child.once("close", () => {
+    const release = () => {
       slots.delete(slot);
       exit();
       notify();
+    };
+    // Listen before touching stdio: a fork refused with EMFILE has none, then errors and closes.
+    // A failed child must not crash the relay. A fork refused with EAGAIN has unopened pipes and never closes.
+    child.on("error", () => {
+      if (child.pid === undefined) release();
     });
+    // `close` follows the exit and the end of stderr, so its verdict is complete.
+    child.once("close", release);
     let carry = "";
+    // Reading a refused fork's unopened stderr fails; that must not crash the relay.
+    child.stderr?.on("error", () => {});
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (text: string) => {
       process.stderr.write(text);
@@ -181,7 +187,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       const complete = (value: unknown) => {
         if (!settle()) return;
         slot.busy = false;
-        hold(slot, false);
+        // A result that arrives after `close` began must not release its hold.
+        if (!closed) hold(slot, false);
         resolve(value as Result);
         notify();
       };
