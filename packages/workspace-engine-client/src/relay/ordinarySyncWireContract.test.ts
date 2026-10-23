@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, releasedLineageBindingDigest } from "./ordinarySyncWireContract";
+import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, hostedHeldWindowCovers } from "./ordinarySyncWireContract";
 import { canonicalJson } from "./releasedLineageBinding";
 import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 
@@ -91,17 +91,41 @@ const holds = [
   { objectId: "d", reason: "hosted-backfill-work-waiting" },
   { objectId: "e", reason: "hosted-scope-path-mismatch", scopePath: "docs/e.md", headPath: null },
   { objectId: "f", reason: "hosted-live-edit-unadmitted" },
-  { objectId: "g", reason: "released-lineage-unsettled", binding: JSON.parse(vectors.valid[0]!.canonical),
+  { objectId: "g", reason: "released-lineage-unsettled", path: "docs/g.md", bindingDigest: vectors.valid[0]!.digest,
     continuation: "frozen", bindingStale: false },
 ];
 const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
   pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds,
-  departed: ["gone"] };
+  heldThrough: null, departed: ["gone"] };
 
 describe("hosted native sync contract", () => {
   it("keeps the issued hosted cursor, every hold with its fields, departed documents, and a pass that adopted a scope", () => {
     expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, ignored: true })).toEqual(hosted);
     expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, pendingCursor: null, held: [] }).pendingCursor).toBeNull();
+  });
+
+  it("keeps a held list that stops early at the last document it lists, in the engine's byte order", () => {
+    const cut = { ...hosted, held: holds.slice(0, 2), heldThrough: "c" };
+    expect(decodeHostedSyncResult("sync.pullHosted", cut)).toEqual(cut);
+    // UTF-16 puts the astral ID first; the engine's UTF-8 bytes put it last.
+    const ordered = [{ objectId: "￿", reason: "hosted-backfill-work-waiting" }, { objectId: "\u{10000}", reason: "hosted-backfill-work-waiting" }];
+    expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, held: ordered }).held).toEqual(ordered);
+    expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, held: [...ordered].reverse() })).toThrow(ProtocolShapeError);
+  });
+
+  it.each([
+    { held: holds.slice(0, 2), heldThrough: "a" }, { held: holds.slice(0, 2), heldThrough: "b" }, { held: [], heldThrough: "a" },
+    { held: [holds[1], holds[0]] }, { held: [holds[0], holds[0]] }, { held: holds.slice(0, 2), heldThrough: "" },
+    { heldThrough: undefined },
+  ])("rejects a held list that contradicts where it stops: %j", patch => {
+    expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
+  });
+
+  it("speaks for a document only inside its held list's window", () => {
+    const window = { after: "b", through: "d" };
+    expect(["a", "b", "c", "d", "e"].filter(objectId => hostedHeldWindowCovers(window, objectId))).toEqual(["c", "d"]);
+    expect(hostedHeldWindowCovers({ after: undefined, through: null }, "any")).toBe(true);
+    expect(hostedHeldWindowCovers({ after: "￿", through: null }, "\u{10000}")).toBe(true);
   });
 
   it("keeps a commit that stands beside the retirement error after it, and unread departed documents", () => {
@@ -112,21 +136,16 @@ describe("hosted native sync contract", () => {
     expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, committed: false, retirement: null }).committed).toBe(false);
   });
 
-  it("keeps a released-lineage hold's binding exactly, so its digest is the engine's", () => {
-    const held = decodeHostedSyncResult("sync.pullHosted", hosted).held[5]!;
-    if (held.reason !== "released-lineage-unsettled") throw new Error("Expected the released-lineage hold.");
-    expect(releasedLineageBindingDigest(held.binding)).toBe(vectors.valid[0]!.digest);
+  it("names a released-lineage hold by the summary discovery lists, its binding only by its digest", () => {
+    expect(decodeHostedSyncResult("sync.pullHosted", hosted).held[5]).toEqual(holds[5]);
     const stale = { ...holds[5], continuation: "dependency-drain", bindingStale: true };
     expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, held: [stale] }).held).toEqual([stale]);
   });
 
-  const binding = JSON.parse(vectors.valid[1]!.canonical);
-  const v1 = vectors.invalid.find(vector => vector.name === "a version 1 binding")!;
   it.each([
-    { held: [{ ...holds[5], binding: undefined }] }, { held: [{ ...holds[5], binding: { ...binding, extra: 1 } }] },
-    { held: [{ ...holds[5], binding: JSON.parse(v1.text) }] },
-    { held: [{ ...holds[5], binding: { ...binding, currentPath: undefined } }] },
-    { held: [{ ...holds[5], binding: { ...binding, incoming: { ...binding.incoming, relaySeq: 0 } } }] },
+    { held: [{ ...holds[5], binding: JSON.parse(vectors.valid[0]!.canonical) }] }, { held: [{ ...holds[5], binding: null }] },
+    { held: [{ ...holds[5], bindingDigest: undefined }] }, { held: [{ ...holds[5], bindingDigest: "D".repeat(64) }] },
+    { held: [{ ...holds[5], path: undefined }] }, { held: [{ ...holds[5], path: "" }] },
     { held: [{ ...holds[5], continuation: "thawed" }] }, { held: [{ ...holds[5], continuation: undefined }] },
     { held: [{ ...holds[5], bindingStale: undefined }] }, { held: [{ ...holds[5], bindingStale: 0 }] },
   ])("rejects an unusable released-lineage hold: %j", patch => {

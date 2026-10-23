@@ -1,4 +1,4 @@
-import { decodeHostedSyncResult, type HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
+import { decodeHostedSyncResult, hostedHeldWindowCovers, type HostedHeldWindow, type HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
@@ -37,8 +37,10 @@ export interface ServiceHostedPullPage {
   readonly sharingDeclined: readonly SharingDeclined[];
   /** The paths the page wrote or deleted, in any version. */
   readonly changedPaths: readonly string[];
-  /** The documents the pass fetched and left held. None may be edited live until a later capture succeeds. */
+  /** The documents the pass left held within `heldWindow`. None may be edited live until a later capture succeeds. */
   readonly held: readonly ServiceHostedHold[];
+  /** Where `held` speaks for every document. Past it, the page says nothing of what is held. */
+  readonly heldWindow: HostedHeldWindow;
 }
 
 const isDivergence = (error: unknown) => error instanceof EngineRequestError &&
@@ -56,6 +58,9 @@ export class ServiceHostedReplication {
   #running = false;
   #diverged = false;
   #departed: ReadonlySet<string> | null = null;
+  // Where the next pass lists held documents from: after the last one a cut list named, so every
+  // hold is named within a few passes however many there are.
+  #heldAfter: string | undefined;
   constructor(readonly connection: {
     client: Pick<EngineClient, "sendRequest">; workspace: string; workspaceId: string;
     nextRequestId(): number; deadlineMs: number; signal: AbortSignal; assertCurrent(): void;
@@ -103,7 +108,9 @@ export class ServiceHostedReplication {
   }
   /**
    * Runs up to maxPagesPerPull hosted passes. `onPage` hears each pass once it
-   * committed, or committed nothing, before the next is asked for. A
+   * committed, or committed nothing, before the next is asked for. Each pass
+   * lists the held documents after where the last one's list stopped, and
+   * from the first once a list reached the last. A
    * retirement that failed after its commit fails the pull; the next pull
    * retries it first.
    */
@@ -111,7 +118,14 @@ export class ServiceHostedReplication {
     return this.#run(callerSignal, async signal => {
       const pages: ServiceHostedPullPage[] = [];
       for (let index = 0; index < this.#config.maxPagesPerPull; index++) {
-        const pass = decodeHostedSyncResult("sync.pullHosted", await this.#request("sync.pullHosted", {}, signal));
+        const after = this.#heldAfter;
+        const pass = decodeHostedSyncResult("sync.pullHosted",
+          await this.#request("sync.pullHosted", after === undefined ? {} : {heldAfter: after}, signal));
+        const heldWindow = {after, through: pass.heldThrough};
+        if (!pass.held.every(hold => hostedHeldWindowCovers(heldWindow, hold.objectId))) {
+          throw new Error("hosted sync.pullHosted result: held documents before where their list starts");
+        }
+        this.#heldAfter = pass.heldThrough ?? undefined;
         this.#departed = new Set(pass.departed);
         const sharingDeclined = [...pass.sharingDeclined];
         // A pass that adopted a scope, or whose scope moved, applied nothing: pull again.
@@ -130,7 +144,7 @@ export class ServiceHostedReplication {
         }
         const page = {committed, adoptedScope: !pendingCursor, fetched: pass.fetched, applied: pass.applied, refused: pass.refused, skipped: pass.skipped,
           conflictsOpened: pass.conflictsOpened, refusals: pass.refusals, sharingDeclined,
-          changedPaths: pass.changedPaths.map(row => row.path), held: pass.held};
+          changedPaths: pass.changedPaths.map(row => row.path), held: pass.held, heldWindow};
         pages.push(page);
         onPage?.(page);
         if (retirement) throw new Error(`Hosted retirement failed: ${retirement.message}`);
