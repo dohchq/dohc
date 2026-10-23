@@ -133,6 +133,8 @@ mac:
   # zip is required alongside dmg for macOS auto-updates (electron-updater).
   target: [dmg, zip]
   hardenedRuntime: true
+  # Sign Node, then pin its final bytes before the outer app is sealed.
+  sign: scripts/sign-engine-reader-macos.mjs
   # Document types are set here, not in fileAssociations, which give each
   # document the full app icon. With CFBundleTypeIconSystemGenerated, macOS
   # draws a page with dohc's icon on it. dohc edits Markdown as its own
