@@ -17,10 +17,7 @@ import {
   type NavigationPolicy,
 } from "../security/electronSecurity";
 import { isLoopbackHostname } from "../security/loopback";
-import {
-  resolveDesktopIconDirectory,
-  resolveSystemThemeIconPath,
-} from "../systemThemeIcon";
+import { resolveDesktopIconDirectory } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import { installTextContextMenu } from "./textContextMenu";
@@ -256,17 +253,13 @@ export function createMainWindow(options?: {
   // than its own file, which may be older.
   chromeTheme ??= placement.theme;
   const theme = chromeTheme;
-  // The executable and Wayland launcher keep the static packaging icon. Live
-  // Windows/X11 window icons follow the OS appearance where the shell allows.
+  // Windows and Linux windows show the app icon's paper tile, which reads on
+  // light and dark taskbars alike.
   const iconDirectory = resolveDesktopIconDirectory({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     moduleDirectory: import.meta.dirname,
   });
-  const iconPath = resolveSystemThemeIconPath(
-    iconDirectory,
-    nativeTheme.shouldUseDarkColors,
-  );
 
   const window = new BrowserWindow({
     show: false,
@@ -274,7 +267,7 @@ export function createMainWindow(options?: {
     minWidth: role === "manager" ? MANAGER_WINDOW_SIZE.width : MIN_WINDOW_SIZE.width,
     minHeight: role === "manager" ? MANAGER_WINDOW_SIZE.height : MIN_WINDOW_SIZE.height,
     backgroundColor: palette[theme].bg,
-    ...(iconPath ? { icon: iconPath } : {}),
+    icon: join(iconDirectory, "icon.png"),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
     // strip); the OS draws only its window controls.
     ...(process.platform === "darwin"
