@@ -21,6 +21,7 @@ import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
+import type {ServiceKeptEditsIdentity} from "./storage/serviceKeptEdits";
 
 const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
@@ -89,7 +90,7 @@ export class ServiceActivationDriver {
   readonly #refusals=new OwnerKnownRefusals();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
-    workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica}|undefined;config:ServiceActivationConfig;
+    workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica;identity:ServiceKeptEditsIdentity}|undefined;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
@@ -415,7 +416,7 @@ export class ServiceActivationDriver {
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publish:signal=>workspace.replica.publish(signal),
       ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
-        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,keptOnServer:true,validate:c.validateAdmission}});
+        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,keptOnServer:workspace.identity,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:targetKey(target),...state};
   }
   // Clears readiness when the owner may no longer use its exact binding.

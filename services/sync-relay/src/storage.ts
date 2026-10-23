@@ -435,8 +435,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readServiceKeptEdits(workspaceId: string, outboxId: string) {
     return serviceKeptEditsStorage.readServiceKeptEdits(this, workspaceId, outboxId);
   }
-  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}) {
-    return serviceKeptEditsStorage.serviceKeptEditsOf(this, document);
+  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number) {
+    return serviceKeptEditsStorage.serviceKeptEditsOf(this, document, after);
   }
   markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
@@ -447,8 +447,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);
   }
-  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}) {
-    return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document);
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document, identity);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);

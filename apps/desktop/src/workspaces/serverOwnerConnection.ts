@@ -8,6 +8,7 @@ import type {RegistryEntry} from "./registryStore";
 import {workspaceRemoteMatchesCredentials} from "./chatRelayIdentity";
 import {canonicalRelayUrl} from "./syncCode";
 import {OwnerLiveRefusalsResult} from "../ipc/bridgeContract";
+import {ServerKeptEditsConflict} from "./ownerLiveQuarantine";
 import {z} from "zod";
 
 export function createServerOwnerConnection(options: {
@@ -96,7 +97,7 @@ export function createServerOwnerConnection(options: {
           refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
         },
-        // A read carries the whole queue: up to the server's 64 MiB outbox, its base and checkpoint, in base64.
+        // A page carries at most one engine response frame of the queue, 8 MiB, in base64.
         async keptEdits(input, attempt) {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]);
@@ -105,12 +106,30 @@ export function createServerOwnerConnection(options: {
             body: JSON.stringify(input), signal: requestSignal, redirect: "error",
           });
           assertCurrent(); requestSignal.throwIfAborted();
-          const value = await readBoundedJson(response, 256 * 1024 * 1024, requestSignal);
+          const value = await readBoundedJson(response, 9 * 1024 * 1024, requestSignal);
           assertCurrent();
-          if (response.status === 409) throw new Error("This document changed. Open Live documents to check it.");
+          if (response.status === 409) {
+            const code = value && typeof value === "object" && "code" in value ? value.code : undefined;
+            if (code === "kept-edits-changed" || code === "kept-edits-unreachable") throw new ServerKeptEditsConflict(code === "kept-edits-unreachable");
+            throw new Error(value && typeof value === "object" && "error" in value && typeof value.error === "string" ? value.error
+              : "This document changed. Open Live documents to check it.");
+          }
           if (!response.ok) throw new Error("dohc could not reach your kept edits on the server. Try again.");
           // The next pass reads the list the action changed, not one cached before it.
-          if (input.action !== "read") discovery.delete(workspace.workspaceId);
+          if (input.action !== "page") discovery.delete(workspace.workspaceId);
+          return value;
+        },
+        // A later page of the list of edits the server kept, after the cursor its previous page named.
+        async keptEditsPage(after, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host?kept=1&after=${after}`, {
+            headers: {authorization: `Bearer ${session.value.token}`}, signal: requestSignal, redirect: "error",
+          });
+          assertCurrent(); requestSignal.throwIfAborted();
+          if (!response.ok) {await response.body?.cancel(); throw new Error("Owner kept edits discovery failed.");}
+          const value = await readBoundedJson(response, 1_048_576, requestSignal);
+          assertCurrent();
           return value;
         },
         async retire(binding, attempt) {

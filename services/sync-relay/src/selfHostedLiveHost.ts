@@ -3,7 +3,7 @@ import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
 import {basename, isAbsolute, join, posix, resolve} from "node:path";
-import type {Event} from "@dohc/workspace-engine-client";
+import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import {setTimeout as delay} from "node:timers/promises";
 import * as Cause from "effect/Cause";
@@ -328,11 +328,11 @@ export async function startSelfHostedLiveHost(options: {
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
     },
-    /** The running daemon's reads and Try again of refused queues it keeps for their owners. */
+    /** The running daemon's page reads and Try again of refused queues it keeps for their owners. */
     keptEdits: {
-      read(kept: ServiceKeptEdits, signal?: AbortSignal) {
+      page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, signal?: AbortSignal) {
         if (!current) throw new Error("This server does not hold the workspace's live documents now.");
-        return current.readKeptEdits(kept, signal);
+        return current.readKeptEditsPage(kept, cursor, signal);
       },
       async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, guard, signal) : "unavailable" as const;},
     },

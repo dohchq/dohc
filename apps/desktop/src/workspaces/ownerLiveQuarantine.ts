@@ -1,21 +1,74 @@
-import {OwnerYDocOutbox, type LiveObjectBinding} from "@dohc/workspace-engine-client";
+import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type LiveObjectBinding, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import type {EngineClient, OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
 import type {UnwrittenRelease} from "./ownerLiveReleases";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
-  reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(), recovery: z.enum(["paused", "retrying", "copied"]),
+  reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(),
+  recovery: z.enum(["paused", "retrying", "copied", "unreachable"]),
 }).strict();
 /**
  * A refused queue the server keeps for a document it hosts. `generation`
  * names the refusal; Try again and a confirmed copy name it back.
+ * `unreachable`: the server keeps them in an earlier copy of the workspace
+ * that it cannot read now, so neither Try again nor Save can reach them.
  */
 export type ServerKeptEdits = z.infer<typeof ServerKeptEdits>;
 
-/** The server's refused queues, from its live document list. Absent means none. */
-export function readServerKeptEdits(response: unknown): ServerKeptEdits[] {
-  return z.object({keptEdits: z.array(ServerKeptEdits).max(256).optional()}).parse(response).keptEdits ?? [];
+/** The server answered that the refusal an action named changed or is gone, or that it cannot reach its edits now. */
+export class ServerKeptEditsConflict extends Error {
+  constructor(readonly unreachable: boolean) {
+    super(unreachable ? "The server kept these edits in an earlier copy of this workspace. It cannot read them now."
+      : "This document changed. Open Live documents to check it.");
+  }
+}
+
+const SERVER_KEPT_EDITS_PAGE = 256;
+const FirstKeptEditsPage = z.object({keptEdits: z.array(ServerKeptEdits).max(SERVER_KEPT_EDITS_PAGE).optional(),
+  keptEditsCursor: z.number().int().positive().safe().optional()});
+const LaterKeptEditsPage = z.object({ok: z.literal(true), keptEdits: z.array(ServerKeptEdits).max(SERVER_KEPT_EDITS_PAGE),
+  nextCursor: z.number().int().positive().safe().nullable()}).strict();
+
+/**
+ * Every refused queue the server keeps for the workspace: the live document
+ * list's first page, then each later page its cursor names, through `page`.
+ * Each page must parse and move the cursor forward, or the whole scan fails.
+ * A queue listed twice, as when it was refused again during the scan, keeps
+ * its later row. Absent means none.
+ */
+export async function readServerKeptEdits(response: unknown, page: (after: number) => Promise<unknown>): Promise<ServerKeptEdits[]> {
+  const first = FirstKeptEditsPage.parse(response), rows = new Map<string, ServerKeptEdits>();
+  for (const row of first.keptEdits ?? []) rows.set(row.outboxId, row);
+  for (let after = first.keptEditsCursor; after !== undefined;) {
+    const next = LaterKeptEditsPage.parse(await page(after));
+    for (const row of next.keptEdits) {rows.delete(row.outboxId); rows.set(row.outboxId, row);}
+    if (next.nextCursor !== null && next.nextCursor <= after) throw new Error("The server's kept edits cursor did not advance.");
+    after = next.nextCursor ?? undefined;
+  }
+  return [...rows.values()];
+}
+
+/**
+ * Reads a refused queue the server keeps, whole, one bounded page per
+ * request through `page`, as this computer's engine would read its own. A
+ * queue that changed under the read answers as changed.
+ */
+export async function readServerKeptEditsQueue(row: ServerKeptEdits, page: (cursor: JsonValue | undefined) => Promise<unknown>): Promise<OwnerYDocOutboxRecovery> {
+  const served = z.object({ok: z.literal(true), page: z.record(z.string(), z.unknown())}).strict();
+  const outbox = new OwnerYDocOutbox({sendRequest: async request => {
+    const params = request.params as {outboxId?: unknown; cursor?: JsonValue};
+    if (request.method !== "ydoc.ownerOutbox.readPending" || params.outboxId !== row.outboxId) throw new Error("Unsupported kept edits read.");
+    return {id: request.id, result: served.parse(await page(params.cursor)).page as JsonValue};
+  }}, "server");
+  try {
+    const queue = await outbox.readRecovery(row.outboxId);
+    if (queue.outboxId !== row.outboxId || queue.binding.objectId !== row.objectId || queue.state !== "quarantined") throw new ServerKeptEditsConflict(false);
+    return queue;
+  } catch (error) {
+    if (error instanceof OwnerYDocOutboxReadChangedError) throw new ServerKeptEditsConflict(false);
+    throw error;
+  } finally {outbox.dispose();}
 }
 
 // Enrollment recovers these by itself. Only a refusal waits for the owner.

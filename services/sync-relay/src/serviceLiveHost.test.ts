@@ -14,6 +14,7 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {SERVICE_KEPT_EDITS_PAGE} from "./storage/serviceKeptEdits.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
@@ -530,19 +531,32 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   // A refused queue the engine keeps, with one entry, as the host's own connection reads it.
   // A granted Try again keeps the document's unload pending, as the engine does.
-  const keptOutbox = {binding: undefined as unknown, state: "quarantined", retryDeliveryId: null as string | null};
-  const keptPage = (params: Record<string, unknown>) => {
-    const header = {outboxId: params.outboxId, binding: keptOutbox.binding, baseUpdateDigest: (keptOutbox.binding as {lineageClaimId: string}).lineageClaimId,
-      baseByteLength: 1, state: keptOutbox.state, pendingBytes: 1, pendingEntryCount: 1, nextSequence: 2, oldestEntryAtMs: 1, quarantineReason: "invalid-update",
-      observedBinding: null, retryDeliveryId: keptOutbox.retryDeliveryId}, update = Buffer.from([7]);
+  // Its head's append key tells an adoption seed from later work. Other queues the test adds keep their own state; the engine
+  // answers one it no longer holds as not found.
+  type KeptOutbox = {binding: unknown; state: string; retryDeliveryId: string | null; appendKey: string};
+  const keptOutbox: KeptOutbox = {binding: undefined, state: "quarantined", retryDeliveryId: null, appendKey: "append-1"};
+  const keptOutboxes = new Map<string, KeptOutbox | null>();
+  const outboxOf = (request: {id: number; params: Record<string, unknown>}) => {
+    const found = keptOutboxes.get(String(request.params.outboxId));
+    if (found === null) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-outbox-not-found", retry: "no"} as never);
+    return found ?? keptOutbox;
+  };
+  const keptPage = (request: {id: number; params: Record<string, unknown>}) => {
+    const {params} = request, queue = outboxOf(request);
+    const header = {outboxId: params.outboxId, binding: queue.binding, baseUpdateDigest: (queue.binding as {lineageClaimId: string}).lineageClaimId,
+      baseByteLength: 1, state: queue.state, pendingBytes: 1, pendingEntryCount: 1, nextSequence: 2, oldestEntryAtMs: 1, quarantineReason: "invalid-update",
+      observedBinding: null, retryDeliveryId: queue.retryDeliveryId}, update = Buffer.from([7]);
     const snapshot = sha256(Buffer.from(JSON.stringify(header))), cursor = (part: string, sequence = 0) => ({snapshot, part, sequence, offset: 0});
     const requested = (params.cursor as ReturnType<typeof cursor> | undefined) ?? cursor("header");
     if (requested.snapshot !== snapshot) return {kind: "readChanged"};
     const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, firstEntryCursor: cursor("entryHeader", 1)})), cursor("base")] as const
-      : requested.part === "entryHeader" ? [Buffer.from(JSON.stringify({sequence: 1, appendKey: "append-1", deliveryId: "refused", updateDigest: sha256(update),
+      : requested.part === "entryHeader" ? [Buffer.from(JSON.stringify({sequence: 1, appendKey: queue.appendKey, deliveryId: "refused", updateDigest: sha256(update),
         byteLength: 1, createdAtMs: 1})), cursor("update", 1)] as const : [update, null] as const;
     return {kind: "page", ...requested, totalBytes: bytes.length, digest: sha256(bytes), bytesBase64: bytes.toString("base64"), nextCursor};
   };
+  // A queue frozen at its owner's adoption seed, as the engine refuses to settle past it.
+  const seedFrozen = () => [keptOutbox, ...keptOutboxes.values()].some(queue => queue?.binding !== undefined && queue.state === "quarantined" &&
+    queue.appendKey.startsWith("owner-adoption:"));
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>;
     sendLiveApplication: ReturnType<typeof vi.fn>; readLiveApplicationAck: ReturnType<typeof vi.fn>};
   // The engine's reason for refusing native capture, as for a document with an open sync conflict.
@@ -577,7 +591,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           workspaceHandle: request.params.workspaceId === "workspace" ? "attached-handle" : `attached-${request.params.workspaceId}`});
         case "liveApplication.detachWorkspace": if (detachFailure) throw detachFailure; return reply({detached: true});
         case "liveApplication.unloadDocument": {
-          if (keptOutbox.retryDeliveryId !== null) return reply({status: "pending", reason: "delivery-pending"});
+          if ([keptOutbox, ...keptOutboxes.values()].some(queue => queue && queue.retryDeliveryId !== null)) return reply({status: "pending", reason: "delivery-pending"});
           const next = unloads.shift() ?? {status: "unloaded"};
           if (next instanceof Error) throw next;
           return reply(next);
@@ -592,15 +606,16 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
           outboxId: null, pendingBytes: 0, outboxState: "active", retryDeliveryId: null});
         case "liveApplication.settle": {
+          if (seedFrozen()) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "live-application-invalid-input", retry: "no"} as never);
           const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
           return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,
             applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: settlement.materialized,
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
-        case "ydoc.ownerOutbox.retry": keptOutbox.retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
-        case "ydoc.ownerOutbox.quarantine": keptOutbox.state = "quarantined"; keptOutbox.retryDeliveryId = null; return reply({});
-        case "ydoc.ownerOutbox.readPending": return reply(keptPage(request.params));
+        case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
+        case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
+        case "ydoc.ownerOutbox.readPending": return reply(keptPage(request));
         case "sync.createHostedReplica":
           if (replies.create) throw replies.create === "diverged" ? divergence(request.id) : replies.create;
           return reply({hosted: true});
@@ -631,7 +646,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, keptOutboxes, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
@@ -997,12 +1012,19 @@ const departure = ["liveApplication.register", "liveApplication.settle", "liveAp
 function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
   o.keptOutbox.binding = o.binding;
   let refusals = 0;
-  const refuse = () => o.f.storage.recordServiceKeptEdits({outboxId: "kept-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "refused",
+  const identity = o.workspace.hostedReplication!.identity;
+  const refuse = () => o.f.storage.recordServiceKeptEdits({identity, outboxId: "kept-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "refused",
     refusalKey: `refusal-${++refusals}`, nowMs: 1});
   refuse();
   const engine = (method: string) => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; workspace?: string; params: unknown})
     .filter(request => request.method === method);
-  return {refuse, engine, row: () => o.f.storage.readServiceKeptEdits("workspace", "kept-outbox")};
+  // Another refused queue of the document, recorded before `kept-outbox` refuses again, with its own engine state.
+  const other = (outboxId: string, copied = true) => {
+    o.keptOutboxes.set(outboxId, {binding: o.binding, state: "quarantined", retryDeliveryId: null, appendKey: "append-1"});
+    o.f.storage.recordServiceKeptEdits({identity, outboxId, binding: o.binding, reason: "invalid-update", headDeliveryId: "refused", refusalKey: `${outboxId}-refusal`, nowMs: 1});
+    if (copied) o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId, generation: o.f.storage.readServiceKeptEdits("workspace", outboxId)!.generation});
+  };
+  return {refuse, other, engine, identity, row: () => o.f.storage.readServiceKeptEdits("workspace", "kept-outbox")};
 }
 
 // Proves: a stopped document whose owner has no recovery copy of edits the
@@ -1073,6 +1095,70 @@ it("rechecks a Try again inside the document's work before granting it", async (
 });
 // The engine requests of a departure, without the membership a restarted daemon starts with.
 const departed = (methods: string[]) => methods.filter(method => !["liveApplication.hosts", "liveApplication.attachWorkspace"].includes(method));
+
+// Proves: a document whose queue the relay refused at its owner's adoption
+// seed can still depart. The Try again granted before Stop ends before
+// anything else, the document unloads without settling or publishing, with
+// the queue's bytes kept, and once its owner confirms a copy it leaves.
+it("lets a document refused at its adoption seed depart after Try again, Stop and a recovery copy", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(o.keptOutbox).toMatchObject({state: "quarantined", retryDeliveryId: null});
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+  // No registration or settlement, so nothing to publish: the one unload is all the departure asked of the engine.
+  expect(o.calls(sent)).toEqual(["liveApplication.unloadDocument"]);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(k.row()).toBeNull();
+  expect(o.calls(sent).every(method => method === "liveApplication.unloadDocument")).toBe(true);
+});
+
+// Proves: the departure reaches every queue of the document, not only the
+// first page of them, so a Try again granted on a queue past that page ends
+// too. A queue the engine no longer holds loses its row instead of failing
+// every departure.
+it("ends a Try again past the first page of a stopped document's queues, and forgets a queue the engine no longer holds", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.f.storage.forgetServiceKeptEdits({workspaceId: "workspace", outboxId: "kept-outbox"});
+  for (let index = 0; index < SERVICE_KEPT_EDITS_PAGE; index++) k.other(`filler-${index}`);
+  k.other("released-queue", false); o.keptOutboxes.set("released-queue", null);
+  k.refuse();
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(o.keptOutbox).toMatchObject({state: "quarantined", retryDeliveryId: null});
+  expect(o.f.storage.readServiceKeptEdits("workspace", "released-queue")).toBeNull();
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+});
+
+// Proves: a row of the store an identity rotation left behind holds nothing.
+// A fresh daemon under the new identity lets the stopped document go, reaches
+// no queue of the old store, and leaves the old row listed for its owner.
+it("lets a stopped document go under a rotated identity although its old store's edits have no copy", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  const rotatedRoot = join(o.f.root, "workspace-rotated"); await mkdir(rotatedRoot);
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const queues = k.engine("ydoc.ownerOutbox.readPending").length;
+  await restarted.update({workspaces: [{...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}}], documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  expect(restarted.retains(o.sibling)).toBe(false);
+  expect(k.engine("ydoc.ownerOutbox.readPending")).toHaveLength(queues);
+  expect(k.row()).toMatchObject({identity: k.identity, copied: false});
+});
 
 // Proves: an edit the engine applied but whose reply, and every ACK read after
 // it, the relay lost before Stop settles. The departure reads the engine's
@@ -1208,6 +1294,37 @@ it("keeps a document that moved while no daemon ran until its owner copies the e
   expect(restarted.retains(o.sibling)).toBe(false);
   expect(k.row()).toBeNull();
   expect(departed(o.calls(sent))).toEqual([]);
+});
+
+// Proves: retention for a recovery copy follows the moved document, not its
+// old path. With another document hosted at that path, and after that one
+// leaves too, the moved document's queue stays readable, and its workspace
+// attached, until its owner confirms a copy.
+it("keeps a moved document's queue readable while a replacement holds its old path, and after the replacement leaves", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  const at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input => input.path === o.sibling.path ? "another-object" : at(input));
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const replacement = {...o.sibling, objectId: "another-object"};
+  const readable = async () => expect(await restarted.readKeptEditsPage(k.row()!, undefined)).toMatchObject({kind: "page", part: "header"});
+  await restarted.update({workspaces: [o.workspace], documents: [replacement], departing: [o.sibling]});
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(restarted.retains(o.sibling)).toBe(true);
+  await readable();
+  // The replacement leaves; the moved document still waits for its copy.
+  errors.mockClear();
+  await restarted.update({workspaces: [o.workspace], documents: [], departing: [o.sibling, replacement]});
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(restarted.retains(o.sibling)).toBe(true);
+  expect(restarted.drained("workspace")).toBe(false);
+  await readable();
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
+  expect(k.row()).toBeNull();
 });
 
 // Proves: deleting the share ends live authority as Stop does, though the

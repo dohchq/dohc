@@ -4,7 +4,7 @@ import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-
 import { describe, expect, it } from "vitest";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import type { JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
-import { decodeOwnerYDocOutboxRecovery, encodeOwnerYDocOutboxRecovery, OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type OwnerYDocOutboxRecovery } from "./ownerYDocOutbox.js";
+import { OwnerYDocOutbox, OwnerYDocOutboxReadChangedError } from "./ownerYDocOutbox.js";
 
 const WORKSPACE = "owner-outbox-receipt-test" as WorkspaceHandle;
 const SENTINEL = new Error("invalid receipt reached sendRequest");
@@ -44,29 +44,6 @@ function receipt(
 function outbox(client: DaemonRequesterClient): OwnerYDocOutbox {
   return new OwnerYDocOutbox(client, WORKSPACE);
 }
-
-describe("owner outbox recovery wire", () => {
-  const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-  const base = new Uint8Array([1, 2, 3]), seed = new Uint8Array([4]), native = new Uint8Array([5, 6]);
-  const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: sha(base), currentPath: "a.md",
-    selectorPaths: ["a.md"], restoreFenceGeneration: 0};
-  const recovery: OwnerYDocOutboxRecovery = {outboxId: "outbox", binding, baseUpdateDigest: sha(base), baseUpdate: base, checkpoint: null,
-    state: "quarantined", pendingBytes: 3, oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
-    entries: [
-      {sequence: 1, appendKey: "owner-adoption:seed", deliveryId: "delivery-1", updateDigest: sha(seed), update: seed, byteLength: 1, createdAtMs: 1,
-        nativeSource: {binding, adoptionId: "adoption", nativeSequence: 1, updateDigest: sha(seed), origin: {kind: "adoptionSeed"}}},
-      {sequence: 2, appendKey: "native-2", deliveryId: "delivery-2", updateDigest: sha(native), update: native, byteLength: 2, createdAtMs: 2,
-        personEdit: true},
-    ]};
-
-  it("carries every byte, digest and recorded author of a refused queue, and refuses one that changed", () => {
-    const wire = JSON.parse(JSON.stringify(encodeOwnerYDocOutboxRecovery(recovery)));
-    expect(decodeOwnerYDocOutboxRecovery(wire)).toEqual(recovery);
-    expect(() => decodeOwnerYDocOutboxRecovery({...wire, entries: [wire.entries[0], {...wire.entries[1], updateBase64: Buffer.from([5, 7]).toString("base64")}]}))
-      .toThrow("does not match its digest");
-    expect(() => decodeOwnerYDocOutboxRecovery({...wire, entries: [wire.entries[1]]})).toThrow("pending bytes");
-  });
-});
 
 describe("OwnerYDocOutbox append boundary", () => {
   const input = {

@@ -268,6 +268,18 @@ describe("edits the server refused", () => {
     expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, objectId: "object-1", incident: "server:outbox:1"});
   });
 
+  // Edits the server keeps in an earlier copy of the workspace: neither Save nor Try again can reach them, so the notice offers neither.
+  it("says the server cannot read edits it kept in an earlier copy of the workspace, and offers neither Save nor Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, storedOn: "server" as const, incident: "server:outbox:1", recovery: "unreachable"}));
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByText("The server could not accept your edits. It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.")).toBeTruthy();
+    expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
+    expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+  });
+
   // The release committed, then settlement could not write the file.
   it("says once that a Stop could not write the file, and its Try again writes it", async () => {
     const bridge = makeBridge(Promise.resolve(null));

@@ -11,7 +11,7 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
-import { SERVICE_KEPT_EDITS_REASONS } from "./storage/serviceKeptEdits.js";
+import { SERVICE_KEPT_EDITS_REASONS, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 
 export type LiveAdmissionValidation = LiveJournalValidation | {
@@ -29,10 +29,11 @@ export interface OwnerOutboxAdmission {
   /** Outlives every pass and connection, so a refusal received once is recorded, not admitted again. */
   readonly refusals: OwnerKnownRefusals;
   /**
-   * Set where the queue lives on the service host, so its owner can find and
-   * recover a refused queue there. A device's queue is on the owner's computer.
+   * The workspace identity whose hosted store holds the queue, where it lives
+   * on the service host, so its owner can find and recover a refused queue
+   * there. A device's queue is on the owner's computer.
    */
-  readonly keptOnServer?: boolean;
+  readonly keptOnServer?: ServiceKeptEditsIdentity;
   validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
@@ -87,9 +88,15 @@ export async function drainOwnerOutbox(options: {
   };
   const status = await readStatus(), outboxId = status.outboxId;
   const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
-  // A queue that delivers again, as after an accepted Try again, is no longer kept for its owner.
-  if (admission.keptOnServer && typeof outboxId === "string" && status.quarantined === undefined) {
-    storage.forgetServiceKeptEdits({workspaceId: binding.workspaceId, outboxId});
+  // A queue that delivers again, as after an accepted Try again, is no longer
+  // kept for its owner. Its status is read again under the hold, so a refusal
+  // another pass is recording keeps its row.
+  if (admission.keptOnServer && typeof outboxId === "string" && status.quarantined === undefined && storage.readServiceKeptEdits(binding.workspaceId, outboxId)) {
+    if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
+    try {
+      const current = await readStatus();
+      if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits({workspaceId: binding.workspaceId, outboxId});
+    } finally {refusals.release(held);}
   }
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
@@ -112,8 +119,8 @@ export async function drainOwnerOutbox(options: {
   // The record of a refusal its owner can find, written before the engine's
   // quarantine so no crash leaves a quarantine without one.
   const keep = (outbox: string, refusal: {reason: string; deliveryId: string; key: string}) => {
-    if (admission.keptOnServer) storage.recordServiceKeptEdits({outboxId: outbox, binding, reason: refusal.reason, headDeliveryId: refusal.deliveryId,
-      refusalKey: refusal.key, nowMs: Date.now()});
+    if (admission.keptOnServer) storage.recordServiceKeptEdits({identity: admission.keptOnServer, outboxId: outbox, binding, reason: refusal.reason,
+      headDeliveryId: refusal.deliveryId, refusalKey: refusal.key, nowMs: Date.now()});
   };
   if (status.quarantined) {
     // With no Try again outstanding, no known refusal is left to record.

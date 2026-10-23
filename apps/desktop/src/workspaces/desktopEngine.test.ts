@@ -13,7 +13,7 @@ import {
   type EngineClientSpawnOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopEngine, type ServerOwnerDelivery } from "./desktopEngine";
-import { encodeOwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
+import type { JsonValue, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { EngineRelayClient } from "./engineRelayClient";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import type { RegistryEntry } from "./registryStore";
@@ -25,7 +25,7 @@ import { directDocumentProjection } from "./documentProjection";
 import { createHash } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
+import { readServerKeptEditsQueue, ServerKeptEditsConflict, type OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 
@@ -38,8 +38,8 @@ vi.mock("./nativeOwnerDelivery", async () => ({runNativeOwnerDeliveryPass: owner
   OwnerKnownRefusals: (await vi.importActual<typeof import("./ownerYDocOutbox")>("./ownerYDocOutbox")).OwnerKnownRefusals}));
 // Stands in for the engine's durable owner queues, which outlive every desktop process.
 const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn(), queue: vi.fn()}));
-vi.mock("./ownerLiveQuarantine", async importOriginal => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry,
-  readOwnerLiveQueue: quarantineMock.queue, readServerKeptEdits: (await importOriginal<typeof import("./ownerLiveQuarantine")>()).readServerKeptEdits}));
+vi.mock("./ownerLiveQuarantine", async importOriginal => ({...await importOriginal<typeof import("./ownerLiveQuarantine")>(),
+  readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry, readOwnerLiveQueue: quarantineMock.queue}));
 // Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
 vi.mock("./installedReaderConfig", async importOriginal => {
   const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
@@ -189,7 +189,8 @@ beforeEach(() => {
 type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
 const unexpectedKeptEdits = async (): Promise<unknown> => {throw new Error("Unexpected kept edits request.");};
 /** A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`. */
-async function quarantinedOwner(documents: {path: string; objectId: string}[], server: {kept?: () => unknown[]; keptEdits?: ServerSession["keptEdits"]} = {}) {
+async function quarantinedOwner(documents: {path: string; objectId: string}[],
+  server: {kept?: () => unknown[]; keptCursor?: number; keptEdits?: ServerSession["keptEdits"]; keptEditsPage?: ServerSession["keptEditsPage"]} = {}) {
   const f = fixture(), credentials = new AbortController();
   Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
   const rootPath = await createTestScratch("dohc-owner-quarantine-");
@@ -202,10 +203,10 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[], s
     attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
   f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
     connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-      retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits,
+      retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
       documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
         ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}})),
-        ...(server.kept ? {keptEdits: server.kept()} : {})})})};
+        ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})})})};
   const workspace = () => f.authorities.withAuthority("owner", lease =>
     ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
   return {f, credentials, binding: bindingOf("notes/plan.md", "object"), workspace};
@@ -223,6 +224,35 @@ function recoveryQueue(binding: LiveObjectBinding) {
   return {update, queue: {outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: digest(baseUpdate), checkpoint, state: "quarantined" as const,
     pendingBytes: update.byteLength, oldestEntryAtMs: 1, quarantineReason: "capacity-refused", observedBinding: null, retryDeliveryId: null,
     entries: [{sequence: 2, appendKey: "append", deliveryId: "delivery", updateDigest: digest(update), update, byteLength: update.byteLength, createdAtMs: 1}]}};
+}
+/**
+ * Serves a refused queue as the server's engine pages it, a few bytes per
+ * page, so a read follows every cursor through every part. A cursor from
+ * another snapshot reads as changed.
+ */
+function servedPages(queue: OwnerYDocOutboxRecovery, chunk = 3) {
+  const snapshot = digest(Buffer.from(`snapshot:${queue.outboxId}`));
+  const cursor = (part: string, sequence = 0, offset = 0) => ({snapshot, part, sequence, offset});
+  const first = queue.entries[0];
+  const header = {outboxId: queue.outboxId, binding: queue.binding, baseUpdateDigest: queue.baseUpdateDigest, baseByteLength: queue.baseUpdate.byteLength,
+    state: queue.state, pendingBytes: queue.pendingBytes, pendingEntryCount: queue.entries.length, nextSequence: (queue.entries.at(-1)?.sequence ?? 0) + 1,
+    oldestEntryAtMs: queue.oldestEntryAtMs, quarantineReason: queue.quarantineReason, observedBinding: queue.observedBinding, retryDeliveryId: queue.retryDeliveryId,
+    firstEntryCursor: first ? cursor("entryHeader", first.sequence) : null, checkpointDigest: queue.checkpoint ? digest(queue.checkpoint) : null};
+  const parts = new Map<string, {bytes: Uint8Array; next: ReturnType<typeof cursor> | null}>([
+    ["header:0", {bytes: Buffer.from(JSON.stringify(header)), next: cursor("base")}], ["base:0", {bytes: queue.baseUpdate, next: header.firstEntryCursor}]]);
+  queue.entries.forEach(({update, ...entry}, index) => {
+    const following = queue.entries[index + 1];
+    parts.set(`entryHeader:${entry.sequence}`, {bytes: Buffer.from(JSON.stringify(entry)), next: cursor("update", entry.sequence)});
+    parts.set(`update:${entry.sequence}`, {bytes: update, next: following ? cursor("entryHeader", following.sequence) : null});
+  });
+  if (queue.checkpoint) parts.set("checkpoint:0", {bytes: queue.checkpoint, next: null});
+  return (requested: JsonValue | undefined) => {
+    const at = (requested as ReturnType<typeof cursor> | undefined) ?? cursor("header");
+    if (at.snapshot !== snapshot) return {kind: "readChanged"};
+    const part = parts.get(`${at.part}:${at.sequence}`)!, bytes = part.bytes.subarray(at.offset, at.offset + chunk), end = at.offset + bytes.byteLength;
+    return {kind: "page", ...at, totalBytes: part.bytes.byteLength, digest: digest(part.bytes), bytesBase64: Buffer.from(bytes).toString("base64"),
+      nextCursor: end < part.bytes.byteLength ? cursor(at.part, at.sequence, end) : part.next};
+  };
 }
 const keptBinding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
@@ -971,7 +1001,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
     ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -1009,7 +1039,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits,
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -1052,7 +1082,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
     const refused = (recovery: "paused" | "retrying") => [{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
       outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}];
     quarantineMock.read.mockResolvedValue(refused("paused"));
@@ -1373,10 +1403,14 @@ describe("server owner peer lifecycle", () => {
   it("saves edits the server keeps from the server's queue, then confirms the copy, and tries them again on the server", async () => {
     let kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"}];
     const requests: {action: string; outboxId: string; generation: number}[] = [];
-    const {f, credentials, binding, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
+    const pages = servedPages({...recoveryQueue(keptBinding).queue, outboxId: "server-outbox"});
+    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
       keptEdits: async input => {
+        if (input.action === "page") {
+          if (input.cursor === undefined) requests.push({action: "page", outboxId: input.outboxId, generation: input.generation});
+          return {ok: true, page: pages(input.cursor)};
+        }
         requests.push(input);
-        if (input.action === "read") return {ok: true, ...kept[0], queue: encodeOwnerYDocOutboxRecovery({...recoveryQueue(binding).queue, outboxId: "server-outbox"})};
         kept = [{...kept[0]!, recovery: input.action === "copied" ? "copied" : "retrying"}];
         return {ok: true};
       }});
@@ -1391,7 +1425,7 @@ describe("server owner peer lifecycle", () => {
       expect(JSON.parse(await readFile(join(root, saved.packagePath), "utf8"))).toMatchObject({storedOn: "server", outboxId: "server-outbox"});
       expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("kept");
       // The copy was on disk before the server heard of it.
-      expect(requests).toEqual([{action: "read", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 1}]);
+      expect(requests).toEqual([{action: "page", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 1}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{storedOn: "server", recovery: "copied"}]);
       // The engine on this computer was never asked for the server's queue.
       expect(quarantineMock.queue).not.toHaveBeenCalled();
@@ -1400,6 +1434,85 @@ describe("server owner peer lifecycle", () => {
       expect(requests.at(-1)).toEqual({action: "retry", outboxId: "server-outbox", generation: 1});
       expect(quarantineMock.retry).not.toHaveBeenCalled();
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "retrying"}]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: a page read returns every byte and every recorded author of the
+  // queue, across many small pages, and a queue that changed between pages
+  // answers changed instead of a copy.
+  it("assembles the server's queue from bounded pages with every byte and author, and refuses one that changed", async () => {
+    const {queue} = recoveryQueue(keptBinding);
+    const served: OwnerYDocOutboxRecovery = {...queue, outboxId: "server-outbox", entries: queue.entries.map(entry => ({...entry, personEdit: true as const,
+      agentDeclaration: {agentId: "agent", onBehalfOf: null, depth: 1}, nativeSource: {binding: keptBinding, adoptionId: "adoption", nativeSequence: 2, updateDigest: entry.updateDigest,
+        origin: {kind: "nativeUpdate" as const, actorOriginId: "origin", actorKind: "agent", onBehalfOf: "owner", chainDepth: 1, recordedAtMs: 1}}}))};
+    const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused" as const};
+    const pages = servedPages(served, 2);
+    let reads = 0;
+    expect(await readServerKeptEditsQueue(row, async cursor => {reads++; return {ok: true, page: pages(cursor)};})).toEqual(served);
+    expect(reads).toBeGreaterThan(10);
+    let turn = 0;
+    // The queue changes after the first page, so the engine answers the next as changed.
+    await expect(readServerKeptEditsQueue(row, async cursor => ({ok: true, page: turn++ === 0 ? pages(cursor) : {kind: "readChanged"}})))
+      .rejects.toBeInstanceOf(ServerKeptEditsConflict);
+  });
+
+  // Proves: the desktop lists every row the server keeps, past its first page,
+  // and saves and confirms one only that later page names. A later page that
+  // fails keeps the last complete list.
+  it("discovers and saves row 257 of the server's kept edits, and keeps the last complete list when a page fails", async () => {
+    const row = (index: number) => ({objectId: `object-${index}`, path: `notes/plan-${index}.md`, outboxId: `server-outbox-${index}`, reason: "invalid-update",
+      generation: index, recovery: "paused"});
+    const firstPage = Array.from({length: 256}, (_, index) => row(index + 1));
+    let failing = false;
+    const pageRequests: number[] = [], actions: string[] = [];
+    const last = row(257), pages = servedPages({...recoveryQueue({...keptBinding, objectId: last.objectId}).queue, outboxId: last.outboxId});
+    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan-1.md", objectId: "object-1"}], {kept: () => firstPage, keptCursor: 256,
+      keptEditsPage: async after => {
+        pageRequests.push(after);
+        if (failing) throw new Error("Owner kept edits discovery failed.");
+        return {ok: true, keptEdits: [last, firstPage[0]], nextCursor: null};
+      },
+      keptEdits: async input => {
+        actions.push(input.action);
+        if (input.action === "page") return {ok: true, page: pages(input.cursor)};
+        return {ok: true};
+      }});
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(257));
+      expect(pageRequests[0]).toBe(256);
+      // A row listed on both pages appears once.
+      expect(f.engine.ownerLiveQuarantines("owner").filter(found => found.objectId === "object-1")).toHaveLength(1);
+      const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), last.path);
+      expect(saved).toMatchObject({storedOn: "server", keptEdits: "copied"});
+      expect(actions.at(-1)).toBe("copied");
+      failing = true;
+      const before = pageRequests.length;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(pageRequests.length).toBeGreaterThan(before));
+      expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(257);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: a refusal the server answers changed or gone loses its cached row,
+  // and one it cannot reach reads as unreachable and offers neither Save nor Try again.
+  it("drops a server row the server answers changed, and marks one it cannot reach", async () => {
+    let answer: "changed" | "unreachable" = "changed";
+    const kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"},
+      {objectId: "object-2", path: "notes/other.md", outboxId: "server-outbox-2", reason: "invalid-update", generation: 2, recovery: "paused"}];
+    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
+      keptEdits: async () => {throw new ServerKeptEditsConflict(answer === "unreachable");}});
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(2));
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:1")).rejects.toThrow("This document changed.");
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2"}]);
+      answer = "unreachable";
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/other.md")).rejects.toThrow("earlier copy of this workspace");
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "unreachable"}]);
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("earlier copy of this workspace");
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
@@ -1429,7 +1542,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, documents: async () => ({ok: true, diverged, documents: rows})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, diverged, documents: rows})})};
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
@@ -1495,7 +1608,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {

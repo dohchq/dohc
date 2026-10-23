@@ -1873,6 +1873,13 @@ export function DesktopWorkspaceShell(props: {
           message:"dohc is sending your kept edits to the server once more.",details,action:save,identity});
         continue;
       }
+      // Neither Save nor Try again can reach them, so the row offers only copy.
+      if (row.recovery==="unreachable") {
+        reportShellFailure({title:`Live editing paused for ${row.path}`,
+          message:"The server could not accept your edits. It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.",
+          details,identity});
+        continue;
+      }
       const retry=() => {
         bridge().retryOwnerLiveQuarantine({workspaceId,objectId:row.objectId,incident:row.incident}).catch((error: unknown) => {
           // A slow answer for a workspace this window left repaints nothing.
